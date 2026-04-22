@@ -80,7 +80,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		maxTurns:     maxTurns,
 	}
 
-	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "")
+	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader)
 	ctx.SetSystemPrompt(sysPrompt)
 
 	return agent
@@ -114,30 +114,30 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 		if err != nil {
 			errMsg := err.Error()
-			// Model confusion - echoed tool syntax as text; recover by retrying
+			// Model confusion — echoed tool syntax as text; recover by retrying
 			if strings.Contains(errMsg, "model confused") {
-				fmt.Fprintf(os.Stderr, "\n[WARN]  Model confused, retrying...\n")
+				fmt.Fprintf(os.Stderr, "\n⚠️  Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
 				a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
 				continue
 			}
-			// Stream stalled - safety timeout fired or context canceled; recover with truncation
+			// Stream stalled — safety timeout fired or context canceled; recover with truncation
 			if strings.Contains(errMsg, "stream stalled") ||
 				strings.Contains(errMsg, "context canceled") ||
 				strings.Contains(errMsg, "context deadline exceeded") {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
-					fmt.Fprintf(os.Stderr, "\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
+					fmt.Fprintf(os.Stderr, "\n❌ Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
 				if contextErrors <= 1 {
-					fmt.Fprintf(os.Stderr, "\n[WARN]  Stream stalled, truncating history (phase 1/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n⚠️  Stream stalled, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
-					fmt.Fprintf(os.Stderr, "\n[WARN]  Stream still stalled, aggressive truncation (phase 2/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n⚠️  Stream still stalled, aggressive truncation (phase 2/3)...\n")
 					a.context.AggressiveTruncateHistory()
 				} else {
-					fmt.Fprintf(os.Stderr, "\n[WARN]  Stream still stalled, dropping to minimum (phase 3/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n⚠️  Stream still stalled, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
 				continue
@@ -145,18 +145,18 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if isContextLengthError(errMsg) {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
-					fmt.Fprintf(os.Stderr, "\n[ERR] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
+					fmt.Fprintf(os.Stderr, "\n❌ Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
 
 				if contextErrors <= 1 {
-					fmt.Fprintf(os.Stderr, "\n[WARN]  Context length exceeded, truncating history (phase 1/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n⚠️  Context length exceeded, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
-					fmt.Fprintf(os.Stderr, "\n[WARN]  Context still full, aggressive truncation (phase 2/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n⚠️  Context still full, aggressive truncation (phase 2/3)...\n")
 					a.context.AggressiveTruncateHistory()
 				} else {
-					fmt.Fprintf(os.Stderr, "\n[WARN]  Context still full, dropping to minimum (phase 3/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n⚠️  Context still full, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
 				continue
@@ -240,7 +240,7 @@ func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
 		params.Tools = toolParams
 	}
 
-	// 120s overall timeout for streaming - the stall detector inside Process
+	// 120s overall timeout for streaming — the stall detector inside Process
 	// will force-close earlier if no events arrive for 15s.
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -252,9 +252,9 @@ func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
 		if err := term.Handle(chunk); err != nil {
 			return err
 		}
-		// Check if model is confused - detect right after collect sets the flag
+		// Check if model is confused — detect right after collect sets the flag
 		if collect.toolUseAsText {
-			fmt.Fprint(os.Stderr, "\n[WARN]  Model confused, aborting stream...\n")
+			fmt.Fprint(os.Stderr, "\n⚠️  Model confused, aborting stream...\n")
 			cancel()
 			return fmt.Errorf("model confused: echoed tool syntax as text")
 		}
@@ -276,7 +276,7 @@ func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
 
 	// Check if the model was confused and echoed tool syntax as text
 	if collect.toolUseAsText {
-		fmt.Fprintf(os.Stderr, "\n[WARN]  Model echoed tool syntax as text - recovering\n")
+		fmt.Fprintf(os.Stderr, "\n⚠️  Model echoed tool syntax as text — recovering\n")
 		// The model is confused. Clear the confused text so it doesn't pollute context.
 		collect.Text = ""
 	}
@@ -329,7 +329,7 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 			}
 			toolCalls = append(toolCalls, call)
 		}
-		// Thinking blocks (type "thinking") are intentionally ignored -
+		// Thinking blocks (type "thinking") are intentionally ignored —
 		// they're internal reasoning, not part of the visible response.
 	}
 
@@ -528,17 +528,17 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 
 	// Display timing to stderr
 	if cancelled {
-		fmt.Fprintf(os.Stderr, "  [TIME]  timed out after %v\n", timeout)
+		fmt.Fprintf(os.Stderr, "  ⏱️  timed out after %v\n", timeout)
 	} else if result.IsError {
 		preview := limitStr(output, 150)
-		fmt.Fprintf(os.Stderr, "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
+		fmt.Fprintf(os.Stderr, "  ❌ %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
 	} else {
 		preview := toolResultPreview(toolName, output)
 		if toolName == "exec" {
 			// For exec, just show the result indented, no prefix
 			fmt.Fprintf(os.Stderr, "  %s\n", preview)
 		} else {
-			fmt.Fprintf(os.Stderr, "  [OK] %s: %s\n", toolName, preview)
+			fmt.Fprintf(os.Stderr, "  ✅ %s: %s\n", toolName, preview)
 		}
 	}
 
@@ -622,16 +622,16 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 	output := a.truncateOutput(result.Output)
 
 	if cancelled {
-		fmt.Fprintf(os.Stderr, "  [TIME]  timed out after %v\n", timeout)
+		fmt.Fprintf(os.Stderr, "  ⏱️  timed out after %v\n", timeout)
 	} else if result.IsError {
 		preview := limitStr(output, 150)
-		fmt.Fprintf(os.Stderr, "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
+		fmt.Fprintf(os.Stderr, "  ❌ %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
 	} else {
 		preview := toolResultPreview(toolName, output)
 		if toolName == "exec" {
 			fmt.Fprintf(os.Stderr, "  %s\n", preview)
 		} else {
-			fmt.Fprintf(os.Stderr, "  [OK] %s: %s\n", toolName, preview)
+			fmt.Fprintf(os.Stderr, "  ✅ %s: %s\n", toolName, preview)
 		}
 	}
 
@@ -653,7 +653,7 @@ func toolResultPreview(toolName, output string) string {
 	switch toolName {
 	case "exec":
 		// For exec, show the first line of output, or "(no output)" if empty
-		// Skip "STDOUT:" / "STDERR:" headers - just show the actual content
+		// Skip "STDOUT:" / "STDERR:" headers — just show the actual content
 		cleaned := cleanExecOutput(output)
 		if cleaned == "" {
 			return "(no output)"

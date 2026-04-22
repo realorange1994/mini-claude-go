@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	"miniclaudecode-go/skills"
 	"miniclaudecode-go/tools"
 )
 
@@ -27,9 +28,10 @@ You have access to the following tools to help the user with software engineerin
 4. For file edits, provide enough context in old_string to uniquely match.
 5. Be concise and direct in your responses.
 6. On Windows, use PowerShell syntax and commands (e.g., Get-ChildItem, Test-Path, Copy-Item). On Unix, use bash commands.
-7. Use git directly for git operations - it is available in the PATH.
+7. Use git directly for git operations — it is available in the PATH.
 
 ## Current Permission Mode: %s
+%s
 %s
 %s`
 
@@ -39,8 +41,8 @@ var modeDescriptions = map[string]string{
 	"plan": "In PLAN mode, only read-only operations are allowed. Write operations are blocked.",
 }
 
-// BuildSystemPrompt constructs the system prompt from tool list, mode, and project instructions.
-func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir string) string {
+// BuildSystemPrompt constructs the system prompt from tool list, mode, project instructions, and skills.
+func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir string, skillLoader *skills.Loader) string {
 	toolList := buildToolList(registry)
 
 	modeDesc := modeDescriptions[permissionMode]
@@ -54,7 +56,30 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 		projectSection = "## Project Instructions (from CLAUDE.md)\n\n" + projectInstructions
 	}
 
-	return fmt.Sprintf(systemPromptTemplate, envInfo, wd, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection)
+	// Build skills section
+	var skillsSection string
+	if skillLoader != nil {
+		// Add always-on skills to system prompt
+		alwaysSkills := skillLoader.GetAlwaysSkills()
+		if len(alwaysSkills) > 0 {
+			var skillNames []string
+			for _, s := range alwaysSkills {
+				skillNames = append(skillNames, s.Name)
+			}
+			skillsSection = skillLoader.BuildSystemPrompt(skillNames)
+		}
+
+		// Add skills summary for discovery
+		skillsSummary := skillLoader.BuildSkillsSummary()
+		if skillsSummary != "" {
+			if skillsSection != "" {
+				skillsSection += "\n\n"
+			}
+			skillsSection += "## Available Skills\n\n" + skillsSummary
+		}
+	}
+
+	return fmt.Sprintf(systemPromptTemplate, envInfo, wd, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection)
 }
 
 func buildToolList(registry *tools.Registry) string {
