@@ -9,3 +9,9 @@
 .DS_Store
 Thumbs.db
 .claude/snapshots/
+
+# MCP config (may contain API keys)
+.mcp.json
+
+# User settings (may contain API keys)
+.claude/settings.json

@@ -2,7 +2,7 @@
   "mcpServers": {
     "minimax": {
       "command": "node",
-      "args": ["server.js"],
+      "args": ["path/to/minimax-mcp/server.js"],
       "env": {
         "MINIMAX_API_KEY": "your-api-key-here"
       }
