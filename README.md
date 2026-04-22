@@ -1,10 +1,10 @@
-# miniClaudeCode-go
+# mini-claude-go
 
 A lightweight, distilled implementation of Claude Code's agent loop framework written in Go.
 
 ## Overview
 
-miniClaudeCode-go is a minimal AI agent framework that implements the core agentic loop pattern similar to Claude Code. It provides a tool-use paradigm where an LLM can execute various tools to accomplish complex tasks.
+mini-claude-go is a minimal AI agent framework that implements the core agentic loop pattern similar to Claude Code. It provides a tool-use paradigm where an LLM can execute various tools to accomplish complex tasks.
 
 ## Features
 
@@ -29,8 +29,8 @@ miniClaudeCode-go is a minimal AI agent framework that implements the core agent
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/miniClaudeCode-go.git
-cd miniClaudeCode-go
+git clone https://github.com/realorange1994/mini-claude-go.git
+cd mini-claude-go
 go build -o miniclaudecode .
 ```
 
@@ -56,24 +56,33 @@ Configuration is stored in `.claude/settings.json`:
 
 ```json
 {
-  "api_key": "your-api-key",
-  "base_url": "https://api.anthropic.com",
-  "model": "claude-sonnet-4-6",
-  "permission_mode": "auto"
+  "env": {
+    "ANTHROPIC_API_KEY": "your-api-key",
+    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-6"
+  }
 }
+```
+
+Or use environment variables:
+```bash
+export ANTHROPIC_API_KEY="your-api-key"
+export ANTHROPIC_BASE_URL="https://api.anthropic.com"
+export ANTHROPIC_MODEL="claude-sonnet-4-6"
 ```
 
 ## Architecture
 
 ```
-├── agent_loop.go      # Core agent loop implementation
-├── streaming.go       # Streaming event handling
-├── context.go         # Conversation context management
-├── permissions.go     # Permission gate implementation
-├── tools/             # Built-in tool implementations
-├── mcp/               # MCP client support
-├── skills/            # Skill loading system
-└── transcript/        # Conversation logging
+mini-claude-go/
++-- agent_loop.go      # Core agent loop implementation
++-- streaming.go       # Streaming event handling
++-- context.go         # Conversation context management
++-- permissions.go     # Permission gate implementation
++-- tools/             # Built-in tool implementations
++-- mcp/               # MCP client support
++-- skills/            # Skill loading system
++-- transcript/        # Conversation logging
 ```
 
 ## Compatibility
@@ -85,4 +94,3 @@ Works with Anthropic API and compatible endpoints. Tested with:
 ## License
 
 MIT
-# mini-claude-go
