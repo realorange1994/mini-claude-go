@@ -1,0 +1,478 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+)
+
+// ---------------------------------------------------------------------------
+// Chunk types
+// ---------------------------------------------------------------------------
+
+// ChunkType identifies the kind of streaming event.
+type ChunkType string
+
+const (
+	ChunkTypeText         ChunkType = "text"         // Incremental text token
+	ChunkTypeToolCall     ChunkType = "tool_call"    // Tool call started (id + name)
+	ChunkTypeToolArgument ChunkType = "tool_argument" // Tool argument JSON delta
+	ChunkTypeThinking     ChunkType = "thinking"     // Extended thinking block
+	ChunkTypeUsage        ChunkType = "usage"        // Token usage info
+	ChunkTypeError        ChunkType = "error"        // Error occurred
+	ChunkTypeDone         ChunkType = "done"         // Stream complete
+)
+
+// StreamChunk is a single event emitted during a streaming response.
+type StreamChunk struct {
+	Type    ChunkType
+	Content string // text token, argument delta, error message
+	ID      string // tool call id
+	Name    string // tool name
+	Usage   *Usage
+}
+
+// Usage holds token counts.
+type Usage struct {
+	InputTokens  int
+	OutputTokens int
+}
+
+// streamHandler is the callback signature for consuming chunks.
+type streamHandler func(chunk StreamChunk) error
+
+// ---------------------------------------------------------------------------
+// CollectHandler -- assembles streamed tokens into a complete response
+// ---------------------------------------------------------------------------
+
+// CollectHandler implements streamHandler and collects all chunks so the
+// final assembled response (text, tool calls, thinking) can be retrieved
+// after the stream finishes.
+type CollectHandler struct {
+	mu            sync.Mutex
+	Text          string
+	ToolCalls     []ToolCallInfo
+	Thinking      string
+	Err           error
+	Usage         *Usage
+	ChunksCollect int
+	toolUseAsText bool // detects model echoing tool syntax as text
+}
+
+// ToolCallInfo records a tool call assembled from streaming deltas.
+type ToolCallInfo struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+
+// NewCollectHandler creates a ready-to-use handler.
+func NewCollectHandler() *CollectHandler {
+	return &CollectHandler{
+		ToolCalls: make([]ToolCallInfo, 0),
+	}
+}
+
+// Handle consumes one chunk. Safe for concurrent use.
+func (h *CollectHandler) Handle(chunk StreamChunk) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ChunksCollect++
+
+	switch chunk.Type {
+	case ChunkTypeText:
+		// Detect model echoing tool syntax as text (stuck pattern)
+		// Only flag when multiple strong indicators appear together
+		lower := strings.ToLower(chunk.Content)
+		if (strings.Contains(lower, "tool_use") && strings.Contains(lower, "id=") && strings.Contains(lower, "type=")) ||
+			strings.Contains(lower, "<parameter>") ||
+			(strings.Contains(lower, `"type":"tool_use"`) && strings.Contains(lower, `"id"`)) {
+			h.toolUseAsText = true
+		} else {
+			h.Text += chunk.Content
+		}
+
+	case ChunkTypeToolCall:
+		h.ToolCalls = append(h.ToolCalls, ToolCallInfo{
+			ID:   chunk.ID,
+			Name: chunk.Name,
+		})
+
+	case ChunkTypeToolArgument:
+		if n := len(h.ToolCalls); n > 0 {
+			h.ToolCalls[n-1].Arguments += chunk.Content
+		}
+
+	case ChunkTypeThinking:
+		h.Thinking += chunk.Content
+
+	case ChunkTypeUsage:
+		h.Usage = chunk.Usage
+
+	case ChunkTypeError:
+		h.Err = fmt.Errorf("stream error: %s", chunk.Content)
+
+	case ChunkTypeDone:
+		// stream finished
+	}
+
+	return nil
+}
+
+// FullResponse returns the assembled text.
+// If no text blocks were received but thinking was, returns thinking as fallback
+// (some models return only thinking when no tools are needed).
+func (h *CollectHandler) FullResponse() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Text != "" {
+		return h.Text
+	}
+	return h.Thinking
+}
+
+// AsParsedResponse returns tool calls and text parts directly, bypassing
+// SDK ContentBlockUnion (which loses text on AsAny() cast with non-Claude models).
+func (h *CollectHandler) AsParsedResponse() ([]map[string]any, []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var textParts []string
+	text := h.Text
+	if text == "" {
+		text = h.Thinking
+	}
+	if text != "" {
+		textParts = append(textParts, text)
+	}
+
+	toolCalls := make([]map[string]any, 0, len(h.ToolCalls))
+	for _, tc := range h.ToolCalls {
+		input := make(map[string]any)
+		if tc.Arguments != "" {
+			_ = json.Unmarshal([]byte(tc.Arguments), &input)
+		}
+		toolCalls = append(toolCalls, map[string]any{
+			"id":    tc.ID,
+			"name":  tc.Name,
+			"input": input,
+		})
+	}
+
+	return toolCalls, textParts
+}
+
+// ---------------------------------------------------------------------------
+// TerminalHandler -- prints [Tool: name] ... and [THINK] thinking on completion
+// ---------------------------------------------------------------------------
+
+// TerminalHandler shows a clean progress display during streaming.
+// Shows thinking tokens in dim text, tool calls, and results.
+type TerminalHandler struct {
+	seenToolCall bool
+	thinkingBuf  strings.Builder
+}
+
+func (h *TerminalHandler) Handle(chunk StreamChunk) error {
+	switch chunk.Type {
+	case ChunkTypeThinking:
+		// Buffer thinking, show after tool call starts or text
+		h.thinkingBuf.WriteString(chunk.Content)
+	case ChunkTypeToolCall:
+		h.seenToolCall = true
+		// Show buffered thinking before tool call
+		if th := h.thinkingBuf.String(); th != "" {
+			lines := strings.Split(th, "\n")
+			preview := lines[0]
+			if len(preview) > 120 {
+				preview = preview[:120] + "..."
+			}
+			fmt.Fprintf(os.Stderr, "\n[THINK] %s\n", preview)
+		}
+		h.thinkingBuf.Reset()
+		fmt.Fprintf(os.Stderr, "[Tool: %s] ...\n", chunk.Name)
+	case ChunkTypeText:
+		// Detect model echoing tool syntax as text (stuck pattern)
+		// These patterns are specific to the confused model output format
+		lower := strings.ToLower(chunk.Content)
+		if strings.Contains(lower, "tool_use") ||
+			strings.Contains(lower, "<parameter>") ||
+			(strings.Contains(lower, `"path"`) && strings.Contains(lower, `"name"`)) {
+			// Suppress - model is confused
+			return nil
+		}
+		// Text is collected by CollectHandler; Run loop prints final output.
+		// Don't print here to avoid double output.
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// StreamBus -- pub/sub for StreamChunk events
+// ---------------------------------------------------------------------------
+
+// StreamBus publishes streaming chunks to named subscribers.
+type StreamBus struct {
+	mu          sync.RWMutex
+	subscribers map[string]chan StreamChunk
+}
+
+// NewStreamBus creates an empty bus.
+func NewStreamBus() *StreamBus {
+	return &StreamBus{
+		subscribers: make(map[string]chan StreamChunk),
+	}
+}
+
+// Subscribe registers a subscriber and returns a receive-only channel.
+func (b *StreamBus) Subscribe(id string) <-chan StreamChunk {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ch := make(chan StreamChunk, 100) // buffered so publisher never blocks
+	b.subscribers[id] = ch
+	return ch
+}
+
+// Unsubscribe removes a subscriber and closes its channel.
+func (b *StreamBus) Unsubscribe(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if ch, ok := b.subscribers[id]; ok {
+		close(ch)
+		delete(b.subscribers, id)
+	}
+}
+
+// Publish delivers a chunk to every subscriber (non-blocking, drops on full).
+func (b *StreamBus) Publish(chunk StreamChunk) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for id, ch := range b.subscribers {
+		select {
+		case ch <- chunk:
+		default:
+			fmt.Fprintf(os.Stderr, "[WARN] StreamBus: subscriber %q channel full, dropping chunk\n", id)
+		}
+	}
+}
+
+// Close shuts down every subscriber channel.
+func (b *StreamBus) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, ch := range b.subscribers {
+		close(ch)
+	}
+	b.subscribers = make(map[string]chan StreamChunk)
+}
+
+// ---------------------------------------------------------------------------
+// StreamAdapter -- bridges anthropic SDK streaming events -> StreamChunk
+// ---------------------------------------------------------------------------
+
+// StreamAdapter wraps the anthropic streaming response iterator and feeds
+// chunks into a handler (and optionally a bus).
+type StreamAdapter struct {
+	handler streamHandler
+	bus     *StreamBus
+}
+
+// NewStreamAdapter creates an adapter that dispatches every chunk to the
+// given handler and publishes on the bus (nil bus = no publishing).
+func NewStreamAdapter(handler streamHandler, bus *StreamBus) *StreamAdapter {
+	return &StreamAdapter{handler: handler, bus: bus}
+}
+
+// Process consumes the full streaming response, feeding each event through
+// the handler. It returns any stream-level error.
+// The cancel function is used by the safety timer to forcefully close the connection.
+func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], cancel context.CancelFunc) error {
+	var streamErr error // set when handler returns error
+
+	// Wrap handler: on error, close stream and store error for post-loop return
+	origHandler := sa.handler
+	wrapped := func(chunk StreamChunk) error {
+		if streamErr != nil {
+			return streamErr // already aborted, skip remaining events
+		}
+		err := origHandler(chunk)
+		if err != nil {
+			streamErr = err
+			stream.Close() // close immediately to unblock Next()
+			return err
+		}
+		return nil
+	}
+
+	// Stall detection: reset timer on each successfully processed event.
+	// Only force-close if no event arrives within the stall timeout (30s).
+	// Uses a longer initial timeout (45s) to give the model time to think
+	// before producing tokens on the first turn.
+	const stallTimeout = 30_000   // ms - normal stall detection after first event
+	const startupTimeout = 45_000 // ms - grace period for first event to arrive
+	stallReset := make(chan struct{}, 16)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		timer := time.NewTimer(startupTimeout * time.Millisecond)
+		defer timer.Stop()
+		hasFirstEvent := false
+		for {
+			select {
+			case <-stallReset:
+				if !hasFirstEvent {
+					hasFirstEvent = true
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(stallTimeout * time.Millisecond)
+			case <-timer.C:
+				timeoutVal := stallTimeout
+				if !hasFirstEvent {
+					timeoutVal = startupTimeout
+				}
+				fmt.Fprintf(os.Stderr, "\n[WARN]  Stream stalled (no data for %dms), forcing close...\n", timeoutVal)
+				stream.Close()
+				if cancel != nil {
+					cancel()
+				}
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	for stream.Next() {
+		// Signal stall detector that we received an event
+		select {
+		case stallReset <- struct{}{}:
+		default:
+		}
+
+		event := stream.Current()
+
+		switch e := event.AsAny().(type) {
+		case anthropic.MessageStartEvent:
+			// Message started - carry on; usage info is available via MessageDeltaEvent
+		case anthropic.ContentBlockStartEvent:
+			// A new content block started
+			block := e.ContentBlock
+			switch block.Type {
+			case "tool_use":
+				chunk := StreamChunk{
+					Type: ChunkTypeToolCall,
+					ID:   block.ID,
+					Name: block.Name,
+				}
+				if err := wrapped(chunk); err != nil {
+					return err
+				}
+			}
+
+		case anthropic.ContentBlockDeltaEvent:
+			// Incremental content -- dispatch based on delta type
+			if chunk := sa.handleDeltaRaw(e.Delta); chunk.Type != "" {
+				if err := wrapped(chunk); err != nil {
+					return err
+				}
+			}
+
+		case anthropic.ContentBlockStopEvent:
+			// Content block finished - nothing extra to do
+
+		case anthropic.MessageDeltaEvent:
+			// Carries stop_reason and cumulative usage info
+			usage := e.Usage
+			if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+				chunk := StreamChunk{
+					Type: ChunkTypeUsage,
+					Usage: &Usage{
+						InputTokens:  int(usage.InputTokens),
+						OutputTokens: int(usage.OutputTokens),
+					},
+				}
+				_ = wrapped(chunk)
+			}
+
+		case anthropic.MessageStopEvent:
+			// Message completed normally
+		}
+	}
+
+	// Emit done / error chunk
+	if streamErr != nil {
+		// Handler detected an issue (e.g. model confusion); return it
+		return streamErr
+	}
+	if err := stream.Err(); err != nil {
+		// Distinguish context cancellation (stall timer or caller) from real errors
+		if contextErr(err) {
+			return fmt.Errorf("stream stalled: %w", err)
+		}
+		sa.dispatch(StreamChunk{
+			Type:    ChunkTypeError,
+			Content: err.Error(),
+		})
+		return err
+	}
+	sa.dispatch(StreamChunk{Type: ChunkTypeDone})
+	return nil
+}
+
+// contextErr returns true if the error is caused by context cancellation or deadline.
+func contextErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "deadline exceeded")
+}
+
+// handleDeltaRaw dispatches a RawContentBlockDeltaUnion and returns the chunk type.
+func (sa *StreamAdapter) handleDeltaRaw(delta anthropic.RawContentBlockDeltaUnion) StreamChunk {
+	switch d := delta.AsAny().(type) {
+	case anthropic.TextDelta:
+		if d.Text != "" {
+			return StreamChunk{
+				Type:    ChunkTypeText,
+				Content: d.Text,
+			}
+		}
+	case anthropic.InputJSONDelta:
+		return StreamChunk{
+			Type:    ChunkTypeToolArgument,
+			Content: d.PartialJSON,
+		}
+	case anthropic.ThinkingDelta:
+		if d.Thinking != "" {
+			return StreamChunk{
+				Type:    ChunkTypeThinking,
+				Content: d.Thinking,
+			}
+		}
+	}
+	return StreamChunk{}
+}
+
+func (sa *StreamAdapter) dispatch(chunk StreamChunk) {
+	if sa.handler != nil {
+		_ = sa.handler(chunk) // handler errors are non-fatal for the stream
+	}
+	if sa.bus != nil {
+		sa.bus.Publish(chunk)
+	}
+}

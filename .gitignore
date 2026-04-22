@@ -1,0 +1,11 @@
+# Build artifacts
+*.exe
+*.exe~
+
+# Transcripts (runtime data)
+.claude/transcripts/
+
+# OS files
+.DS_Store
+Thumbs.db
+.claude/snapshots/
