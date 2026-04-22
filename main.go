@@ -9,10 +9,10 @@ import (
 )
 
 const banner = `
-  +--------------------------------------+
-  |       miniClaudeCode v0.1.0         |
-  |  Distilled Agent Loop Framework     |
-  +--------------------------------------+
+  ╔══════════════════════════════════════╗
+  ║       miniClaudeCode v0.1.0         ║
+  ║  Distilled Agent Loop Framework     ║
+  ╚══════════════════════════════════════╝
 
   Type your message to start. Commands:
     /tools   -- list available tools
@@ -33,7 +33,7 @@ func main() {
 	// Priority: flags > env > .claude/settings.json > defaults
 	cfg := DefaultConfig()
 
-	// Load from .claude/settings.json (project-level config)
+	// Load from .claude/settings.json and .mcp.json (project-level config)
 	if wd, err := os.Getwd(); err == nil {
 		if fileCfg, found := LoadConfigFromFile(wd); found {
 			if fileCfg.APIKey != "" {
@@ -46,9 +46,24 @@ func main() {
 				cfg.Model = fileCfg.Model
 			}
 			// Carry over MCP and skills from file config
-			cfg.MCPManager = fileCfg.MCPManager
-			cfg.SkillLoader = fileCfg.SkillLoader
+			if fileCfg.MCPManager != nil {
+				cfg.MCPManager = fileCfg.MCPManager
+			}
+			if fileCfg.SkillLoader != nil {
+				cfg.SkillLoader = fileCfg.SkillLoader
+			}
 		}
+	}
+
+	// Environment variables override settings file
+	if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
+		cfg.APIKey = envKey
+	}
+	if envURL := os.Getenv("ANTHROPIC_BASE_URL"); envURL != "" {
+		cfg.BaseURL = envURL
+	}
+	if envModel := os.Getenv("ANTHROPIC_MODEL"); envModel != "" {
+		cfg.Model = envModel
 	}
 
 	// Flags override everything

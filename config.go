@@ -41,6 +41,19 @@ type MCPServerConfig struct {
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
 	Env     map[string]string `json:"env"`
+	URL     string            `json:"url"`
+}
+
+// MCPConfigFile represents the .mcp.json format used by Claude Code.
+type MCPConfigFile struct {
+	MCPServers map[string]MCPConfigEntry `json:"mcpServers"`
+}
+
+type MCPConfigEntry struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+	URL     string            `json:"url"`
 }
 
 // ClaudeSettings represents the settings.json format used by Claude CLI.
@@ -59,46 +72,63 @@ type ClaudeSettings struct {
 	} `json:"mcp"`
 }
 
-// LoadConfigFromFile loads config from .claude/settings.json in the project root.
+// LoadConfigFromFile loads config from .claude/settings.json and .mcp.json in the project root.
 func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
-	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return Config{}, false
-	}
-
-	var s ClaudeSettings
-	if err := json.Unmarshal(data, &s); err != nil {
-		return Config{}, false
-	}
-
-	cfg = Config{
-		APIKey:     s.Env.AnthropicAuthToken,
-		BaseURL:    s.Env.AnthropicBaseURL,
-		Model:      s.Env.AnthropicModel,
-		ProjectDir: projectDir,
-	}
-	if cfg.Model == "" {
-		cfg.Model = s.Env.AnthropicSonnet
-	}
-	if cfg.Model == "" {
-		cfg.Model = s.Env.AnthropicOpus
-	}
-
-	// Initialize MCP manager
+	// Initialize MCP manager first
 	mcpMgr := mcp.NewManager()
-	for name, srv := range s.MCP.Servers {
-		mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
+
+	// Load from settings.json
+	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		var s ClaudeSettings
+		if err := json.Unmarshal(data, &s); err == nil {
+			cfg = Config{
+				APIKey:     s.Env.AnthropicAuthToken,
+				BaseURL:    s.Env.AnthropicBaseURL,
+				Model:      s.Env.AnthropicModel,
+				ProjectDir: projectDir,
+			}
+			if cfg.Model == "" {
+				cfg.Model = s.Env.AnthropicSonnet
+			}
+			if cfg.Model == "" {
+				cfg.Model = s.Env.AnthropicOpus
+			}
+			// Legacy: also load MCP servers from settings.json
+			for name, srv := range s.MCP.Servers {
+				mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
+			}
+		}
 	}
-	if len(s.MCP.Servers) > 0 {
+
+	// Load MCP config from .mcp.json (Claude Code compatible format)
+	mcpPath := filepath.Join(projectDir, ".mcp.json")
+	if mcpData, err := os.ReadFile(mcpPath); err == nil {
+		var mcpCfg MCPConfigFile
+		if err := json.Unmarshal(mcpData, &mcpCfg); err == nil {
+			for name, entry := range mcpCfg.MCPServers {
+				if entry.URL != "" {
+					mcpMgr.RegisterRemote(name, entry.URL, entry.Env)
+				} else if entry.Command != "" {
+					args := entry.Args
+					if args == nil {
+						args = []string{}
+					}
+					mcpMgr.Register(name, entry.Command, args, entry.Env)
+				}
+			}
+		}
+	}
+
+	// Start MCP servers if any
+	if servers := mcpMgr.ListServers(); len(servers) > 0 {
 		if err := mcpMgr.StartAll(context.Background()); err != nil {
-			// Log error but don't fail - MCP is optional
 			fmt.Fprintf(os.Stderr, "MCP start error: %v\n", err)
 		}
 	}
 	cfg.MCPManager = mcpMgr
 
-	// Initialize skill loader - check binary directory first, then workspace
+	// Initialize skill loader — check binary directory first, then workspace
 	loader := skills.NewLoader(projectDir)
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
@@ -110,7 +140,11 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 	_ = loader.Refresh()
 	cfg.SkillLoader = loader
 
-	return cfg, cfg.APIKey != ""
+	// Return found if any config was loaded
+	if cfg.APIKey != "" || cfg.Model != "" || len(mcpMgr.ListServers()) > 0 {
+		return cfg, true
+	}
+	return cfg, false
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -145,6 +179,7 @@ func DefaultRegistry() *tools.Registry {
 	r.Register(&tools.GrepTool{})
 	r.Register(&tools.MultiEditTool{})
 	r.Register(&tools.ListDirTool{})
+	r.Register(&tools.ExaSearchTool{})
 	r.Register(&tools.WebSearchTool{})
 	r.Register(&tools.WebFetchTool{})
 	r.Register(&tools.RuntimeInfoTool{})

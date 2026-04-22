@@ -1,20 +1,23 @@
 // Package mcp implements MCP (Model Context Protocol) client.
-// Communicates with MCP servers via stdio JSON-RPC 2.0.
+// Communicates with MCP servers via stdio JSON-RPC 2.0 or HTTP+SSE for remote servers.
 package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
 
-// --- JSON-RPC Types ---
+// ─── JSON-RPC Types ───
 
 type RPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -42,7 +45,7 @@ type RPCError struct {
 	Data    any    `json:"data,omitempty"`
 }
 
-// --- Tool Types ---
+// ─── Tool Types ───
 
 type Tool struct {
 	Name        string         `json:"name"`
@@ -62,7 +65,14 @@ type ContentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
-// --- Client ---
+// ─── Client ───
+
+type serverType int
+
+const (
+	stdioServer serverType = iota
+	remoteServer
+)
 
 type Client struct {
 	name    string
@@ -74,6 +84,14 @@ type Client struct {
 	nextID  int64
 	tools   []Tool
 	running bool
+
+	// Server type
+	serverType serverType
+
+	// For remote servers
+	url        string
+	httpClient *http.Client
+	headers    map[string]string
 }
 
 func NewClient(name, command string, args []string, env map[string]string) *Client {
@@ -84,11 +102,32 @@ func NewClient(name, command string, args []string, env map[string]string) *Clie
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}
 	}
-	return &Client{name: name, cmd: cmd}
+	return &Client{
+		name:       name,
+		cmd:        cmd,
+		serverType: stdioServer,
+	}
+}
+
+func NewRemoteClient(name, url string, headers map[string]string) *Client {
+	return &Client{
+		name:       name,
+		url:        url,
+		serverType: remoteServer,
+		httpClient: &http.Client{Timeout: 60 * time.Second},
+		headers:    headers,
+	}
 }
 
 // Start launches the MCP server process and initializes the connection.
 func (c *Client) Start(ctx context.Context) error {
+	if c.serverType == remoteServer {
+		return c.startRemote(ctx)
+	}
+	return c.startStdio(ctx)
+}
+
+func (c *Client) startStdio(ctx context.Context) error {
 	stdin, err := c.cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
@@ -124,11 +163,11 @@ func (c *Client) Start(ctx context.Context) error {
 		return fmt.Errorf("start %s: %w", c.name, err)
 	}
 
-	if err := c.initialize(ctx); err != nil {
+	if err := c.initializeStdio(ctx); err != nil {
 		return fmt.Errorf("initialize %s: %w", c.name, err)
 	}
 
-	tools, err := c.ListTools(ctx)
+	tools, err := c.listToolsStdio(ctx)
 	if err != nil {
 		return fmt.Errorf("list tools %s: %w", c.name, err)
 	}
@@ -137,14 +176,32 @@ func (c *Client) Start(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) initialize(ctx context.Context) error {
+func (c *Client) startRemote(ctx context.Context) error {
+	c.running = true
+
+	// Initialize via HTTP POST
+	if err := c.initializeRemote(ctx); err != nil {
+		return fmt.Errorf("initialize %s: %w", c.name, err)
+	}
+
+	// List tools via HTTP POST
+	tools, err := c.listToolsRemote(ctx)
+	if err != nil {
+		return fmt.Errorf("list tools %s: %w", c.name, err)
+	}
+	c.tools = tools
+
+	return nil
+}
+
+func (c *Client) initializeStdio(ctx context.Context) error {
 	params := json.RawMessage(`{
 		"protocolVersion": "2024-11-05",
 		"capabilities": {},
 		"clientInfo": {"name": "miniclaudecode", "version": "0.1.0"}
 	}`)
 
-	_, err := c.request(ctx, "initialize", params)
+	_, err := c.requestStdio(ctx, "initialize", params)
 	if err != nil {
 		return err
 	}
@@ -153,12 +210,44 @@ func (c *Client) initialize(ctx context.Context) error {
 		JSONRPC: "2.0",
 		Method:  "notifications/initialized",
 	}
-	return c.send(notif)
+	return c.sendStdio(notif)
+}
+
+func (c *Client) initializeRemote(ctx context.Context) error {
+	params := map[string]any{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "miniclaudecode", "version": "0.1.0"},
+	}
+	_, err := c.requestRemote(ctx, "initialize", params)
+	return err
 }
 
 // ListTools discovers available tools from this MCP server.
 func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
-	resp, err := c.request(ctx, "tools/list", nil)
+	if c.serverType == remoteServer {
+		return c.listToolsRemote(ctx)
+	}
+	return c.listToolsStdio(ctx)
+}
+
+func (c *Client) listToolsStdio(ctx context.Context) ([]Tool, error) {
+	resp, err := c.requestStdio(ctx, "tools/list", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		Tools []Tool `json:"tools"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Tools, nil
+}
+
+func (c *Client) listToolsRemote(ctx context.Context) ([]Tool, error) {
+	resp, err := c.requestRemote(ctx, "tools/list", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -178,9 +267,16 @@ func (c *Client) CallTool(ctx context.Context, name string, args ToolCallArgs) (
 	if args != nil {
 		paramsMap["arguments"] = args
 	}
-	params, _ := json.Marshal(paramsMap)
 
-	resp, err := c.request(ctx, "tools/call", json.RawMessage(params))
+	if c.serverType == remoteServer {
+		return c.callToolRemote(ctx, name, paramsMap)
+	}
+	return c.callToolStdio(ctx, name, paramsMap)
+}
+
+func (c *Client) callToolStdio(ctx context.Context, name string, paramsMap map[string]any) (*ToolResult, error) {
+	params, _ := json.Marshal(paramsMap)
+	resp, err := c.requestStdio(ctx, "tools/call", params)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +288,22 @@ func (c *Client) CallTool(ctx context.Context, name string, args ToolCallArgs) (
 	return &result, nil
 }
 
-func (c *Client) request(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+func (c *Client) callToolRemote(ctx context.Context, name string, paramsMap map[string]any) (*ToolResult, error) {
+	resp, err := c.requestRemote(ctx, "tools/call", paramsMap)
+	if err != nil {
+		return nil, err
+	}
+
+	var result ToolResult
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// ─── Stdio transport ─────────────────────────────────────────────────────────
+
+func (c *Client) requestStdio(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -226,9 +337,8 @@ func (c *Client) request(ctx context.Context, method string, params json.RawMess
 
 	select {
 	case <-ctx.Done():
-		// Close stdin to unblock the read goroutine and force server to exit
 		c.stdin.Close()
-		<-done // wait for reader to finish
+		<-done
 		return nil, ctx.Err()
 	case <-done:
 		if readErr != nil {
@@ -241,7 +351,7 @@ func (c *Client) request(ctx context.Context, method string, params json.RawMess
 	}
 }
 
-func (c *Client) send(v any) error {
+func (c *Client) sendStdio(v any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	data, _ := json.Marshal(v)
@@ -249,8 +359,113 @@ func (c *Client) send(v any) error {
 	return err
 }
 
-// Stop terminates the MCP server process.
+// ─── Remote HTTP+SSE transport ────────────────────────────────────────────────
+
+func (c *Client) requestRemote(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	c.mu.Lock()
+	c.nextID++
+	reqID := c.nextID
+	c.mu.Unlock()
+
+	var reqBody []byte
+	var err error
+
+	switch p := params.(type) {
+	case nil:
+		reqBody, err = json.Marshal(RPCRequest{JSONRPC: "2.0", ID: reqID, Method: method})
+	case json.RawMessage:
+		reqBody, err = json.Marshal(RPCRequest{JSONRPC: "2.0", ID: reqID, Method: method, Params: p})
+	case map[string]any:
+		reqBody, err = json.Marshal(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      reqID,
+			"method":  method,
+			"params":  p,
+		})
+	default:
+		reqBody, err = json.Marshal(RPCRequest{JSONRPC: "2.0", ID: reqID, Method: method})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.url, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Read SSE response
+	reader := io.LimitReader(resp.Body, 2*1024*1024)
+	sseResp, err := c.readSSE(reader)
+	if err != nil {
+		return nil, fmt.Errorf("SSE read: %w", err)
+	}
+
+	var rpcResp RPCResponse
+	if err := json.Unmarshal(sseResp, &rpcResp); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("MCP error [%d]: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+	return rpcResp.Result, nil
+}
+
+func (c *Client) readSSE(reader io.Reader) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	scanner := bufio.NewScanner(reader)
+	// Increase buffer for large responses
+	buf.Grow(256 * 1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			// Skip ping/keepalive lines
+			if data == "" || data == ":" {
+				continue
+			}
+			// If it's a JSON object with a result, return it
+			if strings.Contains(data, `"result"`) || strings.Contains(data, `"error"`) {
+				return []byte(data), nil
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// ─── Stop ─────────────────────────────────────────────────────────────────────
+
 func (c *Client) Stop() error {
+	if c.serverType == remoteServer {
+		if !c.running {
+			return nil
+		}
+		c.running = false
+		return nil
+	}
+
 	if !c.running {
 		return nil
 	}
@@ -275,7 +490,7 @@ func (c *Client) Tools() []Tool {
 	return c.tools
 }
 
-// --- Manager ---
+// ─── Manager ───
 
 type ToolWithServer struct {
 	Tool
@@ -291,11 +506,18 @@ func NewManager() *Manager {
 	return &Manager{clients: make(map[string]*Client)}
 }
 
-// Register adds an MCP server.
+// Register adds an MCP stdio server.
 func (m *Manager) Register(name, command string, args []string, env map[string]string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.clients[name] = NewClient(name, command, args, env)
+}
+
+// RegisterRemote adds an MCP remote server via URL.
+func (m *Manager) RegisterRemote(name, url string, headers map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clients[name] = NewRemoteClient(name, url, headers)
 }
 
 // StartAll launches all registered MCP servers.
