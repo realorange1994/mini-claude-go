@@ -76,7 +76,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		transcript:  tw,
 		useStream:   useStream,
 		maxToolChars: 8192,
-		toolTimeout:  60 * time.Second,
+		toolTimeout:  120 * time.Second,
 		maxTurns:     maxTurns,
 	}
 
@@ -222,7 +222,7 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		params.Tools = toolParams
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	return a.client.Messages.New(ctx, params)
@@ -248,9 +248,9 @@ func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
 		params.Tools = toolParams
 	}
 
-	// 120s overall timeout for streaming — the stall detector inside Process
+	// 180s overall timeout for streaming — the stall detector inside Process
 	// will force-close earlier if no events arrive for 15s.
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	collect := NewCollectHandler()
@@ -506,7 +506,7 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 	// Execute with timeout (mirrors ggbot's executeToolWithStreaming timeout)
 	timeout := a.toolTimeout
 	if timeout <= 0 {
-		timeout = 60 * time.Second
+		timeout = 120 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -603,7 +603,7 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 
 	timeout := a.toolTimeout
 	if timeout <= 0 {
-		timeout = 60 * time.Second
+		timeout = 120 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
