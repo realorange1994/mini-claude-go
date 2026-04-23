@@ -25,9 +25,10 @@ const (
 	ChunkTypeToolCall     ChunkType = "tool_call"    // Tool call started (id + name)
 	ChunkTypeToolArgument ChunkType = "tool_argument" // Tool argument JSON delta
 	ChunkTypeThinking     ChunkType = "thinking"     // Extended thinking block
-	ChunkTypeUsage        ChunkType = "usage"        // Token usage info
-	ChunkTypeError        ChunkType = "error"        // Error occurred
-	ChunkTypeDone         ChunkType = "done"         // Stream complete
+	ChunkTypeUsage    ChunkType = "usage"        // Token usage info
+	ChunkTypeError    ChunkType = "error"        // Error occurred
+	ChunkTypeDone     ChunkType = "done"         // Stream complete
+	ChunkTypeBlockStop ChunkType = "block_stop"  // Content block finished
 )
 
 // StreamChunk is a single event emitted during a streaming response.
@@ -121,6 +122,9 @@ func (h *CollectHandler) Handle(chunk StreamChunk) error {
 
 	case ChunkTypeDone:
 		// stream finished
+
+	case ChunkTypeBlockStop:
+		// content block finished — no-op for collector
 	}
 
 	return nil
@@ -136,6 +140,14 @@ func (h *CollectHandler) FullResponse() string {
 		return h.Text
 	}
 	return h.Thinking
+}
+
+// IsToolUseAsText reports whether the model echoed tool syntax as plain text.
+// Thread-safe.
+func (h *CollectHandler) IsToolUseAsText() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.toolUseAsText
 }
 
 // AsParsedResponse returns tool calls and text parts directly, bypassing
@@ -176,8 +188,10 @@ func (h *CollectHandler) AsParsedResponse() ([]map[string]any, []string) {
 // TerminalHandler shows a clean progress display during streaming.
 // Shows thinking tokens in dim text, tool calls, and results.
 type TerminalHandler struct {
-	seenToolCall bool
-	thinkingBuf  strings.Builder
+	seenToolCall   bool
+	thinkingBuf    strings.Builder
+	curToolName    string
+	curToolArgs    strings.Builder
 }
 
 func (h *TerminalHandler) Handle(chunk StreamChunk) error {
@@ -197,21 +211,109 @@ func (h *TerminalHandler) Handle(chunk StreamChunk) error {
 			fmt.Fprintf(os.Stderr, "\n[THINK] %s\n", preview)
 		}
 		h.thinkingBuf.Reset()
-		fmt.Fprintf(os.Stderr, "[Tool: %s] ...\n", chunk.Name)
+		h.curToolName = chunk.Name
+		h.curToolArgs.Reset()
+		fmt.Fprintf(os.Stderr, "[Tool: %s] ", chunk.Name)
+	case ChunkTypeToolArgument:
+		h.curToolArgs.WriteString(chunk.Content)
+	case ChunkTypeBlockStop:
+		// Content block finished — flush pending tool call with parsed args
+		if h.curToolName != "" {
+			h.flushToolCall()
+		}
+	case ChunkTypeDone:
+		// Flush any pending tool call with its parsed args
+		if h.curToolName != "" {
+			h.flushToolCall()
+		}
+		// Flush buffered thinking if no tool call was seen
+		if !h.seenToolCall && h.thinkingBuf.Len() > 0 {
+			th := h.thinkingBuf.String()
+			lines := strings.Split(th, "\n")
+			preview := lines[0]
+			if len(preview) > 120 {
+				preview = preview[:120] + "..."
+			}
+			fmt.Fprintf(os.Stderr, "\n[THINK] %s\n", preview)
+			h.thinkingBuf.Reset()
+		}
 	case ChunkTypeText:
+		// Flush any pending tool call before printing text
+		if h.curToolName != "" {
+			h.flushToolCall()
+		}
 		// Detect model echoing tool syntax as text (stuck pattern)
 		// These patterns are specific to the confused model output format
 		lower := strings.ToLower(chunk.Content)
 		if strings.Contains(lower, "tool_use") ||
 			strings.Contains(lower, "<parameter>") ||
 			(strings.Contains(lower, `"path"`) && strings.Contains(lower, `"name"`)) {
-			// Suppress - model is confused
+			// Suppress — model is confused
 			return nil
 		}
 		// Text is collected by CollectHandler; Run loop prints final output.
 		// Don't print here to avoid double output.
 	}
 	return nil
+}
+
+// flushToolCall parses the accumulated tool arguments and prints a compact summary.
+func (h *TerminalHandler) flushToolCall() {
+	if h.curToolName == "" {
+		return
+	}
+	args := h.curToolArgs.String()
+	summary := toolArgSummary(h.curToolName, args)
+	fmt.Fprintf(os.Stderr, "%s\n", summary)
+	h.curToolName = ""
+	h.curToolArgs.Reset()
+}
+
+// toolArgSummary extracts the most relevant field from tool JSON arguments.
+func toolArgSummary(toolName, argsJSON string) string {
+	var input map[string]any
+	if argsJSON != "" {
+		_ = json.Unmarshal([]byte(argsJSON), &input)
+	}
+	if input == nil {
+		input = make(map[string]any)
+	}
+
+	switch toolName {
+	case "read_file", "write_file", "edit_file", "list_dir":
+		if path, ok := input["path"].(string); ok {
+			return path
+		}
+	case "exec":
+		if cmd, ok := input["command"].(string); ok {
+			if len(cmd) > 120 {
+				return cmd[:120] + "..."
+			}
+			return cmd
+		}
+	case "grep":
+		if pattern, ok := input["pattern"].(string); ok {
+			if path, ok2 := input["path"].(string); ok2 {
+				return fmt.Sprintf("%q in %s", pattern, path)
+			}
+			return fmt.Sprintf("%q", pattern)
+		}
+	case "glob":
+		if pattern, ok := input["pattern"].(string); ok {
+			return pattern
+		}
+	}
+
+	// Fallback: show all args compactly
+	parts := make([]string, 0, len(input))
+	for k, v := range input {
+		s := fmt.Sprintf("%v", v)
+		if len(s) > 80 {
+			s = s[:80] + "..."
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", k, s))
+	}
+	return strings.Join(parts, " ")
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +376,7 @@ func (b *StreamBus) Close() {
 }
 
 // ---------------------------------------------------------------------------
-// StreamAdapter -- bridges anthropic SDK streaming events -> StreamChunk
+// StreamAdapter -- bridges anthropic SDK streaming events → StreamChunk
 // ---------------------------------------------------------------------------
 
 // StreamAdapter wraps the anthropic streaming response iterator and feeds
@@ -365,7 +467,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 
 		switch e := event.AsAny().(type) {
 		case anthropic.MessageStartEvent:
-			// Message started - carry on; usage info is available via MessageDeltaEvent
+			// Message started — carry on; usage info is available via MessageDeltaEvent
 		case anthropic.ContentBlockStartEvent:
 			// A new content block started
 			block := e.ContentBlock
@@ -390,7 +492,10 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 			}
 
 		case anthropic.ContentBlockStopEvent:
-			// Content block finished - nothing extra to do
+			// Content block finished — flush pending tool call display
+			if err := wrapped(StreamChunk{Type: ChunkTypeBlockStop}); err != nil {
+				return err
+			}
 
 		case anthropic.MessageDeltaEvent:
 			// Carries stop_reason and cumulative usage info
@@ -425,6 +530,8 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 			Type:    ChunkTypeError,
 			Content: err.Error(),
 		})
+		// Still send Done so subscribers don't hang
+		sa.dispatch(StreamChunk{Type: ChunkTypeDone})
 		return err
 	}
 	sa.dispatch(StreamChunk{Type: ChunkTypeDone})

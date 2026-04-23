@@ -1,4 +1,5 @@
-// Package main - context compaction for long coding sessions.
+// Package main — context compaction for long coding sessions.
+// Self-contained, no external dependencies beyond the standard library.
 //
 // Provides:
 //   - Token estimation (~4 chars per token heuristic)
@@ -7,7 +8,6 @@
 //   - Safe compression boundaries (tool_call/tool_result pairs kept together)
 //   - Archive old messages to a history file
 //   - Boundary markers inserted for omitted messages
-//   - Conversion between SDK types and CompactionMessage
 package main
 
 import (
@@ -23,7 +23,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// --- Token estimation --------------------------------------------------------
+// ─── Token estimation ────────────────────────────────────────────────────────
 
 // CharsPerToken is the heuristic ratio of characters to tokens.
 // Claude and similar models average ~3.5-4.5 chars/token; 4 is a good midpoint.
@@ -37,7 +37,7 @@ func EstimateTokens(text string) int {
 	return int(math.Ceil(float64(len(text)) / CharsPerToken))
 }
 
-// --- Constants ---------------------------------------------------------------
+// ─── Constants ───────────────────────────────────────────────────────────────
 
 const (
 	// DefaultCompactionThreshold is the fraction of max context at which
@@ -57,7 +57,7 @@ const (
 	ArchiveExtension = ".compact.archive.json"
 )
 
-// --- Compaction message (internal, SDK-agnostic representation) --------------
+// ─── Compaction message (internal, SDK-agnostic representation) ──────────────
 
 // CompactionMessage is a lightweight, serializable representation of a
 // conversation message used during compaction. It mirrors the essential
@@ -70,7 +70,7 @@ type CompactionMessage struct {
 	Timestamp string `json:"timestamp,omitempty"`   // ISO-8601 timestamp
 }
 
-// --- Compaction result -------------------------------------------------------
+// ─── Compaction result ───────────────────────────────────────────────────────
 
 // CompactionResult holds the outcome of a compaction operation.
 type CompactionResult struct {
@@ -85,7 +85,7 @@ type CompactionResult struct {
 	CompactionTrigger string              `json:"compaction_trigger"`
 }
 
-// --- Compaction config -------------------------------------------------------
+// ─── Compaction config ───────────────────────────────────────────────────────
 
 // CompactionConfig holds all tunable parameters.
 type CompactionConfig struct {
@@ -109,7 +109,7 @@ func DefaultCompactionConfig() CompactionConfig {
 	}
 }
 
-// --- Context usage tracker ---------------------------------------------------
+// ─── Context usage tracker ───────────────────────────────────────────────────
 
 // ContextUsage tracks token usage over time for compaction decisions.
 type ContextUsage struct {
@@ -154,7 +154,7 @@ func (u *ContextUsage) UsageFraction(tokens int) float64 {
 	return float64(tokens) / float64(u.maxContextSize)
 }
 
-// --- Round grouping ----------------------------------------------------------
+// ─── Round grouping ──────────────────────────────────────────────────────────
 
 // apiRound represents one user+assistant exchange (may include tool calls).
 type apiRound struct {
@@ -259,7 +259,7 @@ func extractToolResultID(msg CompactionMessage) string {
 	return rest[1 : 1+end]
 }
 
-// --- Safe boundary detection -------------------------------------------------
+// ─── Safe boundary detection ─────────────────────────────────────────────────
 
 // findSafeCompactionBoundary finds the index in the rounds slice where we can
 // safely split: before this index can be compacted, from this index onward
@@ -306,7 +306,7 @@ func findSafeCompactionBoundary(rounds []apiRound, keepN int) int {
 	return cutPoint
 }
 
-// --- Token counting for messages ---------------------------------------------
+// ─── Token counting for messages ─────────────────────────────────────────────
 
 // messageTokens returns estimated token count for a single message.
 func messageTokens(msg CompactionMessage) int {
@@ -342,7 +342,7 @@ func totalTokens(messages []CompactionMessage) int {
 	return total
 }
 
-// --- Compaction logic --------------------------------------------------------
+// ─── Compaction logic ────────────────────────────────────────────────────────
 
 // NeedsCompaction checks whether the current message set is approaching
 // the context limit and should be compacted.
@@ -461,7 +461,7 @@ func Compact(messages []CompactionMessage, cfg CompactionConfig) (*CompactionRes
 	}, nil
 }
 
-// --- Archiving ---------------------------------------------------------------
+// ─── Archiving ───────────────────────────────────────────────────────────────
 
 // archiveRounds writes the omitted rounds to a JSON file in the archive dir.
 // Returns the file path.
@@ -542,7 +542,7 @@ func ListArchives(archiveDir string) ([]os.FileInfo, error) {
 	return files, nil
 }
 
-// --- Selective compaction (per-round) ----------------------------------------
+// ─── Selective compaction (per-round) ────────────────────────────────────────
 
 // SelectiveCompactResult holds the result of selective compaction.
 type SelectiveCompactResult struct {
@@ -595,7 +595,7 @@ func SelectiveCompact(rounds []apiRound, compactableTools map[string]bool, place
 	return result
 }
 
-// --- Micro-compaction (time-based content clearing) --------------------------
+// ─── Micro-compaction (time-based content clearing) ──────────────────────────
 
 // MicroCompactConfig holds micro-compaction settings.
 type MicroCompactConfig struct {
@@ -683,7 +683,7 @@ func parseTimestamp(s string) time.Time {
 	return time.Time{}
 }
 
-// --- Smart compaction (turn-based) ------------------------------------------
+// ─── Smart compaction (turn-based) ──────────────────────────────────────────
 
 // SmartCompactResult holds the result of smart (turn-based) compaction.
 type SmartCompactResult struct {
@@ -716,7 +716,7 @@ func SmartCompact(messages []CompactionMessage, keepFirst int, keepLast int) *Sm
 		}
 	}
 
-	// Group into turns - each turn captures all messages in one user+assistant exchange,
+	// Group into turns — each turn captures all messages in one user+assistant exchange,
 	// including tool_result (user role) and tool_use (assistant role) messages.
 	type turn struct {
 		messages []CompactionMessage
@@ -786,7 +786,7 @@ func SmartCompact(messages []CompactionMessage, keepFirst int, keepLast int) *Sm
 	}
 }
 
-// --- Summary -----------------------------------------------------------------
+// ─── Summary ─────────────────────────────────────────────────────────────────
 
 // Summary returns a human-readable summary of the compaction result.
 func (r *CompactionResult) Summary() string {
@@ -802,7 +802,9 @@ func (r *CompactionResult) Summary() string {
 	return b.String()
 }
 
-// serializeContentBlocks serializes []anthropic.ContentBlockParamUnion to a JSON string.
+// ─── Conversion between conversationEntry and CompactionMessage ──────────────
+
+// serializeContentBlockParamUnion serializes []anthropic.ContentBlockParamUnion to a JSON string.
 // Returns the JSON content and extracted tool name/ID if present.
 func serializeContentBlocks(blocks []anthropic.ContentBlockParamUnion) (content string, toolUseID string, toolName string) {
 	data, err := json.Marshal(blocks)
@@ -811,6 +813,7 @@ func serializeContentBlocks(blocks []anthropic.ContentBlockParamUnion) (content 
 		return
 	}
 	content = string(data)
+	// Extract tool info
 	for _, b := range blocks {
 		if b.OfToolUse != nil {
 			toolUseID = b.OfToolUse.ID
@@ -821,7 +824,7 @@ func serializeContentBlocks(blocks []anthropic.ContentBlockParamUnion) (content 
 	return
 }
 
-// serializeToolResultBlocks serializes []anthropic.ToolResultBlockParam to a JSON string.
+// serializeToolResultBlockParam serializes []anthropic.ToolResultBlockParam to a JSON string.
 func serializeToolResultBlocks(results []anthropic.ToolResultBlockParam) (content string, toolUseID string, toolName string) {
 	data, err := json.Marshal(results)
 	if err != nil {
@@ -829,9 +832,16 @@ func serializeToolResultBlocks(results []anthropic.ToolResultBlockParam) (conten
 		return
 	}
 	content = string(data)
+	// Extract tool use ID and name
 	for _, r := range results {
 		if r.ToolUseID != "" {
 			toolUseID = r.ToolUseID
+			// Try to extract tool name from content
+			for _, c := range r.Content {
+				if c.OfText != nil && strings.Contains(c.OfText.Text, toolUseID) {
+					// Tool name not available in result, leave empty
+				}
+			}
 			break
 		}
 	}
@@ -864,6 +874,27 @@ func isToolUseJSON(s string) bool {
 // isToolResultJSON detects if a string looks like serialized tool_result content.
 func isToolResultJSON(s string) bool {
 	return strings.Contains(s, `"type":"tool_result"`) || strings.Contains(s, `"type": "tool_result"`)
+}
+
+// detectToolNameFromJSON tries to extract tool name from JSON content.
+func detectToolNameFromJSON(s string) string {
+	// Look for "name":"xxx" pattern in tool_use blocks
+	idx := strings.Index(s, `"name":`)
+	if idx == -1 {
+		return ""
+	}
+	rest := s[idx:]
+	// Find the quoted value
+	colon := strings.Index(rest, `"`)
+	if colon == -1 {
+		return ""
+	}
+	rest = rest[colon+1:]
+	end := strings.Index(rest, `"`)
+	if end == -1 {
+		return ""
+	}
+	return rest[:end]
 }
 
 // flattenRounds converts []apiRound back to a flat []CompactionMessage list.
