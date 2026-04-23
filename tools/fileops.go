@@ -155,16 +155,20 @@ func opCopyDir(src string, params map[string]any) ToolResult {
 
 func opChmod(path string, params map[string]any) ToolResult {
 	modeStr, _ := params["mode"].(string)
-	if modeStr == "" {
-		return ToolResult{Output: "Error: mode is required for chmod", IsError: true}
+	mode := os.FileMode(0o644) // default mode if not specified
+	if modeStr != "" {
+		var mval int
+		_, err := fmt.Sscanf(modeStr, "%o", &mval)
+		if err != nil {
+			return ToolResult{Output: fmt.Sprintf("Error: invalid mode: %s", modeStr), IsError: true}
+		}
+		mode = os.FileMode(mval)
 	}
-	var mval int
-	_, err := fmt.Sscanf(modeStr, "%o", &mval)
-	if err != nil {
-		return ToolResult{Output: fmt.Sprintf("Error: invalid mode: %s", modeStr), IsError: true}
-	}
-	if err := os.Chmod(path, os.FileMode(mval)); err != nil {
+	if err := os.Chmod(path, mode); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error changing mode: %v", err), IsError: true}
+	}
+	if modeStr == "" {
+		return ToolResult{Output: fmt.Sprintf("Changed mode of %s to %s (default)", path, "0644")}
 	}
 	return ToolResult{Output: fmt.Sprintf("Changed mode of %s to %s", path, modeStr)}
 }
