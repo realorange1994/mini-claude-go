@@ -186,6 +186,9 @@ func DefaultRegistry() *tools.Registry {
 	r.Register(&tools.ImageReadTool{})
 	r.Register(&tools.ProcessTool{})
 	r.Register(&tools.FileOpsTool{})
+	r.Register(&tools.GitTool{})
+	r.Register(&tools.SystemTool{})
+	r.Register(&tools.TerminalTool{})
 	return r
 }
 

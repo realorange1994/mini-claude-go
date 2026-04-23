@@ -1,17 +1,18 @@
 package tools
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
 )
 
-// ProcessTool provides process management (list, kill, pkill, pgrep).
+// ProcessTool provides process management (list, kill, pkill, pgrep, top, pstree).
 type ProcessTool struct{}
 
 func (*ProcessTool) Name() string        { return "process" }
-func (*ProcessTool) Description() string { return "Process management and monitoring. Supports list (ps), kill, pkill, and pgrep operations. On Windows, uses PowerShell cmdlets." }
+func (*ProcessTool) Description() string { return "Process management and monitoring. Supports list (ps), kill, pkill, pgrep, top, and pstree operations. On Windows, uses PowerShell cmdlets." }
 
 func (*ProcessTool) InputSchema() map[string]any {
 	return map[string]any{
@@ -19,8 +20,8 @@ func (*ProcessTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"operation": map[string]any{
 				"type":        "string",
-				"description": "Operation: list, kill, pkill, pgrep",
-				"enum":        []string{"list", "kill", "pkill", "pgrep"},
+				"description": "Operation: list, kill, pkill, pgrep, top, pstree",
+				"enum":        []string{"list", "kill", "pkill", "pgrep", "top", "pstree"},
 			},
 			"pid": map[string]any{
 				"type":        "integer",
@@ -37,6 +38,10 @@ func (*ProcessTool) InputSchema() map[string]any {
 			"user": map[string]any{
 				"type":        "string",
 				"description": "Filter by user (for list, pgrep).",
+			},
+			"lines": map[string]any{
+				"type":        "integer",
+				"description": "Number of lines to show for top (default: 10).",
 			},
 		},
 		"required": []string{"operation"},
@@ -62,6 +67,10 @@ func (*ProcessTool) Execute(params map[string]any) ToolResult {
 		return processKillByName(params, isWindows)
 	case "pgrep":
 		return processGrep(params, isWindows)
+	case "top":
+		return processTop(params, isWindows)
+	case "pstree":
+		return processPstree(isWindows)
 	default:
 		return ToolResult{Output: fmt.Sprintf("Error: unknown operation: %s", operation), IsError: true}
 	}
@@ -116,13 +125,9 @@ func processKill(params map[string]any, isWindows bool) ToolResult {
 	if s, ok := params["signal"].(string); ok && s != "" {
 		signal = s
 	}
-	// Convert signal name to number
 	sig := signal
-	if _, err := exec.LookPath("kill"); err == nil {
-		// If signal is a name like SIGTERM, convert to -TERM format
-		if _, err2 := fmt.Sscanf(signal, "%d", new(int)); err2 != nil {
-			sig = "-" + strings.TrimPrefix(strings.TrimPrefix(signal, "SIG"), "")
-		}
+	if _, err := fmt.Sscanf(signal, "%d", new(int)); err != nil {
+		sig = "-" + strings.TrimPrefix(strings.TrimPrefix(signal, "SIG"), "")
 	}
 	cmd := exec.Command("kill", sig, fmt.Sprintf("%d", pid))
 	return runCmd(cmd)
@@ -136,7 +141,6 @@ func processKillByName(params map[string]any, isWindows bool) ToolResult {
 
 	if isWindows {
 		safePattern := sanitizePSInput(pattern)
-		// On Windows, use Get-Process to find matching processes and stop them
 		cmd := exec.Command("powershell", "-NoProfile", "-Command",
 			fmt.Sprintf("Get-Process -Name '*%s*' -ErrorAction SilentlyContinue | Stop-Process -Force", safePattern))
 		out, err := cmd.CombinedOutput()
@@ -202,9 +206,48 @@ func runCmd(cmd *exec.Cmd) ToolResult {
 	return ToolResult{Output: output}
 }
 
+// processTop shows top processes by CPU usage.
+func processTop(params map[string]any, isWindows bool) ToolResult {
+	lines := 10
+	if l, ok := params["lines"].(float64); ok {
+		lines = int(l)
+	}
+	if lines <= 0 {
+		lines = 10
+	}
+
+	if isWindows {
+		cmd := exec.Command("powershell", "-NoProfile", "-Command",
+			fmt.Sprintf(`Get-Process | Sort-Object CPU -Descending | Select-Object -First %d Id, ProcessName, CPU, @{N='Memory MB';E={[math]::Round($_.WorkingSet64/1MB,1)}} | Format-Table -AutoSize`, lines))
+		return runCmd(cmd)
+	}
+	cmd := exec.Command("top", "-b", "-n", "1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, stderr.String()), IsError: true}
+	}
+	outputLines := strings.Split(stdout.String(), "\n")
+	if len(outputLines) > lines+6 {
+		outputLines = outputLines[:lines+6]
+	}
+	return ToolResult{Output: strings.TrimSpace(strings.Join(outputLines, "\n"))}
+}
+
+// processPstree shows process tree.
+func processPstree(isWindows bool) ToolResult {
+	if isWindows {
+		cmd := exec.Command("powershell", "-NoProfile", "-Command",
+			`Get-Process | Select-Object -First 30 Id, ProcessName, @{N='Parent';E={(Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").ParentProcessId}} | Format-Table -AutoSize`)
+		return runCmd(cmd)
+	}
+	cmd := exec.Command("pstree")
+	return runCmd(cmd)
+}
+
 // sanitizePSInput strips PowerShell metacharacters to prevent command injection.
 func sanitizePSInput(s string) string {
-	// Remove characters that can break out of string interpolation
 	replacer := strings.NewReplacer(
 		"'", "", `"`, "", "`", "", "$", "",
 		";", "", "&", "", "|", "",

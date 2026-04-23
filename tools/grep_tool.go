@@ -10,6 +10,7 @@ import (
 )
 
 const maxGrepMatches = 250
+const maxGrepLineLen = 500
 
 // GrepTool searches file contents using regex. Uses ripgrep if available, otherwise Go regexp.
 type GrepTool struct{}
@@ -51,6 +52,10 @@ func (*GrepTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Output mode: 'content' (default), 'files_with_matches', or 'count'.",
 			},
+			"count_matches": map[string]any{
+				"type":        "boolean",
+				"description": "Count per-line match occurrences (not just matching lines). Only with content mode.",
+			},
 			"context_before": map[string]any{
 				"type":        "integer",
 				"description": "Lines of context before each match (rg only, default: 0).",
@@ -62,6 +67,14 @@ func (*GrepTool) InputSchema() map[string]any {
 			"head_limit": map[string]any{
 				"type":        "integer",
 				"description": "Maximum number of results (default: 250).",
+			},
+			"offset": map[string]any{
+				"type":        "integer",
+				"description": "Skip the first N results for pagination (default: 0).",
+			},
+			"context": map[string]any{
+				"type":        "integer",
+				"description": "Lines of context before and after each match (Go fallback only, default: 0, max: 3).",
 			},
 		},
 		"required": []string{"pattern"},
@@ -86,6 +99,7 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 	typeFilter, _ := params["type"].(string)
 	caseInsensitive, _ := params["case_insensitive"].(bool)
 	fixedStrings, _ := params["fixed_strings"].(bool)
+	countMatches, _ := params["count_matches"].(bool)
 	outputMode, _ := params["output_mode"].(string)
 	if outputMode == "" {
 		outputMode = "content"
@@ -121,10 +135,40 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
-	if _, err := exec.LookPath("rg"); err == nil {
-		return rgSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, ctxBefore, ctxAfter, headLimit)
+	// Combined 'context' param
+	ctxCombined := 0
+	if c, ok := params["context"]; ok {
+		switch v := c.(type) {
+		case float64:
+			ctxCombined = int(v)
+		case int:
+			ctxCombined = v
+		}
 	}
-	return goSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, headLimit)
+	if ctxCombined > 0 {
+		if ctxBefore == 0 {
+			ctxBefore = ctxCombined
+		}
+		if ctxAfter == 0 {
+			ctxAfter = ctxCombined
+		}
+	}
+
+	// Parse offset
+	offset := 0
+	if o, ok := params["offset"]; ok {
+		switch v := o.(type) {
+		case float64:
+			offset = int(v)
+		case int:
+			offset = v
+		}
+	}
+
+	if _, err := exec.LookPath("rg"); err == nil {
+		return rgSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, ctxBefore, ctxAfter, headLimit, offset)
+	}
+	return goSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, headLimit, offset, ctxCombined, countMatches)
 }
 
 var typeMap = map[string][]string{
@@ -143,7 +187,7 @@ var typeMap = map[string][]string{
 	"css":    {".css", ".scss", ".sass"},
 }
 
-func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, ctxBefore, ctxAfter, headLimit int) ToolResult {
+func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, ctxBefore, ctxAfter, headLimit, offset int) ToolResult {
 	args := []string{"--no-heading", "--line-number"}
 
 	switch outputMode {
@@ -192,6 +236,11 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	}
 
 	lines := strings.Split(output, "\n")
+
+	// Apply offset
+	if offset > 0 && offset < len(lines) {
+		lines = lines[offset:]
+	}
 	if len(lines) > headLimit {
 		lines = lines[:headLimit]
 		lines = append(lines, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
@@ -199,7 +248,7 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	return ToolResult{Output: strings.Join(lines, "\n")}
 }
 
-func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, headLimit int) ToolResult {
+func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, headLimit, offset, ctxLines int, countMatches bool) ToolResult {
 	searchPattern := pattern
 	if caseInsensitive {
 		searchPattern = "(?i)" + searchPattern
@@ -255,7 +304,6 @@ func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 					return nil
 				}
 			}
-			// Skip binary files
 			ext := strings.ToLower(filepath.Ext(p))
 			if ext == ".exe" || ext == ".dll" || ext == ".so" || ext == ".bin" {
 				return nil
@@ -265,18 +313,30 @@ func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 		})
 	}
 
+	filesSearched := len(files)
+
 	switch outputMode {
 	case "files_with_matches":
-		return goSearchFilesOnly(re, files, headLimit)
+		return goSearchFilesOnly(re, files, headLimit, offset, filesSearched)
 	case "count":
-		return goSearchCount(re, files)
+		return goSearchCount(re, files, filesSearched)
 	default:
-		return goSearchContent(re, files, headLimit)
+		return goSearchContent(re, files, headLimit, offset, ctxLines, countMatches, filesSearched)
 	}
 }
 
-func goSearchContent(re *regexp.Regexp, files []string, headLimit int) ToolResult {
+// truncateLine truncates a line to maxGrepLineLen characters.
+func truncateLine(line string) string {
+	if len(line) <= maxGrepLineLen {
+		return line
+	}
+	return line[:maxGrepLineLen] + "..."
+}
+
+func goSearchContent(re *regexp.Regexp, files []string, headLimit, offset, ctxLines int, countMatches bool, filesSearched int) ToolResult {
 	var matches []string
+	skipped := 0
+	totalMatchCount := 0
 	for _, fp := range files {
 		data, err := os.ReadFile(fp)
 		if err != nil {
@@ -284,25 +344,74 @@ func goSearchContent(re *regexp.Regexp, files []string, headLimit int) ToolResul
 		}
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
-			if re.MatchString(line) {
-				relPath, _ := filepath.Rel(".", fp)
-				matches = append(matches, fmt.Sprintf("%s:%d:%s", relPath, i+1, strings.TrimSpace(line)))
-				if len(matches) >= headLimit {
-					matches = append(matches, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
-					return ToolResult{Output: strings.Join(matches, "\n")}
+			trimmed := strings.TrimSpace(line)
+			loc := re.FindStringIndex(trimmed)
+			if loc == nil {
+				continue
+			}
+			totalMatchCount++
+			if skipped < offset {
+				skipped++
+				continue
+			}
+			relPath, _ := filepath.Rel(".", fp)
+			if countMatches {
+				count := len(re.FindAllStringIndex(trimmed, -1))
+				if ctxLines > 0 {
+					start := max(0, i-ctxLines)
+					end := min(len(lines)-1, i+ctxLines)
+					for j := start; j <= end; j++ {
+						prefix := "    "
+						if j == i {
+							prefix = ">>> "
+						}
+						matches = append(matches, fmt.Sprintf("%s:%d: %s%s", relPath, j+1, prefix, truncateLine(strings.TrimSpace(lines[j]))))
+					}
+					matches = append(matches, fmt.Sprintf("  [%d match(es) on this line]", count))
+				} else {
+					matches = append(matches, fmt.Sprintf("%s:%d:[%d] %s", relPath, i+1, count, truncateLine(trimmed)))
 				}
+			} else {
+				if ctxLines > 0 {
+					start := max(0, i-ctxLines)
+					end := min(len(lines)-1, i+ctxLines)
+					for j := start; j <= end; j++ {
+						prefix := "    "
+						if j == i {
+							prefix = ">>> "
+						}
+						matches = append(matches, fmt.Sprintf("%s:%d: %s%s", relPath, j+1, prefix, truncateLine(strings.TrimSpace(lines[j]))))
+					}
+				} else {
+					matches = append(matches, fmt.Sprintf("%s:%d:%s", relPath, i+1, truncateLine(trimmed)))
+				}
+			}
+			if len(matches) >= headLimit {
+				matches = append(matches, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
+				return ToolResult{Output: strings.Join(matches, "\n")}
 			}
 		}
 	}
 
 	if len(matches) == 0 {
-		return ToolResult{Output: "No matches found."}
+		if offset > 0 && skipped > 0 {
+			return ToolResult{Output: fmt.Sprintf("No matches after skipping first %d results. (Searched %d files, %d matches total)", offset, filesSearched, totalMatchCount)}
+		}
+		return ToolResult{Output: fmt.Sprintf("No matches found. (Searched %d files)", filesSearched)}
 	}
-	return ToolResult{Output: strings.Join(matches, "\n")}
+
+	summary := fmt.Sprintf("(Searched %d files, %d matches", filesSearched, totalMatchCount)
+	if len(matches) < totalMatchCount {
+		summary += fmt.Sprintf(", showing first %d", len(matches))
+	}
+	summary += ")"
+
+	return ToolResult{Output: strings.Join(matches, "\n") + "\n" + summary}
 }
 
-func goSearchFilesOnly(re *regexp.Regexp, files []string, headLimit int) ToolResult {
+func goSearchFilesOnly(re *regexp.Regexp, files []string, headLimit, offset int, filesSearched int) ToolResult {
 	var found []string
+	skipped := 0
 	for _, fp := range files {
 		if len(found) >= headLimit {
 			break
@@ -312,18 +421,23 @@ func goSearchFilesOnly(re *regexp.Regexp, files []string, headLimit int) ToolRes
 			continue
 		}
 		if re.Match(data) {
+			if skipped < offset {
+				skipped++
+				continue
+			}
 			relPath, _ := filepath.Rel(".", fp)
 			found = append(found, relPath)
 		}
 	}
 	if len(found) == 0 {
-		return ToolResult{Output: "No matches found."}
+		return ToolResult{Output: fmt.Sprintf("No matches found. (Searched %d files)", filesSearched)}
 	}
-	return ToolResult{Output: strings.Join(found, "\n")}
+	return ToolResult{Output: strings.Join(found, "\n") + fmt.Sprintf("\n(Searched %d files, %d matches)", filesSearched, len(found))}
 }
 
-func goSearchCount(re *regexp.Regexp, files []string) ToolResult {
+func goSearchCount(re *regexp.Regexp, files []string, filesSearched int) ToolResult {
 	var lines []string
+	totalMatches := 0
 	for _, fp := range files {
 		data, err := os.ReadFile(fp)
 		if err != nil {
@@ -338,11 +452,11 @@ func goSearchCount(re *regexp.Regexp, files []string) ToolResult {
 		if count > 0 {
 			relPath, _ := filepath.Rel(".", fp)
 			lines = append(lines, fmt.Sprintf("%s:%d", relPath, count))
+			totalMatches += count
 		}
 	}
 	if len(lines) == 0 {
-		return ToolResult{Output: "No matches found."}
+		return ToolResult{Output: fmt.Sprintf("No matches found. (Searched %d files)", filesSearched)}
 	}
-	return ToolResult{Output: strings.Join(lines, "\n")}
+	return ToolResult{Output: strings.Join(lines, "\n") + fmt.Sprintf("\n(Searched %d files, %d matching lines)", filesSearched, totalMatches)}
 }
-
