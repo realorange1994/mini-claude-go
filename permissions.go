@@ -28,16 +28,10 @@ func NewPermissionGate(cfg Config) PermissionGate {
 
 // Check runs the permission gauntlet. Returns a ToolResult if denied, nil if allowed.
 func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.ToolResult {
-	// Layer 1: tool-level self-check
-	denial := tool.CheckPermissions(params)
-	if denial != "" {
-		return &tools.ToolResult{
-			Output:  "Permission denied: " + denial,
-			IsError: true,
-		}
-	}
+	// Layer 1: tool-level self-check (returns warning, not hard denial)
+	warning := tool.CheckPermissions(params)
 
-	// Layer 1.5: denied patterns check
+	// Layer 1.5: denied patterns check (hard denial)
 	if len(g.config.DeniedPatterns) > 0 {
 		var target string
 		switch tool.Name() {
@@ -71,20 +65,28 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		}
 
 	case ModeAsk:
-		// Ask for permission on dangerous operations
 		dangerousTools := map[string]bool{
 			"exec": true, "write_file": true, "edit_file": true,
 			"multi_edit": true, "fileops": true,
 		}
-		if dangerousTools[tool.Name()] {
-			// For exec, check if it's a safe command first
+		isDangerous := dangerousTools[tool.Name()]
+
+		if warning != "" {
+			// Tool returned a warning — always ask user regardless of tool type
+			if !g.askUserWithWarning(tool.Name(), params, warning) {
+				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+			}
+			return nil // user approved
+		}
+
+		// No warning but still dangerous — ask normally
+		if isDangerous {
 			if tool.Name() == "exec" {
 				cmd, _ := params["command"].(string)
 				if g.isSafeCommand(cmd) {
 					return nil // Safe command, allow without asking
 				}
 			}
-			// Ask user for permission
 			if !g.askUser(tool.Name(), params) {
 				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
 			}
@@ -106,6 +108,10 @@ func (g *PermissionGate) isSafeCommand(command string) bool {
 }
 
 func (g *PermissionGate) askUser(toolName string, params map[string]any) bool {
+	return g.askUserWithWarning(toolName, params, "")
+}
+
+func (g *PermissionGate) askUserWithWarning(toolName string, params map[string]any, warning string) bool {
 	var detail string
 	switch toolName {
 	case "exec":
@@ -117,6 +123,9 @@ func (g *PermissionGate) askUser(toolName string, params map[string]any) bool {
 	prompt := fmt.Sprintf("\n[Permission] Allow '%s'", toolName)
 	if detail != "" {
 		prompt += ": " + detail
+	}
+	if warning != "" {
+		prompt += "\n  [WARN] " + warning
 	}
 	prompt += "? [y/N] "
 

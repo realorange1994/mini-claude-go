@@ -20,7 +20,7 @@ func TestBashDenyRmRf(t *testing.T) {
 	}
 }
 
-func TestBashAllowInternalURL(t *testing.T) {
+func TestBashDenyInternalURL(t *testing.T) {
 	tool := &ExecTool{}
 	cmds := []string{
 		"curl http://10.0.0.1/admin",
@@ -30,8 +30,8 @@ func TestBashAllowInternalURL(t *testing.T) {
 	}
 	for _, cmd := range cmds {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result != "" {
-			t.Errorf("expected internal URL to be allowed: %s, got: %s", cmd, result)
+		if result == "" {
+			t.Errorf("expected internal URL to be denied: %s", cmd)
 		}
 	}
 }

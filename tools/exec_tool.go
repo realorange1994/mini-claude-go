@@ -27,6 +27,10 @@ func (*ExecTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "The shell command to execute.",
 			},
+			"working_dir": map[string]any{
+				"type":        "string",
+				"description": "Working directory for the command (default: current directory).",
+			},
 			"timeout": map[string]any{
 				"type":        "integer",
 				"description": "Timeout in seconds (default 120, max 600).",
@@ -41,12 +45,16 @@ var denyRegexps = compileDenyPatterns()
 func compileDenyPatterns() []*regexp.Regexp {
 	patterns := []string{
 		`\brm\s+-[rf]{1,2}\b`,                       // rm -r, rm -rf
+		`\bdel\s+/[fq]\b`,                            // del /f, del /q
+		`\brmdir\s+/s\b`,                             // rmdir /s
+		`(?:^|[;&|]\s*)format\b`,                     // format (as standalone command only)
 		`\b(mkfs|diskpart)\b`,                        // disk formatting
 		`\bdd\s+.*\bof=`,                             // dd with output
 		`>\s*/dev/sd`,                                // write to disk device
 		`\b(shutdown|reboot|poweroff)\b`,             // power operations
 		`:\(\)\s*\{.*\};\s*:`,                        // fork bomb
 		`\w+\(\)\s*\{[^}]*\|\s*[^}]*&\s*\}\s*;\s*`,   // fork bomb variation
+		`&\S*&\S*&`,                                  // chained background processes
 	}
 	result := make([]*regexp.Regexp, len(patterns))
 	for i, p := range patterns {
@@ -62,8 +70,13 @@ func (*ExecTool) CheckPermissions(params map[string]any) string {
 
 	for _, re := range denyRegexps {
 		if re.MatchString(lower) {
-			return fmt.Sprintf("Command blocked by safety guard (dangerous pattern: %s)", re.String())
+			return "Dangerous command pattern detected: " + re.String()
 		}
+	}
+
+	// Warn about commands accessing internal/private URLs
+	if containsInternalURL(cmd) {
+		return "Internal/private URL detected"
 	}
 
 	return ""
@@ -115,11 +128,19 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 		shell, flag = "bash", "-c"
 	}
 
+	// Determine working directory
+	wd, _ := params["working_dir"].(string)
+	if wd == "" {
+		wd, _ = os.Getwd()
+	} else {
+		wd = expandPath(wd)
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, shell, flag, command)
-	cmd.Dir, _ = os.Getwd()
+	cmd.Dir = wd
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
