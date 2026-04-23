@@ -15,14 +15,13 @@ miniClaudeCode-go is a minimal AI agent framework that implements the core agent
   - Phase 2: Turn-based collapse (keeps first 2 + last 2 turns)
   - Phase 3: Selective clearing of read-only tool outputs
   - Phase 4: Aggressive truncation fallback
-- **Tool System**: 17 built-in tools including:
+- **Tool System**: 16 built-in tools including:
   - `exec` - Shell command execution with safety patterns
   - `read_file` / `write_file` / `edit_file` / `multi_edit` - File operations
   - `glob` / `grep` / `list_dir` - File system search and navigation
   - `web_search` / `web_fetch` - Web search and content fetching
   - `fileops` - File operations (copy, move, delete)
   - `process` - Process management (list, kill, pgrep, top, pstree)
-  - `read_image` - Image file reading
   - `git` - Git operations (clone, commit, push, pull, branch, log, and more)
   - `system` - System info (uname, df, free, uptime, hostname, arch)
   - `terminal` - tmux/screen session management

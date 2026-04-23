@@ -183,7 +183,6 @@ func DefaultRegistry() *tools.Registry {
 	r.Register(&tools.WebSearchTool{})
 	r.Register(&tools.WebFetchTool{})
 	r.Register(&tools.RuntimeInfoTool{})
-	r.Register(&tools.ImageReadTool{})
 	r.Register(&tools.ProcessTool{})
 	r.Register(&tools.FileOpsTool{})
 	r.Register(&tools.GitTool{})
