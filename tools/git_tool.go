@@ -152,6 +152,9 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 
 	case "commit":
 		message, _ := params["message"].(string)
+		if message == "" {
+			return nil, fmt.Errorf("commit message is required")
+		}
 		args = []string{"commit", "-m", message}
 
 	case "push":
@@ -180,8 +183,8 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 
 	case "branch":
 		args = []string{"branch"}
-		if branch, _ := params["branch"].(string); branch != "" {
-			args = append(args, "-m", branch)
+		if name, _ := params["branch"].(string); name != "" {
+			args = append(args, name)
 		}
 
 	case "checkout":
