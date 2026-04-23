@@ -106,12 +106,15 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 		return ToolResult{Output: "Error: operation is required", IsError: true}
 	}
 
+	// Get working directory from path parameter
+	workDir, _ := params["path"].(string)
+
 	cmd, err := buildGitCommand(params)
 	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
 	}
 
-	out, err := runGitCommand(ctx, cmd)
+	out, err := runGitCommand(ctx, cmd, workDir)
 	if err != nil {
 		return ToolResult{Output: out, IsError: true}
 	}
@@ -155,7 +158,11 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		if message == "" {
 			return nil, fmt.Errorf("commit message is required")
 		}
-		args = []string{"commit", "-m", message}
+		if all, _ := params["all"].(bool); all {
+			args = []string{"commit", "-a", "-m", message}
+		} else {
+			args = []string{"commit", "-m", message}
+		}
 
 	case "push":
 		args = []string{"push"}
@@ -310,8 +317,11 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 	return args, nil
 }
 
-func runGitCommand(ctx context.Context, args []string) (string, error) {
+func runGitCommand(ctx context.Context, args []string, workDir string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
