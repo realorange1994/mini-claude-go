@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -168,6 +170,170 @@ func (c *ConversationContext) MinimumHistory() {
 	first := c.entries[:1]
 	recent := c.entries[len(c.entries)-2:]
 	c.entries = append(first, recent...)
+}
+
+// CompactContext performs intelligent compaction with multi-phase degradation.
+// Returns true if any compaction was performed.
+//
+// Degradation chain:
+//
+//	Phase 1: Compact - round-based, keeps last N rounds, omits the rest
+//	Phase 2: SmartCompact - turn-based, keeps first 2 + last 2 turns
+//	Phase 3: SelectiveCompact - clears readable tool outputs, preserves write/exec
+//	Phase 4: Hard truncate - fallback to AggressiveTruncateHistory
+func (c *ConversationContext) CompactContext() bool {
+	msgs, toolNames := c.entriesToCompactionMessages()
+	if len(msgs) == 0 {
+		return false
+	}
+
+	cfg := DefaultCompactionConfig()
+	if !NeedsCompaction(msgs, cfg) {
+		return false
+	}
+
+	// Phase 1: Compact (round-based, keeps last KeepRounds rounds)
+	result, err := Compact(msgs, cfg)
+	if err == nil && result.OmittedCount > 0 && !NeedsCompaction(result.Messages, cfg) {
+		c.entries = compactionMessagesToEntries(result.Messages, toolNames)
+		fmt.Fprintf(os.Stderr, "\n  [compact] %s\n", result.Summary())
+		return true
+	}
+
+	// Phase 2: SmartCompact (turn-based, keeps first 2 + last 2 turns)
+	smart := SmartCompact(msgs, 2, 2)
+	if smart.CollapsedTurns > 0 && !NeedsCompaction(smart.Messages, cfg) {
+		c.entries = compactionMessagesToEntries(smart.Messages, toolNames)
+		fmt.Fprintf(os.Stderr, "\n  [compact] SmartCompact: %d turns collapsed\n", smart.CollapsedTurns)
+		return true
+	}
+
+	// Phase 3: SelectiveCompact (clear readable tool outputs)
+	rounds := groupMessagesByRound(msgs)
+	compactable := defaultCompactableTools()
+	sel := SelectiveCompact(rounds, compactable, "[content omitted to save context]")
+	if sel.Compacted > 0 {
+		flat := flattenRounds(sel.Rounds)
+		c.entries = compactionMessagesToEntries(flat, toolNames)
+		fmt.Fprintf(os.Stderr, "\n  [compact] SelectiveCompact: %d rounds cleared, saved ~%d tokens\n", sel.Compacted, sel.Saved)
+		return true
+	}
+
+	// Phase 4: Hard truncate (last resort)
+	fmt.Fprintf(os.Stderr, "\n  [compact] Compaction insufficient, hard truncating\n")
+	c.AggressiveTruncateHistory()
+	return true
+}
+
+// entriesToCompactionMessages converts internal conversation entries to the
+// compact.go message format. Returns the messages and a map of tool names
+// indexed by message index (for tool call/result rounds).
+func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage, map[string]string) {
+	msgs := make([]CompactionMessage, 0, len(c.entries))
+	toolNames := make(map[string]string) // key: message index as string
+
+	for idx, entry := range c.entries {
+		key := fmt.Sprintf("%d", idx)
+		switch v := entry.content.(type) {
+		case string:
+			msgs = append(msgs, CompactionMessage{
+				Role:      entry.role,
+				Content:   v,
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
+
+		case []anthropic.ContentBlockParamUnion:
+			// Tool calls from assistant
+			content, toolUseID, toolName := serializeContentBlocks(v)
+			msg := CompactionMessage{
+				Role:      entry.role,
+				Content:   content,
+				ToolUseID: toolUseID,
+				ToolName:  toolName,
+				Timestamp: time.Now().Format(time.RFC3339),
+			}
+			msgs = append(msgs, msg)
+			if toolName != "" {
+				toolNames[key] = toolName
+			}
+
+		case []anthropic.ToolResultBlockParam:
+			// Tool results (user role in Anthropic API)
+			content, toolUseID, _ := serializeToolResultBlocks(v)
+			// Try to extract tool name from the toolNames map by matching toolUseID
+			toolName := ""
+			for _, m := range msgs {
+				if m.ToolUseID == toolUseID && m.ToolName != "" {
+					toolName = m.ToolName
+					break
+				}
+			}
+			msg := CompactionMessage{
+				Role:      entry.role,
+				Content:   content,
+				ToolUseID: toolUseID,
+				ToolName:  toolName,
+				Timestamp: time.Now().Format(time.RFC3339),
+			}
+			msgs = append(msgs, msg)
+			if toolName != "" {
+				toolNames[key] = toolName
+			}
+		}
+	}
+
+	return msgs, toolNames
+}
+
+// compactionMessagesToEntries converts compacted messages back to conversation entries.
+func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]string) []conversationEntry {
+	entries := make([]conversationEntry, 0, len(msgs))
+
+	for idx, msg := range msgs {
+		key := fmt.Sprintf("%d", idx)
+		if isToolUseJSON(msg.Content) {
+			// Reconstruct tool call blocks
+			if blocks, err := deserializeContentBlocks(msg.Content); err == nil {
+				entries = append(entries, conversationEntry{
+					role:    msg.Role,
+					content: blocks,
+				})
+				continue
+			}
+			// Fallback: treat as text
+			entries = append(entries, conversationEntry{
+				role:    msg.Role,
+				content: msg.Content,
+			})
+		} else if isToolResultJSON(msg.Content) {
+			// Reconstruct tool result blocks
+			if results, err := deserializeToolResultBlocks(msg.Content); err == nil {
+				entries = append(entries, conversationEntry{
+					role:    msg.Role,
+					content: results,
+				})
+				continue
+			}
+			// Fallback: treat as text
+			entries = append(entries, conversationEntry{
+				role:    msg.Role,
+				content: msg.Content,
+			})
+		} else {
+			// Regular text message or omission marker
+			entries = append(entries, conversationEntry{
+				role:    msg.Role,
+				content: msg.Content,
+			})
+		}
+
+		// Preserve tool name lookup
+		if msg.ToolName != "" {
+			toolNames[key] = msg.ToolName
+		}
+	}
+
+	return entries
 }
 
 // LoadProjectInstructions reads CLAUDE.md from the project root.

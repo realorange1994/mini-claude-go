@@ -1,5 +1,4 @@
 // Package main - context compaction for long coding sessions.
-// Self-contained, no external dependencies beyond the standard library.
 //
 // Provides:
 //   - Token estimation (~4 chars per token heuristic)
@@ -8,6 +7,7 @@
 //   - Safe compression boundaries (tool_call/tool_result pairs kept together)
 //   - Archive old messages to a history file
 //   - Boundary markers inserted for omitted messages
+//   - Conversion between SDK types and CompactionMessage
 package main
 
 import (
@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // --- Token estimation --------------------------------------------------------
@@ -798,4 +800,91 @@ func (r *CompactionResult) Summary() string {
 		b.WriteString(fmt.Sprintf(" | archived: %s", r.ArchivePath))
 	}
 	return b.String()
+}
+
+// serializeContentBlocks serializes []anthropic.ContentBlockParamUnion to a JSON string.
+// Returns the JSON content and extracted tool name/ID if present.
+func serializeContentBlocks(blocks []anthropic.ContentBlockParamUnion) (content string, toolUseID string, toolName string) {
+	data, err := json.Marshal(blocks)
+	if err != nil {
+		content = "{}"
+		return
+	}
+	content = string(data)
+	for _, b := range blocks {
+		if b.OfToolUse != nil {
+			toolUseID = b.OfToolUse.ID
+			toolName = b.OfToolUse.Name
+			break
+		}
+	}
+	return
+}
+
+// serializeToolResultBlocks serializes []anthropic.ToolResultBlockParam to a JSON string.
+func serializeToolResultBlocks(results []anthropic.ToolResultBlockParam) (content string, toolUseID string, toolName string) {
+	data, err := json.Marshal(results)
+	if err != nil {
+		content = "{}"
+		return
+	}
+	content = string(data)
+	for _, r := range results {
+		if r.ToolUseID != "" {
+			toolUseID = r.ToolUseID
+			break
+		}
+	}
+	return
+}
+
+// deserializeContentBlocks attempts to rebuild []anthropic.ContentBlockParamUnion from a JSON string.
+func deserializeContentBlocks(content string) ([]anthropic.ContentBlockParamUnion, error) {
+	var blocks []anthropic.ContentBlockParamUnion
+	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
+		return nil, err
+	}
+	return blocks, nil
+}
+
+// deserializeToolResultBlocks attempts to rebuild []anthropic.ToolResultBlockParam from a JSON string.
+func deserializeToolResultBlocks(content string) ([]anthropic.ToolResultBlockParam, error) {
+	var results []anthropic.ToolResultBlockParam
+	if err := json.Unmarshal([]byte(content), &results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// isToolUseJSON detects if a string looks like serialized tool_use content.
+func isToolUseJSON(s string) bool {
+	return strings.Contains(s, `"type":"tool_use"`) || strings.Contains(s, `"type": "tool_use"`)
+}
+
+// isToolResultJSON detects if a string looks like serialized tool_result content.
+func isToolResultJSON(s string) bool {
+	return strings.Contains(s, `"type":"tool_result"`) || strings.Contains(s, `"type": "tool_result"`)
+}
+
+// flattenRounds converts []apiRound back to a flat []CompactionMessage list.
+func flattenRounds(rounds []apiRound) []CompactionMessage {
+	var msgs []CompactionMessage
+	for _, r := range rounds {
+		msgs = append(msgs, r.messages...)
+	}
+	return msgs
+}
+
+// defaultCompactableTools returns tool names whose output can be safely
+// cleared during selective compaction. Read-only tools are compactable;
+// write/exec tools must be preserved.
+func defaultCompactableTools() map[string]bool {
+	return map[string]bool{
+		"read_file":  true,
+		"glob":       true,
+		"grep":       true,
+		"list_dir":   true,
+		"web_fetch":  true,
+		"web_search": true,
+	}
 }
