@@ -145,13 +145,34 @@ func TestCollectHandlerAsParsedResponse(t *testing.T) {
 }
 
 func TestCollectHandlerToolUseAsText(t *testing.T) {
-	h := NewCollectHandler()
+	testCases := []struct {
+		name     string
+		content  string
+		expected bool
+	}{
+		// New stricter logic: requires 2 of 3 structural markers (type, id, name)
+		{"type + id (2 markers)", `{"type":"tool_use","id":"abc123"}`, true},
+		{"type + name (2 markers)", `{"type":"tool_use","name":"read_file"}`, true},
+		{"id + name (2 markers)", `{"id":"abc123","name":"read_file"}`, true},
+		{"all 3 markers", `{"type":"tool_use","id":"abc","name":"exec"}`, true},
+		{"only type (1 marker)", `{"type":"tool_use"}`, false},
+		{"only id (1 marker)", `{"id":"abc123"}`, false},
+		{"only name (1 marker)", `{"name":"read_file"}`, false},
+		{"no markers", `{"path":"test.txt"}`, false},
+		{"loose spacing", `{"type": "tool_use", "id": "abc"}`, true},
+		{"discussing tool_use (only type)", `"The tool_use feature allows..."`, false},
+		{"discussing id (only id)", `"The id field contains..."`, false},
+		{"XML-like (no JSON structure)", `<tool_use><id>abc</id></tool_use>`, false},
+	}
 
-	// Model is confused and outputs tool syntax as text
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: `{"type":"tool_use","id":"abc","name":"exec"}`})
-
-	if !h.toolUseAsText {
-		t.Error("expected toolUseAsText to be detected")
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewCollectHandler()
+			h.Handle(StreamChunk{Type: ChunkTypeText, Content: tc.content})
+			if h.toolUseAsText != tc.expected {
+				t.Errorf("content=%q: expected toolUseAsText=%v, got %v", tc.content, tc.expected, h.toolUseAsText)
+			}
+		})
 	}
 }
 

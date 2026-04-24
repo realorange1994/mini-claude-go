@@ -90,11 +90,16 @@ func (h *CollectHandler) Handle(chunk StreamChunk) error {
 	switch chunk.Type {
 	case ChunkTypeText:
 		// Detect model echoing tool syntax as text (stuck pattern)
-		// Only flag when multiple strong indicators appear together
+		// Only flag when multiple strong indicators appear together — the model
+		// is outputting raw tool_use JSON as text instead of actual tool calls.
+		// Must have structural markers of a real tool call (type + id + name),
+		// not just passing references to these keywords.
 		lower := strings.ToLower(chunk.Content)
-		if (strings.Contains(lower, "tool_use") && strings.Contains(lower, "id=") && strings.Contains(lower, "type=")) ||
-			strings.Contains(lower, "<parameter>") ||
-			(strings.Contains(lower, `"type":"tool_use"`) && strings.Contains(lower, `"id"`)) {
+		hasType := strings.Contains(lower, `"type":"tool_use"`) || strings.Contains(lower, `"type": "tool_use"`)
+		hasID := strings.Contains(lower, `"id":"`) || strings.Contains(lower, `"id": "`)
+		hasName := strings.Contains(lower, `"name":"`) || strings.Contains(lower, `"name": "`)
+		// Only trigger when at least 2 of 3 structural markers present
+		if (hasType && hasID) || (hasType && hasName) || (hasID && hasName) {
 			h.toolUseAsText = true
 		} else {
 			h.Text += chunk.Content
@@ -241,15 +246,6 @@ func (h *TerminalHandler) Handle(chunk StreamChunk) error {
 		// Flush any pending tool call before printing text
 		if h.curToolName != "" {
 			h.flushToolCall()
-		}
-		// Detect model echoing tool syntax as text (stuck pattern)
-		// These patterns are specific to the confused model output format
-		lower := strings.ToLower(chunk.Content)
-		if strings.Contains(lower, "tool_use") ||
-			strings.Contains(lower, "<parameter>") ||
-			(strings.Contains(lower, `"path"`) && strings.Contains(lower, `"name"`)) {
-			// Suppress — model is confused
-			return nil
 		}
 		// Text is collected by CollectHandler; Run loop prints final output.
 		// Don't print here to avoid double output.
@@ -414,11 +410,13 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 	}
 
 	// Stall detection: reset timer on each successfully processed event.
-	// Only force-close if no event arrives within the stall timeout (30s).
-	// Uses a longer initial timeout (45s) to give the model time to think
-	// before producing tokens on the first turn.
-	const stallTimeout = 30_000   // ms - normal stall detection after first event
-	const startupTimeout = 45_000 // ms - grace period for first event to arrive
+	// Unlike the old aggressive timeout approach, this is primarily OBSERVABILITY —
+	// it logs warnings but does NOT force-close the stream. The stream's natural
+	// end (HTTP body EOF) is the primary completion signal, matching Claude Code's
+	// design where timeouts are backup safety nets, not termination mechanisms.
+	// Only force-close after TWO consecutive stall timeouts (90s + 90s = 3min idle).
+	const stallTimeout = 90_000    // ms - normal stall detection after first event
+	const startupTimeout = 120_000 // ms - grace period for first event to arrive
 	stallReset := make(chan struct{}, 16)
 	done := make(chan struct{})
 	defer close(done)
@@ -426,9 +424,11 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 		timer := time.NewTimer(startupTimeout * time.Millisecond)
 		defer timer.Stop()
 		hasFirstEvent := false
+		stallCount := 0
 		for {
 			select {
 			case <-stallReset:
+				stallCount = 0 // reset stall count on each successful event
 				if !hasFirstEvent {
 					hasFirstEvent = true
 				}
@@ -440,16 +440,23 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 				}
 				timer.Reset(stallTimeout * time.Millisecond)
 			case <-timer.C:
+				stallCount++
 				timeoutVal := stallTimeout
 				if !hasFirstEvent {
 					timeoutVal = startupTimeout
 				}
-				fmt.Fprintf(os.Stderr, "\n[WARN]  Stream stalled (no data for %dms), forcing close...\n", timeoutVal)
-				stream.Close()
-				if cancel != nil {
-					cancel()
+				if stallCount >= 2 {
+					// Only force-close after TWO consecutive stall timeouts
+					fmt.Fprintf(os.Stderr, "\n[WARN]  Stream stalled (no data for %dms x%d), forcing close...\n", timeoutVal, stallCount)
+					stream.Close()
+					if cancel != nil {
+						cancel()
+					}
+					return
 				}
-				return
+				// First stall: just warn, don't terminate
+				fmt.Fprintf(os.Stderr, "\n[WARN]  Stream idle for %dms, waiting...\n", timeoutVal)
+				timer.Reset(stallTimeout * time.Millisecond)
 			case <-done:
 				return
 			}

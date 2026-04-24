@@ -29,7 +29,7 @@ type AgentLoop struct {
 	transcript   *transcript.Writer
 	useStream    bool
 	maxToolChars int    // max chars per tool result (default 8192)
-	toolTimeout  time.Duration // per-tool execution timeout (default 60s)
+	toolTimeout  time.Duration // per-tool execution timeout (default 5min)
 	maxTurns     int    // hard cap on turns (default from config.MaxTurns)
 }
 
@@ -76,7 +76,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		transcript:  tw,
 		useStream:   useStream,
 		maxToolChars: 8192,
-		toolTimeout:  120 * time.Second,
+		toolTimeout:  5 * time.Minute,
 		maxTurns:     maxTurns,
 	}
 
@@ -98,13 +98,18 @@ func (a *AgentLoop) Run(userMessage string) string {
 	contextErrors := 0
 	const maxContextRecovery = 3 // Phase 1: truncate, Phase 2: aggressive truncate, Phase 3: give up
 
+	// Transition tracking (like Claude Code's state.transition)
+	// Records WHY we continued to the next iteration, for debugging.
+	var lastTransition string
+	_ = lastTransition // used for transcript/debugging
+
 	for turn := 0; turn < a.maxTurns; turn++ {
 		var toolCalls []map[string]any
 		var textParts []string
 		var err error
 
 		if a.useStream {
-			toolCalls, textParts, err = a.callAPIStreaming()
+			toolCalls, textParts, err = a.callWithRetryAndFallback()
 		} else {
 			var response *anthropic.Message
 			response, err = a.callAPI()
@@ -119,6 +124,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				fmt.Fprintf(os.Stderr, "\n[!] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
 				a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
+				lastTransition = "model_confusion_retry"
 				continue
 			}
 			// Stream stalled — safety timeout fired or context canceled; recover with truncation
@@ -140,6 +146,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 					fmt.Fprintf(os.Stderr, "\n[!]  Stream still stalled, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
+				lastTransition = "stall_recovery"
 				continue
 			}
 			if isContextLengthError(errMsg) {
@@ -159,6 +166,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 					fmt.Fprintf(os.Stderr, "\n[!]  Context still full, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
+				lastTransition = "context_overflow_recovery"
 				continue
 			}
 			return fmt.Sprintf("API error: %v", err)
@@ -172,15 +180,43 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		if len(toolCalls) == 0 {
+			// No tool calls — model gave final answer.
+			// Like Claude Code's stop hooks: the loop could continue here
+			// with additional checks (token budget, quality check, etc.)
+			// but for now we simply exit.
 			a.context.AddAssistantText(finalText)
 			if a.transcript != nil {
 				_ = a.transcript.WriteAssistant(finalText, a.config.Model)
 			}
+			lastTransition = "completed"
 			break
 		}
 
 		a.context.AddAssistantToolCalls(toolCalls)
 		a.executeToolCallsConcurrent(toolCalls)
+		lastTransition = "next_turn"
+	}
+
+	// If max turns reached without a final response, try one last non-streaming call
+	// to get a conclusive answer (like Claude Code's max_turns handling).
+	if finalText == "" {
+		fmt.Fprintf(os.Stderr, "\n[!] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
+		a.context.AddUserMessage("You have reached the maximum number of tool use turns. Please provide a final summary based on the work done so far. Do NOT call any more tools.")
+		if a.useStream {
+			toolCalls, textParts, err := a.callWithRetryAndFallback()
+			if err == nil && len(textParts) > 0 {
+				finalText = strings.Join(textParts, "\n")
+			}
+			_ = toolCalls // ignore any final tool calls at this point
+		} else {
+			response, err := a.callAPI()
+			if err == nil {
+				_, textParts := a.parseResponse(response)
+				if len(textParts) > 0 {
+					finalText = strings.Join(textParts, "\n")
+				}
+			}
+		}
 	}
 
 	if finalText == "" {
@@ -222,18 +258,52 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		params.Tools = toolParams
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+	const maxRetries = 9 // 1 attempt + 9 retries = 10 total
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * 2 * time.Second
+			time.Sleep(delay)
+		}
 
-	return a.client.Messages.New(ctx, params)
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		response, err := a.client.Messages.New(ctx, params)
+		cancel()
+
+		if err == nil {
+			return response, nil
+		}
+
+		lastErr = err
+		errMsg := err.Error()
+
+		// Special errors: pass through to Run loop
+		if strings.Contains(errMsg, "model confused") ||
+			strings.Contains(errMsg, "stream stalled") ||
+			isContextLengthError(errMsg) {
+			return nil, err
+		}
+
+		// Transient error: retry
+		if isTransientError(errMsg) {
+			continue
+		}
+
+		// Non-transient: give up
+		return nil, err
+	}
+
+	return nil, fmt.Errorf("API error after %d retries: %w", maxRetries, lastErr)
 }
 
-func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
+// callWithRetryAndFallback calls the API with streaming, retries on transient
+// errors, and falls back to non-streaming if stream persists failing.
+// This mirrors Claude Code's stream -> non-stream fallback -> retry pattern.
+func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, error) {
+	const maxStreamRetries = 9 // 1 attempt + 9 retries = 10 total
+
 	toolParams := a.buildToolParams()
-
-	// Try compaction before sending to API
 	a.context.CompactContext()
-
 	messages := a.context.BuildMessages()
 
 	params := anthropic.MessageNewParams{
@@ -248,9 +318,59 @@ func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
 		params.Tools = toolParams
 	}
 
-	// 180s overall timeout for streaming — the stall detector inside Process
-	// will force-close earlier if no events arrive for 15s.
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	// Phase 1: Try streaming with retries
+	for attempt := 0; attempt <= maxStreamRetries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * 2 * time.Second // 2s, 4s, 6s ... backoff
+			fmt.Fprintf(os.Stderr, "\n[!]  Retrying stream (attempt %d/%d), waiting %v...\n",
+				attempt+1, maxStreamRetries+1, delay)
+			time.Sleep(delay)
+		}
+
+		toolCalls, textParts, err := a.tryStreamOnce(params)
+		if err == nil {
+			return toolCalls, textParts, nil
+		}
+
+		errMsg := err.Error()
+
+		// Model confused — special handling: inject corrective message
+		if strings.Contains(errMsg, "model confused") {
+			return nil, nil, err // let Run loop handle recovery
+		}
+
+		// Stream stall — special handling: let Run loop handle truncation
+		if strings.Contains(errMsg, "stream stalled") {
+			return nil, nil, err // let Run loop handle recovery
+		}
+
+		// Context length — special handling: let Run loop handle truncation
+		if isContextLengthError(errMsg) {
+			return nil, nil, err // let Run loop handle recovery
+		}
+
+		// Transient error (network, timeout, 5xx): retry
+		if isTransientError(errMsg) {
+			fmt.Fprintf(os.Stderr, "\n[!]  Transient error during stream: %v\n", err)
+			continue
+		}
+
+		// Non-transient error during stream -> try non-streaming fallback
+		fmt.Fprintf(os.Stderr, "\n[!]  Stream failed (%v), falling back to non-streaming...\n", err)
+		return a.callWithNonStreamingFallback(params)
+	}
+
+	// All stream retries exhausted -> try non-streaming fallback
+	fmt.Fprintf(os.Stderr, "\n[!]  Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
+	return a.callWithNonStreamingFallback(params)
+}
+
+// tryStreamOnce makes a single streaming attempt and returns the result.
+func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[string]any, []string, error) {
+	// 300s overall timeout for streaming — the stall detector inside Process
+	// is now observability-first (warns but doesn't terminate), so this is
+	// a safety net only. Matches Claude Code's 90s idle watchdog pattern.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	collect := NewCollectHandler()
@@ -260,8 +380,7 @@ func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
 		if err := term.Handle(chunk); err != nil {
 			return err
 		}
-		// Check if model is confused — detect right after collect sets the flag
-		if collect.toolUseAsText {
+		if collect.IsToolUseAsText() {
 			fmt.Fprint(os.Stderr, "\n[!]  Model confused, aborting stream...\n")
 			cancel()
 			return fmt.Errorf("model confused: echoed tool syntax as text")
@@ -271,8 +390,6 @@ func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
 
 	stream := a.client.Messages.NewStreaming(ctx, params)
 	if err := adapter.Process(stream, cancel); err != nil {
-		// Propagate stall/cancel errors with a recognizable prefix
-		// so the Run loop's recovery logic can match them.
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "context canceled") ||
 			strings.Contains(errMsg, "context deadline exceeded") ||
@@ -282,17 +399,77 @@ func (a *AgentLoop) callAPIStreaming() ([]map[string]any, []string, error) {
 		return nil, nil, fmt.Errorf("stream error: %w", err)
 	}
 
-	// Check if the model was confused and echoed tool syntax as text
-	if collect.toolUseAsText {
+	if collect.IsToolUseAsText() {
 		fmt.Fprintf(os.Stderr, "\n[!]  Model echoed tool syntax as text -- recovering\n")
-		// The model is confused. Clear the confused text so it doesn't pollute context.
 		collect.Text = ""
 	}
 
-	// Return tool calls and text parts directly, bypassing ContentBlockUnion
-	// (which loses text when AsAny() casts back with non-Claude models).
 	toolCalls, textParts := collect.AsParsedResponse()
 	return toolCalls, textParts, nil
+}
+
+// callWithNonStreamingFallback tries non-streaming API call with retries.
+// Mirrors Claude Code's non-streaming fallback + retry budget.
+func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewParams) ([]map[string]any, []string, error) {
+	const maxRetries = 9 // 1 attempt + 9 retries = 10 total
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * 2 * time.Second
+			fmt.Fprintf(os.Stderr, "\n[!]  Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
+				attempt+1, maxRetries+1, delay)
+			time.Sleep(delay)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		response, err := a.client.Messages.New(ctx, params)
+		cancel()
+
+		if err == nil {
+			toolCalls, textParts := a.parseResponse(response)
+			return toolCalls, textParts, nil
+		}
+
+		errMsg := err.Error()
+
+		// Special errors: pass through to Run loop for handling
+		if strings.Contains(errMsg, "model confused") ||
+			strings.Contains(errMsg, "stream stalled") ||
+			isContextLengthError(errMsg) {
+			return nil, nil, err
+		}
+
+		// Transient error: retry
+		if isTransientError(errMsg) {
+			fmt.Fprintf(os.Stderr, "\n[!]  Transient error during non-streaming: %v\n", err)
+			continue
+		}
+
+		// Non-transient error: give up
+		return nil, nil, fmt.Errorf("stream fallback error: %w", err)
+	}
+
+	return nil, nil, fmt.Errorf("stream fallback error after %d retries", maxRetries)
+}
+
+// isTransientError returns true for errors that may resolve on retry
+// (network issues, temporary server errors, rate limits).
+func isTransientError(errMsg string) bool {
+	err := strings.ToLower(errMsg)
+	patterns := []string{
+		"connection refused", "connection reset", "connection timed out",
+		"no such host", "temporary failure", "dns",
+		"internal server error", "500", "502", "503", "504",
+		"rate limit", "429", "too many requests",
+		"service unavailable", "bad gateway", "gateway timeout",
+		"timeout", "deadline exceeded",
+	}
+	for _, p := range patterns {
+		if strings.Contains(err, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
@@ -506,7 +683,7 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 	// Execute with timeout (mirrors ggbot's executeToolWithStreaming timeout)
 	timeout := a.toolTimeout
 	if timeout <= 0 {
-		timeout = 120 * time.Second
+		timeout = 5 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -603,7 +780,7 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 
 	timeout := a.toolTimeout
 	if timeout <= 0 {
-		timeout = 120 * time.Second
+		timeout = 5 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
