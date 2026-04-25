@@ -55,7 +55,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 
 	ctx := NewConversationContext(cfg)
 	gate := NewPermissionGate(cfg)
-	snapshots := NewSnapshotHistory("")
 
 	// Initialize transcript writer
 	sessionID := time.Now().Format("20060102-150405")
@@ -74,7 +73,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		gate:        gate,
 		context:     ctx,
 		client:      client,
-		snapshots:   snapshots,
+		snapshots:    cfg.FileHistory,
 		transcript:  tw,
 		useStream:   useStream,
 		maxToolChars: 8192,
