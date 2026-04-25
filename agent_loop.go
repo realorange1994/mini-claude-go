@@ -940,6 +940,13 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 	}
 	elapsed := time.Since(start)
 
+	// Auto-snapshot after write/edit tools (captures new content)
+	if !cancelled && !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
+		if path, ok := input["path"].(string); ok && path != "" {
+			_ = a.snapshots.TakeSnapshot(path)
+		}
+	}
+
 	// Truncate long outputs
 	output := a.truncateOutput(result.Output)
 
