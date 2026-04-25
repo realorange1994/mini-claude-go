@@ -141,6 +141,7 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 
 	cmd := exec.CommandContext(ctx, shell, flag, command)
 	cmd.Dir = wd
+	cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
