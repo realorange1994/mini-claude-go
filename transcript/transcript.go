@@ -88,6 +88,11 @@ func (w *Writer) Flush() error {
 	return w.flush()
 }
 
+// FilePath returns the path to the transcript file.
+func (w *Writer) FilePath() string {
+	return w.filePath
+}
+
 func (w *Writer) flush() error {
 	if len(w.pending) == 0 {
 		return nil

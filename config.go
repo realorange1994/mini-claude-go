@@ -34,6 +34,7 @@ type Config struct {
 	ProjectDir      string
 	MCPManager      *mcp.Manager
 	SkillLoader     *skills.Loader
+	FileHistory     *SnapshotHistory
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.

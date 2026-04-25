@@ -447,7 +447,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 				}
 				if stallCount >= 2 {
 					// Only force-close after TWO consecutive stall timeouts
-					fmt.Fprintf(os.Stderr, "\n[WARN]  Stream stalled (no data for %dms x%d), forcing close...\n", timeoutVal, stallCount)
+					fmt.Fprintf(os.Stderr, "\n[WARN] Stream stalled (no data for %dms x%d), forcing close...\n", timeoutVal, stallCount)
 					stream.Close()
 					if cancel != nil {
 						cancel()
@@ -455,7 +455,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 					return
 				}
 				// First stall: just warn, don't terminate
-				fmt.Fprintf(os.Stderr, "\n[WARN]  Stream idle for %dms, waiting...\n", timeoutVal)
+				fmt.Fprintf(os.Stderr, "\n[WARN] Stream idle for %dms, waiting...\n", timeoutVal)
 				timer.Reset(stallTimeout * time.Millisecond)
 			case <-done:
 				return

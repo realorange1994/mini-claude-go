@@ -5,20 +5,27 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 const banner = `
-  ╔══════════════════════════════════════╗
-  ║       miniClaudeCode v0.1.0         ║
-  ║  Distilled Agent Loop Framework     ║
-  ╚══════════════════════════════════════╝
+  +====================================+
+  |       miniClaudeCode v0.1.0        |
+  |  Distilled Agent Loop Framework    |
+  +====================================+
 
   Type your message to start. Commands:
     /tools   -- list available tools
     /mode    -- show/change permission mode
     /help    -- show help
     /quit    -- exit
+    /resume  -- resume from a previous transcript
 `
 
 func main() {
@@ -28,6 +35,7 @@ func main() {
 	mode := flag.String("mode", "ask", "Permission mode (ask|auto|plan)")
 	maxTurns := flag.Int("max-turns", 30, "Max agent loop turns per message")
 	stream := flag.Bool("stream", false, "Enable streaming output")
+	resumeFile := flag.String("resume", "", "Resume from a transcript file path or 'last' for most recent")
 	flag.Parse()
 
 	// Priority: flags > env > .claude/settings.json > defaults
@@ -81,9 +89,33 @@ func main() {
 
 	defer cfg.Close()
 
+	// Create FileHistory (used by both tools and agent loop)
+	if wd, err := os.Getwd(); err == nil {
+		cfg.FileHistory = NewSnapshotHistory(wd)
+	}
+
 	registry := DefaultRegistry()
 	RegisterMCPAndSkills(registry, &cfg)
-	agent := NewAgentLoop(cfg, registry, *stream)
+
+	var agent *AgentLoop
+
+	// Resume from transcript or new session
+	if *resumeFile != "" {
+		path, err := findTranscript(*resumeFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resuming transcript: %v\n", err)
+			os.Exit(1)
+		}
+		var err2 error
+		agent, err2 = NewAgentLoopFromTranscript(cfg, registry, *stream, path)
+		if err2 != nil {
+			fmt.Fprintf(os.Stderr, "Error resuming transcript: %v\n", err2)
+			os.Exit(1)
+		}
+		fmt.Printf("[+] Resumed session from transcript: %s\n", path)
+	} else {
+		agent = NewAgentLoop(cfg, registry, *stream)
+	}
 
 	// One-shot mode
 	args := flag.Args()
@@ -99,21 +131,77 @@ func main() {
 }
 
 func runInteractive(agent *AgentLoop) {
+	// Set up Ctrl+C signal handler
+	// Only active during agent.Run() -- sets interrupted flag so agent can abort
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, syscall.SIGINT)
+	go func() {
+		for range signalCh {
+			agent.SetInterrupted(true)
+		}
+	}()
+
 	defer agent.Close()
 	fmt.Print(banner)
 
-	scanner := bufio.NewScanner(os.Stdin)
-	// Increase buffer size for long inputs
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	// Detect if stdin is a terminal (interactive) or piped
+	isTerminal := func() bool {
+		fi, err := os.Stdin.Stat()
+		if err != nil {
+			return false
+		}
+		return fi.Mode()&os.ModeCharDevice != 0
+	}
+	interactive := isTerminal()
+
+	stdinReader := bufio.NewReader(os.Stdin)
+
+	// reopenStdin reopens stdin after Ctrl+C breaks it (Windows closes stdin on SIGINT)
+	reopenStdin := func() *bufio.Reader {
+		var f *os.File
+		var err error
+		if runtime.GOOS == "windows" {
+			f, err = os.OpenFile("CONIN$", os.O_RDWR, 0)
+		} else {
+			f, err = os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		}
+		if err != nil {
+			// Fallback: can't reopen, program should exit
+			return nil
+		}
+		return bufio.NewReader(f)
+	}
+
+	var lastCtrlC time.Time
 
 	for {
 		fmt.Print("\n> ")
-		if !scanner.Scan() {
-			fmt.Println("\nGoodbye!")
+
+		line, err := stdinReader.ReadString('\n')
+		if err != nil {
+			if interactive {
+				now := time.Now()
+				if !lastCtrlC.IsZero() && now.Sub(lastCtrlC) < 2*time.Second {
+					// Double Ctrl+C at prompt -- exit
+					printResumeHint(agent)
+					return
+				}
+				lastCtrlC = now
+				agent.SetInterrupted(false)
+				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again to exit)\n")
+				if newReader := reopenStdin(); newReader != nil {
+					stdinReader = newReader
+					continue
+				}
+			}
+			// Piped input ended or can't reopen -- exit
+			printResumeHint(agent)
 			break
 		}
 
-		userInput := strings.TrimSpace(scanner.Text())
+		lastCtrlC = time.Time{} // reset on successful input
+
+		userInput := strings.TrimSpace(line)
 		if userInput == "" {
 			continue
 		}
@@ -125,6 +213,7 @@ func runInteractive(agent *AgentLoop) {
 			switch cmd {
 			case "/quit", "/exit", "/q":
 				fmt.Println("Goodbye!")
+				printResumeHint(agent)
 				return
 			case "/tools":
 				fmt.Println("\nAvailable tools:")
@@ -149,6 +238,28 @@ func runInteractive(agent *AgentLoop) {
 			case "/help":
 				fmt.Print(banner)
 				continue
+			case "/resume":
+				if len(parts) > 1 {
+					target := parts[1]
+					path, err := findTranscript(target)
+					if err != nil {
+						fmt.Printf("Error: %v\n", err)
+						continue
+					}
+					newAgent, err := NewAgentLoopFromTranscript(agent.config, agent.registry, agent.useStream, path)
+					if err != nil {
+						fmt.Printf("Error resuming transcript: %v\n", err)
+						continue
+					}
+					// Swap the agent (close old one first)
+					agent.Close()
+					agent = newAgent
+					fmt.Printf("[+] Resumed session from transcript: %s\n", path)
+				} else {
+					// List available transcripts
+					listTranscripts()
+				}
+				continue
 			default:
 				fmt.Printf("Unknown command: %s. Type /help for help.\n", cmd)
 				continue
@@ -156,8 +267,134 @@ func runInteractive(agent *AgentLoop) {
 		}
 
 		fmt.Println()
+		agent.SetInterrupted(false) // ensure clear before running
 		result := agent.Run(userInput)
+		// If agent was interrupted, set lastCtrlC so next Ctrl+C at prompt
+		// within 2 seconds counts as double-press (exit)
+		if agent.IsInterrupted() {
+			lastCtrlC = time.Now()
+			agent.SetInterrupted(false)
+		} else {
+			lastCtrlC = time.Time{}
+		}
 		fmt.Println(result)
 		fmt.Println()
 	}
+}
+
+// printResumeHint prints a short resume hint on exit.
+func printResumeHint(agent *AgentLoop) {
+	tp := agent.TranscriptPath()
+	if tp == "" {
+		return
+	}
+	// Extract just the filename (e.g. 20260425-231623.jsonl)
+	name := filepath.Base(tp)
+	// Strip .jsonl extension
+	stem := strings.TrimSuffix(name, ".jsonl")
+	fmt.Fprintf(os.Stderr, "\nTo resume this session: --resume %s\n", stem)
+}
+
+// findTranscript resolves a transcript reference (number, filename, or 'last').
+func findTranscript(target string) (string, error) {
+	dir := ".claude/transcripts"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("no transcripts directory: %w", err)
+	}
+
+	type entry struct {
+		name string
+		mod  time.Time
+	}
+	var files []entry
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			info, _ := e.Info()
+			files = append(files, entry{name: e.Name(), mod: info.ModTime()})
+		}
+	}
+	if len(files) == 0 {
+		return "", fmt.Errorf("no transcripts found")
+	}
+
+	// Sort by modification time, most recent first
+	for i := 0; i < len(files); i++ {
+		for j := i + 1; j < len(files); j++ {
+			if files[j].mod.After(files[i].mod) {
+				files[i], files[j] = files[j], files[i]
+			}
+		}
+	}
+
+	// "last" -> most recent
+	if target == "last" {
+		return filepath.Join(dir, files[0].name), nil
+	}
+
+	// Try as number (1-indexed)
+	if num, err := strconv.Atoi(target); err == nil {
+		if num > 0 && num <= len(files) {
+			return filepath.Join(dir, files[num-1].name), nil
+		}
+		return "", fmt.Errorf("index %d out of range (1-%d)", num, len(files))
+	}
+
+	// Try as exact filename
+	path := filepath.Join(dir, target)
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	}
+
+	// Try with .jsonl extension
+	if !strings.HasSuffix(target, ".jsonl") {
+		path = filepath.Join(dir, target+".jsonl")
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("transcript not found: %s", target)
+}
+
+// listTranscripts lists available transcript files.
+func listTranscripts() {
+	dir := ".claude/transcripts"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fmt.Println("No transcripts found.")
+		return
+	}
+
+	type entry struct {
+		name string
+		mod  time.Time
+	}
+	var files []entry
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			info, _ := e.Info()
+			files = append(files, entry{name: e.Name(), mod: info.ModTime()})
+		}
+	}
+
+	if len(files) == 0 {
+		fmt.Println("No transcripts found.")
+		return
+	}
+
+	// Sort by modification time, most recent first
+	for i := 0; i < len(files); i++ {
+		for j := i + 1; j < len(files); j++ {
+			if files[j].mod.After(files[i].mod) {
+				files[i], files[j] = files[j], files[i]
+			}
+		}
+	}
+
+	fmt.Println("\nAvailable transcripts:")
+	for i, f := range files {
+		fmt.Printf("  %d. %s\n", i+1, f.name)
+	}
+	fmt.Println("\nUsage: /resume <number>, /resume <filename>, or /resume last")
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -31,6 +32,7 @@ type AgentLoop struct {
 	maxToolChars int    // max chars per tool result (default 8192)
 	toolTimeout  time.Duration // per-tool execution timeout (default 5min)
 	maxTurns     int    // hard cap on turns (default from config.MaxTurns)
+	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
 }
 
 // NewAgentLoop creates a new agent loop.
@@ -86,6 +88,183 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 	return agent
 }
 
+// NewAgentLoopFromTranscript creates an agent loop from an existing transcript file.
+func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream bool, transcriptPath string) (*AgentLoop, error) {
+	apiKey := cfg.APIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
+	}
+
+	opts := []option.RequestOption{option.WithHeader("Authorization", "Bearer " + apiKey)}
+	if cfg.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	}
+
+	client := anthropic.NewClient(opts...)
+
+	gate := NewPermissionGate(cfg)
+
+	// Read transcript and rebuild context
+	tr := transcript.NewReader(transcriptPath)
+	entries, err := tr.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read transcript: %w", err)
+	}
+
+	convCtx := rebuildContextFromTranscript(entries, cfg)
+
+	maxTurns := cfg.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 20
+	}
+
+	// Create new transcript writer for this resumed session
+	sessionID := time.Now().Format("20060102-150405")
+	transcriptDir := filepath.Join(".claude", "transcripts")
+	tw := transcript.NewWriter(sessionID, filepath.Join(transcriptDir, sessionID+".jsonl"))
+	_ = tw.Write(transcript.Entry{Type: "system", Content: fmt.Sprintf("model=%s, mode=%s", cfg.Model, cfg.PermissionMode)})
+	_ = tw.Write(transcript.Entry{Type: "user", Content: fmt.Sprintf("Resumed from %s (%d messages restored)", transcriptPath, len(entries))})
+
+	agent := &AgentLoop{
+		config:       cfg,
+		registry:     registry,
+		gate:         gate,
+		context:      convCtx,
+		client:       client,
+		snapshots:    cfg.FileHistory,
+		transcript:   tw,
+		useStream:    useStream,
+		maxToolChars: 8192,
+		toolTimeout:  5 * time.Minute,
+		maxTurns:     maxTurns,
+	}
+
+	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader)
+	convCtx.SetSystemPrompt(sysPrompt)
+
+	return agent, nil
+}
+
+// rebuildContextFromTranscript rebuilds conversation context from transcript entries.
+// It groups consecutive tool_use and tool_result entries correctly:
+// - Multiple consecutive tool_use entries become one assistant message
+// - Multiple consecutive tool_result entries become one user message
+func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config) *ConversationContext {
+	ctx := NewConversationContext(cfg)
+
+	var pendingToolUses []map[string]any
+	var pendingToolResults []anthropic.ToolResultBlockParam
+
+	flushToolUses := func() {
+		if len(pendingToolUses) > 0 {
+			ctx.AddAssistantToolCalls(pendingToolUses)
+			pendingToolUses = nil
+		}
+	}
+	flushToolResults := func() {
+		if len(pendingToolResults) > 0 {
+			ctx.AddToolResults(pendingToolResults)
+			pendingToolResults = nil
+		}
+	}
+
+	for _, entry := range entries {
+		switch entry.Type {
+		case "user":
+			flushToolResults()
+			flushToolUses()
+			ctx.AddUserMessage(entry.Content)
+
+		case "assistant":
+			flushToolResults()
+			flushToolUses()
+			if entry.Content != "" {
+				ctx.AddAssistantText(entry.Content)
+			}
+
+		case "tool_use":
+			if entry.ToolID != "" && entry.ToolName != "" {
+				input := entry.ToolArgs
+				if input == nil {
+					input = make(map[string]any)
+				}
+				pendingToolUses = append(pendingToolUses, map[string]any{
+					"id":    entry.ToolID,
+					"name":  entry.ToolName,
+					"input": input,
+				})
+			}
+
+		case "tool_result":
+			// Flush pending tool uses first
+			flushToolUses()
+			if entry.ToolID != "" {
+				pendingToolResults = append(pendingToolResults, anthropic.ToolResultBlockParam{
+					ToolUseID: entry.ToolID,
+					Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: entry.Content}}},
+				})
+			}
+
+		case "system", "error":
+			flushToolResults()
+			flushToolUses()
+			// Skip system and error entries
+		}
+	}
+
+	// Flush any remaining pending items
+	flushToolUses()
+	flushToolResults()
+
+	return ctx
+}
+
+// SetInterrupted sets or clears the interrupted flag.
+func (a *AgentLoop) SetInterrupted(v bool) {
+	a.interrupted.Store(v)
+}
+
+// IsInterrupted returns true if the loop has been interrupted.
+func (a *AgentLoop) IsInterrupted() bool {
+	return a.interrupted.Load()
+}
+
+// TranscriptPath returns the path to the current transcript file.
+func (a *AgentLoop) TranscriptPath() string {
+	if a.transcript == nil {
+		return ""
+	}
+	return a.transcript.FilePath()
+}
+
+// interruptCtx creates a context that is cancelled either by the timeout
+// or when the interrupted flag is set (whichever comes first).
+func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(baseCtx, timeout)
+
+	// Watch for interrupt flag in background
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if a.IsInterrupted() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	return ctx, cancel
+}
+
 // Run processes a user message through the agent loop, returning the final text response.
 func (a *AgentLoop) Run(userMessage string) string {
 	a.context.AddUserMessage(userMessage)
@@ -104,6 +283,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 	_ = lastTransition // used for transcript/debugging
 
 	for turn := 0; turn < a.maxTurns; turn++ {
+		// Check for interrupt at the start of each turn
+		if a.IsInterrupted() {
+			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupted by user.\n")
+			a.SetInterrupted(false) // reset for next request
+			return finalText
+		}
 		var toolCalls []map[string]any
 		var textParts []string
 		var err error
@@ -119,9 +304,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 		if err != nil {
 			errMsg := err.Error()
+			// User interrupt — return immediately
+			if strings.Contains(errMsg, "interrupted by user") {
+				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupted.\n")
+				return finalText
+			}
 			// Model confusion — echoed tool syntax as text; recover by retrying
 			if strings.Contains(errMsg, "model confused") {
-				fmt.Fprintf(os.Stderr, "\n[!] Model confused, retrying...\n")
+				fmt.Fprintf(os.Stderr, "\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
 				a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
 				lastTransition = "model_confusion_retry"
@@ -133,17 +323,17 @@ func (a *AgentLoop) Run(userMessage string) string {
 				strings.Contains(errMsg, "context deadline exceeded") {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
-					fmt.Fprintf(os.Stderr, "\n[x] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
+					fmt.Fprintf(os.Stderr, "\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
 				if contextErrors <= 1 {
-					fmt.Fprintf(os.Stderr, "\n[!]  Stream stalled, truncating history (phase 1/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n[WARN] Stream stalled, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
-					fmt.Fprintf(os.Stderr, "\n[!]  Stream still stalled, aggressive truncation (phase 2/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n[WARN] Stream still stalled, aggressive truncation (phase 2/3)...\n")
 					a.context.AggressiveTruncateHistory()
 				} else {
-					fmt.Fprintf(os.Stderr, "\n[!]  Stream still stalled, dropping to minimum (phase 3/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n[WARN] Stream still stalled, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
 				lastTransition = "stall_recovery"
@@ -152,18 +342,18 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if isContextLengthError(errMsg) {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
-					fmt.Fprintf(os.Stderr, "\n[x] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
+					fmt.Fprintf(os.Stderr, "\n[ERR] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
 
 				if contextErrors <= 1 {
-					fmt.Fprintf(os.Stderr, "\n[!]  Context length exceeded, truncating history (phase 1/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n[WARN] Context length exceeded, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
-					fmt.Fprintf(os.Stderr, "\n[!]  Context still full, aggressive truncation (phase 2/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n[WARN] Context still full, aggressive truncation (phase 2/3)...\n")
 					a.context.AggressiveTruncateHistory()
 				} else {
-					fmt.Fprintf(os.Stderr, "\n[!]  Context still full, dropping to minimum (phase 3/3)...\n")
+					fmt.Fprintf(os.Stderr, "\n[WARN] Context still full, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
 				lastTransition = "context_overflow_recovery"
@@ -194,13 +384,21 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		a.context.AddAssistantToolCalls(toolCalls)
 		a.executeToolCallsConcurrent(toolCalls)
+
+		// Check for interrupt after tool execution
+		if a.IsInterrupted() {
+			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupted by user.\n")
+			a.SetInterrupted(false)
+			return finalText
+		}
+
 		lastTransition = "next_turn"
 	}
 
 	// If max turns reached without a final response, try one last non-streaming call
 	// to get a conclusive answer (like Claude Code's max_turns handling).
 	if finalText == "" {
-		fmt.Fprintf(os.Stderr, "\n[!] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
+		fmt.Fprintf(os.Stderr, "\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
 		a.context.AddUserMessage("You have reached the maximum number of tool use turns. Please provide a final summary based on the work done so far. Do NOT call any more tools.")
 		if a.useStream {
 			toolCalls, textParts, err := a.callWithRetryAndFallback()
@@ -266,7 +464,7 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			time.Sleep(delay)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, cancel := a.interruptCtx(context.Background(), 90*time.Second)
 		response, err := a.client.Messages.New(ctx, params)
 		cancel()
 
@@ -276,6 +474,12 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 
 		lastErr = err
 		errMsg := err.Error()
+
+		// Interrupt: return immediately
+		if ctx.Err() == context.Canceled || strings.Contains(errMsg, "context canceled") {
+			a.SetInterrupted(false)
+			return nil, fmt.Errorf("interrupted by user")
+		}
 
 		// Special errors: pass through to Run loop
 		if strings.Contains(errMsg, "model confused") ||
@@ -322,7 +526,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 	for attempt := 0; attempt <= maxStreamRetries; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(attempt) * 2 * time.Second // 2s, 4s, 6s ... backoff
-			fmt.Fprintf(os.Stderr, "\n[!]  Retrying stream (attempt %d/%d), waiting %v...\n",
+			fmt.Fprintf(os.Stderr, "\n[WARN] Retrying stream (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxStreamRetries+1, delay)
 			time.Sleep(delay)
 		}
@@ -351,26 +555,23 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 		// Transient error (network, timeout, 5xx): retry
 		if isTransientError(errMsg) {
-			fmt.Fprintf(os.Stderr, "\n[!]  Transient error during stream: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\n[WARN] Transient error during stream: %v\n", err)
 			continue
 		}
 
 		// Non-transient error during stream -> try non-streaming fallback
-		fmt.Fprintf(os.Stderr, "\n[!]  Stream failed (%v), falling back to non-streaming...\n", err)
+		fmt.Fprintf(os.Stderr, "\n[WARN] Stream failed (%v), falling back to non-streaming...\n", err)
 		return a.callWithNonStreamingFallback(params)
 	}
 
 	// All stream retries exhausted -> try non-streaming fallback
-	fmt.Fprintf(os.Stderr, "\n[!]  Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
+	fmt.Fprintf(os.Stderr, "\n[WARN] Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
 	return a.callWithNonStreamingFallback(params)
 }
 
 // tryStreamOnce makes a single streaming attempt and returns the result.
 func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[string]any, []string, error) {
-	// 300s overall timeout for streaming — the stall detector inside Process
-	// is now observability-first (warns but doesn't terminate), so this is
-	// a safety net only. Matches Claude Code's 90s idle watchdog pattern.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := a.interruptCtx(context.Background(), 300*time.Second)
 	defer cancel()
 
 	collect := NewCollectHandler()
@@ -381,7 +582,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[stri
 			return err
 		}
 		if collect.IsToolUseAsText() {
-			fmt.Fprint(os.Stderr, "\n[!]  Model confused, aborting stream...\n")
+			fmt.Fprint(os.Stderr, "\n[WARN] Model confused, aborting stream...\n")
 			cancel()
 			return fmt.Errorf("model confused: echoed tool syntax as text")
 		}
@@ -400,7 +601,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[stri
 	}
 
 	if collect.IsToolUseAsText() {
-		fmt.Fprintf(os.Stderr, "\n[!]  Model echoed tool syntax as text -- recovering\n")
+		fmt.Fprintf(os.Stderr, "\n[WARN] Model echoed tool syntax as text -- recovering\n")
 		collect.Text = ""
 	}
 
@@ -416,18 +617,24 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(attempt) * 2 * time.Second
-			fmt.Fprintf(os.Stderr, "\n[!]  Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
+			fmt.Fprintf(os.Stderr, "\n[WARN] Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
 			time.Sleep(delay)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		ctx, cancel := a.interruptCtx(context.Background(), 120*time.Second)
 		response, err := a.client.Messages.New(ctx, params)
 		cancel()
 
 		if err == nil {
 			toolCalls, textParts := a.parseResponse(response)
 			return toolCalls, textParts, nil
+		}
+
+		// Interrupt
+		if ctx.Err() == context.Canceled || strings.Contains(err.Error(), "context canceled") {
+			a.SetInterrupted(false)
+			return nil, nil, fmt.Errorf("interrupted by user")
 		}
 
 		errMsg := err.Error()
@@ -441,7 +648,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 		// Transient error: retry
 		if isTransientError(errMsg) {
-			fmt.Fprintf(os.Stderr, "\n[!]  Transient error during non-streaming: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\n[WARN] Transient error during non-streaming: %v\n", err)
 			continue
 		}
 
@@ -574,6 +781,19 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 
 	for _, e := range entries {
 		go func(ent toolCallEntry) {
+			// Check for interrupt before starting each tool
+			if a.IsInterrupted() {
+				ch <- jobResult{
+					index: ent.index,
+					param: anthropic.ToolResultBlockParam{
+						ToolUseID: ent.call["id"].(string),
+						Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "Interrupted by user"}}},
+						IsError:   param.NewOpt(true),
+					},
+					output: "Interrupted by user",
+				}
+				return
+			}
 			if ent.denied {
 				ch <- jobResult{
 					index: ent.index,
@@ -680,12 +900,12 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 		}, denial.Output
 	}
 
-	// Execute with timeout (mirrors ggbot's executeToolWithStreaming timeout)
+	// Execute with interrupt-aware context (mirrors ggbot's executeToolWithStreaming timeout)
 	timeout := a.toolTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.interruptCtx(context.Background(), timeout)
 	defer cancel()
 
 	resultCh := make(chan tools.ToolResult, 1)
@@ -699,6 +919,19 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 	select {
 	case result = <-resultCh:
 		// Normal completion
+	case <-ctx.Done():
+		cancelled = true
+		if a.IsInterrupted() {
+			result = tools.ToolResult{
+				Output:  "Interrupted by user",
+				IsError: true,
+			}
+		} else {
+			result = tools.ToolResult{
+				Output:  fmt.Sprintf("Error: %s timed out after %v", toolName, timeout),
+				IsError: true,
+			}
+		}
 	case <-time.After(timeout):
 		cancelled = true
 		result = tools.ToolResult{
@@ -713,17 +946,17 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 
 	// Display timing to stderr
 	if cancelled {
-		fmt.Fprintf(os.Stderr, "  [T]  timed out after %v\n", timeout)
+		fmt.Fprintf(os.Stderr, "  [TIMEOUT] timed out after %v\n", timeout)
 	} else if result.IsError {
 		preview := limitStr(output, 150)
-		fmt.Fprintf(os.Stderr, "  [x] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
+		fmt.Fprintf(os.Stderr, "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
 	} else {
 		preview := toolResultPreview(toolName, output)
 		if toolName == "exec" {
 			// For exec, just show the result indented, no prefix
 			fmt.Fprintf(os.Stderr, "  %s\n", preview)
 		} else {
-			fmt.Fprintf(os.Stderr, "  [+] %s: %s\n", toolName, preview)
+			fmt.Fprintf(os.Stderr, "  [OK] %s: %s\n", toolName, preview)
 		}
 	}
 
@@ -778,11 +1011,12 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 		}, msg
 	}
 
+	// Use interrupt-aware context with timeout
 	timeout := a.toolTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.interruptCtx(context.Background(), timeout)
 	defer cancel()
 
 	resultCh := make(chan tools.ToolResult, 1)
@@ -795,6 +1029,19 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 	var cancelled bool
 	select {
 	case result = <-resultCh:
+	case <-ctx.Done():
+		cancelled = true
+		if a.IsInterrupted() {
+			result = tools.ToolResult{
+				Output:  "Interrupted by user",
+				IsError: true,
+			}
+		} else {
+			result = tools.ToolResult{
+				Output:  fmt.Sprintf("Error: %s timed out after %v", toolName, timeout),
+				IsError: true,
+			}
+		}
 	case <-time.After(timeout):
 		cancelled = true
 		result = tools.ToolResult{
@@ -807,16 +1054,20 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 	output := a.truncateOutput(result.Output)
 
 	if cancelled {
-		fmt.Fprintf(os.Stderr, "  [T]  timed out after %v\n", timeout)
+		if a.IsInterrupted() {
+			fmt.Fprintf(os.Stderr, "  [WARN] %s interrupted\n", toolName)
+		} else {
+			fmt.Fprintf(os.Stderr, "  [TIMEOUT] %s timed out after %v\n", toolName, timeout)
+		}
 	} else if result.IsError {
 		preview := limitStr(output, 150)
-		fmt.Fprintf(os.Stderr, "  [x] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
+		fmt.Fprintf(os.Stderr, "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
 	} else {
 		preview := toolResultPreview(toolName, output)
 		if toolName == "exec" {
 			fmt.Fprintf(os.Stderr, "  %s\n", preview)
 		} else {
-			fmt.Fprintf(os.Stderr, "  [+] %s: %s\n", toolName, preview)
+			fmt.Fprintf(os.Stderr, "  [OK] %s: %s\n", toolName, preview)
 		}
 	}
 
