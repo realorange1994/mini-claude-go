@@ -16,7 +16,7 @@ const systemPromptTemplate = `You are miniClaudeCode, a lightweight AI coding as
 ## Environment
 - OS: %s
 - Working Directory: %s
-- Current Date/Time: %s
+- Current Date/Time: %s (%s)
 - Shell: PowerShell on Windows, sh/bash on Unix
 
 You have access to the following tools to help the user with software engineering tasks:
@@ -82,7 +82,16 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 	}
 
 	currentTime := time.Now().Format("2006-01-02 15:04:05")
-	return fmt.Sprintf(systemPromptTemplate, envInfo, wd, currentTime, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection)
+	_, offset := time.Now().Zone()
+	sign := "+"
+	if offset < 0 {
+		sign = "-"
+		offset = -offset
+	}
+	hours := offset / 3600
+	minutes := (offset % 3600) / 60
+	timezone := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
+	return fmt.Sprintf(systemPromptTemplate, envInfo, wd, currentTime, timezone, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection)
 }
 
 func buildToolList(registry *tools.Registry) string {
