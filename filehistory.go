@@ -66,8 +66,8 @@ func (h *SnapshotHistory) TakeSnapshot(filePath string) error {
 }
 
 // RewindTo restores filePath to the state captured in snapshot at index.
-// Index 0 is the oldest snapshot. After restoring, the snapshot is not
-// removed from the history so that multiple rewinds are possible.
+// Index 0 is the oldest snapshot. Before restoring, the current file state
+// is snapshotted so that redo is possible.
 func (h *SnapshotHistory) RewindTo(filePath string, index int) error {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -80,6 +80,19 @@ func (h *SnapshotHistory) RewindTo(filePath string, index int) error {
 	}
 
 	snap := snaps[index]
+
+	// Snapshot current state before restoring so redo is possible
+	if currentContent, err := os.ReadFile(absPath); err == nil && len(currentContent) > 0 {
+		currentSnap := FileSnapshot{
+			FilePath:  absPath,
+			Content:   string(currentContent),
+			Timestamp: time.Now(),
+		}
+		h.mu.Lock()
+		h.snapshots[absPath] = append(h.snapshots[absPath], currentSnap)
+		h.mu.Unlock()
+		_ = h.persist(currentSnap)
+	}
 
 	if snap.Content == "" {
 		// Original snapshot captured a non-existent file; delete it.
@@ -135,6 +148,62 @@ func (h *SnapshotHistory) Clear() {
 	h.mu.Lock()
 	h.snapshots = make(map[string][]FileSnapshot)
 	h.mu.Unlock()
+}
+
+// ListAllFiles returns all file paths that have snapshot history.
+// It checks in-memory first, then falls back to scanning disk snapshots.
+func (h *SnapshotHistory) ListAllFiles() []string {
+	h.mu.RLock()
+	inMemory := len(h.snapshots)
+	h.mu.RUnlock()
+
+	if inMemory > 0 {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		files := make([]string, 0, len(h.snapshots))
+		for path := range h.snapshots {
+			files = append(files, path)
+		}
+		sort.Strings(files)
+		return files
+	}
+
+	return h.loadAllFromDisk()
+}
+
+// loadAllFromDisk scans the snapshots directory and returns all unique file paths
+// that have at least one snapshot on disk.
+func (h *SnapshotHistory) loadAllFromDisk() []string {
+	if h.snapDir == "" {
+		return nil
+	}
+
+	matches, err := filepath.Glob(filepath.Join(h.snapDir, "*.json"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	for _, f := range matches {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var snap FileSnapshot
+		if err := json.Unmarshal(data, &snap); err != nil {
+			continue
+		}
+		if snap.FilePath != "" {
+			seen[snap.FilePath] = true
+		}
+	}
+
+	files := make([]string, 0, len(seen))
+	for path := range seen {
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	return files
 }
 
 // persist writes a single snapshot to disk as a JSON file.
