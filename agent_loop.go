@@ -866,7 +866,7 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 	// Auto-snapshot before write/edit tools
 	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
 		if path, ok := input["path"].(string); ok && path != "" {
-			_ = a.snapshots.TakeSnapshot(path)
+			_ = a.snapshots.TakeSnapshotWithDesc(path, "before " + toolName)
 		}
 	}
 
@@ -943,7 +943,7 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 	// Auto-snapshot after write/edit tools (captures new content)
 	if !cancelled && !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path, ok := input["path"].(string); ok && path != "" {
-			_ = a.snapshots.TakeSnapshot(path)
+			_ = a.snapshots.TakeSnapshotWithDesc(path, "before " + toolName)
 		}
 	}
 
@@ -994,7 +994,7 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 
 	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
 		if path, ok := input["path"].(string); ok && path != "" {
-			_ = a.snapshots.TakeSnapshot(path)
+			_ = a.snapshots.TakeSnapshotWithDesc(path, "before " + toolName)
 		}
 	}
 

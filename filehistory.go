@@ -13,9 +13,10 @@ import (
 
 // FileSnapshot stores the content of a file at a specific point in time.
 type FileSnapshot struct {
-	FilePath  string    `json:"file_path"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
+	FilePath    string    `json:"file_path"`
+	Content     string    `json:"content"`
+	Timestamp   time.Time `json:"timestamp"`
+	Description string    `json:"description,omitempty"` // e.g. "before edit_file", "after write_file"
 }
 
 // SnapshotHistory maintains an append-only list of snapshots per file,
