@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
 	"miniclaudecode-go/skills"
 	"miniclaudecode-go/tools"
@@ -15,6 +16,7 @@ const systemPromptTemplate = `You are miniClaudeCode, a lightweight AI coding as
 ## Environment
 - OS: %s
 - Working Directory: %s
+- Current Date/Time: %s
 - Shell: PowerShell on Windows, sh/bash on Unix
 
 You have access to the following tools to help the user with software engineering tasks:
@@ -79,7 +81,8 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 		}
 	}
 
-	return fmt.Sprintf(systemPromptTemplate, envInfo, wd, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection)
+	currentTime := time.Now().Format("2006-01-02 15:04:05")
+	return fmt.Sprintf(systemPromptTemplate, envInfo, wd, currentTime, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection)
 }
 
 func buildToolList(registry *tools.Registry) string {
