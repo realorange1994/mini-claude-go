@@ -82,7 +82,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		compactor:   NewCompactor(),
 		useStream:   useStream,
 		maxToolChars: 8192,
-		toolTimeout:  5 * time.Minute,
+		toolTimeout:  30 * time.Second,
 		maxTurns:     maxTurns,
 	}
 
@@ -144,7 +144,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		compactor:    NewCompactor(),
 		useStream:    useStream,
 		maxToolChars: 8192,
-		toolTimeout:  5 * time.Minute,
+		toolTimeout:  30 * time.Second,
 		maxTurns:     maxTurns,
 	}
 
@@ -310,15 +310,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 		var textParts []string
 		var err error
 
-		if a.useStream {
-			toolCalls, textParts, err = a.callWithRetryAndFallback()
-		} else {
-			var response *anthropic.Message
-			response, err = a.callAPI()
-			if err == nil {
-				toolCalls, textParts = a.parseResponse(response)
-			}
-		}
+		// Always use streaming — more reliable across different API/proxy
+		// configurations. Non-streaming can hang on some proxies that don't
+		// flush the response until the entire body is ready.
+		toolCalls, textParts, err = a.callWithRetryAndFallback()
 		if err != nil {
 			errMsg := err.Error()
 			// User interrupt — return immediately
@@ -453,21 +448,11 @@ func (a *AgentLoop) Run(userMessage string) string {
 	if finalText == "" {
 		fmt.Fprintf(os.Stderr, "\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
 		a.context.AddUserMessage("You have reached the maximum number of tool use turns. Please provide a final summary based on the work done so far. Do NOT call any more tools.")
-		if a.useStream {
-			toolCalls, textParts, err := a.callWithRetryAndFallback()
-			if err == nil && len(textParts) > 0 {
-				finalText = strings.Join(textParts, "\n")
-			}
-			_ = toolCalls // ignore any final tool calls at this point
-		} else {
-			response, err := a.callAPI()
-			if err == nil {
-				_, textParts := a.parseResponse(response)
-				if len(textParts) > 0 {
-					finalText = strings.Join(textParts, "\n")
-				}
-			}
+		toolCalls, textParts, err := a.callWithRetryAndFallback()
+		if err == nil && len(textParts) > 0 {
+			finalText = strings.Join(textParts, "\n")
 		}
+		_ = toolCalls // ignore any final tool calls at this point
 	}
 
 	if finalText == "" {
@@ -928,6 +913,21 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 		_ = a.transcript.WriteToolUse(toolUseID, toolName, input)
 	}
 
+	// Agent-controlled timeout — default 30s, clamped to [1, 300] seconds
+	timeout := a.toolTimeout
+	if t, ok := input["timeout"].(float64); ok && t > 0 {
+		secs := int(t)
+		if secs < 1 {
+			secs = 1
+		}
+		if secs > 300 {
+			secs = 300
+		}
+		timeout = time.Duration(secs) * time.Second
+	}
+	// Remove timeout from tool input — it's a meta-parameter, not a tool param
+	delete(input, "timeout")
+
 	// Auto-snapshot before write/edit tools
 	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
 		if path, ok := input["path"].(string); ok && path != "" {
@@ -964,10 +964,9 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 		}, denial.Output
 	}
 
-	// Execute with interrupt-aware context (mirrors ggbot's executeToolWithStreaming timeout)
-	timeout := a.toolTimeout
+	// Execute with interrupt-aware context (agent-controlled timeout, default 30s)
 	if timeout <= 0 {
-		timeout = 5 * time.Minute
+		timeout = 30 * time.Second
 	}
 	ctx, cancel := a.interruptCtx(context.Background(), timeout)
 	defer cancel()
@@ -1076,6 +1075,21 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 		input = make(map[string]any)
 	}
 
+	// Agent-controlled timeout — default 30s, clamped to [1, 300] seconds
+	timeout := a.toolTimeout
+	if t, ok := input["timeout"].(float64); ok && t > 0 {
+		secs := int(t)
+		if secs < 1 {
+			secs = 1
+		}
+		if secs > 300 {
+			secs = 300
+		}
+		timeout = time.Duration(secs) * time.Second
+	}
+	// Remove timeout from tool input — it's a meta-parameter, not a tool param
+	delete(input, "timeout")
+
 	if a.transcript != nil {
 		_ = a.transcript.WriteToolUse(toolUseID, toolName, input)
 	}
@@ -1105,10 +1119,9 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 		}, msg
 	}
 
-	// Use interrupt-aware context with timeout
-	timeout := a.toolTimeout
+	// Use interrupt-aware context with timeout (already set from input or default)
 	if timeout <= 0 {
-		timeout = 5 * time.Minute
+		timeout = 30 * time.Second
 	}
 	ctx, cancel := a.interruptCtx(context.Background(), timeout)
 	defer cancel()
