@@ -45,7 +45,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"branch": map[string]interface{}{
 				"type":        "string",
-				"description": "Branch name for checkout/branch/push/pull/worktree. Also used as tag name for tag operation",
+				"description": "Branch name for checkout/branch/push/pull/worktree. Also used as tag name for tag operation. checkout does NOT support 'files' param - use 'restore' to unstage files",
 			},
 			"message": map[string]interface{}{
 				"type":        "string",
@@ -53,7 +53,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"files": map[string]interface{}{
 				"type":        "array",
-				"description": "File paths for add/rm/restore/diff/ls-files only. NOT for checkout or commit. For mv use 'source' instead",
+				"description": "File paths for add/rm/restore/diff/ls-files ONLY. NOT for checkout, commit, or mv. checkout has NO files support. mv uses 'source' param",
 				"items":       map[string]interface{}{"type": "string"},
 			},
 			"remote": map[string]interface{}{
