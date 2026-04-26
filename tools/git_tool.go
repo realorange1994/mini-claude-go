@@ -85,7 +85,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 				"type":        "boolean",
 				"description": "Remove a worktree (for worktree remove)",
 			},
-				"description": "NOT IMPLEMENTED - Conflict resolution: 'ours' or 'theirs' (for checkout, merge)",
+			"max_count": map[string]interface{}{
 				"type":        "integer",
 				"description": "Maximum number of entries to return (for log, rev-list, default: 20)",
 			},
@@ -99,27 +99,27 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"ours_theirs": map[string]interface{}{
 				"type":        "string",
-				"description": "Conflict resolution: 'ours' or 'theirs' (for checkout, merge)",
+				"description": "Checkout ours or theirs during conflict (for checkout --ours/--theirs)",
 			},
 			"dry_run": map[string]interface{}{
 				"type":        "boolean",
 				"description": "Show what would be done without making changes (for clean)",
 			},
-				"description": "NOT IMPLEMENTED - Author override for commit (format: 'Name <email>')",
+			"mainline": map[string]interface{}{
 				"type":        "integer",
 				"description": "Mainline parent number for cherry-picking/reverting a merge commit (for cherry-pick, revert)",
 			},
-				"description": "NOT IMPLEMENTED - Show staged changes only (for diff)",
+			"author": map[string]interface{}{
 				"type":        "string",
-				"description": "Author string (e.g. 'Name <email>') (for commit, log)",
+				"description": "Author string (e.g. 'Name <email>') (for commit)",
 			},
-				"description": "Recursive removal (for clean only)",
+			"cached": map[string]interface{}{
 				"type":        "boolean",
 				"description": "Show staged files instead of working tree (for diff)",
 			},
 			"recursive": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Recurse into subdirectories (for clean)",
+				"description": "Recursive removal (for clean only)",
 			},
 			"source": map[string]interface{}{
 				"type":        "string",
@@ -132,6 +132,10 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			"no_edit": map[string]interface{}{
 				"type":        "boolean",
 				"description": "Don't edit the commit message (for revert)",
+			},
+			"proxy": map[string]interface{}{
+				"type":        "string",
+				"description": "HTTP/SOCKS proxy URL for git operations (e.g. 'http://127.0.0.1:7890', 'socks5://127.0.0.1:1080'). Sets https_proxy and http_proxy environment variables for the git command.",
 			},
 		},
 		"required": []string{"operation"},
@@ -175,7 +179,10 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
 	}
 
-	out, err := runGitCommand(ctx, cmd, workDir)
+	// Get proxy from params
+	proxy, _ := params["proxy"].(string)
+
+	out, err := runGitCommand(ctx, cmd, workDir, proxy)
 	if err != nil {
 		return ToolResult{Output: out, IsError: true}
 	}
@@ -224,6 +231,9 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		} else {
 			args = []string{"commit", "-m", message}
 		}
+		if author, _ := params["author"].(string); author != "" {
+			args = append(args, "--author", author)
+		}
 
 	case "push":
 		args = []string{"push"}
@@ -257,6 +267,9 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 
 	case "checkout":
 		args = []string{"checkout"}
+		if ot, _ := params["ours_theirs"].(string); ot != "" {
+			args = append(args, "--"+ot)
+		}
 		if branch, _ := params["branch"].(string); branch != "" {
 			args = append(args, branch)
 		}
@@ -293,6 +306,9 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 
 	case "diff":
 		args = []string{"diff"}
+		if getCached, ok := params["cached"].(bool); ok && getCached {
+			args = append(args, "--cached")
+		}
 		if files := getStringArray(params, "files"); len(files) > 0 {
 			args = append(args, files...)
 		}
@@ -501,8 +517,16 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 	return args, nil
 }
 
-func runGitCommand(ctx context.Context, args []string, workDir string) (string, error) {
+func runGitCommand(ctx context.Context, args []string, workDir string, proxy string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
+	if proxy != "" {
+		cmd.Env = append(cmd.Environ(),
+			"https_proxy="+proxy,
+			"http_proxy="+proxy,
+			"HTTPS_PROXY="+proxy,
+			"HTTP_PROXY="+proxy,
+		)
+	}
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
