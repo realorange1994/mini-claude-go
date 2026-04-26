@@ -53,7 +53,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"files": map[string]interface{}{
 				"type":        "array",
-				"description": "Files to stage (for add), remove (for rm), restore (for restore), show diff (for diff), or list (for ls-files)",
+				"description": "Files to stage (for add), remove (for rm), restore (for restore), show diff (for diff), or list (for ls-files). For mv use source instead.",
 				"items":       map[string]interface{}{"type": "string"},
 			},
 			"remote": map[string]interface{}{
@@ -85,7 +85,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 				"type":        "boolean",
 				"description": "Remove a worktree (for worktree remove)",
 			},
-			"max_count": map[string]interface{}{
+				"description": "NOT IMPLEMENTED - Conflict resolution: 'ours' or 'theirs' (for checkout, merge)",
 				"type":        "integer",
 				"description": "Maximum number of entries to return (for log, rev-list, default: 20)",
 			},
@@ -105,15 +105,15 @@ func (*GitTool) InputSchema() map[string]interface{} {
 				"type":        "boolean",
 				"description": "Show what would be done without making changes (for clean)",
 			},
-			"mainline": map[string]interface{}{
+				"description": "NOT IMPLEMENTED - Author override for commit (format: 'Name <email>')",
 				"type":        "integer",
 				"description": "Mainline parent number for cherry-picking/reverting a merge commit (for cherry-pick, revert)",
 			},
-			"author": map[string]interface{}{
+				"description": "NOT IMPLEMENTED - Show staged changes only (for diff)",
 				"type":        "string",
 				"description": "Author string (e.g. 'Name <email>') (for commit, log)",
 			},
-			"cached": map[string]interface{}{
+				"description": "Recursive removal (for clean only)",
 				"type":        "boolean",
 				"description": "Show staged files instead of working tree (for diff)",
 			},
@@ -123,7 +123,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"source": map[string]interface{}{
 				"type":        "string",
-				"description": "Source branch/commit for switch (for switch)",
+				"description": "Source file for mv, or source branch/commit for switch",
 			},
 			"no_commit": map[string]interface{}{
 				"type":        "boolean",
