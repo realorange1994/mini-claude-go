@@ -37,7 +37,11 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "Local path (clone destination, or target for init/worktree)",
+				"description": "Destination path for clone, or target path for init/worktree",
+			},
+			"directory": map[string]interface{}{
+				"type":        "string",
+				"description": "Working directory to run the git command in (for all operations except clone)",
 			},
 			"branch": map[string]interface{}{
 				"type":        "string",
@@ -152,8 +156,19 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 		return ToolResult{Output: "Error: operation is required", IsError: true}
 	}
 
-	// Get working directory from path parameter
-	workDir, _ := params["path"].(string)
+	// Determine working directory:
+	// - For clone: use directory param (path is the clone destination, not workdir)
+	// - For other operations: use directory param if set, otherwise path param
+	var workDir string
+	if operation == "clone" {
+		workDir, _ = params["directory"].(string)
+	} else {
+		if dir, _ := params["directory"].(string); dir != "" {
+			workDir = dir
+		} else {
+			workDir, _ = params["path"].(string)
+		}
+	}
 
 	cmd, err := buildGitCommand(params)
 	if err != nil {
@@ -178,10 +193,10 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 			return nil, fmt.Errorf("repo is required for clone")
 		}
 		args = []string{"clone"}
+		args = append(args, repo)
 		if path, _ := params["path"].(string); path != "" {
 			args = append(args, path)
 		}
-		args = append(args, repo)
 
 	case "init":
 		args = []string{"init"}
