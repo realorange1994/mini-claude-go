@@ -37,11 +37,11 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "Destination path for clone, or target path for init/worktree",
+				"description": "Destination path for clone, target path for init/worktree, destination for mv, or file for blame",
 			},
 			"directory": map[string]interface{}{
 				"type":        "string",
-				"description": "Working directory to run the git command in (for all operations except clone)",
+				"description": "Working directory to run the git command in. For clone, this is the directory where the clone command runs (path is the destination)",
 			},
 			"branch": map[string]interface{}{
 				"type":        "string",
@@ -53,7 +53,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"files": map[string]interface{}{
 				"type":        "array",
-				"description": "Files to stage (for add), show diff (for diff), or list (for ls-files)",
+				"description": "Files to stage (for add), remove (for rm), restore (for restore), show diff (for diff), or list (for ls-files)",
 				"items":       map[string]interface{}{"type": "string"},
 			},
 			"remote": map[string]interface{}{
@@ -91,11 +91,11 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"staged": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Operate on staged changes (for diff, rm)",
+				"description": "For restore: restore from staging area. For rm: remove from index only (--cached)",
 			},
 			"force": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Force operation (for checkout, clean, restore, switch, rm)",
+				"description": "Force the operation (for switch, clean, rm, restore, mv)",
 			},
 			"ours_theirs": map[string]interface{}{
 				"type":        "string",
