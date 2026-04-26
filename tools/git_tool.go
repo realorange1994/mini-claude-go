@@ -91,7 +91,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"staged": map[string]interface{}{
 				"type":        "boolean",
-				"description": "For restore: restore from staging area (--staged). For rm: remove from index only (--cached)",
+				"description": "For restore: restore from staging area (--staged). For rm: remove from index only (--cached). NOTE: there is NO separate 'cached' param for rm - use 'staged' instead",
 			},
 			"force": map[string]interface{}{
 				"type":        "boolean",
@@ -99,7 +99,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"ours_theirs": map[string]interface{}{
 				"type":        "string",
-				"description": "Checkout ours or theirs during conflict (for checkout --ours/--theirs)",
+				"description": "Checkout ours or theirs during conflict (for checkout --ours/--theirs). checkout does NOT support 'files' param",
 			},
 			"dry_run": map[string]interface{}{
 				"type":        "boolean",
@@ -115,7 +115,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"cached": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Show staged changes instead of working tree (only for diff)",
+				"description": "Show staged changes instead of working tree (only for diff). NOT for rm - use 'staged' param for rm --cached",
 			},
 			"recursive": map[string]interface{}{
 				"type":        "boolean",
@@ -123,7 +123,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"source": map[string]interface{}{
 				"type":        "string",
-				"description": "Source file for mv, or source branch/commit for switch",
+				"description": "Source file for mv, or source branch/commit for switch. NOT for restore (restore uses 'files' param)",
 			},
 			"no_commit": map[string]interface{}{
 				"type":        "boolean",
