@@ -33,32 +33,32 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"repo": map[string]interface{}{
 				"type":        "string",
-				"description": "Repository URL (for clone)",
+				"description": "Repository URL (only for clone)",
 			},
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "Destination path for clone, target path for init/worktree, destination for mv, or file for blame",
+				"description": "For clone: destination directory path. For init/worktree: target path. For mv: destination path. For blame: file path. NOT used as working directory (use 'directory' for that)",
 			},
 			"directory": map[string]interface{}{
 				"type":        "string",
-				"description": "Working directory to run the git command in. For clone, this is the directory where the clone command runs (path is the destination)",
+				"description": "Working directory to run the git command in. For clone, this is where git clone runs (path is the clone destination). For other ops, this is the repo directory",
 			},
 			"branch": map[string]interface{}{
 				"type":        "string",
-				"description": "Branch name (for checkout, branch, push, pull, worktree)",
+				"description": "Branch name for checkout/branch/push/pull/worktree. Also used as tag name for tag operation",
 			},
 			"message": map[string]interface{}{
 				"type":        "string",
-				"description": "Commit message (for commit)",
+				"description": "Commit message (only for commit)",
 			},
 			"files": map[string]interface{}{
 				"type":        "array",
-				"description": "Files to stage (for add), remove (for rm), restore (for restore), show diff (for diff), or list (for ls-files). For mv use source instead.",
+				"description": "File paths for add/rm/restore/diff/ls-files only. NOT for checkout or commit. For mv use 'source' instead",
 				"items":       map[string]interface{}{"type": "string"},
 			},
 			"remote": map[string]interface{}{
 				"type":        "string",
-				"description": "Remote name (default: origin)",
+				"description": "Remote name for push/pull/fetch only (default: origin). NOT for 'remote' operation itself",
 			},
 			"target": map[string]interface{}{
 				"type":        "string",
@@ -91,7 +91,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"staged": map[string]interface{}{
 				"type":        "boolean",
-				"description": "For restore: restore from staging area. For rm: remove from index only (--cached)",
+				"description": "For restore: restore from staging area (--staged). For rm: remove from index only (--cached)",
 			},
 			"force": map[string]interface{}{
 				"type":        "boolean",
@@ -111,15 +111,15 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"author": map[string]interface{}{
 				"type":        "string",
-				"description": "Author string (e.g. 'Name <email>') (for commit)",
+				"description": "Author string (e.g. 'Name <email>') (only for commit)",
 			},
 			"cached": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Show staged files instead of working tree (for diff)",
+				"description": "Show staged changes instead of working tree (only for diff)",
 			},
 			"recursive": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Recursive removal (for clean only)",
+				"description": "Recursive removal (only for clean, adds -d flag)",
 			},
 			"source": map[string]interface{}{
 				"type":        "string",
@@ -127,11 +127,11 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"no_commit": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Apply changes without committing (for cherry-pick)",
+				"description": "Apply changes without committing (only for cherry-pick)",
 			},
 			"no_edit": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Don't edit the commit message (for revert)",
+				"description": "Don't edit the commit message (only for revert)",
 			},
 			"proxy": map[string]interface{}{
 				"type":        "string",
