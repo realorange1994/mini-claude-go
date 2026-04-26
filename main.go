@@ -96,6 +96,7 @@ func main() {
 
 	registry := DefaultRegistry()
 	RegisterMCPAndSkills(registry, &cfg)
+	RegisterFileHistoryTools(registry, cfg.FileHistory)
 
 	var agent *AgentLoop
 
