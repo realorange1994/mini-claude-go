@@ -699,6 +699,7 @@ func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
 func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any, []string) {
 	var toolCalls []map[string]any
 	var textParts []string
+	var thinking string
 
 	for _, block := range response.Content {
 		switch v := block.AsAny().(type) {
@@ -719,9 +720,19 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 				"input": input,
 			}
 			toolCalls = append(toolCalls, call)
+		case anthropic.ThinkingBlock:
+			thinking = v.Thinking
 		}
-		// Thinking blocks (type "thinking") are intentionally ignored —
-		// they're internal reasoning, not part of the visible response.
+	}
+
+	// Display thinking if present (matches Rust behavior)
+	if thinking != "" {
+		lines := strings.Split(thinking, "\n")
+		preview := lines[0]
+		if len(preview) > 120 {
+			preview = preview[:120] + "..."
+		}
+		fmt.Fprintf(os.Stderr, "\n[THINK] %s\n", preview)
 	}
 
 	return toolCalls, textParts

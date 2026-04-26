@@ -5,6 +5,7 @@ go 1.23.0
 require (
 	github.com/anthropics/anthropic-sdk-go v1.35.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/pmezard/go-difflib v1.0.0
 )
 
 require (
