@@ -294,6 +294,68 @@ func (h *SnapshotHistory) RewindSteps(filePath string, steps int) (string, error
 	return h.restoreInternal(filePath, steps)
 }
 
+// Checkout restoress a file to a specific active version number.
+// Unlike RewindSteps, Checkout directly indexes into the active (non-deleted)
+// snapshot array, bypassing checksum-based step collapsing.
+// Version 1 = oldest active snapshot.
+// Before restoring, the current file state is snapshotted so that redo is possible.
+// Returns the restored content or an error.
+func (h *SnapshotHistory) Checkout(filePath string, version int) (string, error) {
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve path %s: %w", filePath, err)
+	}
+
+	snaps := h.ListSnapshots(absPath)
+	if len(snaps) == 0 {
+		return "", fmt.Errorf("no snapshots for %s", absPath)
+	}
+
+	// Build active view
+	var activeIdx []int // active version -> original index
+	for i, s := range snaps {
+		if !s.Deleted {
+			activeIdx = append(activeIdx, i)
+		}
+	}
+
+	if version < 1 || version > len(activeIdx) {
+		return "", fmt.Errorf("version %d out of range (1-%d active snapshots)", version, len(activeIdx))
+	}
+
+	targetSnap := snaps[activeIdx[version-1]]
+
+	// Snapshot current state before restoring so redo is possible
+	if currentContent, err := os.ReadFile(absPath); err == nil && len(currentContent) > 0 {
+		currentSnap := FileSnapshot{
+			FilePath:    absPath,
+			Content:     string(currentContent),
+			Timestamp:   time.Now(),
+			Checksum:    computeChecksum(string(currentContent)),
+			Description: fmt.Sprintf("checkout: to v%d", version),
+		}
+		h.mu.Lock()
+		h.snapshots[absPath] = append(h.snapshots[absPath], currentSnap)
+		h.mu.Unlock()
+		_ = h.persist(currentSnap)
+	}
+
+	if targetSnap.Content == "" || targetSnap.Deleted {
+		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("cannot delete %s: %w", absPath, err)
+		}
+		return "(file deleted — target version was empty)", nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
+		return "", fmt.Errorf("cannot create directory for %s: %w", absPath, err)
+	}
+	if err := os.WriteFile(absPath, []byte(targetSnap.Content), 0644); err != nil {
+		return "", fmt.Errorf("cannot restore %s: %w", absPath, err)
+	}
+	return targetSnap.Content, nil
+}
+
 // ListSnapshots returns all snapshots for filePath, ordered oldest-first.
 // It loads from the in-memory cache first and falls back to disk if needed.
 func (h *SnapshotHistory) ListSnapshots(filePath string) []FileSnapshot {
