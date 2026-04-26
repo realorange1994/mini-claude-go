@@ -11,9 +11,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 // ─── Token estimation ────────────────────────────────────────────────────────
@@ -918,4 +921,273 @@ func defaultCompactableTools() map[string]bool {
 		"web_fetch":  true,
 		"web_search": true,
 	}
+}
+
+// ─── LLM-Driven Compaction ───────────────────────────────────────────────────
+
+// CompactTrigger indicates what triggered a compaction.
+type CompactTrigger int
+
+const (
+	CompactTriggerAuto CompactTrigger = iota
+	CompactTriggerManual
+)
+
+func (t CompactTrigger) String() string {
+	switch t {
+	case CompactTriggerAuto:
+		return "auto"
+	case CompactTriggerManual:
+		return "manual"
+	default:
+		return "unknown"
+	}
+}
+
+// compaction prompts
+const compactSystemPrompt = "You are a helpful AI assistant tasked with summarizing conversations."
+
+const compactUserPrompt = `Summarize the following conversation history. Your summary should:
+
+1. Capture the user's main request and goals
+2. Note key decisions made and discoveries found
+3. List files that were read, modified, or created
+4. Describe the current state of work and what remains
+5. Be concise but complete — the next AI should be able to continue seamlessly
+
+Do NOT include:
+- Individual tool call details or raw outputs
+- Intermediate exploration steps
+- Redundant or outdated information
+
+Write the summary as a coherent narrative that preserves enough context for the conversation to continue productively.`
+
+// ContextWindowTracker tracks token usage against model-specific context windows.
+type ContextWindowTracker struct {
+	modelMaxTokens       int
+	autoCompactThreshold float64
+	autoCompactBuffer    int
+}
+
+// NewContextWindowTracker creates a tracker for the given model.
+func NewContextWindowTracker(model string, threshold float64, buffer int) *ContextWindowTracker {
+	return &ContextWindowTracker{
+		modelMaxTokens:       modelContextWindow(model),
+		autoCompactThreshold: threshold,
+		autoCompactBuffer:    buffer,
+	}
+}
+
+// modelContextWindow returns the context window size for a model.
+func modelContextWindow(model string) int {
+	// Default to 200K for all Anthropic models
+	return 200_000
+}
+
+// EffectiveWindow returns the usable context window minus output reserve.
+func (t *ContextWindowTracker) EffectiveWindow() int {
+	return t.modelMaxTokens - 20_000 // reserve 20K for output
+}
+
+// CompactThreshold returns the token count at which compaction should trigger.
+func (t *ContextWindowTracker) CompactThreshold() int {
+	effective := t.EffectiveWindow()
+	threshold := int(float64(effective) * t.autoCompactThreshold)
+	buf := effective - t.autoCompactBuffer
+	if threshold < buf {
+		return threshold
+	}
+	return buf
+}
+
+// ShouldCompact checks if the current message count exceeds the compaction threshold.
+func (t *ContextWindowTracker) ShouldCompact(messages []anthropic.MessageParam) bool {
+	tokens := estimateMessageParamsTokens(messages)
+	return tokens >= t.CompactThreshold()
+}
+
+// estimateMessageParamsTokens estimates tokens for API message params.
+func estimateMessageParamsTokens(messages []anthropic.MessageParam) int {
+	total := 0
+	for _, msg := range messages {
+		// Role overhead
+		total += 3
+		for _, block := range msg.Content {
+			if block.OfText != nil {
+				total += EstimateTokens(block.OfText.Text)
+			}
+			if block.OfToolUse != nil {
+				total += 10 // overhead
+				total += EstimateTokens(block.OfToolUse.Name)
+				if data, err := json.Marshal(block.OfToolUse.Input); err == nil {
+					total += EstimateTokens(string(data))
+				}
+			}
+			if block.OfToolResult != nil {
+				total += 8 // overhead
+				for _, c := range block.OfToolResult.Content {
+					if c.OfText != nil {
+						total += EstimateTokens(c.OfText.Text)
+					}
+				}
+			}
+		}
+	}
+	return total
+}
+
+// CompactionResultLLM holds the result of LLM-driven compaction.
+type CompactionResultLLM struct {
+	BoundaryText      string // system-role compact boundary marker
+	SummaryText       string // user-role summary
+	PreCompactTokens  int
+	PostCompactTokens int
+}
+
+// Compactor handles context compaction with LLM-based and fallback strategies.
+type Compactor struct {
+	mu                    sync.Mutex
+	maxTokens             int
+	compactThreshold      float64
+	compactBuffer         int
+	llmCompactFailedCount int
+	maxLLMCompactFailures int
+	disabled              bool // permanently disable LLM compaction after too many failures
+}
+
+// NewCompactor creates a new compactor with default settings.
+func NewCompactor() *Compactor {
+	return &Compactor{
+		maxTokens:             200_000,
+		compactThreshold:      0.75,
+		compactBuffer:         13_000,
+		llmCompactFailedCount: 0,
+		maxLLMCompactFailures: 3,
+	}
+}
+
+// ShouldCompact checks if compaction is needed based on current message count.
+func (c *Compactor) ShouldCompact(messages []anthropic.MessageParam) bool {
+	tracker := NewContextWindowTracker("", c.compactThreshold, c.compactBuffer)
+	return tracker.ShouldCompact(messages)
+}
+
+// Compact performs LLM-driven compaction, falling back to truncation on failure.
+// Returns true if compaction was performed, false if not needed or fallback used.
+// If LLM compaction succeeds, returns the summary text to inject.
+// If LLM compaction fails (too many failures), the caller should use existing truncation.
+func (c *Compactor) Compact(
+	messages []anthropic.MessageParam,
+	model string,
+	apiKey string,
+	baseURL string,
+) (summary string, performed bool) {
+	c.mu.Lock()
+	if c.disabled {
+		c.mu.Unlock()
+		return "", false
+	}
+	if c.llmCompactFailedCount >= c.maxLLMCompactFailures {
+		c.disabled = true
+		c.mu.Unlock()
+		return "", false
+	}
+	c.mu.Unlock()
+
+	tracker := NewContextWindowTracker(model, c.compactThreshold, c.compactBuffer)
+	if !tracker.ShouldCompact(messages) {
+		return "", false
+	}
+
+	result, err := compactConversationLLM(messages, model, apiKey, baseURL)
+	if err != nil {
+		c.mu.Lock()
+		c.llmCompactFailedCount++
+		if c.llmCompactFailedCount >= c.maxLLMCompactFailures {
+			c.disabled = true
+			fmt.Fprintf(os.Stderr, "\n[Compaction] LLM compaction disabled after %d consecutive failures, using truncation fallback\n", c.maxLLMCompactFailures)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n[Compaction] LLM compaction failed (%d/%d): %v\n", c.llmCompactFailedCount, c.maxLLMCompactFailures, err)
+		}
+		c.mu.Unlock()
+		return "", false
+	}
+
+	// Reset failure count on success
+	c.mu.Lock()
+	c.llmCompactFailedCount = 0
+	c.mu.Unlock()
+
+	fmt.Fprintf(os.Stderr, "\n[Compaction] auto: %d messages -> 2 (summary), ~%d tokens saved\n",
+		len(messages), result.PreCompactTokens-result.PostCompactTokens)
+
+	return result.SummaryText, true
+}
+
+// compactConversationLLM calls the LLM API to generate a conversation summary.
+func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string) (*CompactionResultLLM, error) {
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("no messages to compact")
+	}
+
+	preTokens := estimateMessageParamsTokens(messages)
+
+	// Append the summary prompt as the final user message
+	finalMsgs := make([]anthropic.MessageParam, len(messages)+1)
+	copy(finalMsgs, messages)
+	finalMsgs[len(messages)] = anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{
+			{OfText: &anthropic.TextBlockParam{Text: compactUserPrompt}},
+		},
+	}
+
+	opts := []option.RequestOption{
+		option.WithHeader("Authorization", "Bearer "+apiKey),
+		option.WithHeader("anthropic-version", "2023-06-01"),
+	}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	client := anthropic.NewClient(opts...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     model,
+		MaxTokens: 20000,
+		System: []anthropic.TextBlockParam{
+			{Text: compactSystemPrompt},
+		},
+		Messages: finalMsgs,
+	}, option.WithHTTPClient(&http.Client{
+		Timeout: 60 * time.Second,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("compact API error: %w", err)
+	}
+
+	// Extract summary text
+	var summaryText string
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			summaryText += block.Text
+		}
+	}
+	if summaryText == "" {
+		return nil, fmt.Errorf("no summary text in response")
+	}
+
+	boundaryText := fmt.Sprintf("[Previous conversation summary (%d tokens compressed)]", preTokens)
+	summaryContent := fmt.Sprintf("%s\n\n%s", boundaryText, summaryText)
+
+	postTokens := EstimateTokens(boundaryText) + EstimateTokens(summaryText) + 6 // role overhead
+
+	return &CompactionResultLLM{
+		BoundaryText:      boundaryText,
+		SummaryText:       summaryContent,
+		PreCompactTokens:  preTokens,
+		PostCompactTokens: postTokens,
+	}, nil
 }

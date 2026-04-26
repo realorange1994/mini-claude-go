@@ -23,6 +23,7 @@ type SkillMeta struct {
 	Requires    []string // simple dependency list (files, tools, env vars)
 	ExtBins     []string // extended_requires.bins
 	ExtEnv      []string // extended_requires.env
+	WhenToUse   string   // when_to_use field describing ideal usage scenarios
 }
 
 // SkillInfo represents metadata about a skill.
@@ -37,6 +38,7 @@ type SkillInfo struct {
 	Tags        []string `json:"tags"`
 	Version     string   `json:"version"`
 	MissingDeps []string `json:"missing_deps,omitempty"`
+	WhenToUse   string   `json:"when_to_use,omitempty"`
 }
 
 // Loader loads and parses skill definitions.
@@ -302,6 +304,7 @@ func (l *Loader) parseSkillFileLocked(name string, path string, source string) *
 		Tags:        meta.Tags,
 		Version:     meta.Version,
 		MissingDeps: missingDeps,
+		WhenToUse:   meta.WhenToUse,
 	}
 }
 
@@ -400,6 +403,8 @@ func parseFrontmatter(content string) SkillMeta {
 			} else {
 				currentKey = "requires"
 			}
+		case "when_to_use":
+			meta.WhenToUse = unquote(val)
 		}
 
 		// Handle extended_requires sub-keys

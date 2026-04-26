@@ -23,18 +23,23 @@ const (
 
 // Config holds all runtime configuration.
 type Config struct {
-	Model           string
-	APIKey          string
-	BaseURL         string
-	MaxTurns        int
-	MaxContextMsgs  int
-	PermissionMode  PermissionMode
-	AllowedCommands []string
-	DeniedPatterns  []string
-	ProjectDir      string
-	MCPManager      *mcp.Manager
-	SkillLoader     *skills.Loader
-	FileHistory     *SnapshotHistory
+	Model                  string
+	APIKey                 string
+	BaseURL                string
+	MaxTurns               int
+	MaxContextMsgs         int
+	PermissionMode         PermissionMode
+	AllowedCommands        []string
+	DeniedPatterns         []string
+	ProjectDir             string
+	MCPManager             *mcp.Manager
+	SkillLoader            *skills.Loader
+	SkillTracker           *skills.SkillTracker
+	FileHistory            *SnapshotHistory
+	AutoCompactEnabled     bool
+	AutoCompactThreshold   float64
+	AutoCompactBuffer      int
+	MaxCompactOutputTokens int
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -140,6 +145,7 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 	}
 	_ = loader.Refresh()
 	cfg.SkillLoader = loader
+	cfg.SkillTracker = skills.NewSkillTracker()
 
 	// Return found if any config was loaded
 	if cfg.APIKey != "" || cfg.Model != "" || len(mcpMgr.ListServers()) > 0 {
@@ -199,6 +205,7 @@ func RegisterMCPAndSkills(r *tools.Registry, cfg *Config) {
 	r.Register(&tools.MCPServerStatus{Manager: cfg.MCPManager})
 	r.Register(&tools.ReadSkillTool{Loader: cfg.SkillLoader})
 	r.Register(&tools.ListSkillsTool{Loader: cfg.SkillLoader})
+	r.Register(&tools.SearchSkillsTool{Loader: cfg.SkillLoader})
 }
 
 // Close cleans up resources held by the config (MCP servers, etc).

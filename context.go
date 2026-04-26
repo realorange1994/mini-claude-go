@@ -336,6 +336,33 @@ func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]
 	return entries
 }
 
+// AddCompactBoundary inserts a system-role text marker for LLM compaction.
+func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preCompactTokens int) {
+	text := fmt.Sprintf("[Conversation summary inserted — %d tokens compressed, trigger: %s]", preCompactTokens, trigger)
+	c.entries = append(c.entries, conversationEntry{
+		role:    "system",
+		content: text,
+	})
+}
+
+// AddSummary inserts a user-role summary message after compaction.
+func (c *ConversationContext) AddSummary(content string) {
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: content,
+	})
+}
+
+// Entries returns the conversation entries (for compactor access).
+func (c *ConversationContext) Entries() []conversationEntry {
+	return c.entries
+}
+
+// ReplaceEntries replaces all conversation entries (used by compactor).
+func (c *ConversationContext) ReplaceEntries(entries []conversationEntry) {
+	c.entries = entries
+}
+
 // LoadProjectInstructions reads CLAUDE.md from the project root.
 func LoadProjectInstructions(projectDir string) string {
 	if projectDir == "" {

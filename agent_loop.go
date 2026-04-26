@@ -17,6 +17,7 @@ import (
 
 	"miniclaudecode-go/tools"
 	"miniclaudecode-go/transcript"
+	"miniclaudecode-go/skills"
 )
 
 // AgentLoop drives the core agentic loop.
@@ -28,6 +29,8 @@ type AgentLoop struct {
 	client       anthropic.Client
 	snapshots    *SnapshotHistory
 	transcript   *transcript.Writer
+	skillTracker *skills.SkillTracker
+	compactor    *Compactor
 	useStream    bool
 	maxToolChars int    // max chars per tool result (default 8192)
 	toolTimeout  time.Duration // per-tool execution timeout (default 5min)
@@ -75,13 +78,15 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		client:      client,
 		snapshots:    cfg.FileHistory,
 		transcript:  tw,
+		skillTracker: cfg.SkillTracker,
+		compactor:   NewCompactor(),
 		useStream:   useStream,
 		maxToolChars: 8192,
 		toolTimeout:  5 * time.Minute,
 		maxTurns:     maxTurns,
 	}
 
-	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader)
+	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
 	ctx.SetSystemPrompt(sysPrompt)
 
 	return agent
@@ -135,13 +140,15 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		client:       client,
 		snapshots:    cfg.FileHistory,
 		transcript:   tw,
+		skillTracker: cfg.SkillTracker,
+		compactor:    NewCompactor(),
 		useStream:    useStream,
 		maxToolChars: 8192,
 		toolTimeout:  5 * time.Minute,
 		maxTurns:     maxTurns,
 	}
 
-	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader)
+	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
 	convCtx.SetSystemPrompt(sysPrompt)
 
 	return agent, nil
@@ -276,6 +283,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 	contextErrors := 0
 	const maxContextRecovery = 3 // Phase 1: truncate, Phase 2: aggressive truncate, Phase 3: give up
 
+	// Empty response tracking — prevents infinite loops on thinking-only responses
+	consecutiveEmptyResponses := 0
+	const maxEmptyResponses = 3
+
 	// Transition tracking (like Claude Code's state.transition)
 	// Records WHY we continued to the next iteration, for debugging.
 	var lastTransition string
@@ -288,6 +299,13 @@ func (a *AgentLoop) Run(userMessage string) string {
 			a.SetInterrupted(false) // reset for next request
 			return finalText
 		}
+
+		// Rebuild system prompt each turn to update skill discovery
+		if a.config.SkillLoader != nil {
+			sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker)
+			a.context.SetSystemPrompt(sysPrompt)
+		}
+
 		var toolCalls []map[string]any
 		var textParts []string
 		var err error
@@ -369,6 +387,24 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		if len(toolCalls) == 0 {
+			// No tool calls — could be a thinking-only response (model uses extended
+			// thinking but hasn't produced text yet) or a genuine final answer.
+			if len(textParts) == 0 {
+				// No text and no tool calls — thinking-only response
+				consecutiveEmptyResponses++
+				if consecutiveEmptyResponses >= maxEmptyResponses {
+					fmt.Fprintf(os.Stderr, "\n[ERR] No actionable response after %d attempts, giving up\n", maxEmptyResponses)
+					return fmt.Sprintf("Model returned no actionable response %d times in a row", maxEmptyResponses)
+				}
+				fmt.Fprintf(os.Stderr, "\n[WARN] No text/tool_use in response (attempt %d/%d), continuing...\n",
+					consecutiveEmptyResponses, maxEmptyResponses)
+				// Inject hint to encourage actual output
+				a.context.AddUserMessage("Please continue and provide your response in text or use a tool.")
+				lastTransition = "empty_response_retry"
+				continue
+			}
+			// Genuine final answer with text
+			consecutiveEmptyResponses = 0
 			// No tool calls — model gave final answer.
 			// Like Claude Code's stop hooks: the loop could continue here
 			// with additional checks (token budget, quality check, etc.)
@@ -381,7 +417,25 @@ func (a *AgentLoop) Run(userMessage string) string {
 			break
 		}
 
+		// Reset empty response counter on successful tool call
+		consecutiveEmptyResponses = 0
+
 		a.context.AddAssistantToolCalls(toolCalls)
+
+		// Track read_skill usage for skill tracker
+		if a.skillTracker != nil {
+			for _, call := range toolCalls {
+				if name, _ := call["name"].(string); name == "read_skill" {
+					if input, ok := call["input"].(map[string]any); ok {
+						if skillName, _ := input["name"].(string); skillName != "" {
+							a.skillTracker.MarkRead(skillName)
+							a.skillTracker.MarkUsed(skillName)
+						}
+					}
+				}
+			}
+		}
+
 		a.executeToolCallsConcurrent(toolCalls)
 
 		// Check for interrupt after tool execution
@@ -438,8 +492,8 @@ func (a *AgentLoop) Close() {
 func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	toolParams := a.buildToolParams()
 
-	// Try compaction before sending to API
-	a.context.CompactContext()
+	// Try LLM compaction before sending to API
+	a.tryCompaction()
 
 	messages := a.context.BuildMessages()
 
@@ -506,7 +560,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 	const maxStreamRetries = 9 // 1 attempt + 9 retries = 10 total
 
 	toolParams := a.buildToolParams()
-	a.context.CompactContext()
+	a.tryCompaction()
 	messages := a.context.BuildMessages()
 
 	params := anthropic.MessageNewParams{
@@ -1271,6 +1325,26 @@ func getStringSlice(schema map[string]any, key string) []string {
 		}
 	}
 	return nil
+}
+
+// tryCompaction attempts LLM-driven compaction, falling back to truncation.
+func (a *AgentLoop) tryCompaction() {
+	if a.compactor == nil {
+		a.context.CompactContext()
+		return
+	}
+
+	messages := a.context.BuildMessages()
+	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL)
+	if performed && summary != "" {
+		// Inject boundary marker and summary into context
+		a.context.AddCompactBoundary(CompactTriggerAuto, 0)
+		a.context.AddSummary(summary)
+		return
+	}
+
+	// LLM compaction not performed or failed — use truncation fallback
+	a.context.CompactContext()
 }
 
 // isContextLengthError checks if the error is a context window overflow.

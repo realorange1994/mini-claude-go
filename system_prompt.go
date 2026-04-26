@@ -44,7 +44,7 @@ var modeDescriptions = map[string]string{
 }
 
 // BuildSystemPrompt constructs the system prompt from tool list, mode, project instructions, and skills.
-func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir string, skillLoader *skills.Loader) string {
+func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker) string {
 	toolList := buildToolList(registry)
 
 	modeDesc := modeDescriptions[permissionMode]
@@ -61,7 +61,38 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 	// Build skills section
 	var skillsSection string
 	if skillLoader != nil {
-		// Add always-on skills to system prompt
+		var skillGuidance string
+		if skillTracker != nil {
+			skillGuidance = "\n## Skill System Guidance\n\n" +
+				"BLOCKING REQUIREMENT: When a skill matches the user's request, you MUST invoke the relevant skill tool BEFORE generating any other response.\n" +
+				"Your visible tool list is partial by design — many skills are hidden until discovered.\n" +
+				"Discovery steps:\n" +
+				"1. Use **search_skills** to find skills by topic (e.g., search_skills 'testing')\n" +
+				"2. Use **read_skill** to load a skill's full instructions\n" +
+				"3. Follow the skill's instructions precisely\n\n"
+		}
+
+		// Get unsent skills (not yet shown in system prompt)
+		allSkills := skillLoader.ListSkills(false)
+		var unsentSkills []skills.SkillInfo
+		if skillTracker != nil {
+			unsentSkills = skillTracker.GetUnsentSkills(allSkills)
+			// Mark unsent skills as shown
+			for _, s := range unsentSkills {
+				if !s.Always {
+					skillTracker.MarkShown(s.Name)
+				}
+			}
+		} else {
+			// No tracker — treat all non-always skills as unsent (first run)
+			for _, s := range allSkills {
+				if !s.Always {
+					unsentSkills = append(unsentSkills, s)
+				}
+			}
+		}
+
+		// Always-on skills section
 		alwaysSkills := skillLoader.GetAlwaysSkills()
 		if len(alwaysSkills) > 0 {
 			var skillNames []string
@@ -71,13 +102,52 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 			skillsSection = skillLoader.BuildSystemPrompt(skillNames)
 		}
 
-		// Add skills summary for discovery
+		// "New This Turn" section for unsent non-always skills
+		var newSkills []skills.SkillInfo
+		for _, s := range unsentSkills {
+			if !s.Always {
+				newSkills = append(newSkills, s)
+			}
+		}
+		if len(newSkills) > 0 {
+			var sb strings.Builder
+			sb.WriteString("\n## Available Skills (New This Turn)\n\n")
+			sb.WriteString("The following skills are newly available. Use read_skill to load full instructions.\n\n")
+			budget := 4000
+			used := 0
+			for _, s := range newSkills {
+				entry := fmt.Sprintf("- **%s**: %s", s.Name, s.Description)
+				if s.WhenToUse != "" {
+					entry += fmt.Sprintf(" (%s)", s.WhenToUse)
+				}
+				if !s.Available {
+					entry += " (unavailable)"
+				}
+				entry += "\n"
+				if used+len(entry) > budget {
+					break
+				}
+				sb.WriteString(entry)
+				used += len(entry)
+			}
+			if skillsSection != "" {
+				skillsSection += "\n"
+			}
+			skillsSection += sb.String()
+		}
+
+		// Skills summary for already-shown skills
 		skillsSummary := skillLoader.BuildSkillsSummary()
 		if skillsSummary != "" {
 			if skillsSection != "" {
-				skillsSection += "\n\n"
+				skillsSection += "\n"
 			}
 			skillsSection += "## Available Skills\n\n" + skillsSummary
+		}
+
+		// Prepend skill guidance
+		if skillGuidance != "" && skillsSection != "" {
+			skillsSection = skillGuidance + skillsSection
 		}
 	}
 

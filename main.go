@@ -14,20 +14,6 @@ import (
 	"time"
 )
 
-const banner = `
-  +====================================+
-  |       miniClaudeCode v0.1.0        |
-  |  Distilled Agent Loop Framework    |
-  +====================================+
-
-  Type your message to start. Commands:
-    /tools   -- list available tools
-    /mode    -- show/change permission mode
-    /help    -- show help
-    /quit    -- exit
-    /resume  -- resume from a previous transcript
-`
-
 func main() {
 	model := flag.String("model", "", "Anthropic model to use")
 	apiKey := flag.String("api-key", "", "API key (overrides ANTHROPIC_API_KEY env and config file)")
@@ -143,7 +129,6 @@ func runInteractive(agent *AgentLoop) {
 	}()
 
 	defer agent.Close()
-	fmt.Print(banner)
 
 	// Detect if stdin is a terminal (interactive) or piped
 	isTerminal := func() bool {
@@ -237,7 +222,7 @@ func runInteractive(agent *AgentLoop) {
 				}
 				continue
 			case "/help":
-				fmt.Print(banner)
+				fmt.Println("Commands: /tools, /mode, /resume, /help, /quit")
 				continue
 			case "/resume":
 				if len(parts) > 1 {
@@ -262,7 +247,7 @@ func runInteractive(agent *AgentLoop) {
 				}
 				continue
 			default:
-				fmt.Printf("Unknown command: %s. Type /help for help.\n", cmd)
+				fmt.Printf("Unknown command: %s\n", cmd)
 				continue
 			}
 		}

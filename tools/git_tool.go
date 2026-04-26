@@ -12,7 +12,7 @@ type GitTool struct{}
 
 func (*GitTool) Name() string    { return "git" }
 func (*GitTool) Description() string {
-	return "Execute Git version control operations. Supports clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, and worktree operations."
+	return "Execute Git version control operations. Supports clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, worktree, rm, mv, restore, switch, cherry-pick, revert, clean, blame, reflog, and shortlog operations."
 }
 
 func (*GitTool) InputSchema() map[string]interface{} {
@@ -27,6 +27,8 @@ func (*GitTool) InputSchema() map[string]interface{} {
 					"branch", "checkout", "merge", "rebase", "stash", "reset",
 					"tag", "status", "diff", "log", "remote", "show", "describe",
 					"ls-files", "ls-tree", "rev-parse", "rev-list", "worktree",
+					"rm", "mv", "restore", "switch", "cherry-pick", "revert",
+					"clean", "blame", "reflog", "shortlog",
 				},
 			},
 			"repo": map[string]interface{}{
@@ -82,6 +84,50 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			"max_count": map[string]interface{}{
 				"type":        "integer",
 				"description": "Maximum number of entries to return (for log, rev-list, default: 20)",
+			},
+			"staged": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Operate on staged changes (for diff, rm)",
+			},
+			"force": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Force operation (for checkout, clean, restore, switch, rm)",
+			},
+			"ours_theirs": map[string]interface{}{
+				"type":        "string",
+				"description": "Conflict resolution: 'ours' or 'theirs' (for checkout, merge)",
+			},
+			"dry_run": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Show what would be done without making changes (for clean)",
+			},
+			"mainline": map[string]interface{}{
+				"type":        "integer",
+				"description": "Mainline parent number for cherry-picking/reverting a merge commit (for cherry-pick, revert)",
+			},
+			"author": map[string]interface{}{
+				"type":        "string",
+				"description": "Author string (e.g. 'Name <email>') (for commit, log)",
+			},
+			"cached": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Show staged files instead of working tree (for diff)",
+			},
+			"recursive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Recurse into subdirectories (for clean)",
+			},
+			"source": map[string]interface{}{
+				"type":        "string",
+				"description": "Source branch/commit for switch (for switch)",
+			},
+			"no_commit": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Apply changes without committing (for cherry-pick)",
+			},
+			"no_edit": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Don't edit the commit message (for revert)",
 			},
 		},
 		"required": []string{"operation"},
@@ -305,6 +351,129 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 				args = append(args, name)
 			}
 		}
+
+	case "rm":
+		args = []string{"rm"}
+		if force, _ := params["force"].(bool); force {
+			args = append(args, "-f")
+		}
+		if staged, _ := params["staged"].(bool); staged {
+			args = append(args, "--cached")
+		}
+		if files := getStringArray(params, "files"); len(files) > 0 {
+			args = append(args, files...)
+		} else {
+			return nil, fmt.Errorf("files are required for rm")
+		}
+
+	case "mv":
+		source, _ := params["source"].(string)
+		if source == "" {
+			return nil, fmt.Errorf("source is required for mv")
+		}
+		dest, _ := params["path"].(string)
+		if dest == "" {
+			return nil, fmt.Errorf("path (destination) is required for mv")
+		}
+		args = []string{"mv"}
+		if force, _ := params["force"].(bool); force {
+			args = append(args, "-f")
+		}
+		args = append(args, source, dest)
+
+	case "restore":
+		args = []string{"restore"}
+		if staged, _ := params["staged"].(bool); staged {
+			args = append(args, "--staged")
+		}
+		if force, _ := params["force"].(bool); force {
+			args = append(args, "--force")
+		}
+		if files := getStringArray(params, "files"); len(files) > 0 {
+			args = append(args, files...)
+		} else {
+			args = append(args, ".")
+		}
+
+	case "switch":
+		args = []string{"switch"}
+		if force, _ := params["force"].(bool); force {
+			args = append(args, "--force")
+		}
+		if source, _ := params["source"].(string); source != "" {
+			args = append(args, source)
+		} else if branch, _ := params["branch"].(string); branch != "" {
+			args = append(args, branch)
+		} else {
+			return nil, fmt.Errorf("branch or source is required for switch")
+		}
+
+	case "cherry-pick":
+		target, _ := params["target"].(string)
+		if target == "" {
+			return nil, fmt.Errorf("target (commit) is required for cherry-pick")
+		}
+		args = []string{"cherry-pick"}
+		if mainline, ok := params["mainline"].(float64); ok {
+			args = append(args, "-m", fmt.Sprintf("%d", int(mainline)))
+		}
+		if noCommit, _ := params["no_commit"].(bool); noCommit {
+			args = append(args, "--no-commit")
+		}
+		args = append(args, target)
+
+	case "revert":
+		target, _ := params["target"].(string)
+		if target == "" {
+			return nil, fmt.Errorf("target (commit) is required for revert")
+		}
+		args = []string{"revert"}
+		if mainline, ok := params["mainline"].(float64); ok {
+			args = append(args, "-m", fmt.Sprintf("%d", int(mainline)))
+		}
+		if noEdit, _ := params["no_edit"].(bool); noEdit {
+			args = append(args, "--no-edit")
+		}
+		args = append(args, target)
+
+	case "clean":
+		args = []string{"clean"}
+		if force, _ := params["force"].(bool); force {
+			args = append(args, "-f")
+		}
+		if dryRun, _ := params["dry_run"].(bool); dryRun {
+			args = append(args, "-n")
+		}
+		if recursive, _ := params["recursive"].(bool); recursive {
+			args = append(args, "-d")
+		}
+
+	case "blame":
+		file, _ := params["path"].(string)
+		if file == "" {
+			return nil, fmt.Errorf("path (file) is required for blame")
+		}
+		args = []string{"blame", file}
+
+	case "reflog":
+		args = []string{"reflog"}
+		if sub, _ := params["branch"].(string); sub != "" {
+			args = append(args, "show", sub)
+		} else {
+			args = append(args, "show")
+		}
+		n := 20
+		if mc, ok := params["max_count"].(float64); ok {
+			n = int(mc)
+		}
+		args = append(args, fmt.Sprintf("-%d", n))
+
+	case "shortlog":
+		n := 20
+		if mc, ok := params["max_count"].(float64); ok {
+			n = int(mc)
+		}
+		args = []string{"shortlog", "-sn", fmt.Sprintf("-%d", n), "HEAD"}
 
 	default:
 		return nil, fmt.Errorf("unknown operation: %s", operation)
