@@ -62,7 +62,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"target": map[string]interface{}{
 				"type":        "string",
-				"description": "Target branch or commit (for merge, rebase, describe)",
+				"description": "Target branch or commit (for merge, rebase, describe, show, cherry-pick, revert)",
 			},
 			"flags": map[string]interface{}{
 				"type":        "array",
