@@ -599,6 +599,65 @@ func (h *SnapshotHistory) AddTag(filePath, tag string) bool {
 	return true
 }
 
+// AnnotateSnapshot adds or appends a user annotation to a specific version's description.
+// Version is 1-indexed among active (non-deleted) snapshots.
+// If the version already has a description, the annotation is appended with " | " separator.
+// Returns true if annotation was added.
+func (h *SnapshotHistory) AnnotateSnapshot(filePath string, version int, message string) bool {
+	if message == "" {
+		return false
+	}
+
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return false
+	}
+
+	h.mu.Lock()
+	snaps := h.snapshots[absPath]
+	h.mu.Unlock()
+
+	if len(snaps) == 0 {
+		return false
+	}
+
+	// Find the version by 1-indexed position among non-deleted snapshots
+	idx := -1
+	ver := 0
+	for i, s := range snaps {
+		if s.Deleted {
+			continue
+		}
+		ver++
+		if ver == version {
+			idx = i
+			break
+		}
+	}
+
+	if idx < 0 {
+		return false
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Re-check since we released lock
+	if idx >= len(h.snapshots[absPath]) {
+		return false
+	}
+
+	target := &h.snapshots[absPath][idx]
+	if target.Description != "" {
+		target.Description = fmt.Sprintf("%s | %s", target.Description, message)
+	} else {
+		target.Description = message
+	}
+
+	_ = h.persist(*target)
+	return true
+}
+
 // TagEntry represents a tagged version.
 type TagEntry struct {
 	Version int
@@ -638,6 +697,137 @@ func (h *SnapshotHistory) ListTags(filePath string) []TagEntry {
 		}
 	}
 	return tags
+}
+
+// SearchTagResult represents a search result for a tag in one file.
+type SearchTagResult struct {
+	Version     int
+	Description string
+	Size        int
+}
+
+// SearchTag finds versions by tag name in one file.
+func (h *SnapshotHistory) SearchTag(filePath, tag string) []SearchTagResult {
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return nil
+	}
+
+	snaps := h.ListSnapshots(absPath)
+	var results []SearchTagResult
+	ver := 0
+	for _, s := range snaps {
+		if s.Deleted {
+			continue
+		}
+		ver++
+		if strings.Contains(s.Description, "["+tag+"]") {
+			results = append(results, SearchTagResult{
+				Version:     ver,
+				Description: s.Description,
+				Size:        len(s.Content),
+			})
+		}
+	}
+	return results
+}
+
+// RemoveTag removes a tag from a specific version (1-indexed among active snapshots).
+// Returns true if tag was found and removed.
+func (h *SnapshotHistory) RemoveTag(filePath string, version int, tag string) bool {
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return false
+	}
+
+	tagPattern := "[" + tag + "]"
+
+	h.mu.Lock()
+	snaps := h.snapshots[absPath]
+	h.mu.Unlock()
+
+	// Find the version
+	idx := -1
+	ver := 0
+	for i, s := range snaps {
+		if s.Deleted {
+			continue
+		}
+		ver++
+		if ver == version {
+			idx = i
+			break
+		}
+	}
+
+	if idx < 0 || !strings.Contains(snaps[idx].Description, tagPattern) {
+		return false
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Re-check since we released lock
+	if idx >= len(h.snapshots[absPath]) {
+		return false
+	}
+
+	snaps = h.snapshots[absPath]
+	desc := snaps[idx].Description
+	desc = strings.Replace(desc, tagPattern, "", 1)
+
+	// Clean up whitespace
+	desc = strings.TrimSpace(desc)
+	// Clean up trailing spaces before punctuation
+	for strings.HasSuffix(desc, " |") {
+		desc = strings.TrimSuffix(desc, " |")
+	}
+	// Clean up leading "| "
+	for strings.HasPrefix(desc, "| ") || strings.HasPrefix(desc, "|") {
+		desc = strings.TrimLeftFunc(desc, func(r rune) bool {
+			return r == '|' || r == ' '
+		})
+	}
+	// Collapse multiple spaces
+	fields := strings.Fields(desc)
+	desc = strings.Join(fields, " ")
+
+	h.snapshots[absPath][idx].Description = desc
+	h.persist(h.snapshots[absPath][idx])
+	return true
+}
+
+// SearchTagAll finds versions by tag across all tracked files.
+type SearchTagAllResult struct {
+	FilePath    string
+	Version     int
+	Description string
+}
+
+func (h *SnapshotHistory) SearchTagAll(tag string) []SearchTagAllResult {
+	h.mu.RLock()
+	files := h.ListAllFiles()
+	h.mu.RUnlock()
+
+	var results []SearchTagAllResult
+	for _, f := range files {
+		snaps := h.ListSnapshots(f)
+		ver := 0
+		for _, s := range snaps {
+			if s.Deleted {
+				continue
+			}
+			ver++
+			if strings.Contains(s.Description, "["+tag+"]") {
+				results = append(results, SearchTagAllResult{
+					FilePath:    f,
+					Version:     ver,
+					Description: s.Description,
+				})
+			}
+		}
+	}
+	return results
 }
 
 // TimelineEntry represents a single entry in the cross-file timeline.
