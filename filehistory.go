@@ -323,7 +323,14 @@ func (h *SnapshotHistory) SnapshotCount(filePath string) int {
 	if err != nil {
 		return 0
 	}
-	return len(h.ListSnapshots(absPath))
+	snaps := h.ListSnapshots(absPath)
+	count := 0
+	for _, s := range snaps {
+		if !s.Deleted {
+			count++
+		}
+	}
+	return count
 }
 
 // Clear removes all in-memory snapshots. Disk files are left untouched.
@@ -432,11 +439,23 @@ func (h *SnapshotHistory) ResolveVersion(filePath, spec string) (int, error) {
 		return 0, fmt.Errorf("no snapshots for %s", absPath)
 	}
 
+	// Build active (non-deleted) view — this is what users see as "v1, v2, v3..."
+	var active []FileSnapshot
+	for _, s := range snaps {
+		if !s.Deleted {
+			active = append(active, s)
+		}
+	}
+	total := len(active)
+	if total == 0 {
+		return 0, fmt.Errorf("no active snapshots for %s", absPath)
+	}
+
 	spec = strings.TrimSpace(spec)
 
 	// "current" / "latest"
 	if spec == "current" || spec == "latest" {
-		return len(snaps), nil
+		return total, nil
 	}
 
 	// "v3" or "3" — absolute version number
@@ -446,29 +465,32 @@ func (h *SnapshotHistory) ResolveVersion(filePath, spec string) (int, error) {
 	if v, err := fmt.Sscanf(spec, "%d", new(int)); v == 1 && err == nil {
 		var n int
 		fmt.Sscanf(spec, "%d", &n)
-		if n < 1 || n > len(snaps) {
-			return 0, fmt.Errorf("version %d out of range (1-%d)", n, len(snaps))
+		if n < 1 || n > total {
+			return 0, fmt.Errorf("version %d out of range (1-%d)", n, total)
 		}
 		return n, nil
 	}
 
-	// "last2" — N versions back from current
+	// "lastN" — N versions back from current
 	if strings.HasPrefix(spec, "last") {
 		var n int
 		if _, err := fmt.Sscanf(spec[4:], "%d", &n); err == nil && n >= 1 {
-			v := len(snaps) - n
-			if v < 1 {
-				return 0, fmt.Errorf("last%d is out of range (only %d versions)", n, len(snaps))
+			if n > 0 && n < total {
+				return total - n, nil
 			}
-			return v, nil
+			return 0, fmt.Errorf("last%d is out of range (only %d versions)", n, total)
 		}
 	}
 
-	// Tag name — search descriptions for [spec]
+	// Tag name — search descriptions in active snapshots only
 	tag := "[" + spec + "]"
-	for i, s := range snaps {
-		if strings.Contains(s.Description, tag) {
-			return i + 1, nil
+	activeVersion := 0
+	for _, s := range snaps {
+		if !s.Deleted {
+			activeVersion++
+		}
+		if strings.Contains(s.Description, tag) && !s.Deleted {
+			return activeVersion, nil
 		}
 	}
 
@@ -531,12 +553,25 @@ func (h *SnapshotHistory) ListTags(filePath string) []TagEntry {
 	snaps := h.ListSnapshots(absPath)
 	re := regexp.MustCompile(`\[([^\]]+)\]`)
 
+	// Build active view for version numbering
+	activeIdx := make(map[int]int) // snaps index -> active index (1-based)
+	activeCount := 0
+	for i, s := range snaps {
+		if !s.Deleted {
+			activeCount++
+			activeIdx[i] = activeCount
+		}
+	}
+
 	var tags []TagEntry
 	for i, s := range snaps {
+		if s.Deleted {
+			continue
+		}
 		matches := re.FindAllStringSubmatch(s.Description, -1)
 		for _, m := range matches {
 			if len(m) > 1 {
-				tags = append(tags, TagEntry{Version: i + 1, Tag: m[1]})
+				tags = append(tags, TagEntry{Version: activeIdx[i], Tag: m[1]})
 			}
 		}
 	}
