@@ -940,10 +940,33 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 	}
 	elapsed := time.Since(start)
 
-	// Auto-snapshot after write/edit tools (captures new content)
-	if !cancelled && !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
+	// Post-snapshot for write tools: capture the new state with a meaningful description
+	if !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path, ok := input["path"].(string); ok && path != "" {
-			_ = a.snapshots.TakeSnapshotWithDesc(path, "before " + toolName)
+			desc := toolName
+			if toolName == "edit_file" {
+				if oldStr, ok2 := input["old_string"].(string); ok2 {
+					if newStr, ok3 := input["new_string"].(string); ok3 {
+						oldPreview := limitStr(oldStr, 50)
+						newPreview := limitStr(newStr, 50)
+						desc = fmt.Sprintf("edit: '%s' -> '%s'", oldPreview, newPreview)
+					}
+				}
+			}
+			_ = a.snapshots.TakeSnapshotWithDesc(path, desc)
+		}
+	}
+
+	// rm/rmrf cleanup: clear snapshot history for deleted files
+	if !result.IsError && toolName == "fileops" {
+		if op, ok := input["operation"].(string); ok && (op == "rm" || op == "rmrf") {
+			if path, ok2 := input["path"].(string); ok2 && path != "" {
+				if op == "rm" {
+					a.snapshots.ClearPath(path)
+				} else {
+					a.snapshots.ClearUnderDir(path)
+				}
+			}
 		}
 	}
 
@@ -1056,6 +1079,36 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 		}
 	}
 	elapsed := time.Since(start)
+
+	// Post-snapshot for write tools: capture the new state with a meaningful description
+	if !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
+		if path, ok := input["path"].(string); ok && path != "" {
+			desc := toolName
+			if toolName == "edit_file" {
+				if oldStr, ok2 := input["old_string"].(string); ok2 {
+					if newStr, ok3 := input["new_string"].(string); ok3 {
+						oldPreview := limitStr(oldStr, 50)
+						newPreview := limitStr(newStr, 50)
+						desc = fmt.Sprintf("edit: '%s' -> '%s'", oldPreview, newPreview)
+					}
+				}
+			}
+			_ = a.snapshots.TakeSnapshotWithDesc(path, desc)
+		}
+	}
+
+	// rm/rmrf cleanup: clear snapshot history for deleted files
+	if !result.IsError && toolName == "fileops" {
+		if op, ok := input["operation"].(string); ok && (op == "rm" || op == "rmrf") {
+			if path, ok2 := input["path"].(string); ok2 && path != "" {
+				if op == "rm" {
+					a.snapshots.ClearPath(path)
+				} else {
+					a.snapshots.ClearUnderDir(path)
+				}
+			}
+		}
+	}
 
 	output := a.truncateOutput(result.Output)
 
