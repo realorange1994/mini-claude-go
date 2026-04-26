@@ -15,9 +15,11 @@ const maxGrepLineLen = 500
 // GrepTool searches file contents using regex. Uses ripgrep if available, otherwise Go regexp.
 type GrepTool struct{}
 
-func (*GrepTool) Name() string        { return "grep" }
+func (*GrepTool) Name() string { return "grep" }
 func (*GrepTool) Description() string {
-	return "Search file contents using regex. Uses ripgrep (rg) if available, otherwise falls back to Go regexp."
+	return "Search file contents using regex in a codebase. Uses ripgrep (rg) if available, otherwise falls back to Go regexp. " +
+		"Supports glob and language type filters, context lines, and output modes. " +
+		"For advanced ripgrep features (multiline, PCRE2, JSON output, etc.) use the exec tool to call rg directly."
 }
 
 func (*GrepTool) InputSchema() map[string]any {
@@ -26,55 +28,64 @@ func (*GrepTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"pattern": map[string]any{
 				"type":        "string",
-				"description": "Regex pattern to search for.",
+				"description": "Regex pattern to search for. For literal text, use fixed_strings=true instead of escaping special regex characters.",
 			},
 			"path": map[string]any{
 				"type":        "string",
-				"description": "File or directory to search (default: current directory).",
+				"description": "File or directory to search in. Defaults to current directory. To avoid scanning too many files, use max_depth to limit directory traversal.",
 			},
 			"glob": map[string]any{
 				"type":        "string",
-				"description": "Glob to filter files (e.g. '*.py').",
+				"description": "Glob to filter files (e.g. '*.py'). Only files matching this pattern are searched.",
 			},
 			"type": map[string]any{
 				"type":        "string",
-				"description": "Language type filter (e.g. 'go', 'py', 'js', 'ts', 'rust', 'java').",
+				"description": "Language type filter. Common values: go, py, js, ts, rust, java, sh, yaml, json, md, html, css.",
 			},
-			"case_insensitive": map[string]any{
+			"ignore_case": map[string]any{
 				"type":        "boolean",
 				"description": "Case insensitive search (default: false).",
 			},
+			"case_insensitive": map[string]any{
+				"type":        "boolean",
+				"description": "Alias for ignore_case. Case insensitive search (default: false).",
+			},
 			"fixed_strings": map[string]any{
 				"type":        "boolean",
-				"description": "Treat pattern as literal string, not regex (default: false).",
+				"description": "Treat pattern as a literal string, not regex (default: false).",
 			},
 			"output_mode": map[string]any{
 				"type":        "string",
-				"description": "Output mode: 'content' (default), 'files_with_matches', or 'count'.",
+				"enum":        []string{"content", "files_with_matches", "count"},
+				"description": "Output mode: 'content' (default) shows matching lines, 'files_with_matches' shows file paths, 'count' shows per-file match counts.",
 			},
-			"count_matches": map[string]any{
-				"type":        "boolean",
-				"description": "Count per-line match occurrences (not just matching lines). Only with content mode.",
+			"context": map[string]any{
+				"type":        "integer",
+				"description": "Lines of context before and after each match (default: 0).",
 			},
 			"context_before": map[string]any{
 				"type":        "integer",
-				"description": "Lines of context before each match (rg only, default: 0).",
+				"description": "Lines of context before each match (rg only, default: 0). Overrides context if set.",
 			},
 			"context_after": map[string]any{
 				"type":        "integer",
-				"description": "Lines of context after each match (rg only, default: 0).",
+				"description": "Lines of context after each match (rg only, default: 0). Overrides context if set.",
+			},
+			"max_depth": map[string]any{
+				"type":        "integer",
+				"description": "Maximum directory depth to search. Limits how many levels of subdirectories to traverse. Useful for avoiding scanning too many files (default: unlimited).",
+			},
+			"max_filesize": map[string]any{
+				"type":        "string",
+				"description": "Maximum file size to search (e.g. '1M', '500K', '100B'). Files larger than this are skipped. Only applies when ripgrep is available.",
 			},
 			"head_limit": map[string]any{
 				"type":        "integer",
-				"description": "Maximum number of results (default: 250).",
+				"description": "Maximum number of results to return (default: 250).",
 			},
 			"offset": map[string]any{
 				"type":        "integer",
 				"description": "Skip the first N results for pagination (default: 0).",
-			},
-			"context": map[string]any{
-				"type":        "integer",
-				"description": "Lines of context before and after each match (Go fallback only, default: 0, max: 3).",
 			},
 		},
 		"required": []string{"pattern"},
@@ -97,7 +108,14 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 
 	include, _ := params["glob"].(string)
 	typeFilter, _ := params["type"].(string)
-	caseInsensitive, _ := params["case_insensitive"].(bool)
+
+	// Support both ignore_case and case_insensitive
+	caseInsensitive, _ := params["ignore_case"].(bool)
+	if !caseInsensitive {
+		if ci, _ := params["case_insensitive"].(bool); ci {
+			caseInsensitive = true
+		}
+	}
 	fixedStrings, _ := params["fixed_strings"].(bool)
 	countMatches, _ := params["count_matches"].(bool)
 	outputMode, _ := params["output_mode"].(string)
@@ -116,43 +134,20 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 	if headLimit <= 0 {
 		headLimit = maxGrepMatches
 	}
-	ctxBefore := 0
-	if cb, ok := params["context_before"]; ok {
-		switch v := cb.(type) {
+
+	// Parse max_depth
+	maxDepth := 0
+	if md, ok := params["max_depth"]; ok {
+		switch v := md.(type) {
 		case float64:
-			ctxBefore = int(v)
+			maxDepth = int(v)
 		case int:
-			ctxBefore = v
-		}
-	}
-	ctxAfter := 0
-	if ca, ok := params["context_after"]; ok {
-		switch v := ca.(type) {
-		case float64:
-			ctxAfter = int(v)
-		case int:
-			ctxAfter = v
+			maxDepth = v
 		}
 	}
 
-	// Combined 'context' param
-	ctxCombined := 0
-	if c, ok := params["context"]; ok {
-		switch v := c.(type) {
-		case float64:
-			ctxCombined = int(v)
-		case int:
-			ctxCombined = v
-		}
-	}
-	if ctxCombined > 0 {
-		if ctxBefore == 0 {
-			ctxBefore = ctxCombined
-		}
-		if ctxAfter == 0 {
-			ctxAfter = ctxCombined
-		}
-	}
+	// Parse max_filesize
+	maxFilesize, _ := params["max_filesize"].(string)
 
 	// Parse offset
 	offset := 0
@@ -165,10 +160,35 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
-	if _, err := exec.LookPath("rg"); err == nil {
-		return rgSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, ctxBefore, ctxAfter, headLimit, offset)
+	// Parse context params (combined takes priority if before/after not set)
+	ctxBefore := parseIntParam(params, "context_before")
+	ctxAfter := parseIntParam(params, "context_after")
+	ctxCombined := parseIntParam(params, "context")
+	if ctxCombined > 0 {
+		if ctxBefore == 0 {
+			ctxBefore = ctxCombined
+		}
+		if ctxAfter == 0 {
+			ctxAfter = ctxCombined
+		}
 	}
-	return goSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, headLimit, offset, ctxCombined, countMatches)
+
+	if _, err := exec.LookPath("rg"); err == nil {
+		return rgSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesize)
+	}
+	return goSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, headLimit, offset, ctxCombined, countMatches, maxDepth)
+}
+
+func parseIntParam(params map[string]any, key string) int {
+	if v, ok := params[key]; ok {
+		switch val := v.(type) {
+		case float64:
+			return int(val)
+		case int:
+			return val
+		}
+	}
+	return 0
 }
 
 var typeMap = map[string][]string{
@@ -187,7 +207,7 @@ var typeMap = map[string][]string{
 	"css":    {".css", ".scss", ".sass"},
 }
 
-func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, ctxBefore, ctxAfter, headLimit, offset int) ToolResult {
+func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string) ToolResult {
 	args := []string{"--no-heading", "--line-number"}
 
 	switch outputMode {
@@ -208,6 +228,15 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	}
 	if ctxAfter > 0 {
 		args = append(args, "-A", fmt.Sprintf("%d", ctxAfter))
+	}
+
+	// Limit directory traversal depth
+	if maxDepth > 0 {
+		args = append(args, "--max-depth", fmt.Sprintf("%d", maxDepth))
+	}
+	// Skip large files
+	if maxFilesize != "" {
+		args = append(args, "--max-filesize", maxFilesize)
 	}
 
 	args = append(args, "-m", fmt.Sprintf("%d", headLimit))
@@ -248,7 +277,7 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	return ToolResult{Output: strings.Join(lines, "\n")}
 }
 
-func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, headLimit, offset, ctxLines int, countMatches bool) ToolResult {
+func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, headLimit, offset, ctxLines int, countMatches bool, maxDepth int) ToolResult {
 	searchPattern := pattern
 	if caseInsensitive {
 		searchPattern = "(?i)" + searchPattern
@@ -278,8 +307,16 @@ func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	if info.Mode().IsRegular() {
 		files = []string{path}
 	} else {
+		baseDepth := strings.Count(filepath.Clean(path), string(filepath.Separator))
 		_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
+				// Enforce max_depth
+				if maxDepth > 0 {
+					curDepth := strings.Count(filepath.Clean(p), string(filepath.Separator)) - baseDepth
+					if curDepth >= maxDepth {
+						return filepath.SkipDir
+					}
+				}
 				if isIgnoredDir(d.Name()) {
 					return filepath.SkipDir
 				}
