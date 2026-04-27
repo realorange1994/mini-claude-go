@@ -39,7 +39,7 @@ You have access to the following tools to help the user with software engineerin
 8. For file edits, provide enough context in old_string to uniquely match.
 9. Be concise and direct in your responses.
 10. On Windows, use PowerShell syntax and commands (e.g., Get-ChildItem, Test-Path, Copy-Item). On Unix, use bash commands.
-11. Use git directly for git operations -- it is available in the PATH.
+11. Prefer built-in tools over exec commands. For git operations, use the git tool instead of exec. For file searches, use grep and glob instead of exec. Always choose the most appropriate built-in tool when available.
 
 ## Tool Parameters
 
