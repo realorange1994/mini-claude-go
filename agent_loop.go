@@ -36,6 +36,7 @@ type AgentLoop struct {
 	toolTimeout  time.Duration // per-tool execution timeout (default 5min)
 	maxTurns     int    // hard cap on turns (default from config.MaxTurns)
 	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
+	lastDeltasState DeltasState // tracks what was streamed in last attempt
 }
 
 // NewAgentLoop creates a new agent loop.
@@ -547,7 +548,8 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 
 // callWithRetryAndFallback calls the API with streaming, retries on transient
 // errors, and falls back to non-streaming if stream persists failing.
-// This mirrors Claude Code's stream -> non-stream fallback -> retry pattern.
+// Uses a persistent CollectHandler across retries to track deltas state
+// (matching Hermes-agent retry strategy).
 func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, error) {
 	const maxStreamRetries = 9 // 1 attempt + 9 retries = 10 total
 
@@ -567,7 +569,10 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 		params.Tools = toolParams
 	}
 
-	// Phase 1: Try streaming with retries
+	// Persistent collect handler across retries (tracks partial delivery)
+	collect := NewCollectHandler()
+
+	// Phase 1: Try streaming with smart retry
 	for attempt := 0; attempt <= maxStreamRetries; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(attempt) * 2 * time.Second // 2s, 4s, 6s ... backoff
@@ -576,7 +581,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 			time.Sleep(delay)
 		}
 
-		toolCalls, textParts, err := a.tryStreamOnce(params)
+		toolCalls, textParts, err := a.tryStreamOnce(params, collect)
 		if err == nil {
 			return toolCalls, textParts, nil
 		}
@@ -598,10 +603,24 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 			return nil, nil, err // let Run loop handle recovery
 		}
 
-		// Transient error (network, timeout, 5xx): retry
+		// Transient error (network, timeout, 5xx): decide retry strategy
 		if isTransientError(errMsg) {
 			fmt.Fprintf(os.Stderr, "\n[WARN] Transient error during stream: %v\n", err)
-			continue
+			// Smart retry decision based on what was already delivered
+			switch a.lastDeltasState {
+			case DeltasStateNone:
+				// Nothing sent yet — clean retry
+				continue
+			case DeltasStateToolInFlight:
+				// Tool call started but incomplete — clear partial, retry
+				fmt.Fprintf(os.Stderr, "  [!] Connection dropped mid-tool-call; clearing partial tool call before retry...\n")
+				collect.ClearPartialToolCall()
+				continue
+			case DeltasStateTextOnly:
+				// Text already streamed to user — can't retry without duplication
+				fmt.Fprintf(os.Stderr, "  [!] Stream interrupted after text output, falling back to non-streaming...\n")
+				return a.callWithNonStreamingFallback(params)
+			}
 		}
 
 		// Non-transient error during stream -> try non-streaming fallback
@@ -615,11 +634,11 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 }
 
 // tryStreamOnce makes a single streaming attempt and returns the result.
-func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[string]any, []string, error) {
+// `collect` is passed in (not created) so it persists across retries.
+func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *CollectHandler) ([]map[string]any, []string, error) {
 	ctx, cancel := a.interruptCtx(context.Background(), 300*time.Second)
 	defer cancel()
 
-	collect := NewCollectHandler()
 	term := &TerminalHandler{}
 	adapter := NewStreamAdapter(func(chunk StreamChunk) error {
 		_ = collect.Handle(chunk)
@@ -641,6 +660,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[stri
 
 	stream := a.client.Messages.NewStreaming(ctx, params)
 	if err := adapter.Process(stream, cancel); err != nil {
+		a.lastDeltasState = adapter.DeltasState() // record what was streamed before error
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "context canceled") ||
 			strings.Contains(errMsg, "context deadline exceeded") ||
@@ -649,6 +669,9 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[stri
 		}
 		return nil, nil, fmt.Errorf("stream error: %w", err)
 	}
+
+	// Record what was streamed (for retry safety)
+	a.lastDeltasState = adapter.DeltasState()
 
 	if collect.IsToolUseAsText() {
 		fmt.Fprintf(os.Stderr, "\n[WARN] Model echoed tool syntax as text -- recovering\n")

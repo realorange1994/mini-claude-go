@@ -192,6 +192,14 @@ func (h *CollectHandler) ClearPartialToolCall() {
 	}
 }
 
+// ClearText removes all pending text that was already streamed to the user.
+// Used when retry cannot recover text deltas (text-only case).
+func (h *CollectHandler) ClearText() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Text = ""
+}
+
 // HasTruncatedToolArgs checks if any tool call has invalid JSON arguments,
 // indicating the stream was cut off mid-tool-call.
 func (h *CollectHandler) HasTruncatedToolArgs() bool {
@@ -329,11 +337,16 @@ func toolArgSummary(toolName, argsJSON string) string {
 	}
 
 	switch toolName {
-	case "read_file", "write_file", "edit_file", "list_dir":
+	case "read_file", "write_file", "edit_file", "multi_edit", "fileops":
 		if path, ok := input["path"].(string); ok {
 			return path
 		}
-	case "exec":
+	case "list_dir":
+		if path, ok := input["path"].(string); ok {
+			return path
+		}
+		return "." // Default to current directory
+	case "exec", "terminal":
 		if cmd, ok := input["command"].(string); ok {
 			if len(cmd) > 120 {
 				return cmd[:120] + "..."
@@ -350,6 +363,33 @@ func toolArgSummary(toolName, argsJSON string) string {
 	case "glob":
 		if pattern, ok := input["pattern"].(string); ok {
 			return pattern
+		}
+	case "system":
+		if op, ok := input["operation"].(string); ok {
+			return op
+		}
+	case "git":
+		if args, ok := input["args"].(string); ok {
+			return fmt.Sprintf("git %s", args)
+		}
+	case "web_search", "exa_search":
+		if query, ok := input["query"].(string); ok {
+			return query
+		}
+	case "web_fetch":
+		if url, ok := input["url"].(string); ok {
+			return url
+		}
+	case "process":
+		if name, ok := input["process_name"].(string); ok {
+			return name
+		}
+		if pid, ok := input["pid"].(float64); ok {
+			return fmt.Sprintf("PID %.0f", pid)
+		}
+	case "runtime_info":
+		if show, ok := input["show"].(string); ok {
+			return show
 		}
 	}
 
@@ -425,6 +465,24 @@ func (b *StreamBus) Close() {
 }
 
 // ---------------------------------------------------------------------------
+// DeltasState -- tracks what content was already streamed (for retry safety)
+// ---------------------------------------------------------------------------
+
+// DeltasState tracks what content was already streamed to the user, used to
+// decide whether a retry is safe or would cause text duplication.
+//
+// - None: no deltas sent yet — clean retry is safe
+// - TextOnly: text was already streamed — retry would duplicate text
+// - ToolInFlight: a tool call started with this ID but may be incomplete
+type DeltasState string
+
+const (
+	DeltasStateNone        DeltasState = "none"
+	DeltasStateTextOnly    DeltasState = "text_only"
+	DeltasStateToolInFlight DeltasState = "tool_in_flight"
+)
+
+// ---------------------------------------------------------------------------
 // StreamAdapter -- bridges anthropic SDK streaming events → StreamChunk
 // ---------------------------------------------------------------------------
 
@@ -433,9 +491,10 @@ func (b *StreamBus) Close() {
 type StreamAdapter struct {
 	handler        streamHandler
 	bus            *StreamBus
-	stallTimeoutMs int // stall timeout in ms (0 = defaults)
-	startupMs      int // startup timeout in ms (0 = defaults)
-	finishReason   string // captured from MessageDeltaEvent.stop_reason
+	stallTimeoutMs int       // stall timeout in ms (0 = defaults)
+	startupMs      int       // startup timeout in ms (0 = defaults)
+	finishReason   string    // captured from MessageDeltaEvent.stop_reason
+	deltasState    DeltasState // tracks what was already streamed
 }
 
 // NewStreamAdapter creates an adapter that dispatches every chunk to the
@@ -543,6 +602,8 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 		}
 	}()
 
+		sa.deltasState = DeltasStateNone // tracks what was already streamed
+
 	for stream.Next() {
 		// Signal stall detector that we received an event
 		select {
@@ -554,7 +615,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 
 		switch e := event.AsAny().(type) {
 		case anthropic.MessageStartEvent:
-			// Message started — carry on; usage info is available via MessageDeltaEvent
+			// Message started — carry on
 		case anthropic.ContentBlockStartEvent:
 			// A new content block started
 			block := e.ContentBlock
@@ -565,6 +626,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 					ID:   block.ID,
 					Name: block.Name,
 				}
+				sa.trackDeltaState(ChunkTypeToolCall, chunk.ID)
 				if err := wrapped(chunk); err != nil {
 					return err
 				}
@@ -573,6 +635,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 		case anthropic.ContentBlockDeltaEvent:
 			// Incremental content -- dispatch based on delta type
 			if chunk := sa.handleDeltaRaw(e.Delta); chunk.Type != "" {
+				sa.trackDeltaState(chunk.Type, chunk.ID)
 				if err := wrapped(chunk); err != nil {
 					return err
 				}
@@ -677,4 +740,30 @@ func (sa *StreamAdapter) dispatch(chunk StreamChunk) {
 // FinishReason returns the captured stop_reason after Process completes.
 func (sa *StreamAdapter) FinishReason() string {
 	return sa.finishReason
+}
+
+// DeltasState returns what content was already streamed, used to decide
+// whether a retry is safe or would cause text duplication.
+func (sa *StreamAdapter) DeltasState() DeltasState {
+	return sa.deltasState
+}
+
+// trackDeltaState updates the deltas state based on each chunk type received.
+// - Text (first delta, no prior tool call) → TextOnly
+// - ToolCall → ToolInFlight (tool started but args may be incomplete)
+// - ToolArgument → stays ToolInFlight
+func (sa *StreamAdapter) trackDeltaState(chunkType ChunkType, id string) {
+	switch sa.deltasState {
+	case DeltasStateNone:
+		switch chunkType {
+		case ChunkTypeText:
+			sa.deltasState = DeltasStateTextOnly
+		case ChunkTypeToolCall:
+			sa.deltasState = DeltasStateToolInFlight
+		}
+	case DeltasStateTextOnly:
+		// text already streamed; tool call after text = still can't safely retry
+	case DeltasStateToolInFlight:
+		// tool in flight stays in flight until cleared
+	}
 }
