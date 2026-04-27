@@ -81,6 +81,22 @@ func (w *Writer) WriteError(err string) error {
 	return w.Write(Entry{Type: "error", Error: err})
 }
 
+// WriteSystem writes a system entry.
+func (w *Writer) WriteSystem(content string) error {
+	return w.Write(Entry{Type: "system", Content: content})
+}
+
+// WriteCompact writes a compact boundary entry.
+func (w *Writer) WriteCompact(trigger string, preCompactTokens int) error {
+	content := fmt.Sprintf("Compacted conversation (trigger: %s, %d tokens compressed)", trigger, preCompactTokens)
+	return w.Write(Entry{Type: "compact", Content: content})
+}
+
+// WriteSummary writes a summary entry (from LLM-driven compaction).
+func (w *Writer) WriteSummary(content string) error {
+	return w.Write(Entry{Type: "summary", Content: content})
+}
+
 // Flush forces pending entries to disk.
 func (w *Writer) Flush() error {
 	w.mu.Lock()

@@ -116,3 +116,35 @@ func TestWriteAssistantWithModel(t *testing.T) {
 		t.Errorf("expected model claude-sonnet-4-20250514, got %q", entries[0].Model)
 	}
 }
+
+func TestWriteSystemCompactSummary(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "extended.jsonl")
+	w := NewWriter("extended-session", fpath)
+
+	_ = w.WriteUser("hello")
+	_ = w.WriteSystem("CLAUDE.md instructions")
+	_ = w.WriteCompact("auto", 5000)
+	_ = w.WriteSummary("[Previous conversation summary]")
+	_ = w.Flush()
+	_ = w.Close()
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(entries))
+	}
+
+	expected := []string{"user", "system", "compact", "summary"}
+	for i, e := range entries {
+		if e.Type != expected[i] {
+			t.Errorf("entry %d: expected type %q, got %q", i, expected[i], e.Type)
+		}
+	}
+	if entries[2].Content == "" {
+		t.Error("compact entry should have content")
+	}
+}
