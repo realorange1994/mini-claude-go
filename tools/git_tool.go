@@ -133,7 +133,15 @@ func (*GitTool) InputSchema() map[string]interface{} {
 				"type":        "boolean",
 				"description": "Don't edit the commit message (only for revert)",
 			},
-			"proxy": map[string]interface{}{
+			"stash_subcommand": map[string]interface{}{
+			"type":        "string",
+			"description": "Stash subcommand: pop, apply, drop, list, show (for stash operation). Default is 'push' (just 'git stash')",
+		},
+		"stash_include_untracked": map[string]interface{}{
+			"type":        "boolean",
+			"description": "Include untracked files in stash (for stash push, adds -u flag)",
+		},
+		"proxy": map[string]interface{}{
 				"type":        "string",
 				"description": "HTTP/SOCKS proxy URL for git operations (e.g. 'http://127.0.0.1:7890', 'socks5://127.0.0.1:1080'). Sets https_proxy and http_proxy environment variables for the git command.",
 			},
@@ -267,15 +275,28 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 
 	case "checkout":
 		args = []string{"checkout"}
+		// Handle -b/-B early so they come before branch name: `git checkout -b <branch>`
+		if flags := getStringArray(params, "flags"); len(flags) > 0 {
+			for _, f := range flags {
+				if f == "-b" || f == "-B" {
+					args = append(args, "-b")
+					break
+				}
+			}
+		}
 		if ot, _ := params["ours_theirs"].(string); ot != "" {
 			args = append(args, "--"+ot)
 		}
 		if branch, _ := params["branch"].(string); branch != "" {
 			args = append(args, branch)
 		}
+		return args, nil // Return early to skip generic flags loop
 
 	case "merge":
 		args = []string{"merge"}
+		if message, _ := params["message"].(string); message != "" {
+			args = append(args, "-m", message)
+		}
 		if target, _ := params["target"].(string); target != "" {
 			args = append(args, target)
 		}
@@ -285,9 +306,6 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		if target, _ := params["target"].(string); target != "" {
 			args = append(args, target)
 		}
-
-	case "stash":
-		args = []string{"stash"}
 
 	case "reset":
 		args = []string{"reset"}
@@ -480,11 +498,14 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		}
 
 	case "blame":
-		file, _ := params["path"].(string)
-		if file == "" {
-			return nil, fmt.Errorf("path (file) is required for blame")
+		if file, _ := params["path"].(string); file != "" {
+			args = []string{"blame", file}
+		} else if files := getStringArray(params, "files"); len(files) > 0 {
+			args = []string{"blame"}
+			args = append(args, files...)
+		} else {
+			return nil, fmt.Errorf("path or files is required for blame (file path)")
 		}
-		args = []string{"blame", file}
 
 	case "reflog":
 		args = []string{"reflog"}
@@ -498,6 +519,17 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 			n = int(mc)
 		}
 		args = append(args, fmt.Sprintf("-%d", n))
+
+	case "stash":
+		args = []string{"stash"}
+		if sub, _ := params["stash_subcommand"].(string); sub != "" {
+			if sub == "pop" || sub == "apply" || sub == "drop" || sub == "list" || sub == "show" {
+				args = append(args, sub)
+			}
+		}
+		if includeUntracked, _ := params["stash_include_untracked"].(bool); includeUntracked {
+			args = append(args, "-u")
+		}
 
 	case "shortlog":
 		n := 20

@@ -216,6 +216,69 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 			params:   map[string]interface{}{"operation": "shortlog", "max_count": float64(5)},
 			wantArgs: []string{"shortlog", "-sn", "-5", "HEAD"},
 		},
+
+		// --- checkout -b ---
+		{
+			name:     "checkout -b create branch",
+			params:   map[string]interface{}{"operation": "checkout", "branch": "feature", "flags": []interface{}{"-b"}},
+			wantArgs: []string{"checkout", "-b", "feature"},
+		},
+		{
+			name:     "checkout -B force create",
+			params:   map[string]interface{}{"operation": "checkout", "branch": "feature", "flags": []interface{}{"-B"}},
+			wantArgs: []string{"checkout", "-b", "feature"},
+		},
+		{
+			name:     "checkout -b with --ours",
+			params:   map[string]interface{}{"operation": "checkout", "branch": "feature", "flags": []interface{}{"-b"}, "ours_theirs": "ours"},
+			wantArgs: []string{"checkout", "-b", "--ours", "feature"},
+		},
+
+		// --- merge with message ---
+		{
+			name:     "merge basic",
+			params:   map[string]interface{}{"operation": "merge", "target": "feature"},
+			wantArgs: []string{"merge", "feature"},
+		},
+		{
+			name:     "merge with custom message",
+			params:   map[string]interface{}{"operation": "merge", "target": "feature", "message": "Merge feature branch"},
+			wantArgs: []string{"merge", "-m", "Merge feature branch", "feature"},
+		},
+
+		// --- blame with files fallback ---
+		{
+			name:     "blame with files array",
+			params:   map[string]interface{}{"operation": "blame", "files": []interface{}{"main.go"}},
+			wantArgs: []string{"blame", "main.go"},
+		},
+
+		// --- stash subcommands ---
+		{
+			name:     "stash default",
+			params:   map[string]interface{}{"operation": "stash"},
+			wantArgs: []string{"stash"},
+		},
+		{
+			name:     "stash pop",
+			params:   map[string]interface{}{"operation": "stash", "stash_subcommand": "pop"},
+			wantArgs: []string{"stash", "pop"},
+		},
+		{
+			name:     "stash list",
+			params:   map[string]interface{}{"operation": "stash", "stash_subcommand": "list"},
+			wantArgs: []string{"stash", "list"},
+		},
+		{
+			name:     "stash with untracked",
+			params:   map[string]interface{}{"operation": "stash", "stash_include_untracked": true},
+			wantArgs: []string{"stash", "-u"},
+		},
+		{
+			name:     "stash pop with untracked",
+			params:   map[string]interface{}{"operation": "stash", "stash_subcommand": "pop", "stash_include_untracked": true},
+			wantArgs: []string{"stash", "pop", "-u"},
+		},
 	}
 
 	for _, tt := range tests {
