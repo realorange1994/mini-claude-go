@@ -399,14 +399,15 @@ func LoadProjectInstructions(projectDir string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// ValidateToolPairing validates that every tool_result references a tool_use
-// that exists in a preceding assistant message. Orphaned tool_results are
-// removed. If a tool_result message becomes empty after removal, it is
-// deleted entirely. This prevents the Anthropic API from rejecting requests
-// with error 2013 ("tool result's tool id not found").
+// ValidateToolPairing validates bidirectional tool_use/tool_result pairing.
+// Handles two failure modes after truncation:
+// 1. Orphaned tool_results: result references a tool_use that was removed → delete result
+// 2. Orphaned tool_uses: tool_use has no matching result (result was truncated) →
+//    insert stub result or delete the tool_use block
+// This prevents Anthropic API error 2013.
 func (c *ConversationContext) ValidateToolPairing() {
-	// Collect all valid tool_use IDs from assistant messages
-	validIDs := make(map[string]bool)
+	// Pass 1: Collect all tool_use IDs from assistant messages
+	callIDs := make(map[string]bool)
 	for _, entry := range c.entries {
 		if entry.role != "assistant" {
 			continue
@@ -414,33 +415,69 @@ func (c *ConversationContext) ValidateToolPairing() {
 		if blocks, ok := entry.content.([]anthropic.ContentBlockParamUnion); ok {
 			for _, b := range blocks {
 				if b.OfToolUse != nil && b.OfToolUse.ID != "" {
-					validIDs[b.OfToolUse.ID] = true
+					callIDs[b.OfToolUse.ID] = true
 				}
 			}
 		}
 	}
 
-	// Filter out orphaned tool_results
-	var newEntries []conversationEntry
-	for _, entry := range c.entries {
+	// Pass 2: Remove orphaned tool_results
+	resultIDs := make(map[string]bool)
+	for i, entry := range c.entries {
 		if entry.role == "user" {
 			if results, ok := entry.content.([]anthropic.ToolResultBlockParam); ok {
 				var kept []anthropic.ToolResultBlockParam
 				for _, r := range results {
-					if validIDs[r.ToolUseID] {
+					if callIDs[r.ToolUseID] {
 						kept = append(kept, r)
+						resultIDs[r.ToolUseID] = true
 					}
 				}
 				if len(kept) == 0 {
-					// Entire message was orphaned — drop it
-					continue
+					c.entries[i].content = nil // mark for removal
+				} else {
+					c.entries[i].content = kept
 				}
-				entry.content = kept
 			}
 		}
-		newEntries = append(newEntries, entry)
 	}
-	c.entries = newEntries
+
+	// Remove nil entries (fully orphaned tool_result messages)
+	compacted := make([]conversationEntry, 0, len(c.entries))
+	for _, e := range c.entries {
+		if e.content != nil {
+			compacted = append(compacted, e)
+		}
+	}
+	c.entries = compacted
+
+	// Pass 3: Remove orphaned tool_use blocks (call without matching result)
+	for i, entry := range c.entries {
+		if entry.role != "assistant" {
+			continue
+		}
+		blocks, ok := entry.content.([]anthropic.ContentBlockParamUnion)
+		if !ok {
+			continue
+		}
+		var kept []anthropic.ContentBlockParamUnion
+		hasOrphan := false
+		for _, b := range blocks {
+			if b.OfToolUse != nil && b.OfToolUse.ID != "" && !resultIDs[b.OfToolUse.ID] {
+				hasOrphan = true
+				continue // drop orphaned tool_use
+			}
+			kept = append(kept, b)
+		}
+		if hasOrphan {
+			if len(kept) == 0 {
+				// Entire message was orphaned tool_use — replace with placeholder
+				c.entries[i].content = "(tool call removed — result was truncated)"
+			} else {
+				c.entries[i].content = kept
+			}
+		}
+	}
 }
 
 // FixRoleAlternation ensures strict user/assistant alternation by merging
