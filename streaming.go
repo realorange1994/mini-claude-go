@@ -539,7 +539,7 @@ type StreamAdapter struct {
 // NewStreamAdapter creates an adapter that dispatches every chunk to the
 // given handler and publishes on the bus (nil bus = no publishing).
 func NewStreamAdapter(handler streamHandler, bus *StreamBus) *StreamAdapter {
-	return &StreamAdapter{handler: handler, bus: bus}
+	return &StreamAdapter{handler: handler, bus: bus, deltasState: DeltasStateNone}
 }
 
 // WithStallTimeout sets dynamic stall timeouts.
