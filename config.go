@@ -158,7 +158,7 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 func DefaultConfig() Config {
 	return Config{
 		Model:          "claude-sonnet-4-20250514",
-		MaxTurns:       30,
+		MaxTurns:       90,
 		MaxContextMsgs: 100,
 		PermissionMode: ModeAsk,
 		AllowedCommands: []string{

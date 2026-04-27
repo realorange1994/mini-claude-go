@@ -19,7 +19,7 @@ func main() {
 	apiKey := flag.String("api-key", "", "API key (overrides ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN env and config file)")
 	baseURL := flag.String("base-url", "", "Custom API base URL (overrides config file)")
 	mode := flag.String("mode", "ask", "Permission mode (ask|auto|plan)")
-	maxTurns := flag.Int("max-turns", 30, "Max agent loop turns per message")
+	maxTurns := flag.Int("max-turns", 90, "Max agent loop turns per message")
 	stream := flag.Bool("stream", false, "Enable streaming output")
 	resumeFile := flag.String("resume", "", "Resume from a transcript file path or 'last' for most recent")
 	flag.Parse()
