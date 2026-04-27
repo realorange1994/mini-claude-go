@@ -16,7 +16,7 @@ import (
 
 func main() {
 	model := flag.String("model", "", "Anthropic model to use")
-	apiKey := flag.String("api-key", "", "API key (overrides ANTHROPIC_API_KEY env and config file)")
+	apiKey := flag.String("api-key", "", "API key (overrides ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN env and config file)")
 	baseURL := flag.String("base-url", "", "Custom API base URL (overrides config file)")
 	mode := flag.String("mode", "ask", "Permission mode (ask|auto|plan)")
 	maxTurns := flag.Int("max-turns", 30, "Max agent loop turns per message")
@@ -51,6 +51,8 @@ func main() {
 
 	// Environment variables override settings file
 	if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
+		cfg.APIKey = envKey
+	} else if envKey := os.Getenv("ANTHROPIC_AUTH_TOKEN"); envKey != "" {
 		cfg.APIKey = envKey
 	}
 	if envURL := os.Getenv("ANTHROPIC_BASE_URL"); envURL != "" {
