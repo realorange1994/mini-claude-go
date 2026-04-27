@@ -617,10 +617,11 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 				collect.ClearPartialToolCall()
 				continue
 			case DeltasStateTextOnly:
-				// Text already streamed to user — can't retry without duplication
-				fmt.Fprintf(os.Stderr, "  [!] Stream interrupted after text output, returning partial result...\n")
-				sr := StreamResultFrom(collect, false)
-				return a.resultFromStreamResult(sr)
+				// Text already streamed to user — can't retry without duplication,
+				// but we have what was collected so far. Fall back to non-streaming
+				// for a complete fresh response (matching Hermes outer retry pattern).
+				fmt.Fprintf(os.Stderr, "  [!] Stream interrupted after text output, falling back to non-streaming...\n")
+				return a.callWithNonStreamingFallback(params)
 			}
 		}
 
