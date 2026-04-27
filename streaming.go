@@ -65,6 +65,7 @@ type CollectHandler struct {
 	Usage         *Usage
 	ChunksCollect int
 	toolUseAsText bool // detects model echoing tool syntax as text
+	finishReason  string // captured from MessageDeltaEvent.stop_reason
 }
 
 // ToolCallInfo records a tool call assembled from streaming deltas.
@@ -153,6 +154,58 @@ func (h *CollectHandler) IsToolUseAsText() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.toolUseAsText
+}
+
+// SetFinishReason records the stop_reason from the stream.
+func (h *CollectHandler) SetFinishReason(reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.finishReason = reason
+}
+
+// FinishReason returns why the stream ended (end_turn, max_tokens, tool_use, etc.)
+func (h *CollectHandler) FinishReason() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.finishReason
+}
+
+// HasPartialToolCall checks if the last tool call has no arguments yet
+// (stream cut off mid-tool-call).
+func (h *CollectHandler) HasPartialToolCall() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := len(h.ToolCalls)
+	if n == 0 {
+		return false
+	}
+	return h.ToolCalls[n-1].Arguments == ""
+}
+
+// ClearPartialToolCall removes the last incomplete tool call before retry
+// to avoid duplicating tool_call entries on reconnect.
+func (h *CollectHandler) ClearPartialToolCall() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if n := len(h.ToolCalls); n > 0 {
+		h.ToolCalls = h.ToolCalls[:n-1]
+	}
+}
+
+// HasTruncatedToolArgs checks if any tool call has invalid JSON arguments,
+// indicating the stream was cut off mid-tool-call.
+func (h *CollectHandler) HasTruncatedToolArgs() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.ToolCalls {
+		if h.ToolCalls[i].Arguments != "" {
+			var js json.RawMessage
+			if json.Unmarshal([]byte(h.ToolCalls[i].Arguments), &js) != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // AsParsedResponse returns tool calls and text parts directly, bypassing
@@ -378,14 +431,35 @@ func (b *StreamBus) Close() {
 // StreamAdapter wraps the anthropic streaming response iterator and feeds
 // chunks into a handler (and optionally a bus).
 type StreamAdapter struct {
-	handler streamHandler
-	bus     *StreamBus
+	handler        streamHandler
+	bus            *StreamBus
+	stallTimeoutMs int // stall timeout in ms (0 = defaults)
+	startupMs      int // startup timeout in ms (0 = defaults)
+	finishReason   string // captured from MessageDeltaEvent.stop_reason
 }
 
 // NewStreamAdapter creates an adapter that dispatches every chunk to the
 // given handler and publishes on the bus (nil bus = no publishing).
 func NewStreamAdapter(handler streamHandler, bus *StreamBus) *StreamAdapter {
 	return &StreamAdapter{handler: handler, bus: bus}
+}
+
+// WithStallTimeout sets dynamic stall timeouts.
+// isLocal=true → very long timeouts (local providers can be slow on cold start).
+// estTokens estimates context size for scaling.
+func (sa *StreamAdapter) WithStallTimeout(isLocal bool, estTokens int) *StreamAdapter {
+	if isLocal {
+		sa.stallTimeoutMs = 300_000
+		sa.startupMs = 600_000
+	} else if estTokens > 100_000 {
+		sa.stallTimeoutMs = 300_000
+		sa.startupMs = 360_000
+	} else if estTokens > 50_000 {
+		sa.stallTimeoutMs = 240_000
+		sa.startupMs = 300_000
+	}
+	// else: keep defaults in Process()
+	return sa
 }
 
 // Process consumes the full streaming response, feeding each event through
@@ -410,18 +484,24 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 	}
 
 	// Stall detection: reset timer on each successfully processed event.
-	// Unlike the old aggressive timeout approach, this is primarily OBSERVABILITY —
-	// it logs warnings but does NOT force-close the stream. The stream's natural
-	// end (HTTP body EOF) is the primary completion signal, matching Claude Code's
-	// design where timeouts are backup safety nets, not termination mechanisms.
-	// Only force-close after TWO consecutive stall timeouts (90s + 90s = 3min idle).
-	const stallTimeout = 90_000    // ms - normal stall detection after first event
-	const startupTimeout = 120_000 // ms - grace period for first event to arrive
+	// Dynamic timeouts (matching hermes-agent patterns):
+	//   - Local providers: 300s stall / 600s startup (cold start can be slow)
+	//   - >100K tokens: 300s stall / 360s startup
+	//   - >50K tokens: 240s stall / 300s startup
+	//   - Default: 90s stall / 120s startup
+	stallTO := sa.stallTimeoutMs
+	startupTO := sa.startupMs
+	if stallTO == 0 {
+		stallTO = 90_000
+	}
+	if startupTO == 0 {
+		startupTO = 120_000
+	}
 	stallReset := make(chan struct{}, 16)
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		timer := time.NewTimer(startupTimeout * time.Millisecond)
+		timer := time.NewTimer(time.Duration(startupTO) * time.Millisecond)
 		defer timer.Stop()
 		hasFirstEvent := false
 		stallCount := 0
@@ -438,12 +518,12 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 					default:
 					}
 				}
-				timer.Reset(stallTimeout * time.Millisecond)
+				timer.Reset(time.Duration(stallTO) * time.Millisecond)
 			case <-timer.C:
 				stallCount++
-				timeoutVal := stallTimeout
+				timeoutVal := stallTO
 				if !hasFirstEvent {
-					timeoutVal = startupTimeout
+					timeoutVal = startupTO
 				}
 				if stallCount >= 2 {
 					// Only force-close after TWO consecutive stall timeouts
@@ -456,7 +536,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 				}
 				// First stall: just warn, don't terminate
 				fmt.Fprintf(os.Stderr, "\n[WARN] Stream idle for %dms, waiting...\n", timeoutVal)
-				timer.Reset(stallTimeout * time.Millisecond)
+				timer.Reset(time.Duration(stallTO) * time.Millisecond)
 			case <-done:
 				return
 			}
@@ -505,7 +585,10 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 			}
 
 		case anthropic.MessageDeltaEvent:
-			// Carries stop_reason and cumulative usage info
+			// Carries stop_reason and cumulative usage info (matching Hermes finish_reason tracking)
+			if e.Delta.StopReason != "" {
+				sa.finishReason = string(e.Delta.StopReason)
+			}
 			usage := e.Usage
 			if usage.InputTokens > 0 || usage.OutputTokens > 0 {
 				chunk := StreamChunk{
@@ -589,4 +672,9 @@ func (sa *StreamAdapter) dispatch(chunk StreamChunk) {
 	if sa.bus != nil {
 		sa.bus.Publish(chunk)
 	}
+}
+
+// FinishReason returns the captured stop_reason after Process completes.
+func (sa *StreamAdapter) FinishReason() string {
+	return sa.finishReason
 }

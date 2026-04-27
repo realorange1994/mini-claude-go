@@ -329,6 +329,13 @@ func (a *AgentLoop) Run(userMessage string) string {
 				lastTransition = "model_confusion_retry"
 				continue
 			}
+			// Truncated tool arguments — model cut off mid-tool-call
+			if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
+				fmt.Fprintf(os.Stderr, "\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
+				a.context.AddUserMessage("ERROR: Your tool call arguments was cut off due to length limits. Do NOT repeat the truncated tool call. If you need to make multiple tool calls, make them one at a time with shorter arguments.")
+				lastTransition = "tool_args_truncated_retry"
+				continue
+			}
 			// Stream stalled — safety timeout fired or context canceled; recover with truncation
 			if strings.Contains(errMsg, "stream stalled") ||
 				strings.Contains(errMsg, "context canceled") ||
@@ -627,6 +634,11 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[stri
 		return nil
 	}, nil)
 
+	// Configure dynamic stall timeout (matching hermes-agent patterns)
+	isLocal := isLocalEndpoint(a.config.BaseURL)
+	estTokens := estimateMessageTokens(params.Messages)
+	adapter.WithStallTimeout(isLocal, estTokens)
+
 	stream := a.client.Messages.NewStreaming(ctx, params)
 	if err := adapter.Process(stream, cancel); err != nil {
 		errMsg := err.Error()
@@ -641,6 +653,21 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams) ([]map[stri
 	if collect.IsToolUseAsText() {
 		fmt.Fprintf(os.Stderr, "\n[WARN] Model echoed tool syntax as text -- recovering\n")
 		collect.Text = ""
+	}
+
+	// Check for truncated tool arguments (matching Hermes truncated arg detection)
+	if collect.HasTruncatedToolArgs() {
+		names := make([]string, 0, len(collect.ToolCalls))
+		for _, tc := range collect.ToolCalls {
+			names = append(names, tc.Name)
+		}
+		fmt.Fprintf(os.Stderr, "\n[WARN] Tool arguments truncated: %v\n", names)
+		return nil, nil, fmt.Errorf("tool arguments were truncated (incomplete JSON)")
+	}
+
+	// Pass finish_reason to collect for downstream access
+	if fr := adapter.FinishReason(); fr != "" {
+		collect.SetFinishReason(fr)
 	}
 
 	toolCalls, textParts := collect.AsParsedResponse()
@@ -1377,6 +1404,29 @@ func isContextLengthError(errMsg string) bool {
 		}
 	}
 	return false
+}
+
+// isLocalEndpoint detects if the base URL points to a local provider.
+func isLocalEndpoint(baseURL string) bool {
+	lower := strings.ToLower(baseURL)
+	return strings.Contains(lower, "localhost") ||
+		strings.Contains(lower, "127.0.0.1") ||
+		strings.Contains(lower, "0.0.0.0") ||
+		strings.Contains(lower, "::1") ||
+		strings.Contains(lower, "local")
+}
+
+// estimateMessageTokens roughly estimates token count (~4 chars per token).
+func estimateMessageTokens(messages []anthropic.MessageParam) int {
+	totalChars := 0
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if block.OfText != nil {
+				totalChars += len(block.OfText.Text)
+			}
+		}
+	}
+	return totalChars / 4
 }
 
 // CollectHandler.AsMessageContent reconstructs ContentBlockUnion slices from collected data.
