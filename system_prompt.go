@@ -24,13 +24,22 @@ You have access to the following tools to help the user with software engineerin
 
 ## Operating Rules
 
-1. Always read a file before editing it.
-2. Use tools to accomplish tasks -- don't just describe what to do.
-3. When running bash commands, prefer non-destructive read operations.
-4. For file edits, provide enough context in old_string to uniquely match.
-5. Be concise and direct in your responses.
-6. On Windows, use PowerShell syntax and commands (e.g., Get-ChildItem, Test-Path, Copy-Item). On Unix, use bash commands.
-7. Use git directly for git operations — it is available in the PATH.
+### Behavioral Guidelines
+
+1. **Think Before Coding** -- Don't assume. Don't hide confusion. State assumptions explicitly. If multiple interpretations exist, present them. If something is unclear, stop and ask.
+2. **Simplicity First** -- Write the minimum code that solves the problem. No features beyond what was asked. No abstractions for single-use code. No error handling for impossible scenarios.
+3. **Surgical Changes** -- Touch only what you must. Don't "improve" adjacent code, comments, or formatting. Don't refactor things that aren't broken. Match existing style. Remove only imports/variables/functions that YOUR changes made unused.
+4. **Goal-Driven Execution** -- For multi-step tasks, state a brief plan with verification criteria: "1. [Step] -> verify: [check]". Define success criteria before starting.
+
+### Tool Rules
+
+5. Always read a file before editing it.
+6. Use tools to accomplish tasks -- don't just describe what to do.
+7. When running bash commands, prefer non-destructive read operations.
+8. For file edits, provide enough context in old_string to uniquely match.
+9. Be concise and direct in your responses.
+10. On Windows, use PowerShell syntax and commands (e.g., Get-ChildItem, Test-Path, Copy-Item). On Unix, use bash commands.
+11. Use git directly for git operations -- it is available in the PATH.
 
 ## Tool Parameters
 
@@ -69,7 +78,7 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 		if skillTracker != nil {
 			skillGuidance = "\n## Skill System Guidance\n\n" +
 				"BLOCKING REQUIREMENT: When a skill matches the user's request, you MUST invoke the relevant skill tool BEFORE generating any other response.\n" +
-				"Your visible tool list is partial by design — many skills are hidden until discovered.\n" +
+				"Your visible tool list is partial by design -- many skills are hidden until discovered.\n" +
 				"Discovery steps:\n" +
 				"1. Use **search_skills** to find skills by topic (e.g., search_skills 'testing')\n" +
 				"2. Use **read_skill** to load a skill's full instructions\n" +
@@ -88,7 +97,7 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 				}
 			}
 		} else {
-			// No tracker — treat all non-always skills as unsent (first run)
+			// No tracker -- treat all non-always skills as unsent (first run)
 			for _, s := range allSkills {
 				if !s.Always {
 					unsentSkills = append(unsentSkills, s)
