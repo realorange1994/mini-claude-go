@@ -75,6 +75,45 @@ type ToolCallInfo struct {
 	Arguments string
 }
 
+// StreamResult is the result of a streaming API call, including partial
+// delivery on failure. Matching Hermes-agent StreamResult.
+type StreamResult struct {
+	ToolCalls []ToolCallInfo
+	Text      string
+	Thinking  string
+	Completed bool // true = stream ended normally, false = partial after failure
+	// Why the stream ended. Matches Anthropic stop_reason values:
+	// - "end_turn": normal completion
+	// - "stop_sequence": stop sequence hit
+	// - "max_tokens": output token limit reached
+	// - "tool_use": model yielded to tool use
+	// - "": stream ended abnormally (error, stall, interrupt)
+	FinishReason string
+}
+
+// StreamResult returns the complete streaming result from a CollectHandler.
+// When completed=false, partial results are returned after a failure.
+func StreamResultFrom(h *CollectHandler, completed bool) StreamResult {
+	h.mu.Lock()
+	text := h.Text
+	thinking := h.Thinking
+	finishReason := h.finishReason
+	toolCalls := make([]ToolCallInfo, len(h.ToolCalls))
+	copy(toolCalls, h.ToolCalls)
+	h.mu.Unlock()
+
+	if text == "" {
+		text = thinking
+	}
+	return StreamResult{
+		ToolCalls:    toolCalls,
+		Text:         text,
+		Thinking:     h.Thinking,
+		Completed:    completed,
+		FinishReason: finishReason,
+	}
+}
+
 // NewCollectHandler creates a ready-to-use handler.
 func NewCollectHandler() *CollectHandler {
 	return &CollectHandler{

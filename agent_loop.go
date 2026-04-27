@@ -618,8 +618,9 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 				continue
 			case DeltasStateTextOnly:
 				// Text already streamed to user — can't retry without duplication
-				fmt.Fprintf(os.Stderr, "  [!] Stream interrupted after text output, falling back to non-streaming...\n")
-				return a.callWithNonStreamingFallback(params)
+				fmt.Fprintf(os.Stderr, "  [!] Stream interrupted after text output, returning partial result...\n")
+				sr := StreamResultFrom(collect, false)
+				return a.resultFromStreamResult(sr)
 			}
 		}
 
@@ -694,6 +695,33 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	}
 
 	toolCalls, textParts := collect.AsParsedResponse()
+	return toolCalls, textParts, nil
+}
+
+// resultFromStreamResult converts a StreamResult to the return type of
+// callWithRetryAndFallback, preserving partial results.
+func (a *AgentLoop) resultFromStreamResult(sr StreamResult) ([]map[string]any, []string, error) {
+	toolCalls := make([]map[string]any, 0, len(sr.ToolCalls))
+	for _, tc := range sr.ToolCalls {
+		input := make(map[string]any)
+		if tc.Arguments != "" {
+			_ = json.Unmarshal([]byte(tc.Arguments), &input)
+		}
+		toolCalls = append(toolCalls, map[string]any{
+			"id":    tc.ID,
+			"name":  tc.Name,
+			"input": input,
+		})
+	}
+
+	var textParts []string
+	if sr.Text != "" {
+		textParts = append(textParts, sr.Text)
+	}
+
+	if !sr.Completed {
+		return toolCalls, textParts, fmt.Errorf("stream ended prematurely (finish_reason=%q)", sr.FinishReason)
+	}
 	return toolCalls, textParts, nil
 }
 
