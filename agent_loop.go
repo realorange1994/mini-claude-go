@@ -311,10 +311,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 		var textParts []string
 		var err error
 
-		// Always use streaming — more reliable across different API/proxy
-		// configurations. Non-streaming can hang on some proxies that don't
-		// flush the response until the entire body is ready.
-		toolCalls, textParts, err = a.callWithRetryAndFallback()
+		// Streaming vs non-streaming decision
+		if a.useStream {
+			toolCalls, textParts, err = a.callWithRetryAndFallback()
+		} else {
+			toolCalls, textParts, err = a.callWithNonStreamingOnly()
+		}
 		if err != nil {
 			errMsg := err.Error()
 			// User interrupt — return immediately
@@ -724,6 +726,30 @@ func (a *AgentLoop) resultFromStreamResult(sr StreamResult) ([]map[string]any, [
 		return toolCalls, textParts, fmt.Errorf("stream ended prematurely (finish_reason=%q)", sr.FinishReason)
 	}
 	return toolCalls, textParts, nil
+}
+
+// callWithNonStreamingOnly is the primary entry point when streaming is disabled.
+// It's identical to callWithNonStreamingFallback but named for the non-streaming path.
+func (a *AgentLoop) callWithNonStreamingOnly() ([]map[string]any, []string, error) {
+	return a.callWithNonStreamingFallback(a.buildMessageParams())
+}
+
+// buildMessageParams constructs the API request params from current context.
+func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
+	toolParams := a.buildToolParams()
+	messages := a.context.BuildMessages()
+	params := anthropic.MessageNewParams{
+		Model:     a.config.Model,
+		MaxTokens: 16384,
+		Messages:  messages,
+		System: []anthropic.TextBlockParam{
+			{Text: a.context.SystemPrompt()},
+		},
+	}
+	if len(toolParams) > 0 {
+		params.Tools = toolParams
+	}
+	return params
 }
 
 // callWithNonStreamingFallback tries non-streaming API call with retries.
