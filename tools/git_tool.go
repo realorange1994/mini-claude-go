@@ -37,7 +37,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "For clone: destination directory path. For init/worktree: target path. For mv: destination path. For blame: file path. NOT used as working directory (use 'directory' for that)",
+				"description": "For clone: destination directory path. For init/worktree: target path. For mv: destination path. For blame: file path to blame (also supports 'files' array fallback). NOT used as working directory (use 'directory' for that)",
 			},
 			"directory": map[string]interface{}{
 				"type":        "string",
