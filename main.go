@@ -194,63 +194,70 @@ func runInteractive(agent *AgentLoop) {
 			continue
 		}
 
+		// Check for exact command match — only treat as command if the first
+		// word is a known command. Unknown /xxx is passed through as prompt text.
 		if strings.HasPrefix(userInput, "/") {
-			parts := strings.Fields(strings.ToLower(userInput))
-			cmd := parts[0]
+			parts := strings.Fields(userInput)
+			cmd := strings.ToLower(parts[0])
 
-			switch cmd {
-			case "/quit", "/exit", "/q":
-				fmt.Println("Goodbye!")
-				printResumeHint(agent)
-				return
-			case "/tools":
-				fmt.Println("\nAvailable tools:")
-				for _, t := range agent.registry.AllTools() {
-					fmt.Printf("  - %s: %s\n", t.Name(), t.Description())
-				}
-				continue
-			case "/mode":
-				if len(parts) > 1 {
-					switch parts[1] {
-					case "ask", "auto", "plan":
-						agent.config.PermissionMode = PermissionMode(parts[1])
-						fmt.Printf("Mode changed to: %s\n", parts[1])
-					default:
-						fmt.Printf("Unknown mode: %s\n", parts[1])
+			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
+				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume"
+
+			if !isKnownCmd {
+				// Not a recognized command — treat as normal prompt
+			} else {
+				switch cmd {
+				case "/quit", "/exit", "/q":
+					fmt.Println("Goodbye!")
+					printResumeHint(agent)
+					return
+				case "/tools":
+					fmt.Println("\nAvailable tools:")
+					for _, t := range agent.registry.AllTools() {
+						fmt.Printf("  - %s: %s\n", t.Name(), t.Description())
 					}
-				} else {
-					fmt.Printf("Current mode: %s\n", agent.config.PermissionMode)
-					fmt.Println("Usage: /mode [ask|auto|plan]")
-				}
-				continue
-			case "/help":
-				fmt.Println("Commands: /tools, /mode, /resume, /help, /quit")
-				continue
-			case "/resume":
-				if len(parts) > 1 {
-					target := parts[1]
-					path, err := findTranscript(target)
-					if err != nil {
-						fmt.Printf("Error: %v\n", err)
-						continue
+					continue
+				case "/mode":
+					if len(parts) > 1 {
+						modeVal := strings.ToLower(parts[1])
+						switch modeVal {
+						case "ask", "auto", "plan":
+							agent.config.PermissionMode = PermissionMode(modeVal)
+							fmt.Printf("Mode changed to: %s\n", modeVal)
+						default:
+							fmt.Printf("Unknown mode: %s\n", parts[1])
+						}
+					} else {
+						fmt.Printf("Current mode: %s\n", agent.config.PermissionMode)
+						fmt.Println("Usage: /mode [ask|auto|plan]")
 					}
-					newAgent, err := NewAgentLoopFromTranscript(agent.config, agent.registry, agent.useStream, path)
-					if err != nil {
-						fmt.Printf("Error resuming transcript: %v\n", err)
-						continue
+					continue
+				case "/help":
+					fmt.Println("Commands: /tools, /mode, /resume, /help, /quit")
+					continue
+				case "/resume":
+					if len(parts) > 1 {
+						target := parts[1]
+						path, err := findTranscript(target)
+						if err != nil {
+							fmt.Printf("Error: %v\n", err)
+							continue
+						}
+						newAgent, err := NewAgentLoopFromTranscript(agent.config, agent.registry, agent.useStream, path)
+						if err != nil {
+							fmt.Printf("Error resuming transcript: %v\n", err)
+							continue
+						}
+						// Swap the agent (close old one first)
+						agent.Close()
+						agent = newAgent
+						fmt.Printf("[+] Resumed session from transcript: %s\n", path)
+					} else {
+						// List available transcripts
+						listTranscripts()
 					}
-					// Swap the agent (close old one first)
-					agent.Close()
-					agent = newAgent
-					fmt.Printf("[+] Resumed session from transcript: %s\n", path)
-				} else {
-					// List available transcripts
-					listTranscripts()
+					continue
 				}
-				continue
-			default:
-				fmt.Printf("Unknown command: %s\n", cmd)
-				continue
 			}
 		}
 
