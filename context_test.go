@@ -156,3 +156,144 @@ func TestConversationContextSetSystemPrompt(t *testing.T) {
 		t.Errorf("expected system prompt to be set")
 	}
 }
+
+// ─── Tool pairing validation ───
+
+func TestValidateToolPairingKeepsValid(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("Run ls")
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "call_1", "name": "exec", "input": map[string]any{}},
+	})
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "call_1", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "output"}},
+		}},
+	})
+
+	ctx.ValidateToolPairing()
+	if len(ctx.entries) != 3 {
+		t.Errorf("expected 3 entries (nothing should be removed), got %d", len(ctx.entries))
+	}
+}
+
+func TestValidateToolPairingRemovesOrphan(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("Start")
+	// Simulate truncation: tool_use is gone but tool_result remains
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "call_deleted", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "orphan"}},
+		}},
+	})
+	ctx.AddAssistantText("Response")
+	ctx.AddUserMessage("Next")
+
+	if len(ctx.entries) != 4 {
+		t.Fatalf("expected 4 entries before validation, got %d", len(ctx.entries))
+	}
+	ctx.ValidateToolPairing()
+	// Orphaned tool_result message should be removed
+	if len(ctx.entries) != 3 {
+		t.Errorf("expected 3 entries (orphan removed), got %d", len(ctx.entries))
+	}
+}
+
+func TestValidateToolPairingPartialRemoval(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("Start")
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "call_1", "name": "a", "input": map[string]any{}},
+		{"id": "call_2", "name": "b", "input": map[string]any{}},
+	})
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "call_1", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "r1"}},
+		}},
+		{ToolUseID: "call_2", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "r2"}},
+		}},
+		{ToolUseID: "call_deleted", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "orphan"}},
+		}},
+	})
+
+	ctx.ValidateToolPairing()
+	if len(ctx.entries) != 3 {
+		t.Errorf("expected 3 entries (one orphaned result removed), got %d", len(ctx.entries))
+	}
+}
+
+// ─── Role alternation fix ───
+
+func TestFixRoleAlternationMergesConsecutiveUser(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("First")
+	ctx.AddUserMessage("Second")
+	ctx.AddAssistantText("Response")
+
+	if len(ctx.entries) != 3 {
+		t.Fatalf("expected 3 entries before fix, got %d", len(ctx.entries))
+	}
+	ctx.FixRoleAlternation()
+	// Two consecutive user messages should be merged
+	if len(ctx.entries) != 2 {
+		t.Errorf("expected 2 entries after fix, got %d", len(ctx.entries))
+	}
+}
+
+func TestFixRoleAlternationMergesConsecutiveAssistant(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("Hello")
+	ctx.AddAssistantText("Part 1")
+	ctx.AddAssistantText("Part 2")
+
+	if len(ctx.entries) != 3 {
+		t.Fatalf("expected 3 entries before fix, got %d", len(ctx.entries))
+	}
+	ctx.FixRoleAlternation()
+	if len(ctx.entries) != 2 {
+		t.Errorf("expected 2 entries after fix, got %d", len(ctx.entries))
+	}
+}
+
+func TestFixRoleAlternationPreservesValidSequence(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("A")
+	ctx.AddAssistantText("B")
+	ctx.AddUserMessage("C")
+	ctx.AddAssistantText("D")
+
+	before := len(ctx.entries)
+	ctx.FixRoleAlternation()
+	if len(ctx.entries) != before {
+		t.Errorf("expected %d entries (no change), got %d", before, len(ctx.entries))
+	}
+}
+
+func TestFixRoleAlternationPreservesSystemMessages(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("A")
+	ctx.AddCompactBoundary(CompactTriggerAuto, 1000)
+	ctx.AddUserMessage("B")
+
+	ctx.FixRoleAlternation()
+	// System messages should be preserved
+	if len(ctx.entries) < 2 {
+		t.Errorf("expected at least 2 entries (system preserved), got %d", len(ctx.entries))
+	}
+}

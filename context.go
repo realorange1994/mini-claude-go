@@ -136,6 +136,12 @@ func (c *ConversationContext) truncateIfNeeded() {
 			recent = recent[1:]
 		}
 		c.entries = append(first, recent...)
+
+		// After truncation, validate tool pairing and fix role alternation.
+		// Naive slice truncation can orphan tool_results and leave
+		// consecutive same-role messages, both causing API error 2013.
+		c.ValidateToolPairing()
+		c.FixRoleAlternation()
 	}
 }
 
@@ -149,6 +155,8 @@ func (c *ConversationContext) TruncateHistory() {
 	first := c.entries[:1]
 	recent := c.entries[len(c.entries)-keep:]
 	c.entries = append(first, recent...)
+	c.ValidateToolPairing()
+	c.FixRoleAlternation()
 }
 
 // AggressiveTruncateHistory drops more aggressively - keeps only first and last 5.
@@ -160,6 +168,8 @@ func (c *ConversationContext) AggressiveTruncateHistory() {
 	first := c.entries[:1]
 	recent := c.entries[len(c.entries)-keep:]
 	c.entries = append(first, recent...)
+	c.ValidateToolPairing()
+	c.FixRoleAlternation()
 }
 
 // MinimumHistory drops to bare minimum - only first user message and last 2 entries.
@@ -170,6 +180,8 @@ func (c *ConversationContext) MinimumHistory() {
 	first := c.entries[:1]
 	recent := c.entries[len(c.entries)-2:]
 	c.entries = append(first, recent...)
+	c.ValidateToolPairing()
+	c.FixRoleAlternation()
 }
 
 // CompactContext performs intelligent compaction with multi-phase degradation.
@@ -196,6 +208,8 @@ func (c *ConversationContext) CompactContext() bool {
 	result, err := Compact(msgs, cfg)
 	if err == nil && result.OmittedCount > 0 && !NeedsCompaction(result.Messages, cfg) {
 		c.entries = compactionMessagesToEntries(result.Messages, toolNames)
+		c.ValidateToolPairing()
+		c.FixRoleAlternation()
 		fmt.Fprintf(os.Stderr, "\n  [compact] %s\n", result.Summary())
 		return true
 	}
@@ -204,6 +218,8 @@ func (c *ConversationContext) CompactContext() bool {
 	smart := SmartCompact(msgs, 2, 2)
 	if smart.CollapsedTurns > 0 && !NeedsCompaction(smart.Messages, cfg) {
 		c.entries = compactionMessagesToEntries(smart.Messages, toolNames)
+		c.ValidateToolPairing()
+		c.FixRoleAlternation()
 		fmt.Fprintf(os.Stderr, "\n  [compact] SmartCompact: %d turns collapsed\n", smart.CollapsedTurns)
 		return true
 	}
@@ -215,6 +231,8 @@ func (c *ConversationContext) CompactContext() bool {
 	if sel.Compacted > 0 {
 		flat := flattenRounds(sel.Rounds)
 		c.entries = compactionMessagesToEntries(flat, toolNames)
+		c.ValidateToolPairing()
+		c.FixRoleAlternation()
 		fmt.Fprintf(os.Stderr, "\n  [compact] SelectiveCompact: %d rounds cleared, saved ~%d tokens\n", sel.Compacted, sel.Saved)
 		return true
 	}
@@ -379,4 +397,95 @@ func LoadProjectInstructions(projectDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// ValidateToolPairing validates that every tool_result references a tool_use
+// that exists in a preceding assistant message. Orphaned tool_results are
+// removed. If a tool_result message becomes empty after removal, it is
+// deleted entirely. This prevents the Anthropic API from rejecting requests
+// with error 2013 ("tool result's tool id not found").
+func (c *ConversationContext) ValidateToolPairing() {
+	// Collect all valid tool_use IDs from assistant messages
+	validIDs := make(map[string]bool)
+	for _, entry := range c.entries {
+		if entry.role != "assistant" {
+			continue
+		}
+		if blocks, ok := entry.content.([]anthropic.ContentBlockParamUnion); ok {
+			for _, b := range blocks {
+				if b.OfToolUse != nil && b.OfToolUse.ID != "" {
+					validIDs[b.OfToolUse.ID] = true
+				}
+			}
+		}
+	}
+
+	// Filter out orphaned tool_results
+	var newEntries []conversationEntry
+	for _, entry := range c.entries {
+		if entry.role == "user" {
+			if results, ok := entry.content.([]anthropic.ToolResultBlockParam); ok {
+				var kept []anthropic.ToolResultBlockParam
+				for _, r := range results {
+					if validIDs[r.ToolUseID] {
+						kept = append(kept, r)
+					}
+				}
+				if len(kept) == 0 {
+					// Entire message was orphaned — drop it
+					continue
+				}
+				entry.content = kept
+			}
+		}
+		newEntries = append(newEntries, entry)
+	}
+	c.entries = newEntries
+}
+
+// FixRoleAlternation ensures strict user/assistant alternation by merging
+// consecutive messages with the same role. Critical for Anthropic API
+// compliance after naive slice truncation.
+func (c *ConversationContext) FixRoleAlternation() {
+	if len(c.entries) == 0 {
+		return
+	}
+
+	var merged []conversationEntry
+	for _, entry := range c.entries {
+		// Skip system messages — they are boundary markers
+		if entry.role == "system" {
+			merged = append(merged, entry)
+			continue
+		}
+
+		if len(merged) > 0 {
+			last := &merged[len(merged)-1]
+			if last.role == entry.role {
+				// Merge same-role consecutive messages
+				switch a := last.content.(type) {
+				case string:
+					if b, ok := entry.content.(string); ok {
+						last.content = a + "\n\n" + b
+						continue
+					}
+				case []anthropic.ContentBlockParamUnion:
+					if b, ok := entry.content.([]anthropic.ContentBlockParamUnion); ok {
+						last.content = append(a, b...)
+						continue
+					}
+				case []anthropic.ToolResultBlockParam:
+					if b, ok := entry.content.([]anthropic.ToolResultBlockParam); ok {
+						last.content = append(a, b...)
+						continue
+					}
+				}
+				// Type mismatch — just replace
+				last.content = entry.content
+				continue
+			}
+		}
+		merged = append(merged, entry)
+	}
+	c.entries = merged
 }
