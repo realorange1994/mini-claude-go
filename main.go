@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -139,13 +140,24 @@ func main() {
 }
 
 func runInteractive(agent *AgentLoop) {
+	// Track Ctrl+C timing for double-press exit (works during agent.Run too)
+	var lastCtrlC atomic.Int64 // stores UnixNano of last Ctrl+C
+
 	// Set up Ctrl+C signal handler
-	// Only active during agent.Run() -- sets interrupted flag so agent can abort
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, syscall.SIGINT)
 	go func() {
 		for range signalCh {
+			now := time.Now().UnixNano()
+			prev := lastCtrlC.Load()
+			if prev != 0 && time.Duration(now-prev) < 2*time.Second {
+				// Double Ctrl+C within 2s — exit immediately
+				printResumeHint(agent)
+				os.Exit(0)
+			}
+			lastCtrlC.Store(now)
 			agent.SetInterrupted(true)
+			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
 		}
 	}()
 
@@ -179,23 +191,16 @@ func runInteractive(agent *AgentLoop) {
 		return bufio.NewReader(f)
 	}
 
-	var lastCtrlC time.Time
-
 	for {
 		fmt.Print("\n> ")
 
 		line, err := stdinReader.ReadString('\n')
 		if err != nil {
 			if interactive {
-				now := time.Now()
-				if !lastCtrlC.IsZero() && now.Sub(lastCtrlC) < 2*time.Second {
-					// Double Ctrl+C at prompt -- exit
-					printResumeHint(agent)
-					return
-				}
-				lastCtrlC = now
+				// Ctrl+C at prompt — signal handler already tracks double-press.
+				// Just reopen stdin and continue; if double-pressed, signal handler
+				// already called os.Exit(0).
 				agent.SetInterrupted(false)
-				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again to exit)\n")
 				if newReader := reopenStdin(); newReader != nil {
 					stdinReader = newReader
 					continue
@@ -205,8 +210,6 @@ func runInteractive(agent *AgentLoop) {
 			printResumeHint(agent)
 			break
 		}
-
-		lastCtrlC = time.Time{} // reset on successful input
 
 		userInput := strings.TrimSpace(line)
 		if userInput == "" {
@@ -279,18 +282,12 @@ func runInteractive(agent *AgentLoop) {
 				}
 			}
 		}
-
 		fmt.Println()
 		agent.SetInterrupted(false) // ensure clear before running
 		result := agent.Run(userInput)
-		// If agent was interrupted, set lastCtrlC so next Ctrl+C at prompt
-		// within 2 seconds counts as double-press (exit)
-		if agent.IsInterrupted() {
-			lastCtrlC = time.Now()
-			agent.SetInterrupted(false)
-		} else {
-			lastCtrlC = time.Time{}
-		}
+		agent.SetInterrupted(false) // clear after run
+		fmt.Println(result)
+		fmt.Println()
 		fmt.Println(result)
 		fmt.Println()
 	}
