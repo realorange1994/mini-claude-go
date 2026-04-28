@@ -248,7 +248,11 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	if typeFilter != "" {
 		if exts, ok := typeMap[strings.ToLower(typeFilter)]; ok {
 			for _, e := range exts {
-				args = append(args, "--type-add", "mytype:"+e)
+				glob := e
+				if !strings.HasPrefix(glob, "*") {
+					glob = "*" + glob
+				}
+				args = append(args, "--type-add", "mytype:"+glob)
 			}
 			args = append(args, "--type", "mytype")
 		}
@@ -258,7 +262,11 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 	if output == "" {
+		// rg exits with code 1 when no matches found — not a real error
 		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+				return ToolResult{Output: "No matches found."}
+			}
 			return ToolResult{Output: fmt.Sprintf("Error running rg: %v", err), IsError: true}
 		}
 		return ToolResult{Output: "No matches found."}
