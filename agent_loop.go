@@ -274,6 +274,8 @@ func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration)
 
 // Run processes a user message through the agent loop, returning the final text response.
 func (a *AgentLoop) Run(userMessage string) string {
+	// Clear any stale interrupted flag from previous run
+	a.SetInterrupted(false)
 	a.context.AddUserMessage(userMessage)
 	if a.transcript != nil {
 		_ = a.transcript.WriteUser(userMessage)
@@ -523,8 +525,9 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		lastErr = err
 		errMsg := err.Error()
 
-		// Interrupt: return immediately
-		if ctx.Err() == context.Canceled || strings.Contains(errMsg, "context canceled") {
+		// Interrupt — check the actual flag, not ctx.Err(), because
+		// the interrupt watcher goroutine can race with the timeout.
+		if a.IsInterrupted() {
 			a.SetInterrupted(false)
 			return nil, fmt.Errorf("interrupted by user")
 		}
@@ -774,8 +777,9 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			return toolCalls, textParts, nil
 		}
 
-		// Interrupt
-		if ctx.Err() == context.Canceled || strings.Contains(err.Error(), "context canceled") {
+		// Interrupt — check the actual flag, not ctx.Err(), because
+		// the interrupt watcher goroutine can race with the timeout.
+		if a.IsInterrupted() {
 			a.SetInterrupted(false)
 			return nil, nil, fmt.Errorf("interrupted by user")
 		}

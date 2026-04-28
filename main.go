@@ -288,8 +288,6 @@ func runInteractive(agent *AgentLoop) {
 		agent.SetInterrupted(false) // clear after run
 		fmt.Println(result)
 		fmt.Println()
-		fmt.Println(result)
-		fmt.Println()
 	}
 }
 
