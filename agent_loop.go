@@ -334,6 +334,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 				lastTransition = "model_confusion_retry"
 				continue
 			}
+			// 2013 error: tool_result doesn't follow tool_call — repair pairing before retry
+			if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
+				fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013), repairing context...\n")
+				a.context.ValidateToolPairing()
+				a.context.FixRoleAlternation()
+				lastTransition = "tool_pairing_repair"
+				continue
+			}
 			// Truncated tool arguments — model cut off mid-tool-call
 			if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
 				fmt.Fprintf(os.Stderr, "\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
@@ -341,10 +349,8 @@ func (a *AgentLoop) Run(userMessage string) string {
 				lastTransition = "tool_args_truncated_retry"
 				continue
 			}
-			// Stream stalled — safety timeout fired or context canceled; recover with truncation
-			if strings.Contains(errMsg, "stream stalled") ||
-				strings.Contains(errMsg, "context canceled") ||
-				strings.Contains(errMsg, "context deadline exceeded") {
+			// Stream stalled — safety timeout fired; recover with truncation
+			if strings.Contains(errMsg, "stream stalled") {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
 					fmt.Fprintf(os.Stderr, "\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
@@ -530,6 +536,14 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		if a.IsInterrupted() {
 			a.SetInterrupted(false)
 			return nil, fmt.Errorf("interrupted by user")
+		}
+
+		// 2013 error: tool pairing broken — repair and retry
+		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
+			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013), repairing context...\n")
+			a.context.ValidateToolPairing()
+			a.context.FixRoleAlternation()
+			continue
 		}
 
 		// Special errors: pass through to Run loop
@@ -785,6 +799,22 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		}
 
 		errMsg := err.Error()
+
+		// 2013 error: tool pairing broken — repair and retry
+		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
+			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
+			a.context.ValidateToolPairing()
+			a.context.FixRoleAlternation()
+			continue
+		}
+
+		// 2013 error: tool pairing broken — repair and retry
+		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
+			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
+			a.context.ValidateToolPairing()
+			a.context.FixRoleAlternation()
+			continue
+		}
 
 		// Special errors: pass through to Run loop for handling
 		if strings.Contains(errMsg, "model confused") ||
