@@ -21,8 +21,16 @@ func main() {
 	mode := flag.String("mode", "ask", "Permission mode (ask|auto|plan)")
 	maxTurns := flag.Int("max-turns", 90, "Max agent loop turns per message")
 	stream := flag.Bool("stream", false, "Enable streaming output")
+	projectDir := flag.String("dir", "", "Project directory (change working directory before starting)")
 	resumeFile := flag.String("resume", "", "Resume from a transcript file path or 'last' for most recent")
 	flag.Parse()
+
+	// Change working directory if --dir is specified
+	if *projectDir != "" {
+		if err := os.Chdir(*projectDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Failed to change working directory to %s: %v\n", *projectDir, err)
+		}
+	}
 
 	// Priority: flags > env > .claude/settings.json > defaults
 	cfg := DefaultConfig()
@@ -75,6 +83,12 @@ func main() {
 	cfg.PermissionMode = PermissionMode(*mode)
 	cfg.MaxTurns = *maxTurns
 
+	// Validate: model is required
+	if cfg.Model == "" {
+		fmt.Fprintln(os.Stderr, "[!] No model specified. Set it via --model flag, ANTHROPIC_MODEL env, or model in .claude/settings.json")
+		os.Exit(1)
+	}
+
 	defer cfg.Close()
 
 	// Create FileHistory (used by both tools and agent loop)
@@ -92,26 +106,31 @@ func main() {
 	if *resumeFile != "" {
 		path, err := findTranscript(*resumeFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resuming transcript: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "[!] Resume failed: %v\n", err)
+			fmt.Fprintln(os.Stderr, "[*] Starting a new session instead")
+			agent = NewAgentLoop(cfg, registry, *stream)
+		} else {
+			var err2 error
+			agent, err2 = NewAgentLoopFromTranscript(cfg, registry, *stream, path)
+			if err2 != nil {
+				fmt.Fprintf(os.Stderr, "[!] Resume failed: %v\n", err2)
+				fmt.Fprintln(os.Stderr, "[*] Starting a new session instead")
+				agent = NewAgentLoop(cfg, registry, *stream)
+			} else {
+				fmt.Printf("[+] Resumed session from transcript: %s\n", path)
+			}
 		}
-		var err2 error
-		agent, err2 = NewAgentLoopFromTranscript(cfg, registry, *stream, path)
-		if err2 != nil {
-			fmt.Fprintf(os.Stderr, "Error resuming transcript: %v\n", err2)
-			os.Exit(1)
-		}
-		fmt.Printf("[+] Resumed session from transcript: %s\n", path)
 	} else {
 		agent = NewAgentLoop(cfg, registry, *stream)
 	}
 
-	// One-shot mode
+	// One-shot mode: positional args are appended as prompt (works with --resume too)
 	args := flag.Args()
 	if len(args) > 0 {
 		prompt := strings.Join(args, " ")
 		result := agent.Run(prompt)
 		fmt.Println(result)
+		agent.Close()
 		return
 	}
 

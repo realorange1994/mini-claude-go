@@ -94,12 +94,6 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 				Model:      s.Env.AnthropicModel,
 				ProjectDir: projectDir,
 			}
-			if cfg.Model == "" {
-				cfg.Model = s.Env.AnthropicSonnet
-			}
-			if cfg.Model == "" {
-				cfg.Model = s.Env.AnthropicOpus
-			}
 			// Legacy: also load MCP servers from settings.json
 			for name, srv := range s.MCP.Servers {
 				mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
@@ -157,7 +151,7 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Model:          "claude-sonnet-4-20250514",
+		Model:          "",
 		MaxTurns:       90,
 		MaxContextMsgs: 100,
 		PermissionMode: ModeAsk,
