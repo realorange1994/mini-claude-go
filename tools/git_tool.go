@@ -187,10 +187,10 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 		remote, _ := params["remote"].(string)
 		if remote == "" {
 			// Check if there's an origin remote configured
-			checkOut, checkErr := runGitCommand(ctx, []string{"remote"}, workDir, "")
-			if checkErr != nil {
+			checkOut, _, _ := runGitCommandWithExitCode(ctx, []string{"remote"}, workDir, "")
+			if checkOut == "" {
 				return ToolResult{
-					Output:   fmt.Sprintf("Error: cannot determine git remotes: %v\nOutput: %s", checkErr, checkOut),
+					Output:   "Error: cannot determine git remotes",
 					IsError: true,
 				}
 			}
@@ -211,26 +211,15 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 	// Get proxy from params
 	proxy, _ := params["proxy"].(string)
 
-	out, exitCode, err := runGitCommandWithExitCode(ctx, cmd, workDir, proxy)
-	if err != nil {
-		errMsg := fmt.Sprintf("Error executing 'git %s': %v", strings.Join(cmd, " "), err)
-		if exitCode != 0 {
-			errMsg = fmt.Sprintf("%s (exit code: %d)", errMsg, exitCode)
-		}
-		if out != "" {
-			errMsg = fmt.Sprintf("%s\n\nOutput:\n%s", errMsg, out)
-		}
-		return ToolResult{Output: errMsg, IsError: true}
-	}
-	
-	// Check for warnings in stderr even on success
+	out, exitCode, _ := runGitCommandWithExitCode(ctx, cmd, workDir, proxy)
+
 	if exitCode != 0 {
 		return ToolResult{
-			Output:   fmt.Sprintf("Warning: git succeeded but exit code was %d:\n%s", exitCode, out),
-			IsError: false,
+			Output:  fmt.Sprintf("Error executing 'git %s' (exit code: %d)\n\nOutput:\n%s", strings.Join(cmd, " "), exitCode, out),
+			IsError: true,
 		}
 	}
-	
+
 	return ToolResult{Output: out, IsError: false}
 }
 
@@ -586,9 +575,8 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 	return args, nil
 }
 
-func runGitCommand(ctx context.Context, args []string, workDir string, proxy string) (string, error) {
-	out, _, err := runGitCommandWithExitCode(ctx, args, workDir, proxy)
-	return out, err
+func runGitCommand(ctx context.Context, args []string, workDir string, proxy string) (string, int, error) {
+	return runGitCommandWithExitCode(ctx, args, workDir, proxy)
 }
 
 func runGitCommandWithExitCode(ctx context.Context, args []string, workDir string, proxy string) (string, int, error) {
@@ -605,15 +593,13 @@ func runGitCommandWithExitCode(ctx context.Context, args []string, workDir strin
 		cmd.Dir = workDir
 	}
 	out, err := cmd.CombinedOutput()
-	
+
 	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		exitCode = exitErr.ExitCode()
 	}
-	
-	return strings.TrimSpace(string(out)), exitCode, err
+	// Don't return err — let caller decide how to handle non-zero exit codes
+	return strings.TrimSpace(string(out)), exitCode, nil
 }
 
 func getStringArray(params map[string]interface{}, key string) []string {
