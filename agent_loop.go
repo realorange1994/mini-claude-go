@@ -94,7 +94,9 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 }
 
 // NewAgentLoopFromTranscript creates an agent loop from an existing transcript file.
-func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream bool, transcriptPath string) (*AgentLoop, error) {
+// If continueTranscript is true, new messages are appended to the original file
+// instead of creating a new session transcript.
+func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream bool, transcriptPath string, continueTranscript bool) (*AgentLoop, error) {
 	apiKey := cfg.APIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("ANTHROPIC_API_KEY")
@@ -126,12 +128,17 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		maxTurns = 20
 	}
 
-	// Create new transcript writer for this resumed session
-	sessionID := time.Now().Format("20060102-150405")
-	transcriptDir := filepath.Join(".claude", "transcripts")
-	tw := transcript.NewWriter(sessionID, filepath.Join(transcriptDir, sessionID+".jsonl"))
-	_ = tw.Write(transcript.Entry{Type: "system", Content: fmt.Sprintf("model=%s, mode=%s", cfg.Model, cfg.PermissionMode)})
-	_ = tw.Write(transcript.Entry{Type: "user", Content: fmt.Sprintf("Resumed from %s (%d messages restored)", transcriptPath, len(entries))})
+	// Create transcript writer: continue original file or start a new session
+	var tw *transcript.Writer
+	if continueTranscript {
+		tw = transcript.NewWriterFromExisting(transcriptPath)
+	} else {
+		sessionID := time.Now().Format("20060102-150405")
+		transcriptDir := filepath.Join(".claude", "transcripts")
+		tw = transcript.NewWriter(sessionID, filepath.Join(transcriptDir, sessionID+".jsonl"))
+		_ = tw.Write(transcript.Entry{Type: "system", Content: fmt.Sprintf("model=%s, mode=%s", cfg.Model, cfg.PermissionMode)})
+		_ = tw.Write(transcript.Entry{Type: "user", Content: fmt.Sprintf("Resumed from %s (%d messages restored)", transcriptPath, len(entries))})
+	}
 
 	agent := &AgentLoop{
 		config:       cfg,

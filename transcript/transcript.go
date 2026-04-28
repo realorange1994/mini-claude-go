@@ -41,6 +41,19 @@ func NewWriter(sessionID, filePath string) *Writer {
 	}
 }
 
+// NewWriterFromExisting creates a transcript writer that continues writing
+// to an existing transcript file, preserving the original session ID.
+func NewWriterFromExisting(filePath string) *Writer {
+	// Extract session ID from filename (e.g. "20260428-235831.jsonl" -> "20260428-235831")
+	base := filepath.Base(filePath)
+	sessionID := base[:len(base)-len(".jsonl")]
+	return &Writer{
+		sessionID: sessionID,
+		filePath:  filePath,
+		pending:   make([]Entry, 0, 100),
+	}
+}
+
 // Write adds an entry to the transcript (buffered, flushes at 100 entries).
 func (w *Writer) Write(entry Entry) error {
 	w.mu.Lock()

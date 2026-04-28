@@ -112,7 +112,7 @@ func main() {
 			agent = NewAgentLoop(cfg, registry, *stream)
 		} else {
 			var err2 error
-			agent, err2 = NewAgentLoopFromTranscript(cfg, registry, *stream, path)
+			agent, err2 = NewAgentLoopFromTranscript(cfg, registry, *stream, path, *resumeFile == "last")
 			if err2 != nil {
 				fmt.Fprintf(os.Stderr, "[!] Resume failed: %v\n", err2)
 				fmt.Fprintln(os.Stderr, "[*] Starting a new session instead")
@@ -265,7 +265,7 @@ func runInteractive(agent *AgentLoop) {
 							fmt.Printf("Error: %v\n", err)
 							continue
 						}
-						newAgent, err := NewAgentLoopFromTranscript(agent.config, agent.registry, agent.useStream, path)
+						newAgent, err := NewAgentLoopFromTranscript(agent.config, agent.registry, agent.useStream, path, target == "last")
 						if err != nil {
 							fmt.Printf("Error resuming transcript: %v\n", err)
 							continue
