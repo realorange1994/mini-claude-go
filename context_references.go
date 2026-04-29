@@ -325,8 +325,7 @@ func expandFileReference(ref ContextReference, cwd string) (block string, warnin
 	var displayText string
 	var linesHint string
 	if ref.LineStart > 0 {
-		allLines := strings.Split(text, "
-")
+		allLines := strings.Split(text, "\n")
 		totalLines := len(allLines)
 
 		// If requested start is beyond file length, return a clear message
@@ -357,11 +356,9 @@ func expandFileReference(ref ContextReference, cwd string) (block string, warnin
 		for i := startIdx; i < endIdx; i++ {
 			selected = append(selected, fmt.Sprintf("%4d | %s", i+1, allLines[i]))
 		}
-		displayText = strings.Join(selected, "
-")
+		displayText = strings.Join(selected, "\n")
 		if lineCount >= MaxLineLimit {
-			displayText += fmt.Sprintf("
-... (truncated at %d lines)", MaxLineLimit)
+			displayText += fmt.Sprintf("\n... (truncated at %d lines)", MaxLineLimit)
 		}
 
 		linesHint = fmt.Sprintf(" (lines %d-%d, file has %d lines)", ref.LineStart, ref.LineEnd, totalLines)
@@ -400,8 +397,7 @@ func expandFolderReference(ref ContextReference, cwd string) (block string, warn
 	// Check if folder is empty
 	if dir, err := os.Open(path); err == nil {
 		if names, err := dir.Readdirnames(1); len(names) == 0 && err == nil {
-			return fmt.Sprintf("## @folder:%s (0 tokens)
-(empty directory - no files or subdirectories)", ref.Target), ""
+			return fmt.Sprintf("## @folder:%s (0 tokens)\n(empty directory - no files or subdirectories)", ref.Target), ""
 		}
 		dir.Close()
 	}
