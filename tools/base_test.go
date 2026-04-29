@@ -111,3 +111,69 @@ func TestToolResultWithMetadata(t *testing.T) {
 		t.Errorf("expected ExitCode=0, got %d", result.Metadata.ExitCode)
 	}
 }
+
+func TestToolResultOK(t *testing.T) {
+	r := ToolResultOK("success")
+	if r.IsError {
+		t.Error("expected IsError=false")
+	}
+	if r.Output != "success" {
+		t.Errorf("expected output 'success', got %q", r.Output)
+	}
+}
+
+func TestToolResultError(t *testing.T) {
+	r := ToolResultError("failed")
+	if !r.IsError {
+		t.Error("expected IsError=true")
+	}
+	if r.Output != "failed" {
+		t.Errorf("expected output 'failed', got %q", r.Output)
+	}
+}
+
+func TestToolResultWithMetadataChain(t *testing.T) {
+	r := ToolResultOK("ok").WithMetadata(NewToolResultMetadata("read_file", 0))
+	if r.Metadata.ToolName != "read_file" {
+		t.Errorf("expected ToolName=read_file, got %q", r.Metadata.ToolName)
+	}
+	if !r.Metadata.ExitCodeSet {
+		t.Error("expected ExitCodeSet=true")
+	}
+}
+
+func TestNewToolResultMetadata(t *testing.T) {
+	m := NewToolResultMetadata("exec", 1)
+	if m.ToolName != "exec" {
+		t.Errorf("expected ToolName=exec, got %q", m.ToolName)
+	}
+	if m.ExitCode != 1 {
+		t.Errorf("expected ExitCode=1, got %d", m.ExitCode)
+	}
+	if !m.ExitCodeSet {
+		t.Error("expected ExitCodeSet=true")
+	}
+	if !m.IsError() {
+		t.Error("expected IsError()=true for exit code 1")
+	}
+}
+
+func TestToolResultMetadataExitCodeNotSet(t *testing.T) {
+	m := ToolResultMetadata{ToolName: "exec"}
+	if m.HasExitCode() {
+		t.Error("expected HasExitCode()=false when not set")
+	}
+	if m.IsError() {
+		t.Error("expected IsError()=false when exit code not set")
+	}
+}
+
+func TestToolResultMetadataExitCodeZero(t *testing.T) {
+	m := NewToolResultMetadata("exec", 0)
+	if !m.HasExitCode() {
+		t.Error("expected HasExitCode()=true for explicitly set 0")
+	}
+	if m.IsError() {
+		t.Error("expected IsError()=false for exit code 0")
+	}
+}

@@ -1139,6 +1139,18 @@ func (a *AgentLoop) truncateOutput(output string) string {
 // executeSingleTool runs one tool call with timing, truncation, and timeout.
 // Returns the ToolResultBlockParam and the output string.
 func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResultBlockParam, string) {
+	return a.executeTool(call, true)
+}
+
+// executeSingleToolApproved runs one tool call with permission already checked.
+// Skips the gate.Check call to avoid concurrent stdin reads in ask mode.
+func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.ToolResultBlockParam, string) {
+	return a.executeTool(call, false)
+}
+
+// executeTool is the unified tool execution method.
+// When checkPermissions is true, it runs the permission gate check.
+func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (anthropic.ToolResultBlockParam, string) {
 	toolUseID, _ := call["id"].(string)
 	toolName, _ := call["name"].(string)
 	input, _ := call["input"].(map[string]any)
@@ -1198,13 +1210,15 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 		}, msg
 	}
 
-	denial := a.gate.Check(tool, input)
-	if denial != nil {
-		return anthropic.ToolResultBlockParam{
-			ToolUseID: toolUseID,
-			Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: denial.Output}}},
-			IsError:   param.NewOpt(true),
-		}, denial.Output
+	if checkPermissions {
+		denial := a.gate.Check(tool, input)
+		if denial != nil {
+			return anthropic.ToolResultBlockParam{
+				ToolUseID: toolUseID,
+				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: denial.Output}}},
+				IsError:   param.NewOpt(true),
+			}, denial.Output
+		}
 	}
 
 	// Execute with interrupt-aware context (agent-controlled timeout, default 30s)
@@ -1308,164 +1322,6 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 	}, output
 }
 
-// executeSingleToolApproved runs one tool call with permission already checked.
-// Skips the gate.Check call to avoid concurrent stdin reads in ask mode.
-func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.ToolResultBlockParam, string) {
-	toolUseID, _ := call["id"].(string)
-	toolName, _ := call["name"].(string)
-	input, _ := call["input"].(map[string]any)
-	if input == nil {
-		input = make(map[string]any)
-	}
-
-	// Coerce argument types to match schema
-	if tool := a.registry.Get(toolName); tool != nil {
-		tools.CoerceArguments(tool.InputSchema(), input)
-	}
-
-	// Agent-controlled timeout — default 30s, clamped to [1, 300] seconds
-	timeout := a.toolTimeout
-	if t, ok := input["timeout"].(float64); ok && t > 0 {
-		secs := int(t)
-		if secs < 1 {
-			secs = 1
-		}
-		if secs > 300 {
-			secs = 300
-		}
-		timeout = time.Duration(secs) * time.Second
-	}
-	// Remove timeout from tool input — it's a meta-parameter, not a tool param
-	delete(input, "timeout")
-
-	if a.transcript != nil {
-		_ = a.transcript.WriteToolUse(toolUseID, toolName, input)
-	}
-
-	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
-		if path, ok := input["path"].(string); ok && path != "" {
-			_ = a.snapshots.TakeSnapshotWithDesc(path, "before " + toolName)
-		}
-	}
-
-	tool := a.registry.Get(toolName)
-	if tool == nil {
-		msg := "Error: unknown tool '" + toolName + "'"
-		return anthropic.ToolResultBlockParam{
-			ToolUseID: toolUseID,
-			Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: msg}}},
-			IsError:   param.NewOpt(true),
-		}, msg
-	}
-
-	if err := tools.ValidateParams(tool, input); err != nil {
-		msg := "Error: " + err.Error()
-		return anthropic.ToolResultBlockParam{
-			ToolUseID: toolUseID,
-			Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: msg}}},
-			IsError:   param.NewOpt(true),
-		}, msg
-	}
-
-	// Use interrupt-aware context with timeout (already set from input or default)
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	ctx, cancel := a.interruptCtx(context.Background(), timeout)
-	defer cancel()
-
-	resultCh := make(chan tools.ToolResult, 1)
-	start := time.Now()
-	go func() {
-		resultCh <- tools.ExecuteWithContext(ctx, tool, input)
-	}()
-
-	var result tools.ToolResult
-	var cancelled bool
-	select {
-	case result = <-resultCh:
-	case <-ctx.Done():
-		cancelled = true
-		if a.IsInterrupted() {
-			result = tools.ToolResult{
-				Output:  "Interrupted by user",
-				IsError: true,
-			}
-		} else {
-			result = tools.ToolResult{
-				Output:  fmt.Sprintf("Error: %s timed out after %v", toolName, timeout),
-				IsError: true,
-			}
-		}
-	case <-time.After(timeout):
-		cancelled = true
-		result = tools.ToolResult{
-			Output:  fmt.Sprintf("Error: %s timed out after %v", toolName, timeout),
-			IsError: true,
-		}
-	}
-	elapsed := time.Since(start)
-
-	// Post-snapshot for write tools: capture the new state with a meaningful description
-	if !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
-		if path, ok := input["path"].(string); ok && path != "" {
-			desc := toolName
-			if toolName == "edit_file" {
-				if oldStr, ok2 := input["old_string"].(string); ok2 {
-					if newStr, ok3 := input["new_string"].(string); ok3 {
-						oldPreview := limitStr(oldStr, 50)
-						newPreview := limitStr(newStr, 50)
-						desc = fmt.Sprintf("edit: '%s' -> '%s'", oldPreview, newPreview)
-					}
-				}
-			}
-			_ = a.snapshots.TakeSnapshotWithDesc(path, desc)
-		}
-	}
-
-	// rm/rmrf cleanup: clear snapshot history for deleted files
-	if !result.IsError && toolName == "fileops" {
-		if op, ok := input["operation"].(string); ok && (op == "rm" || op == "rmrf") {
-			if path, ok2 := input["path"].(string); ok2 && path != "" {
-				if op == "rm" {
-					a.snapshots.ClearPath(path)
-				} else {
-					a.snapshots.ClearUnderDir(path)
-				}
-			}
-		}
-	}
-
-	output := a.truncateOutput(result.Output)
-
-	if cancelled {
-		if a.IsInterrupted() {
-			fmt.Fprintf(os.Stderr, "  [WARN] %s interrupted\n", toolName)
-		} else {
-			fmt.Fprintf(os.Stderr, "  [TIMEOUT] %s timed out after %v\n", toolName, timeout)
-		}
-	} else if result.IsError {
-		preview := limitStr(output, 150)
-		fmt.Fprintf(os.Stderr, "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
-	} else {
-		preview := toolResultPreview(toolName, output)
-		if toolName == "exec" {
-			fmt.Fprintf(os.Stderr, "  %s\n", preview)
-		} else {
-			fmt.Fprintf(os.Stderr, "  [OK] %s: %s\n", toolName, preview)
-		}
-	}
-
-	if a.transcript != nil {
-		_ = a.transcript.WriteToolResult(toolUseID, toolName, output)
-	}
-
-	return anthropic.ToolResultBlockParam{
-		ToolUseID: toolUseID,
-		Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: output}}},
-		IsError:   param.NewOpt(result.IsError),
-	}, output
-}
 
 // toolResultPreview extracts the most relevant part of a tool result for display.
 func toolResultPreview(toolName, output string) string {

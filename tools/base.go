@@ -13,19 +13,54 @@ type ToolResult struct {
 	Metadata ToolResultMetadata
 }
 
+// ToolResultOK creates a successful ToolResult.
+func ToolResultOK(output string) ToolResult {
+	return ToolResult{Output: output, IsError: false}
+}
+
+// ToolResultError creates an error ToolResult.
+func ToolResultError(msg string) ToolResult {
+	return ToolResult{Output: msg, IsError: true}
+}
+
+// WithMetadata returns the ToolResult with metadata set.
+func (r ToolResult) WithMetadata(meta ToolResultMetadata) ToolResult {
+	r.Metadata = meta
+	return r
+}
+
 // ToolResultMetadata holds structured metadata about a tool execution.
 type ToolResultMetadata struct {
 	ToolName    string
 	ExitCode    int
+	ExitCodeSet bool  // true when ExitCode was explicitly set (distinguishes 0 from not-set)
 	DurationMs  int64
 	OutputLines int
 	Truncated   bool
 }
 
+// NewToolResultMetadata creates metadata with tool name and exit code explicitly set.
+func NewToolResultMetadata(toolName string, exitCode int) ToolResultMetadata {
+	return ToolResultMetadata{ToolName: toolName, ExitCode: exitCode, ExitCodeSet: true}
+}
+
+// HasExitCode returns true if ExitCode was explicitly set.
+func (m ToolResultMetadata) HasExitCode() bool {
+	return m.ExitCodeSet
+}
+
+// IsError returns true if the tool execution resulted in an error.
+func (m ToolResultMetadata) IsError() bool {
+	if m.ExitCodeSet && m.ExitCode != 0 {
+		return true
+	}
+	return false
+}
+
 // ToCompactSummary returns a one-line summary of the tool result for display.
 func (m ToolResultMetadata) ToCompactSummary(output string) string {
 	status := "ok"
-	if m.ExitCode != 0 {
+	if m.ExitCodeSet && m.ExitCode != 0 {
 		status = "error"
 	}
 	if !m.Truncated && strings.Contains(output, "Error:") {
