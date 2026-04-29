@@ -596,10 +596,31 @@ func (a *AgentLoop) Close() {
 }
 
 // ForceCompact forces a context compaction (for /compact command).
-// Uses local truncation-based compaction (no LLM call).
+// Skips NeedsCompaction check — always performs truncation.
 func (a *AgentLoop) ForceCompact() {
-	a.context.CompactContext()
-	// Mark system prompt dirty after compaction
+	entries := a.context.Entries()
+	if len(entries) == 0 {
+		fmt.Println("[compact] No messages to compact.")
+		return
+	}
+
+	// Try normal compaction first (may skip if not needed)
+	if a.context.CompactContext() {
+		if a.config.cachedPrompt != nil {
+			a.config.cachedPrompt.MarkDirty()
+		}
+		return
+	}
+
+	// Normal compaction skipped (not enough tokens) — force truncation
+	before := len(entries)
+	a.context.TruncateHistory()
+	after := len(a.context.Entries())
+	if after < before {
+		fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
+	} else {
+		fmt.Printf("[compact] No compaction needed (%d entries)\n", before)
+	}
 	if a.config.cachedPrompt != nil {
 		a.config.cachedPrompt.MarkDirty()
 	}
