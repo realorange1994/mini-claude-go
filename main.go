@@ -270,6 +270,7 @@ func runInteractive(agent *AgentLoop) {
 					continue
 				case "/clear":
 					count := agent.ClearHistory()
+					agent.registry.ClearFilesRead()
 					if count > 0 {
 						fmt.Printf("[clear] Cleared %d messages.\n", count)
 					} else {

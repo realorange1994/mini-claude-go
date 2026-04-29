@@ -1253,6 +1253,19 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}, msg
 	}
 
+	// Read-before-edit enforcement: file must be read and unmodified
+	if (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") && !checkPermissions {
+		if path, ok := input["path"].(string); ok && path != "" {
+			if staleMsg := a.registry.CheckFileStale(path); staleMsg != "" {
+				return anthropic.ToolResultBlockParam{
+					ToolUseID: toolUseID,
+					Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: staleMsg}}},
+					IsError:   param.NewOpt(true),
+				}, staleMsg
+			}
+		}
+	}
+
 	if checkPermissions {
 		denial := a.gate.Check(tool, input)
 		if denial != nil {
@@ -1303,6 +1316,13 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}
 	}
 	elapsed := time.Since(start)
+
+	// Mark file as read after successful read_file
+	if !result.IsError && toolName == "read_file" {
+		if path, ok := input["path"].(string); ok && path != "" {
+			a.registry.MarkFileRead(path)
+		}
+	}
 
 	// Post-snapshot for write tools: capture the new state with a meaningful description
 	if !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {

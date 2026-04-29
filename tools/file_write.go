@@ -11,7 +11,7 @@ type FileWriteTool struct{}
 
 func (*FileWriteTool) Name() string { return "write_file" }
 func (*FileWriteTool) Description() string {
-	return "Write content to a file. Creates parent directories if they don't exist. Overwrites if the file already exists."
+	return "Write content to a file. Creates parent directories if they don't exist. Overwrites if the file already exists. You must read the file first with read_file before writing to an existing file."
 }
 
 func (*FileWriteTool) InputSchema() map[string]any {

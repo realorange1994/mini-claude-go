@@ -11,7 +11,7 @@ type FileEditTool struct{}
 
 func (*FileEditTool) Name() string { return "edit_file" }
 func (*FileEditTool) Description() string {
-	return "Edit a file by replacing an exact string with a new string. Provide enough context in old_string to uniquely identify the target."
+	return "Edit a file by replacing an exact string with a new string. You must read the file first with read_file before editing. Provide enough context in old_string to uniquely identify the target."
 }
 
 func (*FileEditTool) InputSchema() map[string]any {

@@ -11,7 +11,7 @@ import (
 type MultiEditTool struct{}
 
 func (*MultiEditTool) Name() string        { return "multi_edit" }
-func (*MultiEditTool) Description() string { return "Apply multiple search/replace edits to a file atomically. If any edit fails, all are rolled back. Accepts a list of {old_string, new_string} pairs." }
+func (*MultiEditTool) Description() string { return "Apply multiple search/replace edits to a file atomically. If any edit fails, all are rolled back. You must read the file first with read_file before editing. Accepts a list of {old_string, new_string} pairs." }
 
 func (*MultiEditTool) InputSchema() map[string]any {
 	return map[string]any{

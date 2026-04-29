@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 )
 
 // ToolResult holds the output of a tool execution.
@@ -158,12 +160,16 @@ func ValidateParams(tool Tool, params map[string]any) error {
 
 // Registry collects tool instances and provides lookup + API schema generation.
 type Registry struct {
-	tools map[string]Tool
+	tools     map[string]Tool
+	filesRead map[string]time.Time // tracks which files have been read by read_file and when (mtime)
 }
 
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{tools: make(map[string]Tool)}
+	return &Registry{
+		tools:     make(map[string]Tool),
+		filesRead: make(map[string]time.Time),
+	}
 }
 
 // Register adds a tool to the registry.
@@ -183,6 +189,64 @@ func (r *Registry) AllTools() []Tool {
 		out = append(out, t)
 	}
 	return out
+}
+
+// MarkFileRead records that a file has been read by read_file, storing its current mtime.
+func (r *Registry) MarkFileRead(path string) {
+	normalized := normalizeFilePath(path)
+	if info, err := os.Stat(expandPath(path)); err == nil {
+		r.filesRead[normalized] = info.ModTime()
+	} else {
+		r.filesRead[normalized] = time.Time{} // new file, no mtime yet
+	}
+}
+
+// HasFileBeenRead checks if a file has been read by read_file.
+func (r *Registry) HasFileBeenRead(path string) bool {
+	return r.filesRead[normalizeFilePath(path)] != (time.Time{})
+}
+
+// CheckFileStale returns an error message if the file was modified since last read.
+// Returns empty string if the file is safe to edit.
+func (r *Registry) CheckFileStale(path string) string {
+	fp := expandPath(path)
+
+	// New file creation: file doesn't exist yet, allow without read
+	if _, err := os.Stat(fp); os.IsNotExist(err) {
+		return ""
+	}
+
+	normalized := normalizeFilePath(path)
+	storedMtime, wasRead := r.filesRead[normalized]
+	if !wasRead {
+		return "Error: file has not been read yet. Read it first with read_file before editing."
+	}
+
+	info, err := os.Stat(fp)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "" // file was deleted, not a staleness issue
+		}
+		return fmt.Sprintf("Error: cannot check file status: %v", err)
+	}
+
+	// File hasn't been modified since we read it
+	if info.ModTime() == storedMtime {
+		return ""
+	}
+
+	return "Error: file has been modified since read, either by the user or by a linter. Read it again before attempting to write it."
+}
+
+// ClearFilesRead clears the read-file tracking (e.g., on /clear).
+func (r *Registry) ClearFilesRead() {
+	r.filesRead = make(map[string]time.Time)
+}
+
+// normalizeFilePath normalizes a path for consistent comparison.
+func normalizeFilePath(path string) string {
+	p := strings.ReplaceAll(path, "\\", "/")
+	return strings.ToLower(p)
 }
 
 // APISchemas builds the tool definitions for the Anthropic API.
