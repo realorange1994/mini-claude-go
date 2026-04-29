@@ -384,11 +384,27 @@ func expandGitReference(ref ContextReference, cwd string, args []string, label s
 	}
 
 	content := strings.TrimSpace(string(output))
-	if content == "" {
-		content = "(no output)"
+	isEmpty := content == ""
+	if isEmpty {
+		// Provide context-specific empty messages so the model understands what "empty" means
+		switch label {
+		case "@diff":
+			content = "(working tree is clean — no unstaged changes)"
+		case "@staged":
+			content = "(nothing staged — no staged changes to commit)"
+		default:
+			if strings.HasPrefix(label, "@git:") {
+				content = "(no commits found in this repository)"
+			} else {
+				content = "(no output)"
+			}
+		}
 	}
 	tokens := len(content) / 4
 
+	if isEmpty {
+		return fmt.Sprintf("## %s (0 tokens)\n%s", label, content), ""
+	}
 	return fmt.Sprintf("## %s (%d tokens)\n```diff\n%s\n```", label, tokens, content), ""
 }
 
