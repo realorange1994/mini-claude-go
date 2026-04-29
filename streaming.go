@@ -286,6 +286,17 @@ func (h *CollectHandler) AsParsedResponse() ([]map[string]any, []string) {
 	return toolCalls, textParts
 }
 
+// ThinkFilterState tracks the state machine for filtering <thinking>...</thinking>
+// blocks from terminal display.
+type ThinkFilterState int
+
+const (
+	ThinkNormal   ThinkFilterState = iota // normal text output
+	ThinkInTag                             // detected <think
+	ThinkInBlock                           // inside thinking block
+	ThinkClosing                           // detected </think
+)
+
 // ---------------------------------------------------------------------------
 // TerminalHandler -- prints [Tool: name] ... and [THINK] thinking on completion
 // ---------------------------------------------------------------------------
@@ -297,6 +308,80 @@ type TerminalHandler struct {
 	thinkingBuf    strings.Builder
 	curToolName    string
 	curToolArgs    strings.Builder
+	thinkState     ThinkFilterState
+	thinkBuf       string
+}
+
+// filterThinking runs text through the think filter state machine.
+// Text inside <thinking>...</thinking> or <think>...</think> blocks is
+// wrapped with ANSI dim/gray escape codes; tag markers are stripped.
+func (h *TerminalHandler) filterThinking(text string) string {
+	var out strings.Builder
+	i := 0
+	for i < len(text) {
+		switch h.thinkState {
+		case ThinkNormal:
+			// Check for opening tag <think or <thinking
+			if text[i] == '<' {
+				remaining := text[i:]
+				if strings.HasPrefix(remaining, "<thinking") {
+					h.thinkState = ThinkInTag
+					h.thinkBuf = "<thinking"
+					i += len("<thinking")
+					continue
+				}
+				if strings.HasPrefix(remaining, "<think") {
+					h.thinkState = ThinkInTag
+					h.thinkBuf = "<think"
+					i += len("<think")
+					continue
+				}
+			}
+			out.WriteByte(text[i])
+			i++
+
+		case ThinkInTag:
+			h.thinkBuf += string(text[i])
+			if text[i] == '>' {
+				h.thinkState = ThinkInBlock
+				h.thinkBuf = ""
+				// Start dim output
+				out.WriteString("\033[2m")
+			}
+			i++
+
+		case ThinkInBlock:
+			// Check for closing tag </think or </thinking
+			if text[i] == '<' {
+				remaining := text[i:]
+				if strings.HasPrefix(remaining, "</thinking") {
+					h.thinkState = ThinkClosing
+					h.thinkBuf = "</thinking"
+					i += len("</thinking")
+					continue
+				}
+				if strings.HasPrefix(remaining, "</think") {
+					h.thinkState = ThinkClosing
+					h.thinkBuf = "</think"
+					i += len("</think")
+					continue
+				}
+			}
+			out.WriteByte(text[i])
+			i++
+
+		case ThinkClosing:
+			h.thinkBuf += string(text[i])
+			if text[i] == '>' {
+				h.thinkState = ThinkNormal
+				h.thinkBuf = ""
+				// End dim output
+				out.WriteString("\033[0m")
+			}
+			i++
+		}
+	}
+	return out.String()
 }
 
 func (h *TerminalHandler) Handle(chunk StreamChunk) error {
@@ -347,8 +432,11 @@ func (h *TerminalHandler) Handle(chunk StreamChunk) error {
 		if h.curToolName != "" {
 			h.flushToolCall()
 		}
-		// Text is collected by CollectHandler; Run loop prints final output.
-		// Don't print here to avoid double output.
+		// Run through think filter state machine before output
+		filtered := h.filterThinking(chunk.Content)
+		if filtered != "" {
+			fmt.Fprint(os.Stderr, filtered)
+		}
 	}
 	return nil
 }
@@ -504,6 +592,59 @@ func (b *StreamBus) Close() {
 }
 
 // ---------------------------------------------------------------------------
+// StreamProgress -- tracks streaming metrics (TTFB, throughput)
+// ---------------------------------------------------------------------------
+
+// StreamProgress tracks timing and token metrics during a streaming response.
+type StreamProgress struct {
+	StartTime   time.Time
+	FirstByteAt time.Time // TTFB
+	TokensRecv  int
+	mu          sync.Mutex
+}
+
+// RecordFirstByte sets FirstByteAt if this is the first content chunk.
+func (p *StreamProgress) RecordFirstByte() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.FirstByteAt.IsZero() {
+		p.FirstByteAt = time.Now()
+	}
+}
+
+// RecordTokens increments the received token count.
+func (p *StreamProgress) RecordTokens(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.TokensRecv += n
+}
+
+// TTFB returns the time to first byte duration. Returns 0 if first byte
+// has not been recorded yet.
+func (p *StreamProgress) TTFB() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.FirstByteAt.IsZero() {
+		return 0
+	}
+	return p.FirstByteAt.Sub(p.StartTime)
+}
+
+// Throughput returns tokens per second. Returns 0 if not enough data.
+func (p *StreamProgress) Throughput() float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.TokensRecv == 0 || p.FirstByteAt.IsZero() {
+		return 0
+	}
+	elapsed := time.Since(p.FirstByteAt).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(p.TokensRecv) / elapsed
+}
+
+// ---------------------------------------------------------------------------
 // DeltasState -- tracks what content was already streamed (for retry safety)
 // ---------------------------------------------------------------------------
 
@@ -534,12 +675,18 @@ type StreamAdapter struct {
 	startupMs      int       // startup timeout in ms (0 = defaults)
 	finishReason   string    // captured from MessageDeltaEvent.stop_reason
 	deltasState    DeltasState // tracks what was already streamed
+	progress       StreamProgress
 }
 
 // NewStreamAdapter creates an adapter that dispatches every chunk to the
 // given handler and publishes on the bus (nil bus = no publishing).
 func NewStreamAdapter(handler streamHandler, bus *StreamBus) *StreamAdapter {
-	return &StreamAdapter{handler: handler, bus: bus, deltasState: DeltasStateNone}
+	return &StreamAdapter{
+		handler:      handler,
+		bus:          bus,
+		deltasState:  DeltasStateNone,
+		progress:     StreamProgress{StartTime: time.Now()},
+	}
 }
 
 // WithStallTimeout sets dynamic stall timeouts.
@@ -674,6 +821,11 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 		case anthropic.ContentBlockDeltaEvent:
 			// Incremental content -- dispatch based on delta type
 			if chunk := sa.handleDeltaRaw(e.Delta); chunk.Type != "" {
+				// Track stream progress metrics
+				if chunk.Type == ChunkTypeText || chunk.Type == ChunkTypeThinking || chunk.Type == ChunkTypeToolArgument {
+					sa.progress.RecordFirstByte()
+					sa.progress.RecordTokens(1)
+				}
 				sa.trackDeltaState(chunk.Type, chunk.ID)
 				if err := wrapped(chunk); err != nil {
 					return err
@@ -785,6 +937,14 @@ func (sa *StreamAdapter) FinishReason() string {
 // whether a retry is safe or would cause text duplication.
 func (sa *StreamAdapter) DeltasState() DeltasState {
 	return sa.deltasState
+}
+
+// Progress returns a copy of the current stream progress metrics.
+func (sa *StreamAdapter) Progress() StreamProgress {
+	sa.progress.mu.Lock()
+	defer sa.progress.mu.Unlock()
+	// Return a copy
+	return sa.progress
 }
 
 // trackDeltaState updates the deltas state based on each chunk type received.

@@ -40,6 +40,7 @@ type Config struct {
 	AutoCompactThreshold   float64
 	AutoCompactBuffer      int
 	MaxCompactOutputTokens int
+	cachedPrompt           *CachedSystemPrompt
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -140,6 +141,7 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 	_ = loader.Refresh()
 	cfg.SkillLoader = loader
 	cfg.SkillTracker = skills.NewSkillTracker()
+	cfg.cachedPrompt = NewCachedSystemPrompt()
 
 	// Return found if any config was loaded
 	if cfg.APIKey != "" || cfg.Model != "" || len(mcpMgr.ListServers()) > 0 {
@@ -166,6 +168,7 @@ func DefaultConfig() Config {
 			"git push --force", "git reset --hard",
 			"> /dev/sda", "mkfs", "dd if=",
 		},
+		cachedPrompt: NewCachedSystemPrompt(),
 	}
 }
 

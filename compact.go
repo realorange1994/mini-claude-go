@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,48 @@ func EstimateTokens(text string) int {
 		return 0
 	}
 	return int(math.Ceil(float64(len(text)) / CharsPerToken))
+}
+
+// EstimateContentTokens estimates tokens based on content type.
+// Different content types have different chars/token ratios:
+//   - Code: 3.5 chars/token (denser, more special tokens)
+//   - Natural language: 4 chars/token (default)
+//   - JSON/structured: 3 chars/token (lots of delimiters)
+//   - tool_use blocks: 3 chars/token + 10 overhead
+//   - tool_result blocks: 3 chars/token + 5 overhead
+func EstimateContentTokens(text string, contentType string) int {
+	charsPerToken := 4.0 // default: natural language
+	switch contentType {
+	case "code":
+		charsPerToken = 3.5
+	case "json":
+		charsPerToken = 3.0
+	case "tool_use":
+		charsPerToken = 3.0
+	case "tool_result":
+		charsPerToken = 3.0
+	}
+	if text == "" {
+		return 0
+	}
+	return int(math.Ceil(float64(len(text)) / charsPerToken))
+}
+
+// DetectContentType heuristically detects content type for token estimation.
+func DetectContentType(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		// Likely JSON
+		return "json"
+	}
+	// Check for code indicators
+	codeIndicators := []string{"func ", "func(", "var ", "const ", "type ", "struct ", "impl ", "fn ", "class ", "def ", "import ", "package "}
+	for _, ind := range codeIndicators {
+		if strings.Contains(text, ind) {
+			return "code"
+		}
+	}
+	return "natural"
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -1052,7 +1095,9 @@ type Compactor struct {
 	compactBuffer         int
 	llmCompactFailedCount int
 	maxLLMCompactFailures int
-	disabled              bool // permanently disable LLM compaction after too many failures
+	disabled              bool     // permanently disable LLM compaction after too many failures
+	lastSummary           string   // for iterative summary updates
+	lastCompactSavings    []float64 // track savings ratio for anti-thrashing
 }
 
 // NewCompactor creates a new compactor with default settings.
@@ -1099,7 +1144,18 @@ func (c *Compactor) Compact(
 		return "", false
 	}
 
-	result, err := compactConversationLLM(messages, model, apiKey, baseURL)
+	// Anti-thrashing: skip if last 2 compactions each saved <10%
+	c.mu.Lock()
+	if len(c.lastCompactSavings) >= 2 {
+		if c.lastCompactSavings[len(c.lastCompactSavings)-1] < 0.10 &&
+			c.lastCompactSavings[len(c.lastCompactSavings)-2] < 0.10 {
+			c.mu.Unlock()
+			return "", false
+		}
+	}
+	c.mu.Unlock()
+
+	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary)
 	if err != nil {
 		c.mu.Lock()
 		c.llmCompactFailedCount++
@@ -1113,9 +1169,17 @@ func (c *Compactor) Compact(
 		return "", false
 	}
 
-	// Reset failure count on success
+	// Reset failure count on success, update lastSummary, and record savings
 	c.mu.Lock()
 	c.llmCompactFailedCount = 0
+	c.lastSummary = result.SummaryText
+	if result.PreCompactTokens > 0 {
+		savingsRatio := float64(result.PreCompactTokens-result.PostCompactTokens) / float64(result.PreCompactTokens)
+		c.lastCompactSavings = append(c.lastCompactSavings, savingsRatio)
+		if len(c.lastCompactSavings) > 2 {
+			c.lastCompactSavings = c.lastCompactSavings[len(c.lastCompactSavings)-2:]
+		}
+	}
 	c.mu.Unlock()
 
 	fmt.Fprintf(os.Stderr, "\n[Compaction] auto: %d messages -> 2 (summary), ~%d tokens saved\n",
@@ -1125,20 +1189,49 @@ func (c *Compactor) Compact(
 }
 
 // compactConversationLLM calls the LLM API to generate a conversation summary.
-func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string) (*CompactionResultLLM, error) {
+// Supports iterative summary updates when a previous summary exists.
+func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string) (*CompactionResultLLM, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages to compact")
 	}
 
 	preTokens := estimateMessageParamsTokens(messages)
 
+	// Apply 3-pass pre-pruning before sending to LLM
+	tailBudget := preTokens / 4 // 25% of current tokens as tail budget
+	pruned := pruneToolResults(messages, tailBudget)
+
+	// Redact sensitive information
+	for i := range pruned {
+		for j := range pruned[i].Content {
+			if pruned[i].Content[j].OfText != nil {
+				pruned[i].Content[j].OfText.Text = redactSensitiveText(pruned[i].Content[j].OfText.Text)
+			}
+			if pruned[i].Content[j].OfToolResult != nil {
+				for k := range pruned[i].Content[j].OfToolResult.Content {
+					if pruned[i].Content[j].OfToolResult.Content[k].OfText != nil {
+						pruned[i].Content[j].OfToolResult.Content[k].OfText.Text = redactSensitiveText(pruned[i].Content[j].OfToolResult.Content[k].OfText.Text)
+					}
+				}
+			}
+		}
+	}
+
+	// Choose prompt based on whether we have a previous summary
+	var userPrompt string
+	if previousSummary != "" {
+		userPrompt = strings.Replace(iterativeCompactUserPrompt, "{previous_summary}", previousSummary, 1)
+	} else {
+		userPrompt = structuredCompactUserPrompt
+	}
+
 	// Append the summary prompt as the final user message
-	finalMsgs := make([]anthropic.MessageParam, len(messages)+1)
-	copy(finalMsgs, messages)
-	finalMsgs[len(messages)] = anthropic.MessageParam{
+	finalMsgs := make([]anthropic.MessageParam, len(pruned)+1)
+	copy(finalMsgs, pruned)
+	finalMsgs[len(pruned)] = anthropic.MessageParam{
 		Role: anthropic.MessageParamRoleUser,
 		Content: []anthropic.ContentBlockParamUnion{
-			{OfText: &anthropic.TextBlockParam{Text: compactUserPrompt}},
+			{OfText: &anthropic.TextBlockParam{Text: userPrompt}},
 		},
 	}
 
@@ -1190,4 +1283,356 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 		PreCompactTokens:  preTokens,
 		PostCompactTokens: postTokens,
 	}, nil
+}
+
+// ─── Content-type-aware token estimation for API messages ────────────────────
+
+// EstimateMessageTokensSmart estimates tokens for a message using content-type
+// detection for more accurate per-block estimation.
+func EstimateMessageTokensSmart(msg anthropic.MessageParam) int {
+	total := 4 // role overhead per message
+	for _, block := range msg.Content {
+		if block.OfText != nil {
+			contentType := DetectContentType(block.OfText.Text)
+			total += EstimateContentTokens(block.OfText.Text, contentType)
+		}
+		if block.OfToolUse != nil {
+			total += 10 // tool_use overhead
+			total += EstimateContentTokens(block.OfToolUse.Name, "code")
+			if data, err := json.Marshal(block.OfToolUse.Input); err == nil {
+				total += EstimateContentTokens(string(data), "json")
+			}
+		}
+		if block.OfToolResult != nil {
+			total += 5 // tool_result overhead
+			for _, c := range block.OfToolResult.Content {
+				if c.OfText != nil {
+					contentType := DetectContentType(c.OfText.Text)
+					total += EstimateContentTokens(c.OfText.Text, contentType)
+				}
+			}
+		}
+	}
+	return total
+}
+
+// ─── Three-pass pre-pruning ──────────────────────────────────────────────────
+
+// PruneToolCallInfo stores info about a tool call for pre-pruning.
+type PruneToolCallInfo struct {
+	ToolName string
+	Args     any
+}
+
+// PruneToolCallIndex maps tool_use_id -> PruneToolCallInfo
+type PruneToolCallIndex map[string]PruneToolCallInfo
+
+// buildToolCallIndex extracts tool call info from assistant messages.
+func buildToolCallIndex(messages []anthropic.MessageParam) PruneToolCallIndex {
+	index := make(PruneToolCallIndex)
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if block.OfToolUse != nil {
+				index[block.OfToolUse.ID] = PruneToolCallInfo{
+					ToolName: block.OfToolUse.Name,
+					Args:     block.OfToolUse.Input,
+				}
+			}
+		}
+	}
+	return index
+}
+
+// pruneToolResults performs 3-pass pre-pruning on messages before LLM compaction.
+// Returns a modified copy of messages with:
+//
+//	Pass 1: Deduplicate identical tool results (FNV-1a hash)
+//	Pass 2: Summarize old tool results beyond tail protection
+//	Pass 3: Truncate large tool_call arguments
+func pruneToolResults(messages []anthropic.MessageParam, tailBudget int) []anthropic.MessageParam {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	result := make([]anthropic.MessageParam, len(messages))
+	copy(result, messages)
+
+	// Pass 1: Deduplicate tool results
+	result = dedupToolResults(result)
+
+	// Pass 2: Summarize old tool results
+	index := buildToolCallIndex(result)
+	result = summarizeOldToolResults(result, index, tailBudget)
+
+	// Pass 3: Truncate large tool_call arguments
+	result = truncateLargeToolArgs(result, 2000) // 2000 char limit per arg
+
+	return result
+}
+
+// dedupToolResults replaces duplicate tool results with a reference marker.
+func dedupToolResults(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	seen := make(map[string]string) // hash -> first tool_use_id
+
+	for i := range messages {
+		for j := range messages[i].Content {
+			block := &messages[i].Content[j]
+			if block.OfToolResult == nil {
+				continue
+			}
+			// Hash the content
+			contentHash := hashToolResultContent(block.OfToolResult)
+			toolUseID := block.OfToolResult.ToolUseID
+
+			if firstID, exists := seen[contentHash]; exists && firstID != toolUseID {
+				// Duplicate - replace with reference
+				block.OfToolResult.Content = []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("[duplicate result, see tool_use_id %s]", firstID)}},
+				}
+			} else {
+				seen[contentHash] = toolUseID
+			}
+		}
+	}
+	return messages
+}
+
+// hashToolResultContent creates a simple FNV-1a hash of tool result content.
+func hashToolResultContent(result *anthropic.ToolResultBlockParam) string {
+	var sb strings.Builder
+	for _, c := range result.Content {
+		if c.OfText != nil {
+			sb.WriteString(c.OfText.Text)
+		}
+	}
+	// Simple FNV-1a hash
+	h := uint32(2166136261)
+	for _, b := range sb.String() {
+		h ^= uint32(b)
+		h *= 16777619
+	}
+	return fmt.Sprintf("%08x", h)
+}
+
+// summarizeOldToolResults replaces old tool results with one-line summaries.
+func summarizeOldToolResults(messages []anthropic.MessageParam, index PruneToolCallIndex, tailBudget int) []anthropic.MessageParam {
+	// Find tail cut point by token budget
+	cutPoint := findTailCutByTokens(messages, tailBudget)
+
+	for i := 0; i < cutPoint && i < len(messages); i++ {
+		for j := range messages[i].Content {
+			block := &messages[i].Content[j]
+			if block.OfToolResult == nil {
+				continue
+			}
+			toolUseID := block.OfToolResult.ToolUseID
+			info, exists := index[toolUseID]
+			if !exists {
+				continue
+			}
+			// Generate one-line summary
+			summary := generateToolResultSummary(info.ToolName, block.OfToolResult)
+			block.OfToolResult.Content = []anthropic.ToolResultBlockParamContentUnion{
+				{OfText: &anthropic.TextBlockParam{Text: summary}},
+			}
+		}
+	}
+	return messages
+}
+
+// generateToolResultSummary creates a one-line summary for a tool result.
+func generateToolResultSummary(toolName string, result *anthropic.ToolResultBlockParam) string {
+	// Extract content text
+	var contentText string
+	for _, c := range result.Content {
+		if c.OfText != nil {
+			contentText += c.OfText.Text
+		}
+	}
+
+	lines := strings.Count(contentText, "\n") + 1
+	isErr := result.IsError.Valid() && result.IsError.Value
+
+	status := "ok"
+	if isErr {
+		status = "error"
+	}
+
+	// Truncate content for summary
+	preview := contentText
+	if len(preview) > 100 {
+		preview = preview[:100] + "..."
+	}
+	preview = strings.ReplaceAll(preview, "\n", " ")
+
+	return fmt.Sprintf("[%s] -> %s, %d lines output", toolName, status, lines)
+}
+
+// truncateLargeToolArgs truncates large arguments in tool_use blocks.
+func truncateLargeToolArgs(messages []anthropic.MessageParam, maxArgChars int) []anthropic.MessageParam {
+	for i := range messages {
+		for j := range messages[i].Content {
+			block := &messages[i].Content[j]
+			if block.OfToolUse == nil {
+				continue
+			}
+			// Truncate large input values
+			inputMap, ok := block.OfToolUse.Input.(map[string]any)
+			if !ok {
+				continue
+			}
+			modified := false
+			newMap := make(map[string]any, len(inputMap))
+			for k, v := range inputMap {
+				if s, ok := v.(string); ok && len(s) > maxArgChars {
+					newMap[k] = s[:maxArgChars] + "...[truncated]"
+					modified = true
+				} else {
+					newMap[k] = v
+				}
+			}
+			if modified {
+				block.OfToolUse.Input = newMap
+			}
+		}
+	}
+	return messages
+}
+
+// ─── Token-budget tail protection ────────────────────────────────────────────
+
+// findTailCutByTokens walks backward from the end of messages accumulating
+// tokens until the tail budget is reached. Returns the index where the
+// "keep" region starts. Ensures:
+//   - At least 3 messages are always protected
+//   - The most recent user message is always in the tail
+//   - Tool_call/result pairs are not split
+func findTailCutByTokens(messages []anthropic.MessageParam, tailTokenBudget int) int {
+	if len(messages) <= 3 {
+		return 0
+	}
+
+	accumulated := 0
+	cutPoint := len(messages)
+
+	// Walk backward
+	for i := len(messages) - 1; i >= 0; i-- {
+		msgTokens := estimateSingleMessageTokens(messages[i])
+		accumulated += msgTokens
+
+		if accumulated >= tailTokenBudget && i <= len(messages)-3 {
+			cutPoint = i
+			break
+		}
+	}
+
+	// Ensure at least 3 messages in tail
+	if cutPoint > len(messages)-3 {
+		cutPoint = len(messages) - 3
+	}
+
+	// Ensure most recent user message is in tail
+	for i := len(messages) - 1; i >= cutPoint; i-- {
+		if messages[i].Role == anthropic.MessageParamRoleUser {
+			// Check this isn't a tool_result user message at the boundary
+			break
+		}
+	}
+
+	// Align boundary: don't split tool_call/result pairs
+	// If the message at cutPoint is a tool_result, move back to include the tool_call
+	for cutPoint > 0 {
+		hasToolResult := false
+		for _, block := range messages[cutPoint].Content {
+			if block.OfToolResult != nil {
+				hasToolResult = true
+				break
+			}
+		}
+		if hasToolResult {
+			// This is a tool_result; check if previous message has the matching tool_use
+			cutPoint--
+			continue
+		}
+		break
+	}
+
+	return cutPoint
+}
+
+// estimateSingleMessageTokens estimates tokens for a single MessageParam.
+func estimateSingleMessageTokens(msg anthropic.MessageParam) int {
+	total := 4 // role overhead
+	for _, block := range msg.Content {
+		if block.OfText != nil {
+			total += EstimateTokens(block.OfText.Text)
+		}
+		if block.OfToolUse != nil {
+			total += 10 // tool_use overhead
+			total += EstimateTokens(block.OfToolUse.Name)
+			if data, err := json.Marshal(block.OfToolUse.Input); err == nil {
+				total += EstimateTokens(string(data))
+			}
+		}
+		if block.OfToolResult != nil {
+			total += 5 // tool_result overhead
+			for _, c := range block.OfToolResult.Content {
+				if c.OfText != nil {
+					total += EstimateTokens(c.OfText.Text)
+				}
+			}
+		}
+	}
+	return total
+}
+
+// ─── Iterative summary updates ──────────────────────────────────────────────
+
+const structuredCompactUserPrompt = `请生成结构化摘要，包含以下部分：
+- Active Task: 当前正在执行的任务
+- Goal: 用户最终目标
+- Completed Actions: 已完成的关键操作（含文件路径）
+- Active State: 当前工作状态
+- Key Decisions: 已做出的重要决定
+- Relevant Files: 涉及的文件列表
+- Remaining Work: 剩余待完成的工作
+- Critical Context: 不能丢失的关键上下文
+
+Do NOT include:
+- Individual tool call details or raw outputs
+- Intermediate exploration steps
+- Redundant or outdated information
+
+Write the summary as a coherent narrative that preserves enough context for the conversation to continue productively.`
+
+const iterativeCompactUserPrompt = `以下是之前的对话摘要和新的对话内容。请更新摘要，保留所有关键信息。
+
+Previous Summary:
+{previous_summary}
+
+New conversation content follows. Please update the summary to incorporate the new information while preserving all critical context from the previous summary.`
+
+// ─── Sensitive info redaction ────────────────────────────────────────────────
+
+// redactSensitiveText replaces sensitive values in text before sending to LLM.
+func redactSensitiveText(text string) string {
+	patterns := []string{
+		`api_key`, `apikey`, `api-key`,
+		`password`, `passwd`, `pass`,
+		`secret`, `token`, `credential`,
+		`auth`, `private_key`, `access_key`,
+	}
+
+	result := text
+	for _, pattern := range patterns {
+		// Match pattern followed by separator and a quoted value
+		// e.g., api_key: "sk-xxx" -> api_key: "[REDACTED]"
+		re := regexp.MustCompile(fmt.Sprintf(`(?i)(%s)\s*[:=]\s*["']([^"']{4,})["']`, pattern))
+		result = re.ReplaceAllString(result, fmt.Sprintf(`$1: "[REDACTED]"`))
+
+		// Also match pattern followed by separator and an unquoted value
+		re2 := regexp.MustCompile(fmt.Sprintf(`(?i)(%s)\s*[:=]\s*(\S{8,})`, pattern))
+		result = re2.ReplaceAllString(result, fmt.Sprintf(`$1: [REDACTED]`))
+	}
+	return result
 }

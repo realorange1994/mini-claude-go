@@ -5,6 +5,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"miniclaudecode-go/skills"
@@ -183,4 +185,42 @@ func buildToolList(registry *tools.Registry) string {
 		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name(), t.Description()))
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// CachedSystemPrompt caches the system prompt and only rebuilds when marked dirty.
+type CachedSystemPrompt struct {
+	cached string
+	dirty  atomic.Bool
+	mu     sync.RWMutex
+}
+
+// NewCachedSystemPrompt creates a new CachedSystemPrompt initialized as dirty.
+func NewCachedSystemPrompt() *CachedSystemPrompt {
+	cp := &CachedSystemPrompt{}
+	cp.dirty.Store(true)
+	return cp
+}
+
+// GetOrBuild returns the cached system prompt, rebuilding only if dirty.
+func (cp *CachedSystemPrompt) GetOrBuild(registry *tools.Registry, permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker) string {
+	if !cp.dirty.Load() {
+		cp.mu.RLock()
+		cached := cp.cached
+		cp.mu.RUnlock()
+		if cached != "" {
+			return cached
+		}
+	}
+
+	prompt := BuildSystemPrompt(registry, permissionMode, projectDir, skillLoader, skillTracker)
+	cp.mu.Lock()
+	cp.cached = prompt
+	cp.mu.Unlock()
+	cp.dirty.Store(false)
+	return prompt
+}
+
+// MarkDirty marks the cached system prompt as needing rebuild on next access.
+func (cp *CachedSystemPrompt) MarkDirty() {
+	cp.dirty.Store(true)
 }

@@ -28,6 +28,43 @@ func NewConversationContext(cfg Config) *ConversationContext {
 	return &ConversationContext{config: cfg}
 }
 
+// EstimatedTokens returns a rough token estimate for all entries (total chars / 4).
+func (c *ConversationContext) EstimatedTokens() int {
+	totalChars := 0
+	for _, entry := range c.entries {
+		switch v := entry.content.(type) {
+		case string:
+			totalChars += len(v)
+		case []anthropic.ContentBlockParamUnion:
+			for _, b := range v {
+				if b.OfText != nil {
+					totalChars += len(b.OfText.Text)
+				}
+				if b.OfToolUse != nil {
+					totalChars += len(b.OfToolUse.ID) + len(b.OfToolUse.Name)
+					if m, ok := b.OfToolUse.Input.(map[string]any); ok {
+						for k, val := range m {
+							totalChars += len(k) + len(fmt.Sprintf("%v", val))
+						}
+					}
+				}
+			}
+		case []anthropic.ToolResultBlockParam:
+			for _, r := range v {
+				for _, c := range r.Content {
+					if c.OfText != nil {
+						totalChars += len(c.OfText.Text)
+					}
+				}
+			}
+		}
+	}
+	if totalChars < 4 {
+		return 0
+	}
+	return totalChars / 4
+}
+
 // SetSystemPrompt sets the system prompt.
 func (c *ConversationContext) SetSystemPrompt(prompt string) {
 	c.systemPrompt = prompt

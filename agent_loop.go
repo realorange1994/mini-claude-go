@@ -20,6 +20,50 @@ import (
 	"miniclaudecode-go/skills"
 )
 
+// IterationBudget manages the turn budget for the agent loop.
+type IterationBudget struct {
+	max         int
+	consumed    atomic.Int32
+	graceCalled atomic.Bool
+}
+
+// NewIterationBudget creates a new iteration budget with the given maximum.
+func NewIterationBudget(max int) *IterationBudget {
+	return &IterationBudget{max: max}
+}
+
+// Consume attempts to consume one iteration unit. Returns false if exhausted.
+func (b *IterationBudget) Consume() bool {
+	for {
+		c := b.consumed.Load()
+		if int(c) >= b.max {
+			return false
+		}
+		if b.consumed.CompareAndSwap(c, c+1) {
+			return true
+		}
+	}
+}
+
+// Refund returns one consumed unit to the budget.
+func (b *IterationBudget) Refund() {
+	for {
+		c := b.consumed.Load()
+		if c <= 0 {
+			return
+		}
+		if b.consumed.CompareAndSwap(c, c-1) {
+			return
+		}
+	}
+}
+
+// GraceCall allows one extra call when the budget is exhausted.
+// Returns true the first time it is called after exhaustion.
+func (b *IterationBudget) GraceCall() bool {
+	return !b.graceCalled.Swap(true)
+}
+
 // AgentLoop drives the core agentic loop.
 type AgentLoop struct {
 	config       Config
@@ -32,9 +76,10 @@ type AgentLoop struct {
 	skillTracker *skills.SkillTracker
 	compactor    *Compactor
 	useStream    bool
-	maxToolChars int    // max chars per tool result (default 8192)
+	maxToolChars int           // max chars per tool result (default 8192)
 	toolTimeout  time.Duration // per-tool execution timeout (default 5min)
-	maxTurns     int    // hard cap on turns (default from config.MaxTurns)
+	maxTurns     int           // hard cap on turns (default from config.MaxTurns)
+	budget       *IterationBudget
 	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
 	lastDeltasState DeltasState // tracks what was streamed in last attempt
 }
@@ -72,23 +117,29 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 	}
 
 	agent := &AgentLoop{
-		config:      cfg,
-		registry:    registry,
-		gate:        gate,
-		context:     ctx,
-		client:      client,
+		config:       cfg,
+		registry:     registry,
+		gate:         gate,
+		context:      ctx,
+		client:       client,
 		snapshots:    cfg.FileHistory,
-		transcript:  tw,
+		transcript:   tw,
 		skillTracker: cfg.SkillTracker,
-		compactor:   NewCompactor(),
-		useStream:   useStream,
+		compactor:    NewCompactor(),
+		useStream:    useStream,
 		maxToolChars: 8192,
 		toolTimeout:  30 * time.Second,
 		maxTurns:     maxTurns,
+		budget:       NewIterationBudget(maxTurns),
 	}
 
-	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
-	ctx.SetSystemPrompt(sysPrompt)
+	if cfg.cachedPrompt != nil {
+		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
+		ctx.SetSystemPrompt(sysPrompt)
+	} else {
+		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
+		ctx.SetSystemPrompt(sysPrompt)
+	}
 
 	return agent
 }
@@ -154,10 +205,16 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		maxToolChars: 8192,
 		toolTimeout:  30 * time.Second,
 		maxTurns:     maxTurns,
+		budget:       NewIterationBudget(maxTurns),
 	}
 
-	sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
-	convCtx.SetSystemPrompt(sysPrompt)
+	if cfg.cachedPrompt != nil {
+		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
+		convCtx.SetSystemPrompt(sysPrompt)
+	} else {
+		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
+		convCtx.SetSystemPrompt(sysPrompt)
+	}
 
 	return agent, nil
 }
@@ -302,7 +359,18 @@ func (a *AgentLoop) Run(userMessage string) string {
 	var lastTransition string
 	_ = lastTransition // used for transcript/debugging
 
-	for turn := 0; turn < a.maxTurns; turn++ {
+	// Preflight compression for resumed sessions
+	const preflightThreshold = 100000 // ~100k tokens
+	if a.context.EstimatedTokens() > preflightThreshold {
+		for i := 0; i < 3; i++ {
+			a.tryCompaction()
+			if a.context.EstimatedTokens() <= preflightThreshold {
+				break
+			}
+		}
+	}
+
+	for a.budget.Consume() {
 		// Check for interrupt at the start of each turn
 		if a.IsInterrupted() {
 			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupted by user.\n")
@@ -311,7 +379,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		// Rebuild system prompt each turn to update skill discovery
-		if a.config.SkillLoader != nil {
+		if a.config.cachedPrompt != nil {
+			sysPrompt := a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker)
+			a.context.SetSystemPrompt(sysPrompt)
+		} else if a.config.SkillLoader != nil {
 			sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker)
 			a.context.SetSystemPrompt(sysPrompt)
 		}
@@ -470,7 +541,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 	// If max turns reached without a final response, try one last non-streaming call
 	// to get a conclusive answer (like Claude Code's max_turns handling).
-	if finalText == "" {
+	if finalText == "" && a.budget.GraceCall() {
 		fmt.Fprintf(os.Stderr, "\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
 		a.context.AddUserMessage("You have reached the maximum number of tool use turns. Please provide a final summary based on the work done so far. Do NOT call any more tools.")
 		toolCalls, textParts, err := a.callWithRetryAndFallback()
@@ -506,6 +577,9 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	a.tryCompaction()
 
 	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages) // KV cache reuse
+	a.context.ValidateToolPairing()
+	a.context.FixRoleAlternation()
 
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
@@ -582,6 +656,9 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 	toolParams := a.buildToolParams()
 	a.tryCompaction()
 	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages) // KV cache reuse
+	a.context.ValidateToolPairing()
+	a.context.FixRoleAlternation()
 
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
@@ -762,6 +839,7 @@ func (a *AgentLoop) callWithNonStreamingOnly() ([]map[string]any, []string, erro
 func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	toolParams := a.buildToolParams()
 	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages) // KV cache reuse
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
 		MaxTokens: 16384,
@@ -815,14 +893,6 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			continue
 		}
 
-		// 2013 error: tool pairing broken — repair and retry
-		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
-			a.context.ValidateToolPairing()
-			a.context.FixRoleAlternation()
-			continue
-		}
-
 		// Special errors: pass through to Run loop for handling
 		if strings.Contains(errMsg, "model confused") ||
 			strings.Contains(errMsg, "stream stalled") ||
@@ -843,11 +913,57 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 	return nil, nil, fmt.Errorf("stream fallback error after %d retries", maxRetries)
 }
 
-// isTransientError returns true for errors that may resolve on retry
-// (network issues, temporary server errors, rate limits).
-func isTransientError(errMsg string) bool {
+// ErrorClass categorizes API errors for retry decision-making.
+type ErrorClass int
+
+const (
+	ECRetryable       ErrorClass = iota // network, timeout, 5xx, 429
+	ECNonRetryable                      // 400, 401, 403, 404
+	ECContextOverflow                   // context length exceeded
+	ECToolPairing                       // 2013 tool pairing
+)
+
+// classifyError categorizes an error message into an ErrorClass.
+func classifyError(errMsg string) ErrorClass {
+	if errMsg == "" {
+		return ECNonRetryable
+	}
 	err := strings.ToLower(errMsg)
-	patterns := []string{
+
+	// Check context overflow first (most specific)
+	contextPatterns := []string{
+		"context_length", "maximum context", "too many tokens",
+		"prompt_too_long", "token limit", "context_exceeded",
+		"max_tokens_exceeded", "context window", "context limit",
+	}
+	for _, p := range contextPatterns {
+		if strings.Contains(err, p) {
+			return ECContextOverflow
+		}
+	}
+
+	// Check tool pairing error
+	if strings.Contains(err, "2013") || strings.Contains(err, "tool call result does not follow tool call") {
+		return ECToolPairing
+	}
+
+	// Check non-retryable errors (auth, permission, not found)
+	nonRetryablePatterns := []string{
+		" 400 ", "400 bad", "400 invalid",
+		" 401 ", "401 unauthorized",
+		" 403 ", "403 forbidden",
+		" 404 ", "404 not found",
+		"authentication", "invalid api key", "invalid x-api-key",
+		"permission denied",
+	}
+	for _, p := range nonRetryablePatterns {
+		if strings.Contains(err, p) {
+			return ECNonRetryable
+		}
+	}
+
+	// Check retryable errors (network, timeout, server, rate limit)
+	retryablePatterns := []string{
 		"connection refused", "connection reset", "connection timed out",
 		"no such host", "temporary failure", "dns",
 		"internal server error", "500", "502", "503", "504",
@@ -855,12 +971,26 @@ func isTransientError(errMsg string) bool {
 		"service unavailable", "bad gateway", "gateway timeout",
 		"timeout", "deadline exceeded",
 	}
-	for _, p := range patterns {
+	for _, p := range retryablePatterns {
 		if strings.Contains(err, p) {
-			return true
+			return ECRetryable
 		}
 	}
-	return false
+
+	// Default: non-retryable (safer assumption for unknown errors)
+	return ECNonRetryable
+}
+
+// isTransientError returns true for errors that may resolve on retry
+// (network issues, temporary server errors, rate limits).
+func isTransientError(errMsg string) bool {
+	return classifyError(errMsg) == ECRetryable
+}
+
+// isNonRetryableError returns true for errors that should not be retried
+// (auth failures, permission denied, not found).
+func isNonRetryableError(errMsg string) bool {
+	return classifyError(errMsg) == ECNonRetryable
 }
 
 func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
@@ -1054,6 +1184,11 @@ func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResult
 		input = make(map[string]any)
 	}
 
+	// Coerce argument types to match schema
+	if tool := a.registry.Get(toolName); tool != nil {
+		tools.CoerceArguments(tool.InputSchema(), input)
+	}
+
 	// Record tool use to transcript
 	if a.transcript != nil {
 		_ = a.transcript.WriteToolUse(toolUseID, toolName, input)
@@ -1219,6 +1354,11 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 	input, _ := call["input"].(map[string]any)
 	if input == nil {
 		input = make(map[string]any)
+	}
+
+	// Coerce argument types to match schema
+	if tool := a.registry.Get(toolName); tool != nil {
+		tools.CoerceArguments(tool.InputSchema(), input)
 	}
 
 	// Agent-controlled timeout — default 30s, clamped to [1, 300] seconds
@@ -1504,6 +1644,11 @@ func (a *AgentLoop) tryCompaction() {
 
 	// LLM compaction not performed or failed — use truncation fallback
 	a.context.CompactContext()
+
+	// Mark system prompt dirty after compaction
+	if a.config.cachedPrompt != nil {
+		a.config.cachedPrompt.MarkDirty()
+	}
 }
 
 // isContextLengthError checks if the error is a context window overflow.
