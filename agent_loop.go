@@ -82,6 +82,7 @@ type AgentLoop struct {
 	budget       *IterationBudget
 	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
 	lastDeltasState DeltasState // tracks what was streamed in last attempt
+	rateLimitState  RateLimitState // rate limit headers from API responses
 }
 
 // NewAgentLoop creates a new agent loop.
@@ -340,6 +341,23 @@ func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration)
 func (a *AgentLoop) Run(userMessage string) string {
 	// Clear any stale interrupted flag from previous run
 	a.SetInterrupted(false)
+
+	// Expand @ context references (e.g., @file:main.go, @diff)
+	cwd, _ := os.Getwd()
+	contextWindow := modelContextWindow(a.config.Model)
+	if contextWindow < 1 {
+		contextWindow = 200_000
+	}
+	expanded := PreprocessContextReferences(userMessage, cwd, contextWindow)
+		if expanded.Expanded && !expanded.Blocked {
+		userMessage = expanded.Message
+	} else if len(expanded.Warnings) > 0 {
+		// Log warnings even if blocked
+		for _, w := range expanded.Warnings {
+			fmt.Fprintf(os.Stderr, "[WARN] %s\n", w)
+		}
+	}
+
 	a.context.AddUserMessage(userMessage)
 	if a.transcript != nil {
 		_ = a.transcript.WriteUser(userMessage)
@@ -672,13 +690,20 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 		params.Tools = toolParams
 	}
 
+	cacheMessageParams(&params) // Anthropic prompt caching (system_and_3)
+
 	// Persistent collect handler across retries (tracks partial delivery)
 	collect := NewCollectHandler()
 
 	// Phase 1: Try streaming with smart retry
 	for attempt := 0; attempt <= maxStreamRetries; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(attempt) * 2 * time.Second // 2s, 4s, 6s ... backoff
+			// On rate limit errors, prefer header-based delay over jittered backoff
+			delay := jitteredBackoff(attempt)
+			if rlim := a.rateLimitState.RetryDelay(); rlim > 0 && rlim < delay*3 {
+				// Use rate limit header delay if it's reasonable (not >3x backoff)
+				delay = rlim
+			}
 			fmt.Fprintf(os.Stderr, "\n[WARN] Retrying stream (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxStreamRetries+1, delay)
 			time.Sleep(delay)
@@ -839,7 +864,7 @@ func (a *AgentLoop) callWithNonStreamingOnly() ([]map[string]any, []string, erro
 func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	toolParams := a.buildToolParams()
 	messages := a.context.BuildMessages()
-	messages = NormalizeAPIMessages(messages) // KV cache reuse
+	messages = NormalizeAPIMessages(messages)   // KV cache reuse
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
 		MaxTokens: 16384,
@@ -851,6 +876,7 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	if len(toolParams) > 0 {
 		params.Tools = toolParams
 	}
+	cacheMessageParams(&params) // Anthropic prompt caching (system_and_3)
 	return params
 }
 
@@ -861,7 +887,10 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(attempt) * 2 * time.Second
+			delay := jitteredBackoff(attempt)
+			if rlim := a.rateLimitState.RetryDelay(); rlim > 0 && rlim < delay*3 {
+				delay = rlim
+			}
 			fmt.Fprintf(os.Stderr, "\n[WARN] Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
 			time.Sleep(delay)
@@ -913,84 +942,10 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 	return nil, nil, fmt.Errorf("stream fallback error after %d retries", maxRetries)
 }
 
-// ErrorClass categorizes API errors for retry decision-making.
-type ErrorClass int
-
-const (
-	ECRetryable       ErrorClass = iota // network, timeout, 5xx, 429
-	ECNonRetryable                      // 400, 401, 403, 404
-	ECContextOverflow                   // context length exceeded
-	ECToolPairing                       // 2013 tool pairing
-)
-
-// classifyError categorizes an error message into an ErrorClass.
-func classifyError(errMsg string) ErrorClass {
-	if errMsg == "" {
-		return ECNonRetryable
-	}
-	err := strings.ToLower(errMsg)
-
-	// Check context overflow first (most specific)
-	contextPatterns := []string{
-		"context_length", "maximum context", "too many tokens",
-		"prompt_too_long", "token limit", "context_exceeded",
-		"max_tokens_exceeded", "context window", "context limit",
-	}
-	for _, p := range contextPatterns {
-		if strings.Contains(err, p) {
-			return ECContextOverflow
-		}
-	}
-
-	// Check tool pairing error
-	if strings.Contains(err, "2013") || strings.Contains(err, "tool call result does not follow tool call") {
-		return ECToolPairing
-	}
-
-	// Check non-retryable errors (auth, permission, not found)
-	nonRetryablePatterns := []string{
-		" 400 ", "400 bad", "400 invalid",
-		" 401 ", "401 unauthorized",
-		" 403 ", "403 forbidden",
-		" 404 ", "404 not found",
-		"authentication", "invalid api key", "invalid x-api-key",
-		"permission denied",
-	}
-	for _, p := range nonRetryablePatterns {
-		if strings.Contains(err, p) {
-			return ECNonRetryable
-		}
-	}
-
-	// Check retryable errors (network, timeout, server, rate limit)
-	retryablePatterns := []string{
-		"connection refused", "connection reset", "connection timed out",
-		"no such host", "temporary failure", "dns",
-		"internal server error", "500", "502", "503", "504",
-		"rate limit", "429", "too many requests",
-		"service unavailable", "bad gateway", "gateway timeout",
-		"timeout", "deadline exceeded",
-	}
-	for _, p := range retryablePatterns {
-		if strings.Contains(err, p) {
-			return ECRetryable
-		}
-	}
-
-	// Default: non-retryable (safer assumption for unknown errors)
-	return ECNonRetryable
-}
-
-// isTransientError returns true for errors that may resolve on retry
-// (network issues, temporary server errors, rate limits).
-func isTransientError(errMsg string) bool {
-	return classifyError(errMsg) == ECRetryable
-}
-
 // isNonRetryableError returns true for errors that should not be retried
 // (auth failures, permission denied, not found).
 func isNonRetryableError(errMsg string) bool {
-	return classifyError(errMsg) == ECNonRetryable
+	return !classifyError(errMsg, 0, 0).Retryable
 }
 
 func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
@@ -1649,25 +1604,6 @@ func (a *AgentLoop) tryCompaction() {
 	if a.config.cachedPrompt != nil {
 		a.config.cachedPrompt.MarkDirty()
 	}
-}
-
-// isContextLengthError checks if the error is a context window overflow.
-func isContextLengthError(errMsg string) bool {
-	if errMsg == "" {
-		return false
-	}
-	err := strings.ToLower(errMsg)
-	patterns := []string{
-		"context_length", "maximum context", "too many tokens",
-		"prompt_too_long", "token limit", "context_exceeded",
-		"max_tokens_exceeded", "context window", "context limit",
-	}
-	for _, p := range patterns {
-		if strings.Contains(err, p) {
-			return true
-		}
-	}
-	return false
 }
 
 // isLocalEndpoint detects if the base URL points to a local provider.
