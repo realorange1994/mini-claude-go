@@ -116,6 +116,19 @@ var (
 		"incomplete chunked read",
 	}
 
+	networkErrorPatterns = []string{
+		"connection refused", "connection reset", "connection timed out",
+		"connection error", "connection lost", "no such host",
+		"temporary failure", "dns error", "network error",
+		"network is unreachable", "host unreachable",
+		"socket error", "tcp error",
+	}
+
+	serverErrorPatterns = []string{
+		"internal server error", "bad gateway",
+		"service unavailable", "gateway timeout",
+	}
+
 	transportErrorTypes = []string{
 		"readtimeout", "connecttimeout", "pooltimeout",
 		"connecterror", "remoteprotocolerror",
@@ -224,14 +237,14 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 
 	// ── Message pattern matching (no status code) ───────────────────
 
-	// Context overflow
+	// Context overflow — not retryable without compression
 	if matchesAny(lower, contextOverflowPatterns) {
-		return result(ECContextOverflow, func(r *ClassifyResult) { r.Compress = true })
+		return notRetryable(ECContextOverflow, func(r *ClassifyResult) { r.Compress = true })
 	}
 
-	// Tool pairing
+	// Tool pairing — not retryable without fixing context
 	if strings.Contains(lower, "2013") || strings.Contains(lower, "tool call result does not follow tool call") {
-		return result(ECToolPairing)
+		return notRetryable(ECToolPairing)
 	}
 
 	// Billing patterns
@@ -242,7 +255,15 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 		})
 	}
 
-	// Usage limit with disambiguation
+	// Rate limit (check before usageLimitPatterns to avoid misclassification)
+	if matchesAny(lower, rateLimitPatterns) {
+		return result(ECRateLimit, func(r *ClassifyResult) {
+			r.RotateKey = true
+			r.Fallback = true
+		})
+	}
+
+	// Usage limit with disambiguation (only if not already classified as rate limit)
 	if matchesAny(lower, usageLimitPatterns) {
 		if matchesAny(lower, usageLimitTransientSignals) {
 			return result(ECRateLimit, func(r *ClassifyResult) {
@@ -251,14 +272,6 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 			})
 		}
 		return notRetryable(ECBilling, func(r *ClassifyResult) {
-			r.RotateKey = true
-			r.Fallback = true
-		})
-	}
-
-	// Rate limit
-	if matchesAny(lower, rateLimitPatterns) {
-		return result(ECRateLimit, func(r *ClassifyResult) {
 			r.RotateKey = true
 			r.Fallback = true
 		})
@@ -281,9 +294,19 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 	if matchesAny(lower, serverDisconnectPatterns) && statusCode == 0 {
 		isLarge := approxTokens > contextLength*6/10 || approxTokens > 120000
 		if isLarge {
-			return result(ECContextOverflow, func(r *ClassifyResult) { r.Compress = true })
+			return notRetryable(ECContextOverflow, func(r *ClassifyResult) { r.Compress = true })
 		}
 		return result(ECTimeout)
+	}
+
+	// Network errors — retryable (connection refused, DNS, etc.)
+	if matchesAny(lower, networkErrorPatterns) {
+		return result(ECRetryable)
+	}
+
+	// Server errors without status code — retryable
+	if matchesAny(lower, serverErrorPatterns) {
+		return result(ECRetryable)
 	}
 
 	// Transport error heuristics
@@ -294,8 +317,8 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 		return result(ECTimeout)
 	}
 
-	// ── Fallback: unknown ───────────────────────────────────────────
-	return result(ECUnknown)
+	// ── Fallback: unknown — not retryable by default ──────────────────
+	return notRetryable(ECUnknown)
 }
 
 // classify402 disambiguates 402: billing exhaustion vs transient usage limit.
@@ -314,9 +337,9 @@ func classify402(lower string, resultFn func(ErrorClass, ...func(*ClassifyResult
 
 // classify400 classifies 400 Bad Request — context overflow, model not found, rate limit, billing, or format error.
 func classify400(lower string, approxTokens int, contextLength int, resultFn func(ErrorClass, ...func(*ClassifyResult)) ClassifyResult, notRetryable func(ErrorClass, ...func(*ClassifyResult)) ClassifyResult) ClassifyResult {
-	// Context overflow from 400
+	// Context overflow from 400 — not retryable without compression
 	if matchesAny(lower, contextOverflowPatterns) {
-		return resultFn(ECContextOverflow, func(r *ClassifyResult) { r.Compress = true })
+		return notRetryable(ECContextOverflow, func(r *ClassifyResult) { r.Compress = true })
 	}
 
 	// Model not found as 400
