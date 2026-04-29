@@ -23,12 +23,12 @@ type Entry struct {
 	Error     string         `json:"error,omitempty"`
 }
 
-// Writer writes transcript entries to a JSONL file (buffered).
+// Writer writes transcript entries to a JSONL file.
+// Each Write call flushes immediately to disk for crash safety.
 type Writer struct {
 	sessionID string
 	filePath  string
 	mu        sync.Mutex
-	pending   []Entry
 	closed    bool
 }
 
@@ -37,7 +37,6 @@ func NewWriter(sessionID, filePath string) *Writer {
 	return &Writer{
 		sessionID: sessionID,
 		filePath:  filePath,
-		pending:   make([]Entry, 0, 100),
 	}
 }
 
@@ -50,11 +49,10 @@ func NewWriterFromExisting(filePath string) *Writer {
 	return &Writer{
 		sessionID: sessionID,
 		filePath:  filePath,
-		pending:   make([]Entry, 0, 100),
 	}
 }
 
-// Write adds an entry to the transcript (buffered, flushes at 100 entries).
+// Write adds an entry to the transcript and flushes immediately to disk.
 func (w *Writer) Write(entry Entry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -62,11 +60,7 @@ func (w *Writer) Write(entry Entry) error {
 		return fmt.Errorf("transcript writer closed")
 	}
 	entry.Timestamp = time.Now()
-	w.pending = append(w.pending, entry)
-	if len(w.pending) >= 100 {
-		return w.flush()
-	}
-	return nil
+	return w.writeOne(entry)
 }
 
 // WriteUser writes a user message entry.
@@ -110,11 +104,9 @@ func (w *Writer) WriteSummary(content string) error {
 	return w.Write(Entry{Type: "summary", Content: content})
 }
 
-// Flush forces pending entries to disk.
+// Flush is a no-op kept for API compatibility; writes are already immediate.
 func (w *Writer) Flush() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.flush()
+	return nil
 }
 
 // FilePath returns the path to the transcript file.
@@ -122,10 +114,7 @@ func (w *Writer) FilePath() string {
 	return w.filePath
 }
 
-func (w *Writer) flush() error {
-	if len(w.pending) == 0 {
-		return nil
-	}
+func (w *Writer) writeOne(entry Entry) error {
 	if err := os.MkdirAll(filepath.Dir(w.filePath), 0755); err != nil {
 		return err
 	}
@@ -134,19 +123,17 @@ func (w *Writer) flush() error {
 		return err
 	}
 	defer f.Close()
-	for _, entry := range w.pending {
-		line, err := json.Marshal(entry)
-		if err != nil {
-			continue
-		}
-		f.Write(append(line, '\n'))
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return err
 	}
-	f.Sync()
-	w.pending = w.pending[:0]
-	return nil
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
-// Close flushes and closes the writer.
+// Close closes the writer.
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -154,7 +141,7 @@ func (w *Writer) Close() error {
 		return nil
 	}
 	w.closed = true
-	return w.flush()
+	return nil
 }
 
 // ============================================================================
@@ -170,6 +157,7 @@ type Reader struct {
 func NewReader(filePath string) *Reader { return &Reader{filePath: filePath} }
 
 // ReadAll reads all entries from the transcript.
+// Handles truncated last lines (from Ctrl+C / crash) by discarding them.
 func (r *Reader) ReadAll() ([]Entry, error) {
 	f, err := os.Open(r.filePath)
 	if err != nil {
@@ -178,13 +166,23 @@ func (r *Reader) ReadAll() ([]Entry, error) {
 	defer f.Close()
 
 	var entries []Entry
+	var lastBadLine string
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
+		line := scanner.Bytes()
 		var entry Entry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err == nil {
+		if err := json.Unmarshal(line, &entry); err == nil {
 			entries = append(entries, entry)
+			lastBadLine = ""
+		} else {
+			// Keep the bad line in case it's the last one (truncated write)
+			lastBadLine = string(line)
 		}
 	}
+	// If the last line was corrupt (truncated JSON from crash/Ctrl+C),
+	// it's safe to discard — it was an incomplete write.
+	_ = lastBadLine
+
 	return entries, scanner.Err()
 }

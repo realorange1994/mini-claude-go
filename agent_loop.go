@@ -291,6 +291,13 @@ func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config) *Conve
 	flushToolUses()
 	flushToolResults()
 
+	// Fix any inconsistencies from interrupted sessions:
+	// - Orphaned tool_use without matching tool_result
+	// - Orphaned tool_result without matching tool_use
+	// - Consecutive same-role messages (breaks Anthropic API)
+	ctx.ValidateToolPairing()
+	ctx.FixRoleAlternation()
+
 	return ctx
 }
 
