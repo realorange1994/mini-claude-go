@@ -163,6 +163,10 @@ func PreprocessContextReferences(message string, cwd string, contextLength int) 
 	for _, ref := range refs {
 		block, warning := expandReference(ref, cwd)
 		if warning != "" {
+			// Inject the error as a context block so the model understands what happened
+			// instead of just seeing a stripped message + cryptic warning
+			errorBlock := fmt.Sprintf("## %s (error)\n%s", ref.Raw, warning)
+			blocks = append(blocks, errorBlock)
 			warnings = append(warnings, warning)
 		}
 		if block != "" {
@@ -268,10 +272,20 @@ func expandFileReference(ref ContextReference, cwd string) (block string, warnin
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Sprintf("File not found: %s", ref.Target)
+		hint := ""
+		if os.IsPermission(err) {
+			hint = " (permission denied)"
+		}
+		return "", fmt.Sprintf("File not found: %s%s", ref.Target, hint)
 	}
 	if info.IsDir() {
 		return "", fmt.Sprintf("%s: path is a directory, use @folder: instead", ref.Raw)
+	}
+
+	// Check file size — reject files over 10MB
+	const maxFileSize int64 = 10 * 1024 * 1024
+	if info.Size() > maxFileSize {
+		return "", fmt.Sprintf("%s: file is too large (%d bytes, max %d MB)", ref.Raw, info.Size(), maxFileSize/(1024*1024))
 	}
 
 	// Check cache first
@@ -283,7 +297,11 @@ func expandFileReference(ref ContextReference, cwd string) (block string, warnin
 		// Stream-read file with line limit (avoids loading huge files into memory)
 		lines, truncated, err := readFileLines(path, MaxLineLimit)
 		if err != nil {
-			return "", fmt.Sprintf("File not found: %s", ref.Target)
+			hint := ""
+			if os.IsPermission(err) {
+				hint = " (permission denied)"
+			}
+			return "", fmt.Sprintf("Cannot read file: %s%s", ref.Target, hint)
 		}
 
 		if isBinaryLines(lines) {
@@ -307,7 +325,15 @@ func expandFileReference(ref ContextReference, cwd string) (block string, warnin
 	var displayText string
 	var linesHint string
 	if ref.LineStart > 0 {
-		allLines := strings.Split(text, "\n")
+		allLines := strings.Split(text, "
+")
+		totalLines := len(allLines)
+
+		// If requested start is beyond file length, return a clear message
+		if ref.LineStart > totalLines {
+			return "", fmt.Sprintf("%s: file has %d lines, but line %d was requested", ref.Raw, totalLines, ref.LineStart)
+		}
+
 		startIdx := ref.LineStart - 1
 		if startIdx < 0 {
 			startIdx = 0
@@ -331,11 +357,17 @@ func expandFileReference(ref ContextReference, cwd string) (block string, warnin
 		for i := startIdx; i < endIdx; i++ {
 			selected = append(selected, fmt.Sprintf("%4d | %s", i+1, allLines[i]))
 		}
-		displayText = strings.Join(selected, "\n")
+		displayText = strings.Join(selected, "
+")
 		if lineCount >= MaxLineLimit {
-			displayText += fmt.Sprintf("\n... (truncated at %d lines)", MaxLineLimit)
+			displayText += fmt.Sprintf("
+... (truncated at %d lines)", MaxLineLimit)
 		}
-		linesHint = fmt.Sprintf(" (lines %d-%d)", ref.LineStart, ref.LineEnd)
+
+		linesHint = fmt.Sprintf(" (lines %d-%d, file has %d lines)", ref.LineStart, ref.LineEnd, totalLines)
+		if ref.LineEnd > totalLines {
+			linesHint = fmt.Sprintf(" (lines %d-%d, file has %d lines - requested end %d adjusted)", ref.LineStart, totalLines, totalLines, ref.LineEnd)
+		}
 	} else {
 		displayText = text
 	}
@@ -355,10 +387,23 @@ func expandFolderReference(ref ContextReference, cwd string) (block string, warn
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Sprintf("Folder not found: %s", ref.Target)
+		hint := ""
+		if os.IsPermission(err) {
+			hint = " (permission denied)"
+		}
+		return "", fmt.Sprintf("Folder not found: %s%s", ref.Target, hint)
 	}
 	if !info.IsDir() {
-		return "", fmt.Sprintf("%s: path is not a directory", ref.Raw)
+		return "", fmt.Sprintf("%s: path is not a directory, use @file: instead", ref.Raw)
+	}
+
+	// Check if folder is empty
+	if dir, err := os.Open(path); err == nil {
+		if names, err := dir.Readdirnames(1); len(names) == 0 && err == nil {
+			return fmt.Sprintf("## @folder:%s (0 tokens)
+(empty directory - no files or subdirectories)", ref.Target), ""
+		}
+		dir.Close()
 	}
 
 	listing := buildFolderListing(path, cwd, 200, MaxFolderDepth)
@@ -369,6 +414,17 @@ func expandFolderReference(ref ContextReference, cwd string) (block string, warn
 
 // expandGitReference runs a git command and returns its output.
 func expandGitReference(ref ContextReference, cwd string, args []string, label string) (block string, warning string) {
+	// First check if we're in a git repository
+	gitCheck := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	gitCheck.Dir = cwd
+	gitCheck.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if output, err := gitCheck.CombinedOutput(); err != nil {
+		if strings.Contains(string(output), "not a git repository") {
+			return "", fmt.Sprintf("%s: not a git repository - git references require a git repo", label)
+		}
+		return "", fmt.Sprintf("%s: git is not installed or not available in PATH", label)
+	}
+
 	cmd := exec.Command("git", args...)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
@@ -376,11 +432,10 @@ func expandGitReference(ref ContextReference, cwd string, args []string, label s
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		errMsg := strings.TrimSpace(string(output))
-		// Check for specific error patterns
-		if strings.Contains(errMsg, "not a git repository") {
-			return "", "Not a git repository"
+		if errMsg == "" {
+			errMsg = "unknown git error"
 		}
-		return "", fmt.Sprintf("%s: %s", ref.Raw, errMsg)
+		return "", fmt.Sprintf("%s: %s", label, errMsg)
 	}
 
 	content := strings.TrimSpace(string(output))
