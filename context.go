@@ -469,6 +469,16 @@ func (c *ConversationContext) Entries() []conversationEntry {
 	return c.entries
 }
 
+// Len returns the number of conversation entries.
+func (c *ConversationContext) Len() int {
+	return len(c.entries)
+}
+
+// Clear removes all conversation entries.
+func (c *ConversationContext) Clear() {
+	c.entries = nil
+}
+
 // ReplaceEntries replaces all conversation entries (used by compactor).
 func (c *ConversationContext) ReplaceEntries(entries []conversationEntry) {
 	c.entries = entries

@@ -223,7 +223,8 @@ func runInteractive(agent *AgentLoop) {
 			cmd := strings.ToLower(parts[0])
 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
-				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume"
+				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
+				cmd == "/compact" || cmd == "/clear"
 
 			if !isKnownCmd {
 				// Not a recognized command — treat as normal prompt
@@ -255,7 +256,25 @@ func runInteractive(agent *AgentLoop) {
 					}
 					continue
 				case "/help":
-					fmt.Println("Commands: /tools, /mode, /resume, /help, /quit")
+					fmt.Println("Commands:")
+					fmt.Println("  /help    — Show available commands")
+					fmt.Println("  /compact — Force context compaction")
+					fmt.Println("  /clear   — Clear conversation history")
+					fmt.Println("  /mode    — Switch permission mode (ask|auto|plan)")
+					fmt.Println("  /resume  — Resume a previous session")
+					fmt.Println("  /tools   — List available tools")
+					fmt.Println("  /quit    — Exit")
+					continue
+				case "/compact":
+					agent.ForceCompact()
+					continue
+				case "/clear":
+					count := agent.ClearHistory()
+					if count > 0 {
+						fmt.Printf("[clear] Cleared %d messages.\n", count)
+					} else {
+						fmt.Println("[clear] No messages to clear.")
+					}
 					continue
 				case "/resume":
 					if len(parts) > 1 {

@@ -595,6 +595,28 @@ func (a *AgentLoop) Close() {
 	}
 }
 
+// ForceCompact forces a context compaction (for /compact command).
+// Uses local truncation-based compaction (no LLM call).
+func (a *AgentLoop) ForceCompact() {
+	a.context.CompactContext()
+	// Mark system prompt dirty after compaction
+	if a.config.cachedPrompt != nil {
+		a.config.cachedPrompt.MarkDirty()
+	}
+}
+
+// ClearHistory clears all conversation messages (for /clear command).
+// Returns the number of messages cleared.
+func (a *AgentLoop) ClearHistory() int {
+	count := a.context.Len()
+	a.context.Clear()
+	// Mark system prompt dirty after clearing
+	if a.config.cachedPrompt != nil {
+		a.config.cachedPrompt.MarkDirty()
+	}
+	return count
+}
+
 func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	toolParams := a.buildToolParams()
 
