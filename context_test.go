@@ -297,3 +297,161 @@ func TestFixRoleAlternationPreservesSystemMessages(t *testing.T) {
 		t.Errorf("expected at least 2 entries (system preserved), got %d", len(ctx.entries))
 	}
 }
+
+// ─── EntryContent sealed interface tests ───
+
+func TestTextContentType(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("Hello")
+	entry := ctx.entries[0]
+	if _, ok := entry.content.(TextContent); !ok {
+		t.Errorf("expected TextContent, got %T", entry.content)
+	}
+	if string(entry.content.(TextContent)) != "Hello" {
+		t.Errorf("expected 'Hello', got %q", entry.content.(TextContent))
+	}
+}
+
+func TestToolUseContentType(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "call_1", "name": "exec", "input": map[string]any{}},
+	})
+	entry := ctx.entries[0]
+	if _, ok := entry.content.(ToolUseContent); !ok {
+		t.Errorf("expected ToolUseContent, got %T", entry.content)
+	}
+}
+
+func TestToolResultContentType(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "call_1"},
+	})
+	entry := ctx.entries[0]
+	if _, ok := entry.content.(ToolResultContent); !ok {
+		t.Errorf("expected ToolResultContent, got %T", entry.content)
+	}
+}
+
+func TestCompactBoundaryContentType(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddCompactBoundary(CompactTriggerAuto, 1000)
+	entry := ctx.entries[0]
+	boundary, ok := entry.content.(CompactBoundaryContent)
+	if !ok {
+		t.Fatalf("expected CompactBoundaryContent, got %T", entry.content)
+	}
+	if boundary.Trigger != CompactTriggerAuto {
+		t.Errorf("expected trigger Auto, got %v", boundary.Trigger)
+	}
+	if boundary.PreCompactTokens != 1000 {
+		t.Errorf("expected 1000 tokens, got %d", boundary.PreCompactTokens)
+	}
+}
+
+func TestSummaryContentType(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddSummary("Short summary")
+	entry := ctx.entries[0]
+	summary, ok := entry.content.(SummaryContent)
+	if !ok {
+		t.Fatalf("expected SummaryContent, got %T", entry.content)
+	}
+	if string(summary) != "Short summary" {
+		t.Errorf("expected 'Short summary', got %q", summary)
+	}
+}
+
+func TestBuildMessagesSkipsCompactBoundary(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("Hello")
+	ctx.AddCompactBoundary(CompactTriggerAuto, 1000)
+	ctx.AddUserMessage("World")
+
+	messages := ctx.BuildMessages()
+	// Should have 2 user messages, boundary marker should be skipped
+	if len(messages) != 2 {
+		t.Errorf("expected 2 messages (boundary skipped), got %d", len(messages))
+	}
+	if messages[0].Role != anthropic.MessageParamRoleUser {
+		t.Errorf("expected first message to be user")
+	}
+}
+
+func TestEstimatedTokensWithNewTypes(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("Hello World")       // 11 chars
+	ctx.AddSummary("Short summary")          // 13 chars
+
+	tokens := ctx.EstimatedTokens()
+	// ~24 chars / 4 = ~6 tokens
+	if tokens < 4 || tokens > 10 {
+		t.Errorf("expected ~6 tokens, got %d", tokens)
+	}
+}
+
+func TestEntriesReplace(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("First")
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "c1", "name": "exec", "input": map[string]any{"cmd": "ls"}},
+	})
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "c1", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "file.go"}},
+		}},
+	})
+
+	entries := ctx.entries
+	ctx.ReplaceEntries(entries)
+	if len(ctx.entries) != 3 {
+		t.Errorf("expected 3 entries, got %d", len(ctx.entries))
+	}
+}
+
+func TestContentEntrySealedInterface(t *testing.T) {
+	// Verify that EntryContent is a valid interface
+	var content EntryContent
+
+	content = TextContent("hello")
+	if _, ok := content.(TextContent); !ok {
+		t.Error("TextContent should implement EntryContent")
+	}
+
+	content = ToolUseContent(nil)
+	if _, ok := content.(ToolUseContent); !ok {
+		t.Error("ToolUseContent should implement EntryContent")
+	}
+
+	content = ToolResultContent(nil)
+	if _, ok := content.(ToolResultContent); !ok {
+		t.Error("ToolResultContent should implement EntryContent")
+	}
+
+	content = CompactBoundaryContent{}
+	if _, ok := content.(CompactBoundaryContent); !ok {
+		t.Error("CompactBoundaryContent should implement EntryContent")
+	}
+
+	content = SummaryContent("test")
+	if _, ok := content.(SummaryContent); !ok {
+		t.Error("SummaryContent should implement EntryContent")
+	}
+}

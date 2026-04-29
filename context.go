@@ -10,10 +10,44 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
+// EntryContent is a sealed interface for conversation entry content types.
+// The unexported method prevents external types from implementing it.
+type EntryContent interface {
+	entryContent()
+}
+
+// TextContent represents plain text in a conversation entry.
+type TextContent string
+
+func (TextContent) entryContent() {}
+
+// ToolUseContent represents assistant tool_use blocks.
+type ToolUseContent []anthropic.ContentBlockParamUnion
+
+func (ToolUseContent) entryContent() {}
+
+// ToolResultContent represents tool result blocks.
+type ToolResultContent []anthropic.ToolResultBlockParam
+
+func (ToolResultContent) entryContent() {}
+
+// CompactBoundaryContent represents a compaction boundary marker.
+type CompactBoundaryContent struct {
+	Trigger           CompactTrigger
+	PreCompactTokens  int
+}
+
+func (CompactBoundaryContent) entryContent() {}
+
+// SummaryContent represents a conversation summary inserted after compaction.
+type SummaryContent string
+
+func (SummaryContent) entryContent() {}
+
 // conversationEntry represents a single entry in the conversation history.
 type conversationEntry struct {
-	role    string // "user" or "assistant"
-	content any    // string, []anthropic.ContentBlockParamUnion, or []anthropic.ToolResultBlockParam
+	role    string // "user" or "assistant" (or "system" for boundary markers)
+	content EntryContent
 }
 
 // ConversationContext manages the conversation message history and system prompt.
@@ -33,9 +67,9 @@ func (c *ConversationContext) EstimatedTokens() int {
 	totalChars := 0
 	for _, entry := range c.entries {
 		switch v := entry.content.(type) {
-		case string:
+		case TextContent:
 			totalChars += len(v)
-		case []anthropic.ContentBlockParamUnion:
+		case ToolUseContent:
 			for _, b := range v {
 				if b.OfText != nil {
 					totalChars += len(b.OfText.Text)
@@ -49,7 +83,7 @@ func (c *ConversationContext) EstimatedTokens() int {
 					}
 				}
 			}
-		case []anthropic.ToolResultBlockParam:
+		case ToolResultContent:
 			for _, r := range v {
 				for _, c := range r.Content {
 					if c.OfText != nil {
@@ -57,6 +91,10 @@ func (c *ConversationContext) EstimatedTokens() int {
 					}
 				}
 			}
+		case CompactBoundaryContent:
+			// Boundary markers are small, ignore for estimation
+		case SummaryContent:
+			totalChars += len(v)
 		}
 	}
 	if totalChars < 4 {
@@ -79,7 +117,7 @@ func (c *ConversationContext) SystemPrompt() string {
 func (c *ConversationContext) AddUserMessage(content string) {
 	c.entries = append(c.entries, conversationEntry{
 		role:    "user",
-		content: content,
+		content: TextContent(content),
 	})
 	c.truncateIfNeeded()
 }
@@ -91,7 +129,7 @@ func (c *ConversationContext) AddAssistantText(text string) {
 	}
 	c.entries = append(c.entries, conversationEntry{
 		role:    "assistant",
-		content: text,
+		content: TextContent(text),
 	})
 	c.truncateIfNeeded()
 }
@@ -114,7 +152,7 @@ func (c *ConversationContext) AddAssistantToolCalls(toolCalls []map[string]any) 
 	}
 	c.entries = append(c.entries, conversationEntry{
 		role:    "assistant",
-		content: blocks,
+		content: ToolUseContent(blocks),
 	})
 	c.truncateIfNeeded()
 }
@@ -123,7 +161,7 @@ func (c *ConversationContext) AddAssistantToolCalls(toolCalls []map[string]any) 
 func (c *ConversationContext) AddToolResults(results []anthropic.ToolResultBlockParam) {
 	c.entries = append(c.entries, conversationEntry{
 		role:    "user",
-		content: results,
+		content: ToolResultContent(results),
 	})
 	c.truncateIfNeeded()
 }
@@ -135,18 +173,25 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 		msg := anthropic.MessageParam{Role: anthropic.MessageParamRole(entry.role)}
 
 		switch v := entry.content.(type) {
-		case string:
+		case TextContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
-				{OfText: &anthropic.TextBlockParam{Text: v}},
+				{OfText: &anthropic.TextBlockParam{Text: string(v)}},
 			}
-		case []anthropic.ContentBlockParamUnion:
+		case ToolUseContent:
 			msg.Content = v
-		case []anthropic.ToolResultBlockParam:
+		case ToolResultContent:
 			blocks := make([]anthropic.ContentBlockParamUnion, len(v))
 			for i, r := range v {
 				blocks[i] = anthropic.ContentBlockParamUnion{OfToolResult: &r}
 			}
 			msg.Content = blocks
+		case CompactBoundaryContent:
+			// Compact boundaries are system markers, skip for API messages
+			continue
+		case SummaryContent:
+			msg.Content = []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: string(v)}},
+			}
 		default:
 			msg.Content = []anthropic.ContentBlockParamUnion{
 				{OfText: &anthropic.TextBlockParam{Text: ""}},
@@ -290,16 +335,16 @@ func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage
 	for idx, entry := range c.entries {
 		key := fmt.Sprintf("%d", idx)
 		switch v := entry.content.(type) {
-		case string:
+		case TextContent:
 			msgs = append(msgs, CompactionMessage{
 				Role:      entry.role,
-				Content:   v,
+				Content:   string(v),
 				Timestamp: time.Now().Format(time.RFC3339),
 			})
 
-		case []anthropic.ContentBlockParamUnion:
+		case ToolUseContent:
 			// Tool calls from assistant
-			content, toolUseID, toolName := serializeContentBlocks(v)
+			content, toolUseID, toolName := serializeContentBlocks([]anthropic.ContentBlockParamUnion(v))
 			msg := CompactionMessage{
 				Role:      entry.role,
 				Content:   content,
@@ -312,9 +357,9 @@ func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage
 				toolNames[key] = toolName
 			}
 
-		case []anthropic.ToolResultBlockParam:
+		case ToolResultContent:
 			// Tool results (user role in Anthropic API)
-			content, toolUseID, _ := serializeToolResultBlocks(v)
+			content, toolUseID, _ := serializeToolResultBlocks([]anthropic.ToolResultBlockParam(v))
 			// Try to extract tool name from the toolNames map by matching toolUseID
 			toolName := ""
 			for _, m := range msgs {
@@ -334,6 +379,15 @@ func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage
 			if toolName != "" {
 				toolNames[key] = toolName
 			}
+
+		case CompactBoundaryContent:
+			// Skip boundary markers for compaction input
+		case SummaryContent:
+			msgs = append(msgs, CompactionMessage{
+				Role:      entry.role,
+				Content:   string(v),
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
 		}
 	}
 
@@ -351,34 +405,34 @@ func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]
 			if blocks, err := deserializeContentBlocks(msg.Content); err == nil {
 				entries = append(entries, conversationEntry{
 					role:    msg.Role,
-					content: blocks,
+					content: ToolUseContent(blocks),
 				})
 				continue
 			}
 			// Fallback: treat as text
 			entries = append(entries, conversationEntry{
 				role:    msg.Role,
-				content: msg.Content,
+				content: TextContent(msg.Content),
 			})
 		} else if isToolResultJSON(msg.Content) {
 			// Reconstruct tool result blocks
 			if results, err := deserializeToolResultBlocks(msg.Content); err == nil {
 				entries = append(entries, conversationEntry{
 					role:    msg.Role,
-					content: results,
+					content: ToolResultContent(results),
 				})
 				continue
 			}
 			// Fallback: treat as text
 			entries = append(entries, conversationEntry{
 				role:    msg.Role,
-				content: msg.Content,
+				content: TextContent(msg.Content),
 			})
 		} else {
 			// Regular text message or omission marker
 			entries = append(entries, conversationEntry{
 				role:    msg.Role,
-				content: msg.Content,
+				content: TextContent(msg.Content),
 			})
 		}
 
@@ -393,10 +447,12 @@ func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]
 
 // AddCompactBoundary inserts a system-role text marker for LLM compaction.
 func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preCompactTokens int) {
-	text := fmt.Sprintf("[Conversation summary inserted — %d tokens compressed, trigger: %s]", preCompactTokens, trigger)
 	c.entries = append(c.entries, conversationEntry{
-		role:    "system",
-		content: text,
+		role: "system",
+		content: CompactBoundaryContent{
+			Trigger:          trigger,
+			PreCompactTokens: preCompactTokens,
+		},
 	})
 }
 
@@ -404,7 +460,7 @@ func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preComp
 func (c *ConversationContext) AddSummary(content string) {
 	c.entries = append(c.entries, conversationEntry{
 		role:    "user",
-		content: content,
+		content: SummaryContent(content),
 	})
 }
 
@@ -449,7 +505,7 @@ func (c *ConversationContext) ValidateToolPairing() {
 		if entry.role != "assistant" {
 			continue
 		}
-		if blocks, ok := entry.content.([]anthropic.ContentBlockParamUnion); ok {
+		if blocks, ok := entry.content.(ToolUseContent); ok {
 			for _, b := range blocks {
 				if b.OfToolUse != nil && b.OfToolUse.ID != "" {
 					callIDs[b.OfToolUse.ID] = true
@@ -462,7 +518,7 @@ func (c *ConversationContext) ValidateToolPairing() {
 	resultIDs := make(map[string]bool)
 	for i, entry := range c.entries {
 		if entry.role == "user" {
-			if results, ok := entry.content.([]anthropic.ToolResultBlockParam); ok {
+			if results, ok := entry.content.(ToolResultContent); ok {
 				var kept []anthropic.ToolResultBlockParam
 				for _, r := range results {
 					if callIDs[r.ToolUseID] {
@@ -473,7 +529,7 @@ func (c *ConversationContext) ValidateToolPairing() {
 				if len(kept) == 0 {
 					c.entries[i].content = nil // mark for removal
 				} else {
-					c.entries[i].content = kept
+					c.entries[i].content = ToolResultContent(kept)
 				}
 			}
 		}
@@ -493,7 +549,7 @@ func (c *ConversationContext) ValidateToolPairing() {
 		if entry.role != "assistant" {
 			continue
 		}
-		blocks, ok := entry.content.([]anthropic.ContentBlockParamUnion)
+		blocks, ok := entry.content.(ToolUseContent)
 		if !ok {
 			continue
 		}
@@ -509,9 +565,9 @@ func (c *ConversationContext) ValidateToolPairing() {
 		if hasOrphan {
 			if len(kept) == 0 {
 				// Entire message was orphaned tool_use — replace with placeholder
-				c.entries[i].content = "(tool call removed — result was truncated)"
+				c.entries[i].content = TextContent("(tool call removed — result was truncated)")
 			} else {
-				c.entries[i].content = kept
+				c.entries[i].content = ToolUseContent(kept)
 			}
 		}
 	}
@@ -538,23 +594,23 @@ func (c *ConversationContext) FixRoleAlternation() {
 			if last.role == entry.role {
 				// Merge same-role consecutive messages
 				switch a := last.content.(type) {
-				case string:
-					if b, ok := entry.content.(string); ok {
-						last.content = a + "\n\n" + b
+				case TextContent:
+					if b, ok := entry.content.(TextContent); ok {
+						last.content = TextContent(string(a) + "\n\n" + string(b))
 						continue
 					}
-				case []anthropic.ContentBlockParamUnion:
-					if b, ok := entry.content.([]anthropic.ContentBlockParamUnion); ok {
+				case ToolUseContent:
+					if b, ok := entry.content.(ToolUseContent); ok {
 						last.content = append(a, b...)
 						continue
 					}
-				case []anthropic.ToolResultBlockParam:
-					if b, ok := entry.content.([]anthropic.ToolResultBlockParam); ok {
+				case ToolResultContent:
+					if b, ok := entry.content.(ToolResultContent); ok {
 						last.content = append(a, b...)
 						continue
 					}
 				}
-				// Type mismatch — just replace
+				// Type mismatch — cannot merge, just replace
 				last.content = entry.content
 				continue
 			}
