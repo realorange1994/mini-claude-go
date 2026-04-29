@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestCollectHandlerText(t *testing.T) {
@@ -524,5 +525,90 @@ func TestDeltasStateInitialStateNone(t *testing.T) {
 	sa := NewStreamAdapter(nil, nil)
 	if sa.DeltasState() != DeltasStateNone {
 		t.Errorf("expected initial state to be None, got %q", sa.DeltasState())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// StreamProgress tests
+// ---------------------------------------------------------------------------
+
+func TestStreamProgressTTFB(t *testing.T) {
+	p := &StreamProgress{}
+	p.StartTime = time.Now()
+
+	// Before first byte, TTFB should be 0
+	if p.TTFB() != 0 {
+		t.Error("expected TTFB=0 before first byte")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	p.RecordFirstByte()
+
+	// After first byte, TTFB should be non-zero
+	ttfb := p.TTFB()
+	if ttfb == 0 {
+		t.Errorf("expected TTFB>0 after first byte, got %v", ttfb)
+	}
+}
+
+func TestStreamProgressTTFBOnlyOnce(t *testing.T) {
+	p := &StreamProgress{}
+	p.StartTime = time.Now()
+
+	p.RecordFirstByte()
+	first := p.TTFB()
+
+	// Small delay then record again — should not change
+	time.Sleep(10 * time.Millisecond)
+	p.RecordFirstByte()
+	second := p.TTFB()
+
+	if first != second {
+		t.Errorf("TTFB should not change on subsequent RecordFirstByte calls: first=%v, second=%v", first, second)
+	}
+}
+
+func TestStreamProgressThroughput(t *testing.T) {
+	p := &StreamProgress{}
+	p.StartTime = time.Now()
+	p.RecordFirstByte()
+	p.RecordTokens(100)
+
+	time.Sleep(5 * time.Millisecond)
+	tp := p.Throughput()
+	if tp <= 0 {
+		t.Errorf("expected throughput>0, got %f", tp)
+	}
+}
+
+func TestStreamProgressThroughputZeroTokens(t *testing.T) {
+	p := &StreamProgress{}
+	p.StartTime = time.Now()
+	p.RecordFirstByte()
+
+	// No tokens recorded -> throughput = 0
+	if p.Throughput() != 0 {
+		t.Error("expected throughput=0 with no tokens")
+	}
+}
+
+func TestStreamProgressThroughputNoFirstByte(t *testing.T) {
+	p := &StreamProgress{}
+	p.StartTime = time.Now()
+	p.RecordTokens(100)
+
+	// No first byte recorded -> throughput = 0
+	if p.Throughput() != 0 {
+		t.Error("expected throughput=0 with no first byte")
+	}
+}
+
+func TestStreamProgressRecordTokens(t *testing.T) {
+	p := &StreamProgress{}
+	p.RecordTokens(50)
+	p.RecordTokens(30)
+
+	if p.TokensRecv != 80 {
+		t.Errorf("expected 80 tokens, got %d", p.TokensRecv)
 	}
 }
