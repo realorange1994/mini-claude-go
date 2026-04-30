@@ -79,32 +79,79 @@ type ClaudeSettings struct {
 	} `json:"mcp"`
 }
 
+// homeClaudeDir returns the path to ~/.claude, or empty string if undetermined.
+func homeClaudeDir() string {
+	// Windows: USERPROFILE
+	if p := os.Getenv("USERPROFILE"); p != "" {
+		return filepath.Join(p, ".claude")
+	}
+	// Unix: HOME
+	if p := os.Getenv("HOME"); p != "" {
+		return filepath.Join(p, ".claude")
+	}
+	return ""
+}
+
 // LoadConfigFromFile loads config from .claude/settings.json and .mcp.json in the project root.
+// Falls back to ~/.claude/settings.json and ~/.mcp.json when project-level config is missing.
 func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 	// Initialize MCP manager first
 	mcpMgr := mcp.NewManager()
+	cfg.ProjectDir = projectDir
 
-	// Load from settings.json
+	// Track whether we found project-level settings
+	projectSettingsFound := false
+
+	// Load from project-level settings.json
 	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		var s ClaudeSettings
 		if err := json.Unmarshal(data, &s); err == nil {
-			cfg = Config{
-				APIKey:     s.Env.AnthropicAuthToken,
-				BaseURL:    s.Env.AnthropicBaseURL,
-				Model:      s.Env.AnthropicModel,
-				ProjectDir: projectDir,
-			}
+			cfg.APIKey = s.Env.AnthropicAuthToken
+			cfg.BaseURL = s.Env.AnthropicBaseURL
+			cfg.Model = s.Env.AnthropicModel
 			// Legacy: also load MCP servers from settings.json
 			for name, srv := range s.MCP.Servers {
 				mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
 			}
+			projectSettingsFound = true
 		} else {
 			fmt.Fprintf(os.Stderr, "[WARN] Failed to parse settings.json: %v\n", err)
 		}
 	}
 
-	// Load MCP config from .mcp.json (Claude Code compatible format)
+	// Fallback: load from home directory ~/.claude/settings.json
+	// Only fills in values that are still empty
+	if !projectSettingsFound {
+		if homeDir := homeClaudeDir(); homeDir != "" {
+			homeSettingsPath := filepath.Join(homeDir, "settings.json")
+			if data, err := os.ReadFile(homeSettingsPath); err == nil {
+				var s ClaudeSettings
+				if err := json.Unmarshal(data, &s); err == nil {
+					if cfg.APIKey == "" {
+						cfg.APIKey = s.Env.AnthropicAuthToken
+					}
+					if cfg.BaseURL == "" {
+						cfg.BaseURL = s.Env.AnthropicBaseURL
+					}
+					if cfg.Model == "" {
+						cfg.Model = s.Env.AnthropicModel
+					}
+					// Load MCP servers from home settings only if none loaded yet
+					if len(mcpMgr.ListServers()) == 0 {
+						for name, srv := range s.MCP.Servers {
+							mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
+						}
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "[WARN] Failed to parse home settings.json: %v\n", err)
+				}
+			}
+		}
+	}
+
+	// Load MCP config from project-level .mcp.json (Claude Code compatible format)
+	projectMCPFound := false
 	mcpPath := filepath.Join(projectDir, ".mcp.json")
 	if mcpData, err := os.ReadFile(mcpPath); err == nil {
 		var mcpCfg MCPConfigFile
@@ -120,8 +167,36 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 					mcpMgr.Register(name, entry.Command, args, entry.Env)
 				}
 			}
+			projectMCPFound = true
 		} else {
 			fmt.Fprintf(os.Stderr, "[WARN] Failed to parse .mcp.json: %v\n", err)
+		}
+	}
+
+	// Fallback: load MCP config from home directory ~/.claude/.mcp.json
+	if !projectMCPFound {
+		if homeDir := homeClaudeDir(); homeDir != "" {
+			homeMCPPath := filepath.Join(homeDir, ".mcp.json")
+			if mcpData, err := os.ReadFile(homeMCPPath); err == nil {
+				var mcpCfg MCPConfigFile
+				if err := json.Unmarshal(mcpData, &mcpCfg); err == nil {
+					if len(mcpMgr.ListServers()) == 0 {
+						for name, entry := range mcpCfg.MCPServers {
+							if entry.URL != "" {
+								mcpMgr.RegisterRemote(name, entry.URL, entry.Env)
+							} else if entry.Command != "" {
+								args := entry.Args
+								if args == nil {
+									args = []string{}
+								}
+								mcpMgr.Register(name, entry.Command, args, entry.Env)
+							}
+						}
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "[WARN] Failed to parse home .mcp.json: %v\n", err)
+				}
+			}
 		}
 	}
 
