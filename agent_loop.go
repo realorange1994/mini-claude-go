@@ -68,7 +68,7 @@ func (b *IterationBudget) GraceCall() bool {
 type AgentLoop struct {
 	config       Config
 	registry     *tools.Registry
-	gate         PermissionGate
+	gate         *PermissionGate
 	context      *ConversationContext
 	client       anthropic.Client
 	snapshots    *SnapshotHistory
@@ -104,7 +104,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 	client := anthropic.NewClient(opts...)
 
 	ctx := NewConversationContext(cfg)
-	gate := NewPermissionGate(cfg)
 
 	// Initialize transcript writer
 	sessionID := time.Now().Format("20060102-150405")
@@ -120,7 +119,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 	agent := &AgentLoop{
 		config:       cfg,
 		registry:     registry,
-		gate:         gate,
+		gate:         NewPermissionGate(&cfg), // points to agent.config after assignment
 		context:      ctx,
 		client:       client,
 		snapshots:    cfg.FileHistory,
@@ -133,6 +132,8 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
 	}
+	// Fix gate to point to agent's config (not the local cfg copy)
+	agent.gate = NewPermissionGate(&agent.config)
 
 	if cfg.cachedPrompt != nil {
 		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
@@ -164,7 +165,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 
 	client := anthropic.NewClient(opts...)
 
-	gate := NewPermissionGate(cfg)
+	gate := NewPermissionGate(&cfg)
 
 	// Read transcript and rebuild context
 	tr := transcript.NewReader(transcriptPath)

@@ -18,12 +18,12 @@ func (e PermissionDenied) Error() string { return e.Reason }
 
 // PermissionGate implements the two-layer permission check.
 type PermissionGate struct {
-	config Config
+	config *Config
 }
 
 // NewPermissionGate creates a new gate.
-func NewPermissionGate(cfg Config) PermissionGate {
-	return PermissionGate{config: cfg}
+func NewPermissionGate(cfg *Config) *PermissionGate {
+	return &PermissionGate{config: cfg}
 }
 
 // Check runs the permission gauntlet. Returns a ToolResult if denied, nil if allowed.
