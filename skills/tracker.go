@@ -123,3 +123,15 @@ func (t *SkillTracker) UsedCount() int {
 	defer t.mu.Unlock()
 	return len(t.usedSkills)
 }
+
+// GetReadSkillNames returns the names of skills that have been read.
+func (t *SkillTracker) GetReadSkillNames() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	names := make([]string, 0, len(t.readSkills))
+	for name := range t.readSkills {
+		names = append(names, name)
+	}
+	return names
+}

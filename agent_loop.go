@@ -1623,8 +1623,120 @@ func getStringSlice(schema map[string]any, key string) []string {
 	return nil
 }
 
+// PostCompactRecovery re-injects critical context after compaction.
+// This prevents the model from losing awareness of files it was working on
+// and skills it was using, reducing wasted turns re-reading them.
+func (a *AgentLoop) PostCompactRecovery() {
+	if !a.config.PostCompactRecoverFiles {
+		return
+	}
+
+	// --- File content recovery ---
+	if a.registry != nil {
+		maxFiles := a.config.PostCompactMaxFiles
+		if maxFiles <= 0 {
+			maxFiles = 5
+		}
+		maxFileChars := a.config.PostCompactMaxFileChars
+		if maxFileChars <= 0 {
+			maxFileChars = 50000
+		}
+
+		paths := a.registry.GetRecentlyReadFiles(maxFiles)
+		totalChars := 0
+		filesRecovered := 0
+
+		for _, path := range paths {
+			// Expand the normalized path back to a real path
+			realPath := path
+			if !filepath.IsAbs(realPath) {
+				realPath = filepath.Join(a.config.ProjectDir, realPath)
+			}
+
+			data, err := os.ReadFile(realPath)
+			if err != nil {
+				continue // file may have been deleted
+			}
+
+			content := string(data)
+			if totalChars+len(content) > maxFileChars {
+				// Truncate to fit budget
+				remaining := maxFileChars - totalChars
+				if remaining < 200 {
+					break
+				}
+				content = content[:remaining] + "\n... [truncated]"
+			}
+
+			attachment := fmt.Sprintf("[Post-compact file recovery: %s]\n```\n%s\n```", path, content)
+			a.context.AddAttachment(attachment)
+			totalChars += len(content)
+			filesRecovered++
+
+			// Re-mark file as read so edit checks still work
+			a.registry.MarkFileRead(path)
+		}
+
+		if filesRecovered > 0 {
+			fmt.Fprintf(os.Stderr, "[post-compact] Recovered %d files (%d chars)\n", filesRecovered, totalChars)
+		}
+	}
+
+	// --- Skill content recovery ---
+	if a.skillTracker != nil && a.config.SkillLoader != nil {
+		maxSkillChars := a.config.PostCompactMaxSkillChars
+		if maxSkillChars <= 0 {
+			maxSkillChars = 5000
+		}
+		maxTotalSkillChars := a.config.PostCompactMaxTotalSkillChars
+		if maxTotalSkillChars <= 0 {
+			maxTotalSkillChars = 25000
+		}
+
+		readSkills := a.skillTracker.GetReadSkillNames()
+		totalChars := 0
+		skillsRecovered := 0
+
+		for _, name := range readSkills {
+			content := a.config.SkillLoader.LoadSkill(name)
+			if content == "" {
+				continue
+			}
+
+			if len(content) > maxSkillChars {
+				content = content[:maxSkillChars] + "\n... [truncated]"
+			}
+
+			if totalChars+len(content) > maxTotalSkillChars {
+				break
+			}
+
+			attachment := fmt.Sprintf("[Post-compact skill recovery: %s]\n%s", name, content)
+			a.context.AddAttachment(attachment)
+			totalChars += len(content)
+			skillsRecovered++
+		}
+
+		if skillsRecovered > 0 {
+			fmt.Fprintf(os.Stderr, "[post-compact] Recovered %d skills (%d chars)\n", skillsRecovered, totalChars)
+		}
+	}
+}
+
 // tryCompaction attempts LLM-driven compaction, falling back to truncation.
 func (a *AgentLoop) tryCompaction() {
+	// Phase 0: Micro-compact — clear old tool results every turn (cheap, no LLM call)
+	if a.config.MicroCompactEnabled {
+		keepRecent := a.config.MicroCompactKeepRecent
+		if keepRecent <= 0 {
+			keepRecent = 5
+		}
+		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder)
+		if cleared > 0 {
+			fmt.Fprintf(os.Stderr, "\n[micro-compact] Cleared %d old tool results\n", cleared)
+		}
+	}
+
 	if a.compactor == nil {
 		a.context.CompactContext()
 		return
@@ -1637,7 +1749,11 @@ func (a *AgentLoop) tryCompaction() {
 		preTokens := a.context.EstimatedTokens()
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 		a.context.AddSummary(summary)
-		// Rebuild messages from the actual context (summary + any tail entries)
+
+		// Phase 2: Post-compact recovery — re-inject critical context
+		a.PostCompactRecovery()
+
+		// Rebuild messages from the actual context (summary + attachments + any tail entries)
 		// and calculate the real post-compact token count for cooldown.
 		// Previously postCompactTokens only counted summary tokens, causing
 		// immediate re-compaction every turn (thrashing).

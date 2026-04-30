@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -160,18 +161,24 @@ func ValidateParams(tool Tool, params map[string]any) error {
 	return nil
 }
 
+// fileReadInfo tracks both the file's mtime (for staleness checks) and when it was read (for recency sorting).
+type fileReadInfo struct {
+	mtime    time.Time // file modification time at read time
+	readTime time.Time // when the file was read
+}
+
 // Registry collects tool instances and provides lookup + API schema generation.
 type Registry struct {
 	tools     map[string]Tool
-	filesRead map[string]time.Time // tracks which files have been read by read_file and when (mtime)
-	mu        sync.RWMutex         // protects filesRead
+	filesRead map[string]fileReadInfo // tracks which files have been read by read_file
+	mu        sync.RWMutex            // protects filesRead
 }
 
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{
 		tools:     make(map[string]Tool),
-		filesRead: make(map[string]time.Time),
+		filesRead: make(map[string]fileReadInfo),
 	}
 }
 
@@ -199,9 +206,9 @@ func (r *Registry) MarkFileRead(path string) {
 	normalized := normalizeFilePath(path)
 	r.mu.Lock()
 	if info, err := os.Stat(expandPath(path)); err == nil {
-		r.filesRead[normalized] = info.ModTime()
+		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now()}
 	} else {
-		r.filesRead[normalized] = time.Time{} // new file, no mtime yet
+		r.filesRead[normalized] = fileReadInfo{readTime: time.Now()} // new file, no mtime yet
 	}
 	r.mu.Unlock()
 }
@@ -209,9 +216,9 @@ func (r *Registry) MarkFileRead(path string) {
 // HasFileBeenRead checks if a file has been read by read_file.
 func (r *Registry) HasFileBeenRead(path string) bool {
 	r.mu.RLock()
-	v := r.filesRead[normalizeFilePath(path)]
+	_, ok := r.filesRead[normalizeFilePath(path)]
 	r.mu.RUnlock()
-	return v != (time.Time{})
+	return ok
 }
 
 // CheckFileStale returns an error message if the file was modified since last read.
@@ -226,7 +233,7 @@ func (r *Registry) CheckFileStale(path string) string {
 
 	normalized := normalizeFilePath(path)
 	r.mu.RLock()
-	storedMtime, wasRead := r.filesRead[normalized]
+	storedInfo, wasRead := r.filesRead[normalized]
 	r.mu.RUnlock()
 	if !wasRead {
 		return "Error: file has not been read yet. Read it first with read_file before editing."
@@ -241,7 +248,7 @@ func (r *Registry) CheckFileStale(path string) string {
 	}
 
 	// File hasn't been modified since we read it
-	if info.ModTime() == storedMtime {
+	if info.ModTime() == storedInfo.mtime {
 		return ""
 	}
 
@@ -251,8 +258,37 @@ func (r *Registry) CheckFileStale(path string) string {
 // ClearFilesRead clears the read-file tracking (e.g., on /clear).
 func (r *Registry) ClearFilesRead() {
 	r.mu.Lock()
-	r.filesRead = make(map[string]time.Time)
+	r.filesRead = make(map[string]fileReadInfo)
 	r.mu.Unlock()
+}
+
+// GetRecentlyReadFiles returns the paths of files that have been read,
+// sorted by most recently read first. Returns up to maxFiles paths.
+func (r *Registry) GetRecentlyReadFiles(maxFiles int) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	type pathTime struct {
+		path     string
+		readTime time.Time
+	}
+	var entries []pathTime
+	for p, info := range r.filesRead {
+		entries = append(entries, pathTime{p, info.readTime})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].readTime.After(entries[j].readTime)
+	})
+
+	limit := maxFiles
+	if limit > len(entries) {
+		limit = len(entries)
+	}
+	result := make([]string, limit)
+	for i := 0; i < limit; i++ {
+		result[i] = entries[i].path
+	}
+	return result
 }
 
 // normalizeFilePath normalizes a path for consistent comparison.

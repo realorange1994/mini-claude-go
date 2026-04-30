@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -506,5 +508,166 @@ func TestContentEntrySealedInterface(t *testing.T) {
 	content = SummaryContent("test")
 	if _, ok := content.(SummaryContent); !ok {
 		t.Error("SummaryContent should implement EntryContent")
+	}
+}
+
+func TestMicroCompactEntries(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Add a user message first
+	ctx.AddUserMessage("initial question")
+
+	// Add 10 tool result entries, each with a unique ToolUseID
+	for i := 0; i < 10; i++ {
+		// Add assistant tool_use
+		toolCalls := []map[string]any{
+			{
+				"id":    fmt.Sprintf("tool_%d", i),
+				"name":  "read_file",
+				"input": map[string]any{"path": fmt.Sprintf("file_%d.go", i)},
+			},
+		}
+		ctx.AddAssistantToolCalls(toolCalls)
+
+		// Add tool result
+		results := []anthropic.ToolResultBlockParam{
+			{
+				ToolUseID: fmt.Sprintf("tool_%d", i),
+				Content: []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("Content of file_%d.go - this is a long output that should be cleared", i)}},
+				},
+			},
+		}
+		ctx.AddToolResults(results)
+	}
+
+	// Verify we have entries
+	if ctx.Len() < 20 {
+		t.Errorf("expected at least 20 entries, got %d", ctx.Len())
+	}
+
+	// Run micro-compact with keepRecent=5
+	cleared := ctx.MicroCompactEntries(5, "[cleared]")
+	if cleared != 5 {
+		t.Errorf("expected 5 entries cleared, got %d", cleared)
+	}
+
+	// Verify the last 5 tool results still have original content
+	entries := ctx.Entries()
+	toolResultCount := 0
+	clearedCount := 0
+	for _, entry := range entries {
+		if results, ok := entry.content.(ToolResultContent); ok {
+			for _, r := range results {
+				for _, c := range r.Content {
+					if c.OfText != nil {
+						if c.OfText.Text == "[cleared]" {
+							clearedCount++
+						} else if strings.Contains(c.OfText.Text, "Content of file_") {
+							toolResultCount++
+						}
+					}
+				}
+				// Verify ToolUseID is preserved (pairing intact)
+				if r.ToolUseID == "" {
+					t.Error("ToolUseID should be preserved after micro-compact")
+				}
+			}
+		}
+	}
+
+	if toolResultCount != 5 {
+		t.Errorf("expected 5 recent tool results preserved, got %d", toolResultCount)
+	}
+	if clearedCount != 5 {
+		t.Errorf("expected 5 cleared tool results, got %d", clearedCount)
+	}
+}
+
+func TestMicroCompactEntriesKeepAll(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Add only 3 tool results
+	for i := 0; i < 3; i++ {
+		results := []anthropic.ToolResultBlockParam{
+			{
+				ToolUseID: fmt.Sprintf("tool_%d", i),
+				Content: []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("output_%d", i)}},
+				},
+			},
+		}
+		ctx.AddToolResults(results)
+	}
+
+	// With keepRecent=5, nothing should be cleared
+	cleared := ctx.MicroCompactEntries(5, "[cleared]")
+	if cleared != 0 {
+		t.Errorf("expected 0 entries cleared (all recent), got %d", cleared)
+	}
+}
+
+func TestMicroCompactEntriesDefaultValues(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Add 8 tool results
+	for i := 0; i < 8; i++ {
+		results := []anthropic.ToolResultBlockParam{
+			{
+				ToolUseID: fmt.Sprintf("tool_%d", i),
+				Content: []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("output_%d", i)}},
+				},
+			},
+		}
+		ctx.AddToolResults(results)
+	}
+
+	// Call with keepRecent=0 (should default to 5)
+	cleared := ctx.MicroCompactEntries(0, "")
+	if cleared != 3 {
+		t.Errorf("expected 3 entries cleared (8-5), got %d", cleared)
+	}
+}
+
+func TestAttachmentContentType(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddAttachment("[Post-compact file recovery: main.go]\n```\npackage main\n```")
+	entry := ctx.entries[0]
+	if _, ok := entry.content.(AttachmentContent); !ok {
+		t.Fatalf("expected AttachmentContent, got %T", entry.content)
+	}
+	if string(entry.content.(AttachmentContent)) != "[Post-compact file recovery: main.go]\n```\npackage main\n```" {
+		t.Errorf("expected attachment content, got %q", entry.content.(AttachmentContent))
+	}
+}
+
+func TestBuildMessagesWithAttachment(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("Hello")
+	ctx.AddAttachment("[Post-compact file recovery: main.go]\n```\npackage main\n```")
+
+	messages := ctx.BuildMessages()
+	if len(messages) != 2 {
+		t.Errorf("expected 2 messages, got %d", len(messages))
+	}
+	// Attachment should be a user-role message with text content
+	if messages[1].Role != anthropic.MessageParamRoleUser {
+		t.Errorf("expected attachment message to be user role")
+	}
+}
+
+func TestAttachmentContentSealedInterface(t *testing.T) {
+	var content EntryContent
+	content = AttachmentContent("test attachment")
+	if _, ok := content.(AttachmentContent); !ok {
+		t.Error("AttachmentContent should implement EntryContent")
 	}
 }

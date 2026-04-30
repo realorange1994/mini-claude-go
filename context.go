@@ -45,6 +45,11 @@ type SummaryContent string
 
 func (SummaryContent) entryContent() {}
 
+// AttachmentContent represents post-compact recovery content (file/skill re-injection).
+type AttachmentContent string
+
+func (AttachmentContent) entryContent() {}
+
 // conversationEntry represents a single entry in the conversation history.
 type conversationEntry struct {
 	role    string // "user" or "assistant" (or "system" for boundary markers)
@@ -212,6 +217,10 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 			messages = messages[:0]
 			continue
 		case SummaryContent:
+			msg.Content = []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: string(v)}},
+			}
+		case AttachmentContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
 				{OfText: &anthropic.TextBlockParam{Text: string(v)}},
 			}
@@ -511,6 +520,61 @@ func (c *ConversationContext) AddSummary(content string) {
 	})
 }
 
+// AddAttachment inserts a user-role attachment message after compaction.
+// Used for post-compact recovery of file content, skill content, etc.
+func (c *ConversationContext) AddAttachment(content string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: AttachmentContent(content),
+	})
+}
+
+// MicroCompactEntries clears content of old tool results beyond the keepRecent
+// window. Operates directly on conversation entries (no serialization round-trip).
+// Returns the number of tool result entries that were cleared.
+// ToolUseID is preserved in cleared results to maintain pairing validity.
+func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if keepRecent <= 0 {
+		keepRecent = 5
+	}
+	if placeholder == "" {
+		placeholder = "[Old tool result content cleared]"
+	}
+
+	// Count tool_result entries from the end (recent first)
+	recentCount := 0
+	cleared := 0
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		entry := &c.entries[i]
+		results, ok := entry.content.(ToolResultContent)
+		if !ok {
+			continue
+		}
+		if recentCount < keepRecent {
+			recentCount++
+			continue
+		}
+		// Clear this tool result: replace content with placeholder, keep ToolUseIDs
+		var clearedResults []anthropic.ToolResultBlockParam
+		for _, r := range results {
+			clearedResults = append(clearedResults, anthropic.ToolResultBlockParam{
+				ToolUseID: r.ToolUseID,
+				Content: []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: placeholder}},
+				},
+				IsError: r.IsError,
+			})
+		}
+		entry.content = ToolResultContent(clearedResults)
+		cleared++
+	}
+	return cleared
+}
+
 // Entries returns the conversation entries (for compactor access).
 func (c *ConversationContext) Entries() []conversationEntry {
 	c.mu.RLock()
@@ -717,6 +781,8 @@ func entryContentToText(c EntryContent) string {
 	case CompactBoundaryContent:
 		return fmt.Sprintf("[compaction boundary: %d tokens]", v.PreCompactTokens)
 	case SummaryContent:
+		return string(v)
+	case AttachmentContent:
 		return string(v)
 	default:
 		return ""

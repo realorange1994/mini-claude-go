@@ -40,6 +40,14 @@ type Config struct {
 	AutoCompactThreshold   float64
 	AutoCompactBuffer      int
 	MaxCompactOutputTokens int
+	MicroCompactEnabled    bool
+	MicroCompactKeepRecent int
+	MicroCompactPlaceholder string
+	PostCompactRecoverFiles    bool
+	PostCompactMaxFiles        int
+	PostCompactMaxFileChars    int
+	PostCompactMaxSkillChars   int
+	PostCompactMaxTotalSkillChars int
 	cachedPrompt           *CachedSystemPrompt
 }
 
@@ -242,6 +250,18 @@ func DefaultConfig() Config {
 			"git push --force", "git reset --hard",
 			"> /dev/sda", "mkfs", "dd if=",
 		},
+		AutoCompactEnabled:     true,
+		AutoCompactThreshold:   0.75,
+		AutoCompactBuffer:      13000,
+		MaxCompactOutputTokens: 8192,
+		MicroCompactEnabled:    true,
+		MicroCompactKeepRecent: 5,
+		MicroCompactPlaceholder: "[Old tool result content cleared]",
+		PostCompactRecoverFiles:       true,
+		PostCompactMaxFiles:           5,
+		PostCompactMaxFileChars:       50000,
+		PostCompactMaxSkillChars:      5000,
+		PostCompactMaxTotalSkillChars: 25000,
 		cachedPrompt: NewCachedSystemPrompt(),
 	}
 }
