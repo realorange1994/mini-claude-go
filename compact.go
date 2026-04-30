@@ -1098,6 +1098,7 @@ type Compactor struct {
 	disabled              bool     // permanently disable LLM compaction after too many failures
 	lastSummary           string   // for iterative summary updates
 	lastCompactSavings    []float64 // track savings ratio for anti-thrashing
+	postCompactTokens     int      // token count after last compaction, for cooldown
 }
 
 // NewCompactor creates a new compactor with default settings.
@@ -1111,10 +1112,31 @@ func NewCompactor() *Compactor {
 	}
 }
 
-// ShouldCompact checks if compaction is needed based on current message count.
+// SetPostCompactTokens updates the post-compact token count for cooldown.
+// Called by tryCompaction() after injecting boundary + summary, using the
+// actual token count of rebuilt messages (summary + tail), not just the
+// LLM-estimated summary-only count.
+func (c *Compactor) SetPostCompactTokens(tokens int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.postCompactTokens = tokens
+}
+
+// ShouldCompact checks if compaction is needed based on token count and cooldown.
 func (c *Compactor) ShouldCompact(messages []anthropic.MessageParam) bool {
-	tracker := NewContextWindowTracker("", c.compactThreshold, c.compactBuffer)
-	return tracker.ShouldCompact(messages)
+	tokens := estimateMessageParamsTokens(messages)
+	threshold := int(float64(c.maxTokens) * c.compactThreshold)
+	if tokens < threshold {
+		return false
+	}
+	// Cooldown: skip if tokens haven't grown 25% since last compaction
+	if c.postCompactTokens > 0 {
+		cooldownThreshold := c.postCompactTokens + c.postCompactTokens/4
+		if tokens < cooldownThreshold {
+			return false
+		}
+	}
+	return true
 }
 
 // Compact performs LLM-driven compaction, falling back to truncation on failure.
@@ -1139,8 +1161,7 @@ func (c *Compactor) Compact(
 	}
 	c.mu.Unlock()
 
-	tracker := NewContextWindowTracker(model, c.compactThreshold, c.compactBuffer)
-	if !tracker.ShouldCompact(messages) {
+	if !c.ShouldCompact(messages) {
 		return "", false
 	}
 
@@ -1180,6 +1201,8 @@ func (c *Compactor) Compact(
 			c.lastCompactSavings = c.lastCompactSavings[len(c.lastCompactSavings)-2:]
 		}
 	}
+	// Set cooldown: record post-compact token count to prevent immediate re-compaction
+	c.postCompactTokens = result.PostCompactTokens
 	c.mu.Unlock()
 
 	fmt.Fprintf(os.Stderr, "\n[Compaction] auto: %d messages -> 2 (summary), ~%d tokens saved\n",
@@ -1614,25 +1637,37 @@ New conversation content follows. Please update the summary to incorporate the n
 
 // ─── Sensitive info redaction ────────────────────────────────────────────────
 
-// redactSensitiveText replaces sensitive values in text before sending to LLM.
-func redactSensitiveText(text string) string {
+// Precompiled regex patterns for sensitive info redaction (H-03: avoid compiling per call).
+var redactPatterns []struct {
+	quotedRe   *regexp.Regexp
+	unquotedRe *regexp.Regexp
+}
+
+func init() {
 	patterns := []string{
 		`api_key`, `apikey`, `api-key`,
 		`password`, `passwd`, `pass`,
 		`secret`, `token`, `credential`,
 		`auth`, `private_key`, `access_key`,
 	}
+	redactPatterns = make([]struct {
+		quotedRe   *regexp.Regexp
+		unquotedRe *regexp.Regexp
+	}, len(patterns))
+	for i, pattern := range patterns {
+		redactPatterns[i].quotedRe = regexp.MustCompile(
+			fmt.Sprintf(`(?i)(%s)\s*[:=]\s*["']([^"']{4,})["']`, pattern))
+		redactPatterns[i].unquotedRe = regexp.MustCompile(
+			fmt.Sprintf(`(?i)(%s)\s*[:=]\s*(\S{8,})`, pattern))
+	}
+}
 
+// redactSensitiveText replaces sensitive values in text before sending to LLM.
+func redactSensitiveText(text string) string {
 	result := text
-	for _, pattern := range patterns {
-		// Match pattern followed by separator and a quoted value
-		// e.g., api_key: "sk-xxx" -> api_key: "[REDACTED]"
-		re := regexp.MustCompile(fmt.Sprintf(`(?i)(%s)\s*[:=]\s*["']([^"']{4,})["']`, pattern))
-		result = re.ReplaceAllString(result, fmt.Sprintf(`$1: "[REDACTED]"`))
-
-		// Also match pattern followed by separator and an unquoted value
-		re2 := regexp.MustCompile(fmt.Sprintf(`(?i)(%s)\s*[:=]\s*(\S{8,})`, pattern))
-		result = re2.ReplaceAllString(result, fmt.Sprintf(`$1: [REDACTED]`))
+	for _, p := range redactPatterns {
+		result = p.quotedRe.ReplaceAllString(result, `$1: "[REDACTED]"`)
+		result = p.unquotedRe.ReplaceAllString(result, `$1: [REDACTED]`)
 	}
 	return result
 }

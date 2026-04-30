@@ -204,7 +204,12 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 			}
 			msg.Content = blocks
 		case CompactBoundaryContent:
-			// Compact boundaries are system markers, skip for API messages
+			// Compact boundary: discard all messages before this point.
+			// Only the summary + messages after the boundary are sent to the API.
+			// This is the key mechanism that makes compaction actually reduce
+			// token usage — without this reset, old messages would still be
+			// included and compaction would be a no-op.
+			messages = messages[:0]
 			continue
 		case SummaryContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
@@ -414,7 +419,12 @@ func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage
 			}
 
 		case CompactBoundaryContent:
-			// Skip boundary markers for compaction input
+			// Compact boundary: discard all messages before this point.
+			// This matches BuildMessages() behavior where the boundary resets
+			// the message list. Only entries AFTER the boundary are sent to
+			// the compactor, preventing re-compaction of already-compacted content.
+			msgs = msgs[:0]
+			toolNames = make(map[string]string)
 		case SummaryContent:
 			msgs = append(msgs, CompactionMessage{
 				Role:      entry.role,
@@ -667,12 +677,65 @@ func (c *ConversationContext) FixRoleAlternation() {
 						continue
 					}
 				}
-				// Type mismatch — cannot merge, just replace
-				last.content = entry.content
-				continue
+				// Type mismatch — cannot merge directly.
+			// Convert both to TextContent so nothing is silently lost.
+			// This handles edge cases like TextContent followed by
+			// ToolResultContent (same role) after truncation.
+			lastText := entryContentToText(last.content)
+			entryText := entryContentToText(entry.content)
+			if lastText != "" && entryText != "" {
+				last.content = TextContent(lastText + "\n\n" + entryText)
+			} else if entryText != "" {
+				last.content = TextContent(entryText)
+			}
+			// If both empty, keep original (last)
+			continue
+		}
+	}
+	merged = append(merged, entry)
+}
+c.entries = merged
+}
+
+// entryContentToText serializes any EntryContent to a plain text string.
+// Used by FixRoleAlternation to handle type-mismatched same-role entries.
+func entryContentToText(c EntryContent) string {
+	switch v := c.(type) {
+	case TextContent:
+		return string(v)
+	case ToolUseContent:
+		var parts []string
+		for _, b := range v {
+			if b.OfText != nil {
+				parts = append(parts, b.OfText.Text)
+			}
+			if b.OfToolUse != nil {
+				name := b.OfToolUse.Name
+				id := b.OfToolUse.ID
+				parts = append(parts, fmt.Sprintf("[tool call %s: %s]", id, name))
 			}
 		}
-		merged = append(merged, entry)
+		return strings.Join(parts, " ")
+	case ToolResultContent:
+		var parts []string
+		for _, r := range v {
+			id := r.ToolUseID
+			for _, c := range r.Content {
+				if c.OfText != nil {
+					text := c.OfText.Text
+					if len(text) > 500 {
+						text = text[:500] + "..."
+					}
+					parts = append(parts, fmt.Sprintf("[result %s: %s]", id, text))
+				}
+			}
+		}
+		return strings.Join(parts, " ")
+	case CompactBoundaryContent:
+		return fmt.Sprintf("[compaction boundary: %d tokens]", v.PreCompactTokens)
+	case SummaryContent:
+		return string(v)
+	default:
+		return ""
 	}
-	c.entries = merged
 }

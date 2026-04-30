@@ -298,6 +298,56 @@ func TestFixRoleAlternationPreservesSystemMessages(t *testing.T) {
 	}
 }
 
+// --- FixRoleAlternation type mismatch tests ---
+
+func TestFixRoleAlternationTypeMismatchTextToolResult(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("First text")
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "call_1", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "result"}},
+		}},
+	})
+
+	if len(ctx.entries) != 2 {
+		t.Fatalf("expected 2 entries before fix, got %d", len(ctx.entries))
+	}
+
+	ctx.FixRoleAlternation()
+	if len(ctx.entries) != 1 {
+		t.Errorf("expected 1 entry after fix (merged), got %d", len(ctx.entries))
+	}
+	if _, ok := ctx.entries[0].content.(TextContent); !ok {
+		t.Errorf("expected merged entry to be TextContent, got %T", ctx.entries[0].content)
+	}
+}
+
+func TestEntryContentToText(t *testing.T) {
+	if entryContentToText(TextContent("hello")) != "hello" {
+		t.Error("TextContent conversion failed")
+	}
+
+	tc := ToolUseContent([]anthropic.ContentBlockParamUnion{
+		{OfToolUse: &anthropic.ToolUseBlockParam{ID: "c1", Name: "exec", Input: map[string]any{}}},
+	})
+	result := entryContentToText(tc)
+	if result == "" {
+		t.Error("ToolUseContent conversion should not be empty")
+	}
+
+	boundary := CompactBoundaryContent{Trigger: CompactTriggerAuto, PreCompactTokens: 5000}
+	result2 := entryContentToText(boundary)
+	if result2 == "" {
+		t.Error("CompactBoundaryContent conversion should not be empty")
+	}
+
+	if entryContentToText(SummaryContent("test summary")) != "test summary" {
+		t.Error("SummaryContent conversion failed")
+	}
+}
+
 // ─── EntryContent sealed interface tests ───
 
 func TestTextContentType(t *testing.T) {
@@ -373,7 +423,9 @@ func TestSummaryContentType(t *testing.T) {
 	}
 }
 
-func TestBuildMessagesSkipsCompactBoundary(t *testing.T) {
+func TestBuildMessagesCompactBoundaryDiscardsPrior(t *testing.T) {
+	// CompactBoundary should discard all messages before it.
+	// Only summary + messages after the boundary are sent to the API.
 	cfg := DefaultConfig()
 	ctx := NewConversationContext(cfg)
 
@@ -382,9 +434,10 @@ func TestBuildMessagesSkipsCompactBoundary(t *testing.T) {
 	ctx.AddUserMessage("World")
 
 	messages := ctx.BuildMessages()
-	// Should have 2 user messages, boundary marker should be skipped
-	if len(messages) != 2 {
-		t.Errorf("expected 2 messages (boundary skipped), got %d", len(messages))
+	// Should have 1 message: "World" (the boundary discards "Hello")
+	// The boundary marker itself is also skipped
+	if len(messages) != 1 {
+		t.Errorf("expected 1 message (boundary discards prior), got %d", len(messages))
 	}
 	if messages[0].Role != anthropic.MessageParamRoleUser {
 		t.Errorf("expected first message to be user")

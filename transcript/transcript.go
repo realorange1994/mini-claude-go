@@ -96,7 +96,13 @@ func (w *Writer) WriteSystem(content string) error {
 // WriteCompact writes a compact boundary entry.
 func (w *Writer) WriteCompact(trigger string, preCompactTokens int) error {
 	content := fmt.Sprintf("Compacted conversation (trigger: %s, %d tokens compressed)", trigger, preCompactTokens)
-	return w.Write(Entry{Type: "compact", Content: content})
+	return w.Write(Entry{
+		Type:    "compact",
+		Content: content,
+		ToolArgs: map[string]any{
+			"pre_compact_tokens": preCompactTokens,
+		},
+	})
 }
 
 // WriteSummary writes a summary entry (from LLM-driven compaction).

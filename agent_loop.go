@@ -79,7 +79,7 @@ type AgentLoop struct {
 	compactor    *Compactor
 	useStream    bool
 	maxToolChars int           // max chars per tool result (default 8192)
-	toolTimeout  time.Duration // per-tool execution timeout (default 5min)
+	toolTimeout  time.Duration // per-tool execution timeout (default 30s)
 	maxTurns     int           // hard cap on turns (default from config.MaxTurns)
 	budget       *IterationBudget
 	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
@@ -283,6 +283,29 @@ func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config) *Conve
 					Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: entry.Content}}},
 				})
 			}
+
+		case "compact":
+			// Compaction boundary: discard all pending tool state.
+			// The summary replaces the compacted messages, so pending
+			// tool_uses/tool_results from before compaction are orphaned.
+			pendingToolUses = nil
+			pendingToolResults = nil
+			// Extract token count from compact message if available
+			preTokens := 0
+			if entry.ToolArgs != nil {
+				if tokens, ok := entry.ToolArgs["pre_compact_tokens"].(float64); ok {
+					preTokens = int(tokens)
+				}
+			}
+			ctx.AddCompactBoundary(CompactTriggerAuto, preTokens)
+			continue
+
+		case "summary":
+			// Add the summary as a user-role message after the boundary
+			if entry.Content != "" {
+				ctx.AddSummary(entry.Content)
+			}
+			continue
 
 		case "system", "error":
 			flushToolResults()
@@ -653,10 +676,15 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	// Try LLM compaction before sending to API
 	a.tryCompaction()
 
-	messages := a.context.BuildMessages()
-	messages = NormalizeAPIMessages(messages) // KV cache reuse
+	// Validate and fix internal entries BEFORE building API messages.
+	// Previously this was done AFTER BuildMessages(), so the fixes
+	// (orphan removal, role alternation) never reached the API params,
+	// causing endless 2013 repair loops.
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
+
+	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
@@ -696,11 +724,15 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			return nil, fmt.Errorf("interrupted by user")
 		}
 
-		// 2013 error: tool pairing broken — repair and retry
+		// 2013 error: tool pairing broken — repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
 			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013), repairing context...\n")
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
+			// Rebuild messages from repaired entries so the fix takes effect
+			messages = a.context.BuildMessages()
+			messages = NormalizeAPIMessages(messages)
+			params.Messages = messages
 			continue
 		}
 
@@ -732,10 +764,12 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 	toolParams := a.buildToolParams()
 	a.tryCompaction()
-	messages := a.context.BuildMessages()
-	messages = NormalizeAPIMessages(messages) // KV cache reuse
+	// Validate and fix internal entries BEFORE building API messages.
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
+
+	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
@@ -886,33 +920,6 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	return toolCalls, textParts, nil
 }
 
-// resultFromStreamResult converts a StreamResult to the return type of
-// callWithRetryAndFallback, preserving partial results.
-func (a *AgentLoop) resultFromStreamResult(sr StreamResult) ([]map[string]any, []string, error) {
-	toolCalls := make([]map[string]any, 0, len(sr.ToolCalls))
-	for _, tc := range sr.ToolCalls {
-		input := make(map[string]any)
-		if tc.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Arguments), &input)
-		}
-		toolCalls = append(toolCalls, map[string]any{
-			"id":    tc.ID,
-			"name":  tc.Name,
-			"input": input,
-		})
-	}
-
-	var textParts []string
-	if sr.Text != "" {
-		textParts = append(textParts, sr.Text)
-	}
-
-	if !sr.Completed {
-		return toolCalls, textParts, fmt.Errorf("stream ended prematurely (finish_reason=%q)", sr.FinishReason)
-	}
-	return toolCalls, textParts, nil
-}
-
 // callWithNonStreamingOnly is the primary entry point when streaming is disabled.
 // It's identical to callWithNonStreamingFallback but named for the non-streaming path.
 func (a *AgentLoop) callWithNonStreamingOnly() ([]map[string]any, []string, error) {
@@ -973,11 +980,15 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 		errMsg := err.Error()
 
-		// 2013 error: tool pairing broken — repair and retry
+		// 2013 error: tool pairing broken — repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
 			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
+			// Rebuild messages from repaired entries so the fix takes effect
+			rebuilt := a.context.BuildMessages()
+			rebuilt = NormalizeAPIMessages(rebuilt)
+			params.Messages = rebuilt
 			continue
 		}
 
@@ -999,12 +1010,6 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 	}
 
 	return nil, nil, fmt.Errorf("stream fallback error after %d retries", maxRetries)
-}
-
-// isNonRetryableError returns true for errors that should not be retried
-// (auth failures, permission denied, not found).
-func isNonRetryableError(errMsg string) bool {
-	return !classifyError(errMsg, 0, 0).Retryable
 }
 
 func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
@@ -1531,13 +1536,28 @@ func (a *AgentLoop) tryCompaction() {
 	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL)
 	if performed && summary != "" {
 		// Inject boundary marker and summary into context
-		a.context.AddCompactBoundary(CompactTriggerAuto, 0)
+		preTokens := a.context.EstimatedTokens()
+		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 		a.context.AddSummary(summary)
+		// Rebuild messages from the actual context (summary + any tail entries)
+		// and calculate the real post-compact token count for cooldown.
+		// Previously postCompactTokens only counted summary tokens, causing
+		// immediate re-compaction every turn (thrashing).
+		actualMessages := a.context.BuildMessages()
+		postTokens := estimateMessageParamsTokens(actualMessages)
+		a.compactor.SetPostCompactTokens(postTokens)
 		return
 	}
 
-	// LLM compaction not performed or failed — use truncation fallback
-	a.context.CompactContext()
+	// LLM compaction was not performed (not needed or disabled).
+	// Do NOT fall through to CompactContext() — the LLM compactor's
+	// ShouldCompact() check already determined that compaction isn't needed.
+	// Previously, this unconditional fallback caused thrashing: after a
+	// successful LLM compaction, CompactContext() would run every turn
+	// because it used entriesToCompactionMessages() which didn't respect
+	// the compact boundary, seeing inflated token counts.
+	// CompactContext() is still available when called directly from the
+	// truncation fallback path (e.g., after context overflow errors).
 
 	// Mark system prompt dirty after compaction
 	if a.config.cachedPrompt != nil {
