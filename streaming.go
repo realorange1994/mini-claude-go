@@ -130,7 +130,7 @@ func (h *CollectHandler) Handle(chunk StreamChunk) error {
 	switch chunk.Type {
 	case ChunkTypeText:
 		// Detect model echoing tool syntax as text (stuck pattern)
-		// Only flag when multiple strong indicators appear together — the model
+		// Only flag when multiple strong indicators appear together -- the model
 		// is outputting raw tool_use JSON as text instead of actual tool calls.
 		// Must have structural markers of a real tool call (type + id + name),
 		// not just passing references to these keywords.
@@ -169,7 +169,7 @@ func (h *CollectHandler) Handle(chunk StreamChunk) error {
 		// stream finished
 
 	case ChunkTypeBlockStop:
-		// content block finished — no-op for collector
+		// content block finished -- no-op for collector
 	}
 
 	return nil
@@ -229,6 +229,17 @@ func (h *CollectHandler) ClearPartialToolCall() {
 	if n := len(h.ToolCalls); n > 0 {
 		h.ToolCalls = h.ToolCalls[:n-1]
 	}
+}
+
+// ClearAll removes all accumulated state (text, tool calls, thinking).
+// Used before stream retries where the API will send a completely
+// new response -- old collected data would have mismatched IDs.
+func (h *CollectHandler) ClearAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Text = ""
+	h.ToolCalls = nil
+	h.Thinking = ""
 }
 
 // ClearText removes all pending text that was already streamed to the user.
@@ -407,7 +418,7 @@ func (h *TerminalHandler) Handle(chunk StreamChunk) error {
 	case ChunkTypeToolArgument:
 		h.curToolArgs.WriteString(chunk.Content)
 	case ChunkTypeBlockStop:
-		// Content block finished — flush pending tool call with parsed args
+		// Content block finished -- flush pending tool call with parsed args
 		if h.curToolName != "" {
 			h.flushToolCall()
 		}
@@ -651,8 +662,8 @@ func (p *StreamProgress) Throughput() float64 {
 // DeltasState tracks what content was already streamed to the user, used to
 // decide whether a retry is safe or would cause text duplication.
 //
-// - None: no deltas sent yet — clean retry is safe
-// - TextOnly: text was already streamed — retry would duplicate text
+// - None: no deltas sent yet -- clean retry is safe
+// - TextOnly: text was already streamed -- retry would duplicate text
 // - ToolInFlight: a tool call started with this ID but may be incomplete
 type DeltasState string
 
@@ -801,7 +812,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 
 		switch e := event.AsAny().(type) {
 		case anthropic.MessageStartEvent:
-			// Message started — carry on
+			// Message started -- carry on
 		case anthropic.ContentBlockStartEvent:
 			// A new content block started
 			block := e.ContentBlock
@@ -833,7 +844,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 			}
 
 		case anthropic.ContentBlockStopEvent:
-			// Content block finished — flush pending tool call display
+			// Content block finished -- flush pending tool call display
 			if err := wrapped(StreamChunk{Type: ChunkTypeBlockStop}); err != nil {
 				return err
 			}

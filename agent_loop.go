@@ -833,15 +833,18 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 		// Transient error (network, timeout, 5xx): decide retry strategy
 		if isTransientError(errMsg) {
 			fmt.Fprintf(os.Stderr, "\n[WARN] Transient error during stream: %v\n", err)
+			// Clear accumulated state before retry -- the API will send
+			// a completely new response with new tool IDs on reconnect,
+			// so old collected data would have mismatched IDs.
+			collect.ClearAll()
 			// Smart retry decision based on what was already delivered
 			switch a.lastDeltasState {
 			case DeltasStateNone:
 				// Nothing sent yet -- clean retry
 				continue
 			case DeltasStateToolInFlight:
-				// Tool call started but incomplete -- clear partial, retry
-				fmt.Fprintf(os.Stderr, "  [!] Connection dropped mid-tool-call; clearing partial tool call before retry...\n")
-				collect.ClearPartialToolCall()
+				// Tool call started but incomplete -- cleared above, retry
+				fmt.Fprintf(os.Stderr, "  [!] Connection dropped mid-tool-call; reconnecting...\n")
 				continue
 			case DeltasStateTextOnly:
 				// Text already streamed to user -- can't retry without duplication,
