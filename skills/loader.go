@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -326,7 +325,6 @@ func parseFrontmatter(content string) SkillMeta {
 
 	// Track which multi-key block we're in
 	var currentKey string
-	var extRequires map[string][]string
 
 	lines := strings.Split(frontmatter, "\n")
 	for _, line := range lines {
@@ -367,10 +365,6 @@ func parseFrontmatter(content string) SkillMeta {
 		// Check if it's a multi-line block start
 		if val == "" {
 			currentKey = key
-			// Initialize sub-map for extended_requires
-			if key == "extended_requires" {
-				extRequires = make(map[string][]string)
-			}
 			continue
 		}
 
@@ -406,12 +400,6 @@ func parseFrontmatter(content string) SkillMeta {
 		case "when_to_use":
 			meta.WhenToUse = unquote(val)
 		}
-
-		// Handle extended_requires sub-keys
-		if currentKey == "" && extRequires != nil {
-			// already reset above
-		}
-		_ = extRequires
 	}
 
 	return meta
@@ -603,5 +591,3 @@ func escapeXML(s string) string {
 	return s
 }
 
-// Ensure strconv is used (for potential future use, but currently not needed)
-var _ = strconv.Itoa

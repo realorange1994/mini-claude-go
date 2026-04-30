@@ -99,6 +99,8 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 			for name, srv := range s.MCP.Servers {
 				mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
 			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[WARN] Failed to parse settings.json: %v\n", err)
 		}
 	}
 
@@ -118,6 +120,8 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 					mcpMgr.Register(name, entry.Command, args, entry.Env)
 				}
 			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[WARN] Failed to parse .mcp.json: %v\n", err)
 		}
 	}
 
@@ -138,7 +142,9 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 			loader.SetBuiltinDir(builtinSkills)
 		}
 	}
-	_ = loader.Refresh()
+	if err := loader.Refresh(); err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] Failed to refresh skills: %v\n", err)
+	}
 	cfg.SkillLoader = loader
 	cfg.SkillTracker = skills.NewSkillTracker()
 	cfg.cachedPrompt = NewCachedSystemPrompt()

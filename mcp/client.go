@@ -146,6 +146,10 @@ func (c *Client) startStdio(ctx context.Context) error {
 	c.stderr = stderr
 	c.running = true
 
+	if err := c.cmd.Start(); err != nil {
+		return fmt.Errorf("start %s: %w", c.name, err)
+	}
+
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -158,10 +162,6 @@ func (c *Client) startStdio(ctx context.Context) error {
 			}
 		}
 	}()
-
-	if err := c.cmd.Start(); err != nil {
-		return fmt.Errorf("start %s: %w", c.name, err)
-	}
 
 	if err := c.initializeStdio(ctx); err != nil {
 		return fmt.Errorf("initialize %s: %w", c.name, err)

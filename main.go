@@ -103,6 +103,7 @@ func main() {
 	RegisterFileHistoryTools(registry, cfg.FileHistory)
 
 	var agent *AgentLoop
+	var err error
 
 	// Resume from transcript or new session
 	if *resumeFile != "" {
@@ -110,20 +111,31 @@ func main() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Resume failed: %v\n", err)
 			fmt.Fprintln(os.Stderr, "[*] Starting a new session instead")
-			agent = NewAgentLoop(cfg, registry, *stream)
+			agent, err = NewAgentLoop(cfg, registry, *stream)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[!] %v\n", err)
+				return
+			}
 		} else {
-			var err2 error
-			agent, err2 = NewAgentLoopFromTranscript(cfg, registry, *stream, path, true)
-			if err2 != nil {
-				fmt.Fprintf(os.Stderr, "[!] Resume failed: %v\n", err2)
+			agent, err = NewAgentLoopFromTranscript(cfg, registry, *stream, path, true)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Resume failed: %v\n", err)
 				fmt.Fprintln(os.Stderr, "[*] Starting a new session instead")
-				agent = NewAgentLoop(cfg, registry, *stream)
+				agent, err = NewAgentLoop(cfg, registry, *stream)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[!] %v\n", err)
+					return
+				}
 			} else {
 				fmt.Printf("[+] Resumed session from transcript: %s\n", path)
 			}
 		}
 	} else {
-		agent = NewAgentLoop(cfg, registry, *stream)
+		agent, err = NewAgentLoop(cfg, registry, *stream)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[!] %v\n", err)
+			return
+		}
 	}
 
 	// One-shot mode: positional args are appended as prompt (works with --resume too)
@@ -329,31 +341,15 @@ func printResumeHint(agent *AgentLoop) {
 
 // findTranscript resolves a transcript reference (number, filename, or 'last').
 func findTranscript(target string) (string, error) {
-	dir := ".claude/transcripts"
-	entries, err := os.ReadDir(dir)
+	files, err := loadTranscriptList()
 	if err != nil {
 		return "", fmt.Errorf("no transcripts directory: %w", err)
-	}
-
-	type entry struct {
-		name string
-		mod  time.Time
-	}
-	var files []entry
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
-			info, _ := e.Info()
-			files = append(files, entry{name: e.Name(), mod: info.ModTime()})
-		}
 	}
 	if len(files) == 0 {
 		return "", fmt.Errorf("no transcripts found")
 	}
 
-	// Sort by modification time, most recent first
-	sort.Slice(files, func(i, j int) bool {
-		return files[j].mod.Before(files[i].mod)
-	})
+	dir := ".claude/transcripts"
 
 	// "last" -> most recent
 	if target == "last" {
@@ -387,38 +383,41 @@ func findTranscript(target string) (string, error) {
 
 // listTranscripts lists available transcript files.
 func listTranscripts() {
-	dir := ".claude/transcripts"
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	files, err := loadTranscriptList()
+	if err != nil || len(files) == 0 {
 		fmt.Println("No transcripts found.")
 		return
 	}
-
-	type entry struct {
-		name string
-		mod  time.Time
-	}
-	var files []entry
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
-			info, _ := e.Info()
-			files = append(files, entry{name: e.Name(), mod: info.ModTime()})
-		}
-	}
-
-	if len(files) == 0 {
-		fmt.Println("No transcripts found.")
-		return
-	}
-
-	// Sort by modification time, most recent first
-	sort.Slice(files, func(i, j int) bool {
-		return files[j].mod.Before(files[i].mod)
-	})
 
 	fmt.Println("\nAvailable transcripts:")
 	for i, f := range files {
 		fmt.Printf("  %d. %s\n", i+1, f.name)
 	}
 	fmt.Println("\nUsage: /resume <number>, /resume <filename>, or /resume last")
+}
+
+// transcriptEntry holds a transcript file's name and modification time.
+type transcriptEntry struct {
+	name string
+	mod  time.Time
+}
+
+// loadTranscriptList reads and sorts transcript files from the .claude/transcripts directory.
+func loadTranscriptList() ([]transcriptEntry, error) {
+	dir := ".claude/transcripts"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var files []transcriptEntry
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			info, _ := e.Info()
+			files = append(files, transcriptEntry{name: e.Name(), mod: info.ModTime()})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[j].mod.Before(files[i].mod)
+	})
+	return files, nil
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -126,10 +128,12 @@ func cacheMessageParams(params *anthropic.MessageNewParams) {
 func messageParamToMaps(msgs []anthropic.MessageParam) []map[string]any {
 	data, err := json.Marshal(msgs)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] prompt_caching: marshal failed: %v\n", err)
 		return nil
 	}
 	var result []map[string]any
 	if err := json.Unmarshal(data, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] prompt_caching: unmarshal failed: %v\n", err)
 		return nil
 	}
 	return result
@@ -139,10 +143,12 @@ func messageParamToMaps(msgs []anthropic.MessageParam) []map[string]any {
 func mapsToMessageParam(msgs []map[string]any) []anthropic.MessageParam {
 	data, err := json.Marshal(msgs)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] prompt_caching: marshal failed: %v\n", err)
 		return nil
 	}
 	var result []anthropic.MessageParam
 	if err := json.Unmarshal(data, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] prompt_caching: unmarshal failed: %v\n", err)
 		return nil
 	}
 	return result

@@ -130,7 +130,12 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 
 	// Truncate if too many chars
 	if len(result) > readFileMaxChars {
-		result = result[:readFileMaxChars] + "\n\n[OUTPUT TRUNCATED]"
+		end := readFileMaxChars
+		// Adjust to safe UTF-8 boundary
+		for end > 0 && (result[end]&0xc0) == 0x80 {
+			end--
+		}
+		result = result[:end] + "\n\n[OUTPUT TRUNCATED]"
 	}
 
 	// Add pagination hint

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -533,12 +534,10 @@ func ListArchives(archiveDir string) ([]os.FileInfo, error) {
 		}
 	}
 
-	// Sort by modification time (simple insertion sort, small N expected)
-	for i := 1; i < len(files); i++ {
-		for j := i; j > 0 && files[j].ModTime().Before(files[j-1].ModTime()); j-- {
-			files[j], files[j-1] = files[j-1], files[j]
-		}
-	}
+	// Sort by modification time
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModTime().Before(files[j].ModTime())
+	})
 
 	return files, nil
 }

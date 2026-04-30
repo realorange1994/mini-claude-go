@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // RateLimitBucket represents one rate-limit window (e.g. requests per minute).
@@ -371,7 +372,12 @@ func FormatRateLimitDisplay(state *RateLimitState) string {
 
 	providerLabel := "Provider"
 	if state.Provider != "" {
-		providerLabel = strings.ToTitle(state.Provider[:1]) + strings.ToLower(state.Provider[1:])
+		runes := []rune(state.Provider)
+		runes[0] = unicode.ToUpper(runes[0])
+		for i := 1; i < len(runes); i++ {
+			runes[i] = unicode.ToLower(runes[i])
+		}
+		providerLabel = string(runes)
 	}
 
 	lines := []string{

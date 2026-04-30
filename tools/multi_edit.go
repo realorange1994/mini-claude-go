@@ -125,5 +125,10 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	end := maxLen
+	// Adjust to safe UTF-8 boundary
+	for end > 0 && (s[end]&0xc0) == 0x80 {
+		end--
+	}
+	return s[:end] + "..."
 }

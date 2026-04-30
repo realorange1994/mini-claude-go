@@ -250,15 +250,16 @@ func readLimited(r interface{ Read([]byte) (int, error) }, limit int) string {
 	return string(buf[:off])
 }
 
+var internalURLPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)[:/]`),
+	regexp.MustCompile(`(?i)https?://[0-9]+(?:\.[0-9]+){3}:\d+`),
+}
+
 // containsInternalURL checks for internal/private URLs.
 func containsInternalURL(cmd string) bool {
 	lower := strings.ToLower(cmd)
-	patterns := []string{
-		`https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)[:/]`,
-		`https?://[0-9]+(?:\.[0-9]+){3}:\d+`,
-	}
-	for _, p := range patterns {
-		if matched, _ := regexp.MatchString(p, lower); matched {
+	for _, re := range internalURLPatterns {
+		if re.MatchString(lower) {
 			return true
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -107,14 +108,13 @@ func newHTTPClient() *http.Client {
 }
 
 // NewAgentLoop creates a new agent loop.
-func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLoop {
+func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentLoop, error) {
 	apiKey := cfg.APIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("ANTHROPIC_API_KEY")
 	}
 	if apiKey == "" {
-		fmt.Fprintln(os.Stderr, "Error: ANTHROPIC_API_KEY environment variable is not set (or use --api-key)")
-		os.Exit(1)
+		return nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set (or use --api-key)")
 	}
 
 	opts := []option.RequestOption{
@@ -167,7 +167,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		ctx.SetSystemPrompt(sysPrompt)
 	}
 
-	return agent
+	return agent, nil
 }
 
 // NewAgentLoopFromTranscript creates an agent loop from an existing transcript file.
@@ -380,22 +380,24 @@ func (a *AgentLoop) TranscriptPath() string {
 func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(baseCtx, timeout)
 
-	// Watch for interrupt flag in background
-	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if a.IsInterrupted() {
-					cancel()
+	// Watch for interrupt flag in background (only one goroutine per instance)
+	a.interruptOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case <-ticker.C:
+					if a.IsInterrupted() {
+						cancel()
+						return
+					}
 				}
 			}
-		}
-	}()
+		}()
+	})
 
 	return ctx, cancel
 }
@@ -1130,7 +1132,9 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 		case anthropic.ToolUseBlock:
 			var input map[string]any
 			if len(v.Input) > 0 {
-				_ = json.Unmarshal(v.Input, &input)
+				if err := json.Unmarshal(v.Input, &input); err != nil {
+					fmt.Fprintf(os.Stderr, "[DEBUG] parseResponse: unmarshal input failed: %v\n", err)
+				}
 			}
 			if input == nil {
 				input = make(map[string]any)
@@ -1250,13 +1254,9 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 		collected = append(collected, <-ch)
 	}
 	// Sort by index to preserve original order
-	for i := 0; i < len(collected); i++ {
-		for j := i + 1; j < len(collected); j++ {
-			if collected[j].index < collected[i].index {
-				collected[i], collected[j] = collected[j], collected[i]
-			}
-		}
-	}
+	sort.Slice(collected, func(i, j int) bool {
+		return collected[i].index < collected[j].index
+	})
 
 	// Append results in order
 	for _, jr := range collected {

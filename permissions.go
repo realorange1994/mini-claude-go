@@ -101,10 +101,23 @@ func (g *PermissionGate) isSafeCommand(command string) bool {
 	cmd := strings.TrimSpace(strings.ToLower(command))
 	for _, safe := range g.config.AllowedCommands {
 		if strings.HasPrefix(cmd, safe) {
-			return true
+			remainder := cmd[len(safe):]
+			if remainder == "" {
+				return true
+			}
+			// Only allow if remainder is a simple argument (no shell metacharacters)
+			if remainder[0] == ' ' && !containsShellMetacharacters(remainder[1:]) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// containsShellMetacharacters checks if a string contains characters that
+// could be used for command injection (shell operators, redirections, etc.).
+func containsShellMetacharacters(s string) bool {
+	return strings.ContainsAny(s, "&|;`$(){}[]<>!#~\n\r")
 }
 
 func (g *PermissionGate) askUser(toolName string, params map[string]any) bool {

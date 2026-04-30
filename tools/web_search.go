@@ -17,6 +17,19 @@ import (
 
 const defaultMaxSearchResults = 10
 
+// Pre-compiled regex patterns for web scraping.
+var (
+	reBingListItem   = regexp.MustCompile(`(?s)<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>`)
+	reBingLink       = regexp.MustCompile(`(?s)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	reSnippetPara    = regexp.MustCompile(`(?s)<p[^>]*class="b_lineclamp[^"]*"[^>]*>(.*?)</p>`)
+	reSnippetCaption = regexp.MustCompile(`(?s)<div[^>]*class="b_caption"[^>]*>(.*?)</div>`)
+	reSnippetSnippet = regexp.MustCompile(`(?s)<div[^>]*class="b_snippet"[^>]*>(.*?)</div>`)
+	re360ListItem    = regexp.MustCompile(`(?s)<li[^>]*class="[^"]*res-list[^"]*"[^>]*>(.*?)</li>`)
+	re360Link        = regexp.MustCompile(`(?s)<[hH][234][^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	re360Snippet     = regexp.MustCompile(`(?s)<p[^>]*>(.*?)</p>`)
+	reAnyLink        = regexp.MustCompile(`<a[^>]+href="([^"]+)"[^>]*>([^<]*)</a>`)
+)
+
 // WebSearchTool searches the web using Bing (with 360 fallback for China).
 type WebSearchTool struct{}
 
@@ -203,8 +216,7 @@ func parseBingResults(html string, maxResults int) []SearchResult {
 	}
 
 	// Bing structure: <li class="b_algo">...</li> - be flexible with attribute ordering
-	re := regexp.MustCompile(`(?s)<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>`)
-	matches := re.FindAllStringSubmatch(html, -1)
+	matches := reBingListItem.FindAllStringSubmatch(html, -1)
 
 
 	for _, match := range matches {
@@ -214,8 +226,7 @@ func parseBingResults(html string, maxResults int) []SearchResult {
 
 		block := match[1]
 
-		linkRe := regexp.MustCompile(`(?s)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
-		linkMatch := linkRe.FindStringSubmatch(block)
+		linkMatch := reBingLink.FindStringSubmatch(block)
 		if linkMatch == nil {
 			continue
 		}
@@ -249,14 +260,7 @@ func parseBingResults(html string, maxResults int) []SearchResult {
 
 // extractBingSnippet extracts the snippet from a Bing result block.
 func extractBingSnippet(block string) string {
-	patterns := []string{
-		`(?s)<p[^>]*class="b_lineclamp[^"]*"[^>]*>(.*?)</p>`,
-		`(?s)<div[^>]*class="b_caption"[^>]*>(.*?)</div>`,
-		`(?s)<div[^>]*class="b_snippet"[^>]*>(.*?)</div>`,
-	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
+	for _, re := range []*regexp.Regexp{reSnippetPara, reSnippetCaption, reSnippetSnippet} {
 		if m := re.FindStringSubmatch(block); m != nil {
 			return stripTags(m[1])
 		}
@@ -299,8 +303,7 @@ func search360(ctx context.Context, query string, maxResults int) ([]SearchResul
 func parse360Results(html string, maxResults int) []SearchResult {
 	var results []SearchResult
 
-	re := regexp.MustCompile(`(?s)<li[^>]*class="[^"]*res-list[^"]*"[^>]*>(.*?)</li>`)
-	matches := re.FindAllStringSubmatch(html, -1)
+	matches := re360ListItem.FindAllStringSubmatch(html, -1)
 
 	for _, match := range matches {
 		if len(results) >= maxResults {
@@ -309,8 +312,7 @@ func parse360Results(html string, maxResults int) []SearchResult {
 
 		block := match[1]
 
-		linkRe := regexp.MustCompile(`(?s)<[hH][234][^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
-		linkMatch := linkRe.FindStringSubmatch(block)
+		linkMatch := re360Link.FindStringSubmatch(block)
 		if linkMatch == nil {
 			continue
 		}
@@ -328,8 +330,7 @@ func parse360Results(html string, maxResults int) []SearchResult {
 		}
 
 		snippet := ""
-		snippetRe := regexp.MustCompile(`(?s)<p[^>]*>(.*?)</p>`)
-		if sm := snippetRe.FindStringSubmatch(block); sm != nil {
+		if sm := re360Snippet.FindStringSubmatch(block); sm != nil {
 			snippet = stripTags(sm[1])
 			snippet = decodeHTMLEntities(snippet)
 			snippet = strings.TrimSpace(snippet)
@@ -349,8 +350,7 @@ func parse360Results(html string, maxResults int) []SearchResult {
 func extractAnyLinks(html string, maxResults int) []SearchResult {
 	var results []SearchResult
 
-	re := regexp.MustCompile(`<a[^>]+href="([^"]+)"[^>]*>([^<]*)</a>`)
-	matches := re.FindAllStringSubmatch(html, -1)
+	matches := reAnyLink.FindAllStringSubmatch(html, -1)
 
 	seen := make(map[string]bool)
 	for _, match := range matches {
