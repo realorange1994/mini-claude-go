@@ -33,7 +33,7 @@ func (*ExecTool) InputSchema() map[string]any {
 			},
 			"timeout": map[string]any{
 				"type":        "integer",
-				"description": "Timeout in seconds (default 120, max 600).",
+				"description": "Timeout in seconds (default 600, max 600).",
 			},
 		},
 		"required": []string{"command"},
@@ -98,7 +98,7 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 		return ToolResult{Output: "Error: empty command", IsError: true}
 	}
 
-	timeout := 120
+	timeout := 600
 	if t, ok := params["timeout"]; ok {
 		switch v := t.(type) {
 		case float64:
@@ -108,7 +108,7 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 		}
 	}
 	if timeout <= 0 {
-		timeout = 120
+		timeout = 600
 	}
 	if timeout > 600 {
 		timeout = 600

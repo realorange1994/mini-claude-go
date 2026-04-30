@@ -45,7 +45,7 @@ You have access to the following tools to help the user with software engineerin
 
 ## Tool Parameters
 
-All tools accept an optional "timeout" parameter (integer, seconds, range 1-300, default 30) to override the execution timeout. Use a larger timeout for operations that may take longer, such as scanning large directories with grep or glob.
+All tools accept an optional "timeout" parameter (integer, seconds, range 1-600, default 600) to override the execution timeout. Use a larger timeout for operations that may take longer, such as scanning large directories with grep or glob.
 
 ## Current Permission Mode: %s
 %s
