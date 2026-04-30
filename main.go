@@ -306,7 +306,9 @@ func runInteractive(agent *AgentLoop) {
 		agent.SetInterrupted(false) // ensure clear before running
 		result := agent.Run(userInput)
 		agent.SetInterrupted(false) // clear after run
-		fmt.Println(result)
+		if !agent.IsStreaming() {
+			fmt.Println(result)
+		}
 		fmt.Println()
 	}
 }

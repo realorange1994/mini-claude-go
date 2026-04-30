@@ -311,6 +311,11 @@ func (a *AgentLoop) IsInterrupted() bool {
 	return a.interrupted.Load()
 }
 
+// IsStreaming returns true if streaming mode is enabled.
+func (a *AgentLoop) IsStreaming() bool {
+	return a.useStream
+}
+
 // TranscriptPath returns the path to the current transcript file.
 func (a *AgentLoop) TranscriptPath() string {
 	if a.transcript == nil {
