@@ -99,9 +99,6 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 	mcpMgr := mcp.NewManager()
 	cfg.ProjectDir = projectDir
 
-	// Track whether we found project-level settings
-	projectSettingsFound := false
-
 	// Load from project-level settings.json
 	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
 	if data, err := os.ReadFile(settingsPath); err == nil {
@@ -114,44 +111,40 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 			for name, srv := range s.MCP.Servers {
 				mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
 			}
-			projectSettingsFound = true
 		} else {
 			fmt.Fprintf(os.Stderr, "[WARN] Failed to parse settings.json: %v\n", err)
 		}
 	}
 
 	// Fallback: load from home directory ~/.claude/settings.json
-	// Only fills in values that are still empty
-	if !projectSettingsFound {
-		if homeDir := homeClaudeDir(); homeDir != "" {
-			homeSettingsPath := filepath.Join(homeDir, "settings.json")
-			if data, err := os.ReadFile(homeSettingsPath); err == nil {
-				var s ClaudeSettings
-				if err := json.Unmarshal(data, &s); err == nil {
-					if cfg.APIKey == "" {
-						cfg.APIKey = s.Env.AnthropicAuthToken
-					}
-					if cfg.BaseURL == "" {
-						cfg.BaseURL = s.Env.AnthropicBaseURL
-					}
-					if cfg.Model == "" {
-						cfg.Model = s.Env.AnthropicModel
-					}
-					// Load MCP servers from home settings only if none loaded yet
-					if len(mcpMgr.ListServers()) == 0 {
-						for name, srv := range s.MCP.Servers {
-							mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
-						}
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "[WARN] Failed to parse home settings.json: %v\n", err)
+	// Fill in values that are still empty after project-level loading
+	if homeDir := homeClaudeDir(); homeDir != "" {
+		homeSettingsPath := filepath.Join(homeDir, "settings.json")
+		if data, err := os.ReadFile(homeSettingsPath); err == nil {
+			var s ClaudeSettings
+			if err := json.Unmarshal(data, &s); err == nil {
+				if cfg.APIKey == "" {
+					cfg.APIKey = s.Env.AnthropicAuthToken
 				}
+				if cfg.BaseURL == "" {
+					cfg.BaseURL = s.Env.AnthropicBaseURL
+				}
+				if cfg.Model == "" {
+					cfg.Model = s.Env.AnthropicModel
+				}
+				// Load MCP servers from home settings only if none loaded yet
+				if len(mcpMgr.ListServers()) == 0 {
+					for name, srv := range s.MCP.Servers {
+						mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
+					}
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "[WARN] Failed to parse home settings.json: %v\n", err)
 			}
 		}
 	}
 
 	// Load MCP config from project-level .mcp.json (Claude Code compatible format)
-	projectMCPFound := false
 	mcpPath := filepath.Join(projectDir, ".mcp.json")
 	if mcpData, err := os.ReadFile(mcpPath); err == nil {
 		var mcpCfg MCPConfigFile
@@ -167,14 +160,14 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 					mcpMgr.Register(name, entry.Command, args, entry.Env)
 				}
 			}
-			projectMCPFound = true
 		} else {
 			fmt.Fprintf(os.Stderr, "[WARN] Failed to parse .mcp.json: %v\n", err)
 		}
 	}
 
 	// Fallback: load MCP config from home directory ~/.claude/.mcp.json
-	if !projectMCPFound {
+	// Only if no MCP servers were loaded from project-level config
+	if len(mcpMgr.ListServers()) == 0 {
 		if homeDir := homeClaudeDir(); homeDir != "" {
 			homeMCPPath := filepath.Join(homeDir, ".mcp.json")
 			if mcpData, err := os.ReadFile(homeMCPPath); err == nil {
