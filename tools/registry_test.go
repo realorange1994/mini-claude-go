@@ -64,23 +64,23 @@ func TestCheckFileStale(t *testing.T) {
 	path := filepath.Join(dir, "test.go")
 	os.WriteFile(path, []byte("original"), 0644)
 
-	// Not read yet = stale
-	if !r.CheckFileStale(path) {
+	// Not read yet = stale (non-empty string)
+	if r.CheckFileStale(path) == "" {
 		t.Error("expected unread file to be stale")
 	}
 
 	// Read the file
 	r.MarkFileRead(path)
-	// Same content = not stale
-	if r.CheckFileStale(path) {
+	// Same content = not stale (empty string)
+	if r.CheckFileStale(path) != "" {
 		t.Error("expected just-read file to not be stale")
 	}
 
 	// Modify the file (ensure mtime changes)
 	time.Sleep(10 * time.Millisecond)
 	os.WriteFile(path, []byte("modified"), 0644)
-	// Modified = stale
-	if !r.CheckFileStale(path) {
+	// Modified = stale (non-empty string)
+	if r.CheckFileStale(path) == "" {
 		t.Error("expected modified file to be stale")
 	}
 }

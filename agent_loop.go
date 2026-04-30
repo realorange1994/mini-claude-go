@@ -1753,6 +1753,9 @@ func (a *AgentLoop) tryCompaction() {
 		// Phase 2: Post-compact recovery — re-inject critical context
 		a.PostCompactRecovery()
 
+		// Phase 3: History snip — preserve recent messages verbatim
+		a.context.AddHistorySnip(3)
+
 		// Rebuild messages from the actual context (summary + attachments + any tail entries)
 		// and calculate the real post-compact token count for cooldown.
 		// Previously postCompactTokens only counted summary tokens, causing

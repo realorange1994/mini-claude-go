@@ -1248,6 +1248,7 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 	if summaryText == "" {
 		return nil, fmt.Errorf("no summary text in response")
 	}
+	summaryText = extractSummaryFromCompactOutput(summaryText)
 
 	boundaryText := fmt.Sprintf("[Previous conversation summary (%d tokens compressed)]", preTokens)
 	summaryContent := fmt.Sprintf("%s\n\n%s", boundaryText, summaryText)
@@ -1565,29 +1566,70 @@ func estimateSingleMessageTokens(msg anthropic.MessageParam) int {
 
 // ─── Iterative summary updates ──────────────────────────────────────────────
 
-const structuredCompactUserPrompt = `请生成结构化摘要，包含以下部分：
-- Active Task: 当前正在执行的任务
-- Goal: 用户最终目标
-- Completed Actions: 已完成的关键操作（含文件路径）
-- Active State: 当前工作状态
-- Key Decisions: 已做出的重要决定
-- Relevant Files: 涉及的文件列表
-- Remaining Work: 剩余待完成的工作
-- Critical Context: 不能丢失的关键上下文
+const structuredCompactUserPrompt = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
-Do NOT include:
-- Individual tool call details or raw outputs
-- Intermediate exploration steps
-- Redundant or outdated information
+Analyze the conversation below, then produce a structured summary.
 
-Write the summary as a coherent narrative that preserves enough context for the conversation to continue productively.`
+First, write your analysis inside <analysis> tags:
+- Chronologically review each message
+- Identify the user's requests, approaches tried, decisions made
+- Note technical details: file paths, function names, error messages
+- Track what worked and what didn't
 
-const iterativeCompactUserPrompt = `以下是之前的对话摘要和新的对话内容。请更新摘要，保留所有关键信息。
+Then, write your summary inside <summary> tags with these REQUIRED fields:
+
+1. Primary Request and Intent: What the user asked for and their goals
+2. Key Technical Concepts: Important concepts, patterns, or technologies discussed
+3. Files and Code Sections: Files read/modified with key details (paths, line numbers, function names)
+4. Errors and Fixes: Any errors encountered and how they were resolved
+5. Problem Solving: What approaches were tried, what worked, what didn't
+6. All User Messages: List every user message (paraphrased if long)
+7. Pending Tasks: What remains to be done
+8. Current Work: What was actively being worked on when context ran out
+9. Optional Next Step: What should be done next to continue the work
+
+Example format:
+<analysis>
+Reviewing message 1: user asked to implement X...
+Reviewing message 2: assistant read file Y and found Z...
+</analysis>
+<summary>
+1. Primary Request and Intent: ...
+2. Key Technical Concepts: ...
+</summary>`
+
+// extractSummaryFromCompactOutput strips the <analysis> block and extracts
+// the <summary> block from the LLM's compaction response.
+// If no <summary> tags are found, returns the full text as-is.
+func extractSummaryFromCompactOutput(text string) string {
+	// Strip <analysis>...</analysis> entirely
+	analysisRe := regexp.MustCompile(`(?s)<analysis>.*?</analysis>`)
+	text = analysisRe.ReplaceAllString(text, "")
+
+	// Extract content from <summary>...</summary>
+	summaryRe := regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
+	matches := summaryRe.FindStringSubmatch(text)
+	if len(matches) >= 2 {
+		return strings.TrimSpace(matches[1])
+	}
+
+	// Fallback: if no <summary> tags, return cleaned text
+	return strings.TrimSpace(text)
+}
+
+const iterativeCompactUserPrompt = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+
+Below is the previous summary followed by new conversation messages. Update the summary by:
+- Merging new information into existing fields
+- Updating progress on tasks mentioned in the previous summary
+- Adding new files, errors, or decisions that appeared in the new messages
+- Removing information that is no longer relevant
+- Preserving all user messages (add new ones, keep existing ones)
 
 Previous Summary:
 {previous_summary}
 
-New conversation content follows. Please update the summary to incorporate the new information while preserving all critical context from the previous summary.`
+Write your analysis in <analysis> tags, then the updated summary in <summary> tags with the same 9-field structure.`
 
 // ─── Sensitive info redaction ────────────────────────────────────────────────
 

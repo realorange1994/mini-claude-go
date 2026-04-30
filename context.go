@@ -531,6 +531,54 @@ func (c *ConversationContext) AddAttachment(content string) {
 	})
 }
 
+// AddHistorySnip preserves the most recent conversation entries verbatim
+// after compaction. This ensures the latest context is not lost in the summary.
+// Entries are added as user-role text messages with a [history-snip] prefix.
+func (c *ConversationContext) AddHistorySnip(count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if count <= 0 {
+		count = 3
+	}
+
+	// Find the most recent CompactBoundaryContent
+	boundaryIdx := -1
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+	if boundaryIdx < 0 {
+		return
+	}
+
+	// Collect up to 'count' entries before the boundary
+	var snipEntries []conversationEntry
+	for i := boundaryIdx - 1; i >= 0 && len(snipEntries) < count; i-- {
+		entry := c.entries[i]
+		switch entry.content.(type) {
+		case CompactBoundaryContent, SummaryContent, AttachmentContent:
+			continue
+		default:
+			snipEntries = append([]conversationEntry{entry}, snipEntries...)
+		}
+	}
+
+	// Append snip entries after the boundary as preserved messages
+	for _, entry := range snipEntries {
+		text := entryContentToText(entry.content)
+		if text == "" {
+			continue
+		}
+		c.entries = append(c.entries, conversationEntry{
+			role:    "user",
+			content: TextContent(fmt.Sprintf("[history-snip %s] %s", entry.role, text)),
+		})
+	}
+}
+
 // MicroCompactEntries clears content of old tool results beyond the keepRecent
 // window. Operates directly on conversation entries (no serialization round-trip).
 // Returns the number of tool result entries that were cleared.
