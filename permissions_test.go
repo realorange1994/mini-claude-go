@@ -23,7 +23,7 @@ func (m *mockTool) Execute(params map[string]any) tools.ToolResult {
 func TestPermissionGateToolSelfCheck(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.PermissionMode = ModeAuto
-	gate := NewPermissionGate(cfg)
+	gate := NewPermissionGate(&cfg)
 
 	// Tool that warns about itself - in ModeAuto warnings are not enforced
 	tool := &mockTool{name: "test", permissions: ""}
@@ -37,7 +37,7 @@ func TestPermissionGateToolSelfCheck(t *testing.T) {
 func TestPermissionGateToolAllowed(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.PermissionMode = ModeAuto
-	gate := NewPermissionGate(cfg)
+	gate := NewPermissionGate(&cfg)
 
 	// Tool that allows itself
 	tool := &mockTool{name: "test", permissions: ""}
@@ -51,7 +51,7 @@ func TestPermissionGateToolAllowed(t *testing.T) {
 func TestPermissionGatePlanModeBlocksWrite(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.PermissionMode = ModePlan
-	gate := NewPermissionGate(cfg)
+	gate := NewPermissionGate(&cfg)
 
 	writeTools := []string{"exec", "write_file", "edit_file", "multi_edit", "fileops"}
 	for _, toolName := range writeTools {
@@ -67,7 +67,7 @@ func TestPermissionGatePlanModeBlocksWrite(t *testing.T) {
 func TestPermissionGatePlanModeAllowsRead(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.PermissionMode = ModePlan
-	gate := NewPermissionGate(cfg)
+	gate := NewPermissionGate(&cfg)
 
 	readTools := []string{"read_file", "glob", "grep", "list_dir"}
 	for _, toolName := range readTools {
@@ -84,7 +84,7 @@ func TestPermissionGateDeniedPatterns(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.PermissionMode = ModeAuto
 	cfg.DeniedPatterns = []string{"rm -rf", "sudo"}
-	gate := NewPermissionGate(cfg)
+	gate := NewPermissionGate(&cfg)
 
 	// Create a mock exec tool
 	tool := &mockTool{name: "exec", permissions: ""}
@@ -111,7 +111,7 @@ func TestPermissionGateDeniedPatterns(t *testing.T) {
 func TestPermissionGateAutoModeAllowsAll(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.PermissionMode = ModeAuto
-	gate := NewPermissionGate(cfg)
+	gate := NewPermissionGate(&cfg)
 
 	// All tools should be allowed in auto mode (except denied patterns)
 	tools := []string{"exec", "write_file", "edit_file", "read_file"}
@@ -128,7 +128,7 @@ func TestPermissionGateAutoModeAllowsAll(t *testing.T) {
 func TestPermissionGateIsSafeCommand(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowedCommands = []string{"git status", "ls", "cat"}
-	gate := NewPermissionGate(cfg)
+	gate := NewPermissionGate(&cfg)
 
 	testCases := []struct {
 		command string
