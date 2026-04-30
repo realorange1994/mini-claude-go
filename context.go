@@ -580,7 +580,11 @@ func (c *ConversationContext) ValidateToolPairing() {
 		}
 	}
 
-	// Pass 2: Remove orphaned tool_results
+	// Pass 2: Remove orphaned tool_results (those without matching tool_use).
+	// This is the critical fix for 2013 error: "tool call result does not follow tool call".
+	// We ONLY remove orphaned tool_results. We do NOT remove tool_use blocks without
+	// results (Pass 3 removed) — removing tool_use blocks while leaving tool_results
+	// in the API's view causes a worse structural mismatch.
 	resultIDs := make(map[string]bool)
 	for i, entry := range c.entries {
 		if entry.role == "user" {
@@ -610,33 +614,12 @@ func (c *ConversationContext) ValidateToolPairing() {
 	}
 	c.entries = compacted
 
-	// Pass 3: Remove orphaned tool_use blocks (call without matching result)
-	for i, entry := range c.entries {
-		if entry.role != "assistant" {
-			continue
-		}
-		blocks, ok := entry.content.(ToolUseContent)
-		if !ok {
-			continue
-		}
-		var kept []anthropic.ContentBlockParamUnion
-		hasOrphan := false
-		for _, b := range blocks {
-			if b.OfToolUse != nil && b.OfToolUse.ID != "" && !resultIDs[b.OfToolUse.ID] {
-				hasOrphan = true
-				continue // drop orphaned tool_use
-			}
-			kept = append(kept, b)
-		}
-		if hasOrphan {
-			if len(kept) == 0 {
-				// Entire message was orphaned tool_use — replace with placeholder
-				c.entries[i].content = TextContent("(tool call removed — result was truncated)")
-			} else {
-				c.entries[i].content = ToolUseContent(kept)
-			}
-		}
-	}
+	// Pass 3 (REMOVED): Previously removed tool_use blocks without matching results.
+	// This was counterproductive: when the API returns 2013, it's because a
+	// tool_result doesn't match a tool_use. Removing the tool_use block makes
+	// the orphaned tool_result even more orphaned, worsening the mismatch.
+	// Instead, we keep tool_use blocks intact and only remove orphaned results.
+	// The API will handle any tool_use without results gracefully.
 }
 
 // FixRoleAlternation ensures strict user/assistant alternation by merging

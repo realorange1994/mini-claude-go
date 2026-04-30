@@ -701,12 +701,12 @@ func NewStreamAdapter(handler streamHandler, bus *StreamBus) *StreamAdapter {
 }
 
 // WithStallTimeout sets dynamic stall timeouts.
-// isLocal=true → very long timeouts (local providers can be slow on cold start).
+// isLocal=true → reduced timeouts to prevent long hangs.
 // estTokens estimates context size for scaling.
 func (sa *StreamAdapter) WithStallTimeout(isLocal bool, estTokens int) *StreamAdapter {
 	if isLocal {
-		sa.stallTimeoutMs = 300_000
-		sa.startupMs = 600_000
+		sa.stallTimeoutMs = 60_000
+		sa.startupMs = 120_000
 	} else if estTokens > 100_000 {
 		sa.stallTimeoutMs = 300_000
 		sa.startupMs = 360_000
@@ -781,18 +781,12 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 				if !hasFirstEvent {
 					timeoutVal = startupTO
 				}
-				if stallCount >= 2 {
-					// Only force-close after TWO consecutive stall timeouts
-					fmt.Fprintf(os.Stderr, "\n[WARN] Stream stalled (no data for %dms x%d), forcing close...\n", timeoutVal, stallCount)
-					stream.Close()
-					if cancel != nil {
-						cancel()
-					}
-					return
+				fmt.Fprintf(os.Stderr, "\n[WARN] Stream stalled (no data for %dms), forcing close...\n", timeoutVal)
+				stream.Close()
+				if cancel != nil {
+					cancel()
 				}
-				// First stall: just warn, don't terminate
-				fmt.Fprintf(os.Stderr, "\n[WARN] Stream idle for %dms, waiting...\n", timeoutVal)
-				timer.Reset(time.Duration(stallTO) * time.Millisecond)
+				return
 			case <-done:
 				return
 			}

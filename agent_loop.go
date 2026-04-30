@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +90,22 @@ type AgentLoop struct {
 	rateLimitState  RateLimitState // rate limit headers from API responses
 }
 
+// newHTTPClient creates an HTTP client with sensible timeouts to prevent
+// the agent from hanging on slow or unresponsive providers.
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 300 * time.Second, // overall request timeout
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,  // connection timeout
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   30 * time.Second,
+			ResponseHeaderTimeout: 300 * time.Second, // time to read headers
+		},
+	}
+}
+
 // NewAgentLoop creates a new agent loop.
 func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLoop {
 	apiKey := cfg.APIKey
@@ -99,7 +117,10 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		os.Exit(1)
 	}
 
-	opts := []option.RequestOption{option.WithHeader("Authorization", "Bearer "+apiKey)}
+	opts := []option.RequestOption{
+		option.WithHeader("Authorization", "Bearer "+apiKey),
+		option.WithHTTPClient(newHTTPClient()),
+	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
@@ -161,7 +182,10 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		return nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
 	}
 
-	opts := []option.RequestOption{option.WithHeader("Authorization", "Bearer " + apiKey)}
+	opts := []option.RequestOption{
+		option.WithHeader("Authorization", "Bearer "+apiKey),
+		option.WithHTTPClient(newHTTPClient()),
+	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
@@ -1146,7 +1170,7 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 		inputPreview := formatToolArgs(toolName, input)
 
 		if toolName == "exec" {
-			fmt.Fprintf(os.Stderr, "  $ %s\n", inputPreview)
+			fmt.Fprintf(os.Stderr, "  [%s]: %s\n", toolName, inputPreview)
 		} else {
 			fmt.Fprintf(os.Stderr, "  [%s] %s\n", toolName, inputPreview)
 		}
@@ -1444,10 +1468,12 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	} else {
 		preview := toolResultPreview(toolName, output)
 		if toolName == "exec" {
-			// For exec, just show the result indented, no prefix
-			fmt.Fprintf(os.Stderr, "  %s\n", preview)
+			// For exec, show result with tool name prefix
+			fmt.Fprintf(os.Stderr, "  [+] %s: %s\n", toolName, preview)
+		} else if preview == "" {
+			fmt.Fprintf(os.Stderr, "  [+] %s\n", toolName)
 		} else {
-			fmt.Fprintf(os.Stderr, "  [OK] %s: %s\n", toolName, preview)
+			fmt.Fprintf(os.Stderr, "  [+] %s: %s\n", toolName, preview)
 		}
 	}
 
