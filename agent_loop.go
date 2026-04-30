@@ -131,7 +131,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) *AgentLo
 		compactor:    NewCompactor(),
 		useStream:    useStream,
 		maxToolChars: 8192,
-		toolTimeout:  30 * time.Second,
+		toolTimeout:  120 * time.Second,
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
 	}
@@ -208,7 +208,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		compactor:    NewCompactor(),
 		useStream:    useStream,
 		maxToolChars: 8192,
-		toolTimeout:  30 * time.Second,
+		toolTimeout:  120 * time.Second,
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
 	}
@@ -1225,15 +1225,15 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		_ = a.transcript.WriteToolUse(toolUseID, toolName, input)
 	}
 
-	// Agent-controlled timeout — default 30s, clamped to [1, 300] seconds
+	// Agent-controlled timeout — default 120s, clamped to [1, 600] seconds
 	timeout := a.toolTimeout
 	if t, ok := input["timeout"].(float64); ok && t > 0 {
 		secs := int(t)
 		if secs < 1 {
 			secs = 1
 		}
-		if secs > 300 {
-			secs = 300
+		if secs > 600 {
+			secs = 600
 		}
 		timeout = time.Duration(secs) * time.Second
 	}
@@ -1293,7 +1293,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	// Execute with interrupt-aware context (agent-controlled timeout, default 30s)
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = 120 * time.Second
 	}
 	ctx, cancel := a.interruptCtx(context.Background(), timeout)
 	defer cancel()
