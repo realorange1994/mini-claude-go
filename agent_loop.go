@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -81,6 +83,7 @@ type AgentLoop struct {
 	maxTurns     int           // hard cap on turns (default from config.MaxTurns)
 	budget       *IterationBudget
 	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
+	interruptOnce sync.Once    // ensures single interrupt watcher goroutine
 	lastDeltasState DeltasState // tracks what was streamed in last attempt
 	rateLimitState  RateLimitState // rate limit headers from API responses
 }
@@ -1453,6 +1456,10 @@ func cleanExecOutput(output string) string {
 func limitStr(s string, max int) string {
 	if len(s) <= max {
 		return s
+	}
+	// Find the last valid UTF-8 boundary at or before max
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
 	}
 	return s[:max] + "..."
 }

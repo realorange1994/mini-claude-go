@@ -112,7 +112,7 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 
 	// Apply atomically
 	if hasCRLF {
-		content = strings.ReplaceAll(content, "\n", "\r\n")
+		content = RestoreCRLF(content)
 	}
 	if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}

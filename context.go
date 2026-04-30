@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -52,6 +53,7 @@ type conversationEntry struct {
 
 // ConversationContext manages the conversation message history and system prompt.
 type ConversationContext struct {
+	mu           sync.RWMutex
 	config       Config
 	entries      []conversationEntry
 	systemPrompt string
@@ -64,6 +66,8 @@ func NewConversationContext(cfg Config) *ConversationContext {
 
 // EstimatedTokens returns a rough token estimate for all entries (total chars / 4).
 func (c *ConversationContext) EstimatedTokens() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	totalChars := 0
 	for _, entry := range c.entries {
 		switch v := entry.content.(type) {
@@ -105,16 +109,22 @@ func (c *ConversationContext) EstimatedTokens() int {
 
 // SetSystemPrompt sets the system prompt.
 func (c *ConversationContext) SetSystemPrompt(prompt string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.systemPrompt = prompt
 }
 
 // SystemPrompt returns the system prompt.
 func (c *ConversationContext) SystemPrompt() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.systemPrompt
 }
 
 // AddUserMessage appends a user text message.
 func (c *ConversationContext) AddUserMessage(content string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.entries = append(c.entries, conversationEntry{
 		role:    "user",
 		content: TextContent(content),
@@ -124,6 +134,8 @@ func (c *ConversationContext) AddUserMessage(content string) {
 
 // AddAssistantText appends an assistant text message.
 func (c *ConversationContext) AddAssistantText(text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if text == "" {
 		return
 	}
@@ -136,6 +148,8 @@ func (c *ConversationContext) AddAssistantText(text string) {
 
 // AddAssistantToolCalls records assistant tool_use blocks.
 func (c *ConversationContext) AddAssistantToolCalls(toolCalls []map[string]any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(toolCalls))
 	for _, call := range toolCalls {
 		id, _ := call["id"].(string)
@@ -159,6 +173,8 @@ func (c *ConversationContext) AddAssistantToolCalls(toolCalls []map[string]any) 
 
 // AddToolResults appends tool results as a user message.
 func (c *ConversationContext) AddToolResults(results []anthropic.ToolResultBlockParam) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.entries = append(c.entries, conversationEntry{
 		role:    "user",
 		content: ToolResultContent(results),
@@ -168,6 +184,8 @@ func (c *ConversationContext) AddToolResults(results []anthropic.ToolResultBlock
 
 // BuildMessages converts entries to []anthropic.MessageParam for the API.
 func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	messages := make([]anthropic.MessageParam, 0, len(c.entries))
 	for _, entry := range c.entries {
 		msg := anthropic.MessageParam{Role: anthropic.MessageParamRole(entry.role)}
@@ -203,6 +221,7 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	return messages
 }
 
+// must hold c.mu write lock
 func (c *ConversationContext) truncateIfNeeded() {
 	maxMsgs := c.config.MaxContextMsgs
 	if len(c.entries) > maxMsgs {
@@ -230,6 +249,8 @@ func (c *ConversationContext) truncateIfNeeded() {
 // TruncateHistory drops older messages to recover from context overflow.
 // Keeps the first entry (initial user message) and the last 10 entries.
 func (c *ConversationContext) TruncateHistory() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if len(c.entries) <= 12 {
 		return
 	}
@@ -243,6 +264,13 @@ func (c *ConversationContext) TruncateHistory() {
 
 // AggressiveTruncateHistory drops more aggressively - keeps only first and last 5.
 func (c *ConversationContext) AggressiveTruncateHistory() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.aggressiveTruncateHistory()
+}
+
+// must hold c.mu write lock
+func (c *ConversationContext) aggressiveTruncateHistory() {
 	if len(c.entries) <= 6 {
 		return
 	}
@@ -256,6 +284,8 @@ func (c *ConversationContext) AggressiveTruncateHistory() {
 
 // MinimumHistory drops to bare minimum - only first user message and last 2 entries.
 func (c *ConversationContext) MinimumHistory() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if len(c.entries) <= 3 {
 		return
 	}
@@ -276,6 +306,8 @@ func (c *ConversationContext) MinimumHistory() {
 //	Phase 3: SelectiveCompact - clears readable tool outputs, preserves write/exec
 //	Phase 4: Hard truncate - fallback to AggressiveTruncateHistory
 func (c *ConversationContext) CompactContext() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	msgs, toolNames := c.entriesToCompactionMessages()
 	if len(msgs) == 0 {
 		return false
@@ -321,13 +353,14 @@ func (c *ConversationContext) CompactContext() bool {
 
 	// Phase 4: Hard truncate (last resort)
 	fmt.Fprintf(os.Stderr, "\n  [compact] Compaction insufficient, hard truncating\n")
-	c.AggressiveTruncateHistory()
+	c.aggressiveTruncateHistory()
 	return true
 }
 
 // entriesToCompactionMessages converts internal conversation entries to the
 // compact.go message format. Returns the messages and a map of tool names
 // indexed by message index (for tool call/result rounds).
+// must hold c.mu at least read lock
 func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage, map[string]string) {
 	msgs := make([]CompactionMessage, 0, len(c.entries))
 	toolNames := make(map[string]string) // key: message index as string
@@ -447,6 +480,8 @@ func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]
 
 // AddCompactBoundary inserts a system-role text marker for LLM compaction.
 func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preCompactTokens int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.entries = append(c.entries, conversationEntry{
 		role: "system",
 		content: CompactBoundaryContent{
@@ -458,6 +493,8 @@ func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preComp
 
 // AddSummary inserts a user-role summary message after compaction.
 func (c *ConversationContext) AddSummary(content string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.entries = append(c.entries, conversationEntry{
 		role:    "user",
 		content: SummaryContent(content),
@@ -466,21 +503,29 @@ func (c *ConversationContext) AddSummary(content string) {
 
 // Entries returns the conversation entries (for compactor access).
 func (c *ConversationContext) Entries() []conversationEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.entries
 }
 
 // Len returns the number of conversation entries.
 func (c *ConversationContext) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return len(c.entries)
 }
 
 // Clear removes all conversation entries.
 func (c *ConversationContext) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.entries = nil
 }
 
 // ReplaceEntries replaces all conversation entries (used by compactor).
 func (c *ConversationContext) ReplaceEntries(entries []conversationEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.entries = entries
 }
 
@@ -508,6 +553,7 @@ func LoadProjectInstructions(projectDir string) string {
 // 2. Orphaned tool_uses: tool_use has no matching result (result was truncated) →
 //    insert stub result or delete the tool_use block
 // This prevents Anthropic API error 2013.
+// must hold c.mu write lock
 func (c *ConversationContext) ValidateToolPairing() {
 	// Pass 1: Collect all tool_use IDs from assistant messages
 	callIDs := make(map[string]bool)
@@ -586,6 +632,7 @@ func (c *ConversationContext) ValidateToolPairing() {
 // FixRoleAlternation ensures strict user/assistant alternation by merging
 // consecutive messages with the same role. Critical for Anthropic API
 // compliance after naive slice truncation.
+// must hold c.mu write lock
 func (c *ConversationContext) FixRoleAlternation() {
 	if len(c.entries) == 0 {
 		return

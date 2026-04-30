@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrorClass categorizes API errors for retry decision-making.
@@ -396,10 +397,13 @@ func matchesAny(text string, patterns []string) bool {
 	return false
 }
 
-// truncateStr truncates a string to maxLen bytes.
+// truncateStr truncates a string to maxLen bytes, respecting UTF-8 boundaries.
 func truncateStr(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
+	}
+	for maxLen > 0 && !utf8.RuneStart(s[maxLen]) {
+		maxLen--
 	}
 	return s[:maxLen]
 }

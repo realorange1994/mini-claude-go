@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -162,6 +164,7 @@ func ValidateParams(tool Tool, params map[string]any) error {
 type Registry struct {
 	tools     map[string]Tool
 	filesRead map[string]time.Time // tracks which files have been read by read_file and when (mtime)
+	mu        sync.RWMutex         // protects filesRead
 }
 
 // NewRegistry creates an empty registry.
@@ -194,16 +197,21 @@ func (r *Registry) AllTools() []Tool {
 // MarkFileRead records that a file has been read by read_file, storing its current mtime.
 func (r *Registry) MarkFileRead(path string) {
 	normalized := normalizeFilePath(path)
+	r.mu.Lock()
 	if info, err := os.Stat(expandPath(path)); err == nil {
 		r.filesRead[normalized] = info.ModTime()
 	} else {
 		r.filesRead[normalized] = time.Time{} // new file, no mtime yet
 	}
+	r.mu.Unlock()
 }
 
 // HasFileBeenRead checks if a file has been read by read_file.
 func (r *Registry) HasFileBeenRead(path string) bool {
-	return r.filesRead[normalizeFilePath(path)] != (time.Time{})
+	r.mu.RLock()
+	v := r.filesRead[normalizeFilePath(path)]
+	r.mu.RUnlock()
+	return v != (time.Time{})
 }
 
 // CheckFileStale returns an error message if the file was modified since last read.
@@ -217,7 +225,9 @@ func (r *Registry) CheckFileStale(path string) string {
 	}
 
 	normalized := normalizeFilePath(path)
+	r.mu.RLock()
 	storedMtime, wasRead := r.filesRead[normalized]
+	r.mu.RUnlock()
 	if !wasRead {
 		return "Error: file has not been read yet. Read it first with read_file before editing."
 	}
@@ -240,13 +250,74 @@ func (r *Registry) CheckFileStale(path string) string {
 
 // ClearFilesRead clears the read-file tracking (e.g., on /clear).
 func (r *Registry) ClearFilesRead() {
+	r.mu.Lock()
 	r.filesRead = make(map[string]time.Time)
+	r.mu.Unlock()
 }
 
 // normalizeFilePath normalizes a path for consistent comparison.
 func normalizeFilePath(path string) string {
 	p := strings.ReplaceAll(path, "\\", "/")
 	return strings.ToLower(p)
+}
+
+// IsPathAllowed checks that a resolved file path is within the working directory.
+// Returns an error message if the path escapes the project, or empty string if allowed.
+func IsPathAllowed(path string) string {
+	resolved := expandPath(path)
+	// Make absolute if not already
+	if !filepath.IsAbs(resolved) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		resolved = filepath.Join(wd, resolved)
+	}
+	resolved = filepath.Clean(resolved)
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	absWd, err := filepath.Abs(wd)
+	if err != nil {
+		return ""
+	}
+	absWd = filepath.Clean(absWd)
+
+	// Resolve symlinks on both sides for robustness
+	if evaled, err := filepath.EvalSymlinks(absWd); err == nil {
+		absWd = evaled
+	}
+	if evaled, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = evaled
+	}
+
+	rel, err := filepath.Rel(absWd, resolved)
+	if err != nil {
+		return fmt.Sprintf("Error: path %q is outside the project directory", path)
+	}
+	// filepath.Rel uses .. to indicate paths above the base
+	if strings.HasPrefix(rel, "..") {
+		return fmt.Sprintf("Error: path %q is outside the project directory", path)
+	}
+	return ""
+}
+
+// RestoreCRLF restores CRLF line endings in text that was normalized to LF.
+// Uses O(n) algorithm: only adds \r before \n that wasn't already preceded by \r.
+func RestoreCRLF(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + len(s)/10)
+	prevCR := false
+	for _, c := range s {
+		if c == '\n' && !prevCR {
+			b.WriteByte('\r')
+		}
+		prevCR = c == '\r'
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 // APISchemas builds the tool definitions for the Anthropic API.
