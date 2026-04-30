@@ -381,6 +381,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// Clear any stale interrupted flag from previous run
 	a.SetInterrupted(false)
 
+	// Reset the turn budget so each new conversation starts fresh
+	a.budget = NewIterationBudget(a.maxTurns)
+	a.lastDeltasState = DeltasStateNone // reset streaming state
+
 	// Expand @ context references (e.g., @file:main.go, @diff)
 	cwd, _ := os.Getwd()
 	contextWindow := modelContextWindow(a.config.Model)
@@ -407,7 +411,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 	contextErrors := 0
 	const maxContextRecovery = 3 // Phase 1: truncate, Phase 2: aggressive truncate, Phase 3: give up
 
-	// Empty response tracking — prevents infinite loops on thinking-only responses
+	// Empty response tracking -- prevents infinite loops on thinking-only responses
 	consecutiveEmptyResponses := 0
 	const maxEmptyResponses = 3
 
@@ -456,12 +460,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 		if err != nil {
 			errMsg := err.Error()
-			// User interrupt — return immediately
+			// User interrupt -- return immediately
 			if strings.Contains(errMsg, "interrupted by user") {
 				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupted.\n")
 				return finalText
 			}
-			// Model confusion — echoed tool syntax as text; recover by retrying
+			// Model confusion -- echoed tool syntax as text; recover by retrying
 			if strings.Contains(errMsg, "model confused") {
 				fmt.Fprintf(os.Stderr, "\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
@@ -469,7 +473,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				lastTransition = "model_confusion_retry"
 				continue
 			}
-			// 2013 error: tool_result doesn't follow tool_call — repair pairing before retry
+			// 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
 			if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
 				fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013), repairing context...\n")
 				a.context.ValidateToolPairing()
@@ -477,14 +481,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 				lastTransition = "tool_pairing_repair"
 				continue
 			}
-			// Truncated tool arguments — model cut off mid-tool-call
+			// Truncated tool arguments -- model cut off mid-tool-call
 			if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
 				fmt.Fprintf(os.Stderr, "\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
 				a.context.AddUserMessage("ERROR: Your tool call arguments was cut off due to length limits. Do NOT repeat the truncated tool call. If you need to make multiple tool calls, make them one at a time with shorter arguments.")
 				lastTransition = "tool_args_truncated_retry"
 				continue
 			}
-			// Stream stalled — safety timeout fired; recover with truncation
+			// Stream stalled -- safety timeout fired; recover with truncation
 			if strings.Contains(errMsg, "stream stalled") {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
@@ -535,10 +539,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		if len(toolCalls) == 0 {
-			// No tool calls — could be a thinking-only response (model uses extended
+			// No tool calls -- could be a thinking-only response (model uses extended
 			// thinking but hasn't produced text yet) or a genuine final answer.
 			if len(textParts) == 0 {
-				// No text and no tool calls — thinking-only response
+				// No text and no tool calls -- thinking-only response
 				consecutiveEmptyResponses++
 				if consecutiveEmptyResponses >= maxEmptyResponses {
 					fmt.Fprintf(os.Stderr, "\n[ERR] No actionable response after %d attempts, giving up\n", maxEmptyResponses)
@@ -553,7 +557,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 			// Genuine final answer with text
 			consecutiveEmptyResponses = 0
-			// No tool calls — model gave final answer.
+			// No tool calls -- model gave final answer.
 			// Like Claude Code's stop hooks: the loop could continue here
 			// with additional checks (token budget, quality check, etc.)
 			// but for now we simply exit.
@@ -598,14 +602,16 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 	// If max turns reached without a final response, try one last non-streaming call
 	// to get a conclusive answer (like Claude Code's max_turns handling).
+	// Tools are removed in this call to force a text-only response.
 	if finalText == "" && a.budget.GraceCall() {
 		fmt.Fprintf(os.Stderr, "\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
 		a.context.AddUserMessage("You have reached the maximum number of tool use turns. Please provide a final summary based on the work done so far. Do NOT call any more tools.")
-		toolCalls, textParts, err := a.callWithRetryAndFallback()
-		if err == nil && len(textParts) > 0 {
-			finalText = strings.Join(textParts, "\n")
+		// Call WITHOUT tools to force text-only response
+		toolCallsGrace, textPartsGrace, err := a.callWithNonStreamingNoTools()
+		if err == nil && len(textPartsGrace) > 0 {
+			finalText = strings.Join(textPartsGrace, "\n")
 		}
-		_ = toolCalls // ignore any final tool calls at this point
+		_ = toolCallsGrace // ignore any tool calls in grace response (should be none)
 	}
 
 	if finalText == "" {
@@ -628,7 +634,7 @@ func (a *AgentLoop) Close() {
 }
 
 // ForceCompact forces a context compaction (for /compact command).
-// Skips NeedsCompaction check — always performs truncation.
+// Skips NeedsCompaction check -- always performs truncation.
 func (a *AgentLoop) ForceCompact() {
 	entries := a.context.Entries()
 	if len(entries) == 0 {
@@ -644,7 +650,7 @@ func (a *AgentLoop) ForceCompact() {
 		return
 	}
 
-	// Normal compaction skipped (not enough tokens) — force truncation
+	// Normal compaction skipped (not enough tokens) -- force truncation
 	before := len(entries)
 	a.context.TruncateHistory()
 	after := len(a.context.Entries())
@@ -717,14 +723,14 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		lastErr = err
 		errMsg := err.Error()
 
-		// Interrupt — check the actual flag, not ctx.Err(), because
+		// Interrupt -- check the actual flag, not ctx.Err(), because
 		// the interrupt watcher goroutine can race with the timeout.
 		if a.IsInterrupted() {
 			a.SetInterrupted(false)
 			return nil, fmt.Errorf("interrupted by user")
 		}
 
-		// 2013 error: tool pairing broken — repair and rebuild params before retry
+		// 2013 error: tool pairing broken -- repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
 			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013), repairing context...\n")
 			a.context.ValidateToolPairing()
@@ -809,17 +815,17 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 		errMsg := err.Error()
 
-		// Model confused — special handling: inject corrective message
+		// Model confused -- special handling: inject corrective message
 		if strings.Contains(errMsg, "model confused") {
 			return nil, nil, err // let Run loop handle recovery
 		}
 
-		// Stream stall — special handling: let Run loop handle truncation
+		// Stream stall -- special handling: let Run loop handle truncation
 		if strings.Contains(errMsg, "stream stalled") {
 			return nil, nil, err // let Run loop handle recovery
 		}
 
-		// Context length — special handling: let Run loop handle truncation
+		// Context length -- special handling: let Run loop handle truncation
 		if isContextLengthError(errMsg) {
 			return nil, nil, err // let Run loop handle recovery
 		}
@@ -830,15 +836,15 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 			// Smart retry decision based on what was already delivered
 			switch a.lastDeltasState {
 			case DeltasStateNone:
-				// Nothing sent yet — clean retry
+				// Nothing sent yet -- clean retry
 				continue
 			case DeltasStateToolInFlight:
-				// Tool call started but incomplete — clear partial, retry
+				// Tool call started but incomplete -- clear partial, retry
 				fmt.Fprintf(os.Stderr, "  [!] Connection dropped mid-tool-call; clearing partial tool call before retry...\n")
 				collect.ClearPartialToolCall()
 				continue
 			case DeltasStateTextOnly:
-				// Text already streamed to user — can't retry without duplication,
+				// Text already streamed to user -- can't retry without duplication,
 				// but we have what was collected so far. Fall back to non-streaming
 				// for a complete fresh response (matching Hermes outer retry pattern).
 				fmt.Fprintf(os.Stderr, "  [!] Stream interrupted after text output, falling back to non-streaming...\n")
@@ -946,6 +952,61 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	return params
 }
 
+// callWithNonStreamingNoTools makes a non-streaming API call WITHOUT tools.
+// Used for the final grace call when max turns reached -- forces text-only response.
+func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, error) {
+	const maxRetries = 3 // shorter retry budget for grace call
+
+	// Build messages WITHOUT tools
+	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages)
+	params := anthropic.MessageNewParams{
+		Model:     a.config.Model,
+		MaxTokens: 16384,
+		Messages:  messages,
+		System: []anthropic.TextBlockParam{
+			{Text: a.context.SystemPrompt()},
+		},
+	}
+	// NOTE: No tools set -- model can only return text
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := jitteredBackoff(attempt)
+			fmt.Fprintf(os.Stderr, "\n[WARN] Retrying final call (attempt %d/%d), waiting %v...\n",
+				attempt+1, maxRetries+1, delay)
+			time.Sleep(delay)
+		}
+
+		ctx, cancel := a.interruptCtx(context.Background(), 120*time.Second)
+		response, err := a.client.Messages.New(ctx, params)
+		cancel()
+
+		if err == nil {
+			toolCalls, textParts := a.parseResponse(response)
+			return toolCalls, textParts, nil
+		}
+
+		if a.IsInterrupted() {
+			a.SetInterrupted(false)
+			return nil, nil, fmt.Errorf("interrupted by user")
+		}
+
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "model confused") ||
+			strings.Contains(errMsg, "stream stalled") ||
+			isContextLengthError(errMsg) {
+			return nil, nil, err
+		}
+		if isTransientError(errMsg) {
+			continue
+		}
+		return nil, nil, fmt.Errorf("final call error: %w", err)
+	}
+
+	return nil, nil, fmt.Errorf("final call failed after %d retries", maxRetries)
+}
+
 // callWithNonStreamingFallback tries non-streaming API call with retries.
 // Mirrors Claude Code's non-streaming fallback + retry budget.
 func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewParams) ([]map[string]any, []string, error) {
@@ -971,7 +1032,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			return toolCalls, textParts, nil
 		}
 
-		// Interrupt — check the actual flag, not ctx.Err(), because
+		// Interrupt -- check the actual flag, not ctx.Err(), because
 		// the interrupt watcher goroutine can race with the timeout.
 		if a.IsInterrupted() {
 			a.SetInterrupted(false)
@@ -980,7 +1041,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 		errMsg := err.Error()
 
-		// 2013 error: tool pairing broken — repair and rebuild params before retry
+		// 2013 error: tool pairing broken -- repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
 			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
 			a.context.ValidateToolPairing()
@@ -1225,7 +1286,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		_ = a.transcript.WriteToolUse(toolUseID, toolName, input)
 	}
 
-	// Agent-controlled timeout — default 600s, clamped to [1, 600] seconds
+	// Agent-controlled timeout -- default 600s, clamped to [1, 600] seconds
 	timeout := a.toolTimeout
 	if t, ok := input["timeout"].(float64); ok && t > 0 {
 		secs := int(t)
@@ -1237,7 +1298,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}
 		timeout = time.Duration(secs) * time.Second
 	}
-	// Remove timeout from tool input — it's a meta-parameter, not a tool param
+	// Remove timeout from tool input -- it's a meta-parameter, not a tool param
 	delete(input, "timeout")
 
 	// Auto-snapshot before write/edit tools
@@ -1407,7 +1468,7 @@ func toolResultPreview(toolName, output string) string {
 	switch toolName {
 	case "exec":
 		// For exec, show the first line of output, or "(no output)" if empty
-		// Skip "STDOUT:" / "STDERR:" headers — just show the actual content
+		// Skip "STDOUT:" / "STDERR:" headers -- just show the actual content
 		cleaned := cleanExecOutput(output)
 		if cleaned == "" {
 			return "(no output)"
@@ -1550,7 +1611,7 @@ func (a *AgentLoop) tryCompaction() {
 	}
 
 	// LLM compaction was not performed (not needed or disabled).
-	// Do NOT fall through to CompactContext() — the LLM compactor's
+	// Do NOT fall through to CompactContext() -- the LLM compactor's
 	// ShouldCompact() check already determined that compaction isn't needed.
 	// Previously, this unconditional fallback caused thrashing: after a
 	// successful LLM compaction, CompactContext() would run every turn
