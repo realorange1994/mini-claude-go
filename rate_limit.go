@@ -112,7 +112,7 @@ func (s *RateLimitState) RetryDelay() time.Duration {
 	var maxDelay float64
 	for _, b := range buckets {
 		if b.Remaining <= 0 && b.Limit > 0 {
-			// This bucket is exhausted — wait for reset
+			// This bucket is exhausted -- wait for reset
 			delay := b.RemainingSecondsNow()
 			if delay > maxDelay {
 				maxDelay = delay
@@ -356,7 +356,7 @@ func FormatRateLimitDisplay(state *RateLimitState) string {
 	defer state.mu.RUnlock()
 
 	if !state.HasData() {
-		return "No rate limit data yet — make an API request first."
+		return "No rate limit data yet -- make an API request first."
 	}
 
 	age := state.Age()
@@ -397,7 +397,7 @@ func FormatRateLimitDisplay(state *RateLimitState) string {
 	} {
 		if entry.bucket.Limit > 0 && entry.bucket.UsagePct() >= 80 {
 			reset := fmtSeconds(entry.bucket.RemainingSecondsNow())
-			warnings = append(warnings, fmt.Sprintf("  [!] %s at %.0f%% — resets in %s",
+			warnings = append(warnings, fmt.Sprintf("  [!] %s at %.0f%% -- resets in %s",
 				entry.label, entry.bucket.UsagePct(), reset))
 		}
 	}

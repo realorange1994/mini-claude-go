@@ -598,7 +598,7 @@ func runGitCommandWithExitCode(ctx context.Context, args []string, workDir strin
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		exitCode = exitErr.ExitCode()
 	}
-	// Don't return err — let caller decide how to handle non-zero exit codes
+	// Don't return err -- let caller decide how to handle non-zero exit codes
 	return strings.TrimSpace(string(out)), exitCode, nil
 }
 

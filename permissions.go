@@ -72,14 +72,14 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		isDangerous := dangerousTools[tool.Name()]
 
 		if warning != "" {
-			// Tool returned a warning — always ask user regardless of tool type
+			// Tool returned a warning -- always ask user regardless of tool type
 			if !g.askUserWithWarning(tool.Name(), params, warning) {
 				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
 			}
 			return nil // user approved
 		}
 
-		// No warning but still dangerous — ask normally
+		// No warning but still dangerous -- ask normally
 		if isDangerous {
 			if tool.Name() == "exec" {
 				cmd, _ := params["command"].(string)

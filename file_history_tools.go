@@ -64,7 +64,7 @@ func (t *FileHistoryTool) showFileHistory(path string) tools.ToolResult {
 			version := i + 1
 			line := fmt.Sprintf("  [v%d] %s - %d bytes", version, snaps[i].Timestamp.Format("2006-01-02 15:04:05"), len(snaps[i].Content))
 			if desc != "" {
-				line += " — " + desc
+				line += " -- " + desc
 			}
 			line += " (merged)"
 			sb.WriteString(line + "\n")
@@ -82,7 +82,7 @@ func (t *FileHistoryTool) showFileHistory(path string) tools.ToolResult {
 		}
 		line := fmt.Sprintf("  [v%d] %s - %d bytes", version, snap.Timestamp.Format("2006-01-02 15:04:05"), len(snap.Content))
 		if desc != "" {
-			line += " — " + desc
+			line += " -- " + desc
 		}
 		if i == len(snaps)-1 {
 			line += " (current)"
@@ -129,9 +129,9 @@ func (t *FileHistoryTool) listAllFiles(params map[string]any) tools.ToolResult {
 			latest = snaps[len(snaps)-1].Description
 		}
 		if latest != "" {
-			sb.WriteString(fmt.Sprintf("  %s — %d versions, latest: %s\n", f, count, latest))
+			sb.WriteString(fmt.Sprintf("  %s -- %d versions, latest: %s\n", f, count, latest))
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s — %d versions\n", f, count))
+			sb.WriteString(fmt.Sprintf("  %s -- %d versions\n", f, count))
 		}
 	}
 	return tools.ToolResult{Output: sb.String()}
@@ -625,9 +625,9 @@ func (t *FileHistorySummaryTool) Execute(params map[string]any) tools.ToolResult
 			deleted = " [DELETED]"
 		}
 		if desc != "" {
-			sb.WriteString(fmt.Sprintf("  %s — %d versions, latest: %s%s (%s)\n", info.path, info.count, desc, deleted, info.latest.Timestamp.Format("15:04")))
+			sb.WriteString(fmt.Sprintf("  %s -- %d versions, latest: %s%s (%s)\n", info.path, info.count, desc, deleted, info.latest.Timestamp.Format("15:04")))
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s — %d versions%s (%s)\n", info.path, info.count, deleted, info.latest.Timestamp.Format("15:04")))
+			sb.WriteString(fmt.Sprintf("  %s -- %d versions%s (%s)\n", info.path, info.count, deleted, info.latest.Timestamp.Format("15:04")))
 		}
 	}
 	return tools.ToolResult{Output: sb.String()}
@@ -797,7 +797,7 @@ func (t *FileHistoryTagTool) Execute(params map[string]any) tools.ToolResult {
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("Versions with tag [%s] (%d total):\n", tagVal, len(results)))
 		for _, r := range results {
-			sb.WriteString(fmt.Sprintf("  %s v%d — %s\n", r.FilePath, r.Version, r.Description))
+			sb.WriteString(fmt.Sprintf("  %s v%d -- %s\n", r.FilePath, r.Version, r.Description))
 		}
 		return tools.ToolResult{Output: sb.String()}
 	case "delete":

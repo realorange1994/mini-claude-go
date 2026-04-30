@@ -187,7 +187,7 @@ func (r *Reader) ReadAll() ([]Entry, error) {
 		}
 	}
 	// If the last line was corrupt (truncated JSON from crash/Ctrl+C),
-	// it's safe to discard — it was an incomplete write.
+	// it's safe to discard -- it was an incomplete write.
 	_ = lastBadLine
 
 	return entries, scanner.Err()

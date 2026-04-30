@@ -10,23 +10,23 @@ func TestClassifyErrorTransient(t *testing.T) {
 		err   string
 		trans bool
 	}{
-		// Network errors — retryable
+		// Network errors -- retryable
 		{"connection refused", true},
 		{"Connection reset", true},
 		{"connection timed out", true},
 		{"no such host", true},
 		{"temporary failure", true},
 		{"dns error", true},
-		// Server errors — retryable
+		// Server errors -- retryable
 		{"Internal server error", true},
 		{"500 internal server error", true},
 		{"502 bad gateway", true},
 		{"503 service unavailable", true},
 		{"504 gateway timeout", true},
-		// Rate limit — retryable
+		// Rate limit -- retryable
 		{"rate limit exceeded", true},
 		{"429 too many requests", true},
-		// Timeout — retryable
+		// Timeout -- retryable
 		{"request timeout", true},
 		{"deadline exceeded", true},
 		// Non-retryable errors

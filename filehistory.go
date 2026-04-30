@@ -268,7 +268,7 @@ func (h *SnapshotHistory) restoreInternal(filePath string, steps int) (string, e
 		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("cannot delete %s: %w", absPath, err)
 		}
-		return "(file deleted — target version was empty)", nil
+		return "(file deleted -- target version was empty)", nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
@@ -344,7 +344,7 @@ func (h *SnapshotHistory) Checkout(filePath string, version int) (string, error)
 		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("cannot delete %s: %w", absPath, err)
 		}
-		return "(file deleted — target version was empty)", nil
+		return "(file deleted -- target version was empty)", nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
@@ -501,7 +501,7 @@ func (h *SnapshotHistory) ResolveVersion(filePath, spec string) (int, error) {
 		return 0, fmt.Errorf("no snapshots for %s", absPath)
 	}
 
-	// Build active (non-deleted) view — this is what users see as "v1, v2, v3..."
+	// Build active (non-deleted) view -- this is what users see as "v1, v2, v3..."
 	var active []FileSnapshot
 	for _, s := range snaps {
 		if !s.Deleted {
@@ -520,7 +520,7 @@ func (h *SnapshotHistory) ResolveVersion(filePath, spec string) (int, error) {
 		return total, nil
 	}
 
-	// "v3" or "3" — absolute version number
+	// "v3" or "3" -- absolute version number
 	if strings.HasPrefix(spec, "v") {
 		spec = spec[1:]
 	}
@@ -533,7 +533,7 @@ func (h *SnapshotHistory) ResolveVersion(filePath, spec string) (int, error) {
 		return n, nil
 	}
 
-	// "lastN" — N versions back from current
+	// "lastN" -- N versions back from current
 	if strings.HasPrefix(spec, "last") {
 		var n int
 		if _, err := fmt.Sscanf(spec[4:], "%d", &n); err == nil && n >= 1 {
@@ -544,7 +544,7 @@ func (h *SnapshotHistory) ResolveVersion(filePath, spec string) (int, error) {
 		}
 	}
 
-	// Tag name — search descriptions in active snapshots only
+	// Tag name -- search descriptions in active snapshots only
 	tag := "[" + spec + "]"
 	activeVersion := 0
 	for _, s := range snaps {

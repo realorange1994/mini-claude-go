@@ -402,7 +402,7 @@ func TestCollectHandlerHasTruncatedToolArgsInvalidJSON(t *testing.T) {
 func TestCollectHandlerHasTruncatedToolArgsEmptyArgsIgnored(t *testing.T) {
 	h := NewCollectHandler()
 	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	// Tool call with no args at all — not truncated, just incomplete
+	// Tool call with no args at all -- not truncated, just incomplete
 	if h.HasTruncatedToolArgs() {
 		t.Error("expected false when tool has no args (not truncated)")
 	}
@@ -558,7 +558,7 @@ func TestStreamProgressTTFBOnlyOnce(t *testing.T) {
 	p.RecordFirstByte()
 	first := p.TTFB()
 
-	// Small delay then record again — should not change
+	// Small delay then record again -- should not change
 	time.Sleep(10 * time.Millisecond)
 	p.RecordFirstByte()
 	second := p.TTFB()

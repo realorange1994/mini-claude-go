@@ -129,7 +129,7 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 	}
 	cfg.MCPManager = mcpMgr
 
-	// Initialize skill loader — check binary directory first, then workspace
+	// Initialize skill loader -- check binary directory first, then workspace
 	loader := skills.NewLoader(projectDir)
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)

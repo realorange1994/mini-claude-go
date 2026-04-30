@@ -282,7 +282,7 @@ func expandFileReference(ref ContextReference, cwd string) (block string, warnin
 		return "", fmt.Sprintf("%s: path is a directory, use @folder: instead", ref.Raw)
 	}
 
-	// Check file size — reject files over 10MB
+	// Check file size -- reject files over 10MB
 	const maxFileSize int64 = 10 * 1024 * 1024
 	if info.Size() > maxFileSize {
 		return "", fmt.Sprintf("%s: file is too large (%d bytes, max %d MB)", ref.Raw, info.Size(), maxFileSize/(1024*1024))
@@ -440,9 +440,9 @@ func expandGitReference(ref ContextReference, cwd string, args []string, label s
 		// Provide context-specific empty messages so the model understands what "empty" means
 		switch label {
 		case "@diff":
-			content = "(working tree is clean — no unstaged changes)"
+			content = "(working tree is clean -- no unstaged changes)"
 		case "@staged":
-			content = "(nothing staged — no staged changes to commit)"
+			content = "(nothing staged -- no staged changes to commit)"
 		default:
 			if strings.HasPrefix(label, "@git:") {
 				content = "(no commits found in this repository)"
@@ -511,7 +511,7 @@ func expandURLReference(ref ContextReference) (block string, warning string) {
 	title := extractHTMLTitle(content)
 	titleHint := ""
 	if title != "" {
-		titleHint = fmt.Sprintf(" — %s", title)
+		titleHint = fmt.Sprintf(" -- %s", title)
 	}
 
 	return fmt.Sprintf("## @url:%s%s (%d tokens)\n%s", url, titleHint, tokens, text), ""

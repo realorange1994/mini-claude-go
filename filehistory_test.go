@@ -271,7 +271,7 @@ func TestRewindToEmptyDeletesFile(t *testing.T) {
 	os.WriteFile(fp, []byte("exists"), 0644)
 	sh.TakeSnapshotWithDesc(fp, "after write") // v2
 
-	// Rewind to v1 (empty) — should delete the file
+	// Rewind to v1 (empty) -- should delete the file
 	err := sh.RewindTo(fp, 0)
 	if err != nil {
 		t.Fatalf("RewindTo failed: %v", err)

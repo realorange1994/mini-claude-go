@@ -16,19 +16,19 @@ type ErrorClass int
 const (
 	ECRetryable       ErrorClass = iota // generic retryable (network, 5xx)
 	ECNonRetryable                      // generic non-retryable (4xx)
-	ECContextOverflow                   // context too large — compress
+	ECContextOverflow                   // context too large -- compress
 	ECToolPairing                       // 2013 tool pairing broken
-	ECRateLimit                         // 429 — backoff + retry
-	ECBilling                           // 402/credit exhausted — rotate key or fallback
-	ECModelNotFound                     // model doesn't exist — fallback
-	ECPayloadTooLarge                   // 413 — compress prompt
-	ECOverloaded                        // 503/529 — provider overloaded
-	ECTimeout                           // connection/read timeout — retry
-	ECFormatError                       // 400 bad request — abort or fix
-	ECAuth                              // 401/403 — rotate credential
+	ECRateLimit                         // 429 -- backoff + retry
+	ECBilling                           // 402/credit exhausted -- rotate key or fallback
+	ECModelNotFound                     // model doesn't exist -- fallback
+	ECPayloadTooLarge                   // 413 -- compress prompt
+	ECOverloaded                        // 503/529 -- provider overloaded
+	ECTimeout                           // connection/read timeout -- retry
+	ECFormatError                       // 400 bad request -- abort or fix
+	ECAuth                              // 401/403 -- rotate credential
 	ECThinkingSig                       // thinking block signature invalid
 	ECLongContextTier                   // 429 + "extra usage" + "long context"
-	ECUnknown                           // unclassifiable — retry with backoff
+	ECUnknown                           // unclassifiable -- retry with backoff
 )
 
 // ClassifyResult is the output of classifyError with recovery hints.
@@ -201,7 +201,7 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 		if matchesAny(lower, modelNotFoundPatterns) {
 			return notRetryable(ECModelNotFound, func(r *ClassifyResult) { r.Fallback = true })
 		}
-		// Generic 404 — unknown (don't assume model not found)
+		// Generic 404 -- unknown (don't assume model not found)
 		return result(ECUnknown)
 	}
 
@@ -238,12 +238,12 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 
 	// ── Message pattern matching (no status code) ───────────────────
 
-	// Context overflow — not retryable without compression
+	// Context overflow -- not retryable without compression
 	if matchesAny(lower, contextOverflowPatterns) {
 		return notRetryable(ECContextOverflow, func(r *ClassifyResult) { r.Compress = true })
 	}
 
-	// Tool pairing — not retryable without fixing context
+	// Tool pairing -- not retryable without fixing context
 	if strings.Contains(lower, "2013") || strings.Contains(lower, "tool call result does not follow tool call") {
 		return notRetryable(ECToolPairing)
 	}
@@ -300,12 +300,12 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 		return result(ECTimeout)
 	}
 
-	// Network errors — retryable (connection refused, DNS, etc.)
+	// Network errors -- retryable (connection refused, DNS, etc.)
 	if matchesAny(lower, networkErrorPatterns) {
 		return result(ECRetryable)
 	}
 
-	// Server errors without status code — retryable
+	// Server errors without status code -- retryable
 	if matchesAny(lower, serverErrorPatterns) {
 		return result(ECRetryable)
 	}
@@ -318,7 +318,7 @@ func classifyError(errMsg string, approxTokens int, contextLength int) ClassifyR
 		return result(ECTimeout)
 	}
 
-	// ── Fallback: unknown — not retryable by default ──────────────────
+	// ── Fallback: unknown -- not retryable by default ──────────────────
 	return notRetryable(ECUnknown)
 }
 
@@ -336,9 +336,9 @@ func classify402(lower string, resultFn func(ErrorClass, ...func(*ClassifyResult
 	})
 }
 
-// classify400 classifies 400 Bad Request — context overflow, model not found, rate limit, billing, or format error.
+// classify400 classifies 400 Bad Request -- context overflow, model not found, rate limit, billing, or format error.
 func classify400(lower string, approxTokens int, contextLength int, resultFn func(ErrorClass, ...func(*ClassifyResult)) ClassifyResult, notRetryable func(ErrorClass, ...func(*ClassifyResult)) ClassifyResult) ClassifyResult {
-	// Context overflow from 400 — not retryable without compression
+	// Context overflow from 400 -- not retryable without compression
 	if matchesAny(lower, contextOverflowPatterns) {
 		return notRetryable(ECContextOverflow, func(r *ClassifyResult) { r.Compress = true })
 	}

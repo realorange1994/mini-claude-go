@@ -13,17 +13,17 @@ miniClaudeCode-go is a minimal AI agent framework that implements the core agent
 - **Context Compaction**: 4-phase automatic context degradation (Compact → SmartCompact → SelectiveCompact → AggressiveTruncate) keeps conversations productive in limited context windows
 - **@ Context References**: Inject file content, folder listings, git diffs, and URLs into prompts with `@file:path`, `@folder:path`, `@staged`, `@diff`, `@git:N`, `@url:URL`
 - **Tool System**: 25+ built-in tools with argument type coercion and schema validation:
-  - `exec` — Shell command execution with safety patterns
-  - `read_file` / `write_file` / `edit_file` / `multi_edit` — File operations
-  - `glob` / `grep` / `list_dir` — File system search and navigation
-  - `web_search` / `web_fetch` — Web search and content fetching (built-in scraper + Exa)
-  - `fileops` — File operations (copy, move, delete, chmod, symlink)
-  - `process` — Process management (list, kill, pgrep, top, pstree)
-  - `git` — Full git operations (clone, commit, push, pull, branch, merge, rebase, stash, worktree, and more)
-  - `system` — System info (uname, df, free, uptime, hostname, arch)
-  - `terminal` — tmux/screen session management
-  - `runtime_info` — Go runtime and system information
-- **File History**: Snapshot, diff, rewind, restore, checkout, tag, annotate, search, timeline, and batch operations — 12 dedicated file history tools
+  - `exec` -- Shell command execution with safety patterns
+  - `read_file` / `write_file` / `edit_file` / `multi_edit` -- File operations
+  - `glob` / `grep` / `list_dir` -- File system search and navigation
+  - `web_search` / `web_fetch` -- Web search and content fetching (built-in scraper + Exa)
+  - `fileops` -- File operations (copy, move, delete, chmod, symlink)
+  - `process` -- Process management (list, kill, pgrep, top, pstree)
+  - `git` -- Full git operations (clone, commit, push, pull, branch, merge, rebase, stash, worktree, and more)
+  - `system` -- System info (uname, df, free, uptime, hostname, arch)
+  - `terminal` -- tmux/screen session management
+  - `runtime_info` -- Go runtime and system information
+- **File History**: Snapshot, diff, rewind, restore, checkout, tag, annotate, search, timeline, and batch operations -- 12 dedicated file history tools
 - **Permission Modes**: Three permission modes for different use cases (auto, ask, plan)
 - **MCP Support**: Model Context Protocol client for external tool integration (stdio + HTTP/SSE transports)
 - **Skills System**: Extensible skill loader with read_skill, list_skills, and search_skills, plus a SkillTracker for progressive disclosure across turns
@@ -64,12 +64,12 @@ go build -o miniclaudecode .
 
 ### Slash Commands (in interactive mode)
 
-- `/help` — Show available commands
-- `/resume [session]` — Resume a previous conversation session
-- `/compact` — Force context compaction
-- `/clear` — Clear conversation history
-- `/mode [auto|ask|plan]` — Switch permission mode
-- `/quit` — Exit
+- `/help` -- Show available commands
+- `/resume [session]` -- Resume a previous conversation session
+- `/compact` -- Force context compaction
+- `/clear` -- Clear conversation history
+- `/mode [auto|ask|plan]` -- Switch permission mode
+- `/quit` -- Exit
 
 ### @ Context References
 
@@ -80,12 +80,12 @@ Read the main module @file:src/main.go and check the staged changes @staged
 ```
 
 Supported references:
-- `@file:path[:start-end]` — File content with optional line range
-- `@folder:path` — Directory listing
-- `@staged` — Git staged diff
-- `@diff` — Git unstaged diff
-- `@git:N` — Git commit diff (N = commit count or hash)
-- `@url:URL` — Web page content
+- `@file:path[:start-end]` -- File content with optional line range
+- `@folder:path` -- Directory listing
+- `@staged` -- Git staged diff
+- `@diff` -- Git unstaged diff
+- `@git:N` -- Git commit diff (N = commit count or hash)
+- `@url:URL` -- Web page content
 
 ## Configuration
 

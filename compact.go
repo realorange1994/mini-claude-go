@@ -1,4 +1,4 @@
-// Package main — context compaction for long coding sessions.
+// Package main -- context compaction for long coding sessions.
 // Self-contained, no external dependencies beyond the standard library.
 //
 // Provides:
@@ -762,7 +762,7 @@ func SmartCompact(messages []CompactionMessage, keepFirst int, keepLast int) *Sm
 		}
 	}
 
-	// Group into turns — each turn captures all messages in one user+assistant exchange,
+	// Group into turns -- each turn captures all messages in one user+assistant exchange,
 	// including tool_result (user role) and tool_use (assistant role) messages.
 	type turn struct {
 		messages []CompactionMessage
@@ -996,7 +996,7 @@ const compactUserPrompt = `Summarize the following conversation history. Your su
 2. Note key decisions made and discoveries found
 3. List files that were read, modified, or created
 4. Describe the current state of work and what remains
-5. Be concise but complete — the next AI should be able to continue seamlessly
+5. Be concise but complete -- the next AI should be able to continue seamlessly
 
 Do NOT include:
 - Individual tool call details or raw outputs

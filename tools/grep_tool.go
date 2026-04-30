@@ -262,7 +262,7 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 	if output == "" {
-		// rg exits with code 1 when no matches found — not a real error
+		// rg exits with code 1 when no matches found -- not a real error
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 				return ToolResult{Output: "No matches found."}

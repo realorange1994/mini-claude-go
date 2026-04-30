@@ -420,7 +420,7 @@ func TestCoerceArgumentsStringToObject(t *testing.T) {
 			"config": "just a string",
 		}
 		CoerceArguments(schema, args)
-		// Should not coerce — doesn't start with {
+		// Should not coerce -- doesn't start with {
 		if args["config"] != "just a string" {
 			t.Errorf("non-object string should remain unchanged, got %v", args["config"])
 		}
@@ -431,7 +431,7 @@ func TestCoerceArgumentsStringToObject(t *testing.T) {
 			"config": "{invalid json}",
 		}
 		CoerceArguments(schema, args)
-		// Should not coerce — invalid JSON
+		// Should not coerce -- invalid JSON
 		if args["config"] != "{invalid json}" {
 			t.Errorf("invalid JSON object string should remain unchanged, got %v", args["config"])
 		}

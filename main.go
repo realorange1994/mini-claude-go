@@ -151,7 +151,7 @@ func runInteractive(agent *AgentLoop) {
 			now := time.Now().UnixNano()
 			prev := lastCtrlC.Load()
 			if prev != 0 && time.Duration(now-prev) < 2*time.Second {
-				// Double Ctrl+C within 2s — exit immediately
+				// Double Ctrl+C within 2s -- exit immediately
 				printResumeHint(agent)
 				os.Exit(0)
 			}
@@ -197,7 +197,7 @@ func runInteractive(agent *AgentLoop) {
 		line, err := stdinReader.ReadString('\n')
 		if err != nil {
 			if interactive {
-				// Ctrl+C at prompt — signal handler already tracks double-press.
+				// Ctrl+C at prompt -- signal handler already tracks double-press.
 				// Just reopen stdin and continue; if double-pressed, signal handler
 				// already called os.Exit(0).
 				agent.SetInterrupted(false)
@@ -216,7 +216,7 @@ func runInteractive(agent *AgentLoop) {
 			continue
 		}
 
-		// Check for exact command match — only treat as command if the first
+		// Check for exact command match -- only treat as command if the first
 		// word is a known command. Unknown /xxx is passed through as prompt text.
 		if strings.HasPrefix(userInput, "/") {
 			parts := strings.Fields(userInput)
@@ -227,7 +227,7 @@ func runInteractive(agent *AgentLoop) {
 				cmd == "/compact" || cmd == "/clear"
 
 			if !isKnownCmd {
-				// Not a recognized command — treat as normal prompt
+				// Not a recognized command -- treat as normal prompt
 			} else {
 				switch cmd {
 				case "/quit", "/exit", "/q":
@@ -257,13 +257,13 @@ func runInteractive(agent *AgentLoop) {
 					continue
 				case "/help":
 					fmt.Println("Commands:")
-					fmt.Println("  /help    — Show available commands")
-					fmt.Println("  /compact — Force context compaction")
-					fmt.Println("  /clear   — Clear conversation history")
-					fmt.Println("  /mode    — Switch permission mode (ask|auto|plan)")
-					fmt.Println("  /resume  — Resume a previous session")
-					fmt.Println("  /tools   — List available tools")
-					fmt.Println("  /quit    — Exit")
+					fmt.Println("  /help    -- Show available commands")
+					fmt.Println("  /compact -- Force context compaction")
+					fmt.Println("  /clear   -- Clear conversation history")
+					fmt.Println("  /mode    -- Switch permission mode (ask|auto|plan)")
+					fmt.Println("  /resume  -- Resume a previous session")
+					fmt.Println("  /tools   -- List available tools")
+					fmt.Println("  /quit    -- Exit")
 					continue
 				case "/compact":
 					agent.ForceCompact()
