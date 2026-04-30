@@ -155,51 +155,6 @@ func DefaultCompactionConfig() CompactionConfig {
 	}
 }
 
-// ─── Context usage tracker ───────────────────────────────────────────────────
-
-// ContextUsage tracks token usage over time for compaction decisions.
-type ContextUsage struct {
-	mu             sync.Mutex
-	history        []usageSnapshot
-	maxContextSize int
-}
-
-type usageSnapshot struct {
-	Timestamp time.Time
-	Tokens    int
-	Model     string
-}
-
-// NewContextUsage creates a new usage tracker.
-func NewContextUsage(maxContextSize int) *ContextUsage {
-	return &ContextUsage{maxContextSize: maxContextSize}
-}
-
-// Record logs a usage snapshot.
-func (u *ContextUsage) Record(tokens int, model string) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.history = append(u.history, usageSnapshot{
-		Timestamp: time.Now(),
-		Tokens:    tokens,
-		Model:     model,
-	})
-	// Keep only the last 100 snapshots
-	if len(u.history) > 100 {
-		u.history = u.history[len(u.history)-100:]
-	}
-}
-
-// UsageFraction returns the current context usage as a fraction of max.
-func (u *ContextUsage) UsageFraction(tokens int) float64 {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.maxContextSize <= 0 {
-		return 0
-	}
-	return float64(tokens) / float64(u.maxContextSize)
-}
-
 // ─── Round grouping ──────────────────────────────────────────────────────────
 
 // apiRound represents one user+assistant exchange (may include tool calls).

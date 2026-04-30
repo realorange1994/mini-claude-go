@@ -371,7 +371,7 @@ func FormatRateLimitDisplay(state *RateLimitState) string {
 
 	providerLabel := "Provider"
 	if state.Provider != "" {
-		providerLabel = strings.Title(strings.ToLower(state.Provider))
+		providerLabel = strings.ToTitle(state.Provider[:1]) + strings.ToLower(state.Provider[1:])
 	}
 
 	lines := []string{

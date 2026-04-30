@@ -320,6 +320,9 @@ func (c *Client) requestStdio(ctx context.Context, method string, params json.Ra
 		return nil, fmt.Errorf("write: %w", err)
 	}
 
+	// Use a one-shot channel to signal the read goroutine is done.
+	// The goroutine reads in a separate goroutine so we can cancel
+	// by closing stdin (which causes ReadBytes to return EOF).
 	done := make(chan struct{})
 	var resp RPCResponse
 	var readErr error
@@ -337,6 +340,14 @@ func (c *Client) requestStdio(ctx context.Context, method string, params json.Ra
 
 	select {
 	case <-ctx.Done():
+		// Goroutine cleanup on context cancel:
+		// 1. Closing stdin signals EOF to the child process, which causes
+		//    the stdout ReadBytes goroutine to return (breaking its read loop).
+		// 2. Waiting on <-done ensures the stdout reader goroutine completes
+		//    before we return, preventing goroutine leaks.
+		// The process may still be running, so we don't kill it -- we just
+		// interrupt the current request. The stderr reader goroutine (started
+		// in startStdio) will exit when the process eventually terminates.
 		c.stdin.Close()
 		<-done
 		return nil, ctx.Err()

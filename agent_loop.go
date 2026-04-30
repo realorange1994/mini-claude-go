@@ -1275,10 +1275,18 @@ func (a *AgentLoop) truncateOutput(output string) string {
 	if len(output) <= limit {
 		return output
 	}
-	// Keep first 80% and last 20%
+	// Keep first 80% and last 20%, with safe UTF-8 boundary truncation
 	first := limit * 4 / 5
 	last := limit - first
-	return output[:first] + "\n\n... [OUTPUT TRUNCATED] ...\n\n" + output[len(output)-last:]
+	firstEnd := first
+	for firstEnd > 0 && (output[firstEnd]&0xc0) == 0x80 {
+		firstEnd--
+	}
+	lastStart := len(output) - last
+	for lastStart < len(output) && (output[lastStart]&0xc0) == 0x80 {
+		lastStart++
+	}
+	return output[:firstEnd] + "\n\n... [OUTPUT TRUNCATED] ...\n\n" + output[lastStart:]
 }
 
 // executeSingleTool runs one tool call with timing, truncation, and timeout.

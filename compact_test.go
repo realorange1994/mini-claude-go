@@ -1,7 +1,6 @@
 package main
 
 import (
-	"math"
 	"testing"
 )
 
@@ -20,20 +19,6 @@ func TestEstimateTokens(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("EstimateTokens(%q) = %d, want %d", short(tc.input), got, tc.want)
 		}
-	}
-}
-
-func TestContextUsage(t *testing.T) {
-	u := NewContextUsage(200000)
-
-	u.Record(50000, "claude-sonnet")
-	if len(u.history) != 1 {
-		t.Errorf("expected 1 history entry, got %d", len(u.history))
-	}
-
-	frac := u.UsageFraction(50000)
-	if math.Abs(frac-0.25) > 0.01 {
-		t.Errorf("expected usage fraction 0.25, got %f", frac)
 	}
 }
 

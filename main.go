@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -350,13 +351,9 @@ func findTranscript(target string) (string, error) {
 	}
 
 	// Sort by modification time, most recent first
-	for i := 0; i < len(files); i++ {
-		for j := i + 1; j < len(files); j++ {
-			if files[j].mod.After(files[i].mod) {
-				files[i], files[j] = files[j], files[i]
-			}
-		}
-	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[j].mod.Before(files[i].mod)
+	})
 
 	// "last" -> most recent
 	if target == "last" {
@@ -415,13 +412,9 @@ func listTranscripts() {
 	}
 
 	// Sort by modification time, most recent first
-	for i := 0; i < len(files); i++ {
-		for j := i + 1; j < len(files); j++ {
-			if files[j].mod.After(files[i].mod) {
-				files[i], files[j] = files[j], files[i]
-			}
-		}
-	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[j].mod.Before(files[i].mod)
+	})
 
 	fmt.Println("\nAvailable transcripts:")
 	for i, f := range files {

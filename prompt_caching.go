@@ -93,10 +93,16 @@ func applyCacheMarker(msg map[string]any, marker map[string]any) {
 }
 
 // deepCopyMessages does a deep copy via JSON marshal/unmarshal.
+// Returns the original slice on marshal failure (avoiding nil/empty results).
 func deepCopyMessages(messages []map[string]any) []map[string]any {
-	data, _ := json.Marshal(messages)
+	data, err := json.Marshal(messages)
+	if err != nil {
+		return messages
+	}
 	var result []map[string]any
-	_ = json.Unmarshal(data, &result)
+	if err := json.Unmarshal(data, &result); err != nil {
+		return messages
+	}
 	return result
 }
 
@@ -118,17 +124,27 @@ func cacheMessageParams(params *anthropic.MessageNewParams) {
 
 // messageParamToMaps converts SDK message params to map representation.
 func messageParamToMaps(msgs []anthropic.MessageParam) []map[string]any {
-	data, _ := json.Marshal(msgs)
+	data, err := json.Marshal(msgs)
+	if err != nil {
+		return nil
+	}
 	var result []map[string]any
-	_ = json.Unmarshal(data, &result)
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil
+	}
 	return result
 }
 
 // mapsToMessageParam converts maps back to SDK message params.
 func mapsToMessageParam(msgs []map[string]any) []anthropic.MessageParam {
-	data, _ := json.Marshal(msgs)
+	data, err := json.Marshal(msgs)
+	if err != nil {
+		return nil
+	}
 	var result []anthropic.MessageParam
-	_ = json.Unmarshal(data, &result)
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil
+	}
 	return result
 }
 
