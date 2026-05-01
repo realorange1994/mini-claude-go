@@ -206,6 +206,7 @@ func (c *AutoModeClassifier) callClassifier(
 	}
 
 	// Parse tool_use response (structured by SDK)
+	var allText strings.Builder
 	for _, block := range resp.Content {
 		if toolUse, ok := block.AsAny().(anthropic.ToolUseBlock); ok {
 			if toolUse.Name == "classify_action" {
@@ -218,18 +219,26 @@ func (c *AutoModeClassifier) callClassifier(
 				return result
 			}
 		}
-		// Fallback: try text parsing if model returned text instead of tool use
+		// Collect text from TextBlock or ThinkingBlock
 		if text, ok := block.AsAny().(anthropic.TextBlock); ok {
-			fmt.Fprintf(os.Stderr, "  [auto-classifier] Unexpected text response, parsing: %.200s\n", text.Text)
-			result := parseClassifierResponse(text.Text)
-			if result != nil {
-				status := "ALLOWED"
-				if !result.Allow {
-					status = "BLOCKED"
-				}
-				fmt.Fprintf(os.Stderr, "  [auto-classifier] %s: %s (%s)\n", status, actionDesc, result.Reason)
-				return *result
+			allText.WriteString(text.Text)
+		}
+		if thinking, ok := block.AsAny().(anthropic.ThinkingBlock); ok {
+			if thinking.Thinking != "" {
+				allText.WriteString(thinking.Thinking)
 			}
+		}
+	}
+	// Try to parse collected text as classifier response
+	if allText.Len() > 0 {
+		result := parseClassifierResponse(allText.String())
+		if result != nil {
+			status := "ALLOWED"
+			if !result.Allow {
+				status = "BLOCKED"
+			}
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] %s: %s (%s)\n", status, actionDesc, result.Reason)
+			return *result
 		}
 	}
 
@@ -429,14 +438,16 @@ func parseFromText(text string) *ClassifierResult {
 	lower := strings.ToLower(text)
 
 	decision := ""
-	if strings.Contains(lower, `"allow"`) || strings.Contains(lower, `decision": "allow"`) || strings.Contains(lower, `decision: "allow"`) {
+	if strings.Contains(lower, `"allow"`) || strings.Contains(lower, `decision": "allow"`) || strings.Contains(lower, `decision: "allow"`) || strings.Contains(lower, "allow this action") {
 		decision = "allow"
-	} else if strings.Contains(lower, `"block"`) || strings.Contains(lower, `decision": "block"`) || strings.Contains(lower, `decision: "block"`) {
+	} else if strings.Contains(lower, `"block"`) || strings.Contains(lower, `decision": "block"`) || strings.Contains(lower, `decision: "block"`) || strings.Contains(lower, "block this action") {
+		decision = "block"
+	} else if strings.Contains(lower, "unsafe") || strings.Contains(lower, "dangerous") {
 		decision = "block"
 	} else if strings.Contains(lower, "allow") && !strings.Contains(lower, "block") {
 		// If only "allow" appears, infer allow
 		decision = "allow"
-	} else if strings.Contains(lower, "block") || strings.Contains(lower, "deny") || strings.Contains(lower, "unsafe") {
+	} else if strings.Contains(lower, "block") || strings.Contains(lower, "deny") {
 		decision = "block"
 	} else {
 		// Cannot extract any decision
