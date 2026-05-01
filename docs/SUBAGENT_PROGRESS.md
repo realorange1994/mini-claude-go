@@ -67,8 +67,8 @@ Claude Code's official Agent sub-agent implementation (`AgentTool.tsx` from `@an
 
 | Feature | Priority | Complexity | Status |
 |---------|----------|------------|--------|
-| AbortController (cancel running agents) | MEDIUM | LOW | 🔲 Pending |
-| 30s grace eviction for completed tasks | LOW | LOW | 🔲 Pending |
+| AbortController (cancel running agents) | MEDIUM | LOW | ✅ Done |
+| 30s grace eviction for completed tasks | LOW | LOW | ✅ Done |
 | AgentSummaryService (periodic progress) | LOW | HIGH | 🔲 Pending |
 | Notification injection into LLM context (not just REPL) | MEDIUM | MEDIUM | 🔲 Pending |
 | Resume stopped agents from disk transcript | LOW | HIGH | 🔲 Pending |

@@ -201,3 +201,72 @@ func TestTaskStoreConcurrentAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskStateTranscriptPath(t *testing.T) {
+	ts := NewTaskStore()
+	task := ts.CreateTask("agent-1", "test task", "claude-3", "general")
+
+	// Initially transcript path should be empty
+	if task.GetTranscriptPath() != "" {
+		t.Errorf("expected empty transcript path, got %s", task.GetTranscriptPath())
+	}
+
+	// Set transcript path
+	path := ".claude/transcripts/20260501-123456-sub.jsonl"
+	task.SetTranscriptPath(path)
+
+	// Verify it was stored
+	if task.GetTranscriptPath() != path {
+		t.Errorf("expected transcript path=%s, got %s", path, task.GetTranscriptPath())
+	}
+}
+
+func TestTaskStoreCompletedTaskHasTranscriptPath(t *testing.T) {
+	ts := NewTaskStore()
+	task := ts.CreateTask("agent-1", "async task", "model", "general")
+
+	// Simulate setting transcript path before completing (async spawn flow)
+	task.SetTranscriptPath(".claude/transcripts/sub-agents/20260501-123456-sub.jsonl")
+
+	// Complete the task
+	ts.CompleteTask("agent-1", "done", 3, 500)
+
+	// Verify transcript path is preserved after completion
+	task = ts.GetTask("agent-1")
+	if task.Status != TaskStatusCompleted {
+		t.Errorf("expected Status=Completed, got %d", task.Status)
+	}
+	if task.GetTranscriptPath() == "" {
+		t.Error("completed task should have transcript path")
+	}
+	expected := ".claude/transcripts/sub-agents/20260501-123456-sub.jsonl"
+	if task.GetTranscriptPath() != expected {
+		t.Errorf("expected transcript path=%s, got %s", expected, task.GetTranscriptPath())
+	}
+}
+
+func TestTaskStateTranscriptPathConcurrentAccess(t *testing.T) {
+	ts := NewTaskStore()
+	task := ts.CreateTask("agent-1", "test", "model", "type")
+
+	// Concurrent reads and writes to transcript path
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			task.SetTranscriptPath(fmt.Sprintf(".claude/transcripts/path-%d.jsonl", i))
+		}(i)
+		go func() {
+			defer wg.Done()
+			_ = task.GetTranscriptPath()
+		}()
+	}
+	wg.Wait()
+
+	// Final value should be one of the written values
+	final := task.GetTranscriptPath()
+	if final == "" {
+		t.Error("transcript path should not be empty after concurrent writes")
+	}
+}

@@ -27,6 +27,7 @@ type TaskState struct {
 	Description     string
 	Model           string
 	SubagentType    string
+	TranscriptPath  string           // path to the sub-agent's transcript file
 	ToolsUsed       int
 	DurationMs      int64
 	StartTime       time.Time
@@ -48,6 +49,20 @@ func (ts *TaskState) IsTerminal() bool {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.Status == TaskStatusCompleted || ts.Status == TaskStatusFailed || ts.Status == TaskStatusKilled
+}
+
+// SetTranscriptPath sets the transcript path for the task.
+func (ts *TaskState) SetTranscriptPath(path string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.TranscriptPath = path
+}
+
+// GetTranscriptPath returns the transcript path for the task.
+func (ts *TaskState) GetTranscriptPath() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.TranscriptPath
 }
 
 // TaskStore manages all sub-agent tasks for an agent session.

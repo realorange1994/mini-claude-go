@@ -95,14 +95,15 @@ func (a *AgentLoop) registerTaskOutputTool() {
 }
 
 // EnqueueAgentNotification pushes a formatted task notification XML to the notification channel.
-func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result string, toolsUsed int, durationMs int64) {
+func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptPath string, toolsUsed int, durationMs int64) {
 	notification := fmt.Sprintf(`<task-notification>
 <agentId>%s</agentId>
 <status>%s</status>
 <result>%s</result>
 <output_file></output_file>
+<transcript_path>%s</transcript_path>
 <usage><total_tokens>%d</total_tokens><tool_uses>%d</tool_uses><duration_ms>%d</duration_ms></usage>
-</task-notification>`, taskID, status, result, toolsUsed, toolsUsed, durationMs)
+</task-notification>`, taskID, status, result, transcriptPath, toolsUsed, toolsUsed, durationMs)
 
 	select {
 	case a.notificationChan <- notification:
@@ -122,6 +123,21 @@ func (a *AgentLoop) DrainNotifications() []string {
 			return notifications
 		}
 	}
+}
+
+// InjectNotifications adds notification text as a user message to the conversation context.
+// This ensures the LLM can see and act on async agent completions.
+func (a *AgentLoop) InjectNotifications(notifications []string) {
+	if len(notifications) == 0 {
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("[System: The following sub-agent tasks completed while you were waiting]\n\n")
+	for _, n := range notifications {
+		sb.WriteString(n)
+		sb.WriteString("\n\n")
+	}
+	a.context.AddUserMessage(sb.String())
 }
 
 // AgentLoop drives the core agentic loop.

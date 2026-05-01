@@ -230,6 +230,9 @@ func runInteractive(agent *AgentLoop) {
 				fmt.Println(n)
 			}
 			fmt.Println("------------------------------")
+
+			// Inject into LLM context so model can act on them
+			agent.InjectNotifications(notifications)
 		}
 
 		fmt.Print("\n> ")
@@ -389,6 +392,7 @@ func drainOneShotNotifications(agent *AgentLoop) {
 			fmt.Println(n)
 		}
 		fmt.Println("------------------------------")
+		agent.InjectNotifications(notifications)
 	}
 }
 

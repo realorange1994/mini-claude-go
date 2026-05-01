@@ -307,10 +307,17 @@ func (a *AgentLoop) SpawnSubAgent(
 				if a.taskStore != nil {
 					a.taskStore.FailTask(taskID, fmt.Sprintf("failed to create: %v", err))
 				}
-				a.EnqueueAgentNotification(taskID, "failed", "", 0, 0)
+				a.EnqueueAgentNotification(taskID, "failed", "", "", 0, 0)
 				return
 			}
 			defer childLoop.Close()
+
+			// Store the child's transcript path in the task state
+			if a.taskStore != nil {
+				if task := a.taskStore.GetTask(taskID); task != nil {
+					task.SetTranscriptPath(childLoop.TranscriptPath())
+				}
+			}
 
 			// Wire async cancellation context into child loop
 			childLoop.cancelCtx = asyncCtx
@@ -340,7 +347,7 @@ func (a *AgentLoop) SpawnSubAgent(
 			if a.taskStore != nil {
 				a.taskStore.CompleteTask(taskID, childResult, turnsUsed, dur)
 			}
-			a.EnqueueAgentNotification(taskID, "completed", childResult, turnsUsed, dur)
+			a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), turnsUsed, dur)
 		}()
 
 		return taskID, fmt.Sprintf("Agent launched in background.\n\nagentId: %s\nStatus: async_launched", taskID), "", 0, time.Since(start).Milliseconds()
@@ -362,6 +369,13 @@ func (a *AgentLoop) SpawnSubAgent(
 		return taskID, "", fmt.Sprintf("failed to create sub-agent: %v", err), 0, time.Since(start).Milliseconds()
 	}
 	defer childLoop.Close()
+
+	// Store the child's transcript path in the task state
+	if a.taskStore != nil {
+		if task := a.taskStore.GetTask(taskID); task != nil {
+			task.SetTranscriptPath(childLoop.TranscriptPath())
+		}
+	}
 
 	childLoop.context.SetSystemPrompt(childSysPrompt)
 
@@ -699,7 +713,11 @@ func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.D
 	}
 
 	if task.IsTerminal() {
-		return fmt.Sprintf("Agent: %s\nStatus: %d\nResult: %s", task.ID, task.Status, task.Result), ""
+		result := fmt.Sprintf("Agent: %s\nStatus: %d\nResult: %s", task.ID, task.Status, task.Result)
+		if tp := task.GetTranscriptPath(); tp != "" {
+			result += fmt.Sprintf("\nTranscriptPath: %s", tp)
+		}
+		return result, ""
 	}
 
 	if block {
@@ -708,7 +726,11 @@ func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.D
 		for time.Now().Before(deadline) {
 			time.Sleep(500 * time.Millisecond)
 			if task.IsTerminal() {
-				return fmt.Sprintf("Agent: %s\nStatus: %d\nResult: %s", task.ID, task.Status, task.Result), ""
+				result := fmt.Sprintf("Agent: %s\nStatus: %d\nResult: %s", task.ID, task.Status, task.Result)
+				if tp := task.GetTranscriptPath(); tp != "" {
+					result += fmt.Sprintf("\nTranscriptPath: %s", tp)
+				}
+				return result, ""
 			}
 		}
 		return fmt.Sprintf("Agent: %s\nStatus: %d (still running after timeout)", task.ID, task.Status), ""
@@ -763,6 +785,41 @@ func (a *AgentLoop) resolveAgentID(nameOrID string) string {
 		}
 	}
 	return nameOrID
+}
+
+// ResumeAsyncAgent creates a new AgentLoop from a completed async task's transcript.
+// The caller is responsible for managing the returned agent (calling Run, Close, etc).
+// Returns an error if the task is not found, has no transcript path, or the transcript
+// cannot be read.
+func (a *AgentLoop) ResumeAsyncAgent(taskID string) (*AgentLoop, error) {
+	if a.taskStore == nil {
+		return nil, fmt.Errorf("task store not available")
+	}
+
+	task := a.taskStore.GetTask(taskID)
+	if task == nil {
+		return nil, fmt.Errorf("agent %s not found", taskID)
+	}
+
+	transcriptPath := task.GetTranscriptPath()
+	if transcriptPath == "" {
+		return nil, fmt.Errorf("agent %s has no transcript path", taskID)
+	}
+
+	// Use the parent agent's config and registry to create the resumed agent
+	// from the stored transcript.
+	resumedAgent, err := NewAgentLoopFromTranscript(
+		a.config,
+		a.registry,
+		a.useStream,
+		transcriptPath,
+		false, // start a new session transcript for the resumed agent
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resume agent from transcript: %w", err)
+	}
+
+	return resumedAgent, nil
 }
 
 // extractAgentName extracts a short name from the prompt/description string.
