@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -237,7 +236,6 @@ type AgentLoop struct {
 	maxTurns     int           // hard cap on turns (default from config.MaxTurns)
 	budget       *IterationBudget
 	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
-	interruptOnce sync.Once    // ensures single interrupt watcher goroutine
 	lastDeltasState DeltasState // tracks what was streamed in last attempt
 	rateLimitState  RateLimitState // rate limit headers from API responses
 	prevTurnTokens  int            // tracks token count from previous turn for reactive compact
@@ -595,27 +593,27 @@ func (a *AgentLoop) TranscriptPath() string {
 
 // interruptCtx creates a context that is cancelled either by the timeout
 // or when the interrupted flag is set (whichever comes first).
+// Each call starts its own watcher goroutine that exits when the context
+// is done, so there are no goroutine leaks.
 func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(baseCtx, timeout)
 
-	// Watch for interrupt flag in background (only one goroutine per instance)
-	a.interruptOnce.Do(func() {
-		go func() {
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
+	// Watch for interrupt flag in background
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if a.IsInterrupted() {
+					cancel()
 					return
-				case <-ticker.C:
-					if a.IsInterrupted() {
-						cancel()
-						return
-					}
 				}
 			}
-		}()
-	})
+		}
+	}()
 
 	return ctx, cancel
 }
@@ -1211,6 +1209,12 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		if strings.Contains(errMsg, "context canceled") ||
 			strings.Contains(errMsg, "context deadline exceeded") ||
 			strings.Contains(errMsg, "deadline exceeded") {
+			// Check if the context was cancelled due to user interrupt (Ctrl+C)
+			// rather than a genuine stream stall or timeout.
+			if a.IsInterrupted() {
+				a.SetInterrupted(false)
+				return nil, nil, fmt.Errorf("interrupted by user")
+			}
 			return nil, nil, fmt.Errorf("stream stalled: %w", err)
 		}
 		return nil, nil, fmt.Errorf("stream error: %w", err)
