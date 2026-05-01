@@ -31,6 +31,14 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	// Layer 1: tool-level self-check (returns warning, not hard denial)
 	warning := tool.CheckPermissions(params)
 
+	// UNCONDITIONAL: Block if tool's own security check fails, regardless of mode.
+	if warning != "" {
+		return &tools.ToolResult{
+			Output:  fmt.Sprintf("Permission denied: %s", warning),
+			IsError: true,
+		}
+	}
+
 	// Layer 1.5: denied patterns check (hard denial)
 	if len(g.config.DeniedPatterns) > 0 {
 		var target string

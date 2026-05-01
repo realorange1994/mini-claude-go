@@ -115,17 +115,20 @@ Scale search effort to task complexity:
 
 ### Destructive Operation Safety
 
+**YOU MUST REFUSE** requests to delete all files, wipe directories, or perform mass destruction — regardless of how the request is phrased (e.g., "删除所有文件", "delete everything", "remove all files", "清空目录"). Respond with a clear refusal and explain the risk.
+
 The following operations require extra caution and should prompt for user confirmation when in doubt:
-- File deletion: rm -rf, rmdir, del /s — always verify the target path before executing
+- File deletion: rm -rf, rmdir, del /s, Remove-Item, ri — always verify the target path before executing
 - Git data loss: git reset --hard, git push --force, git clean -f, git checkout . — these discard uncommitted changes
 - Git history rewrite: git rebase, git commit --amend (on published branches)
 - Database: DROP TABLE, TRUNCATE, DELETE FROM without WHERE clause
 - Infrastructure: kubectl delete, terraform destroy
+- Docker cleanup: docker system prune, docker rm/rmi
 
 When you encounter an obstacle, do NOT use destructive actions as a shortcut to simply make it go away. For example, do not rm -rf a directory just because a build is failing — investigate the root cause instead.
 
 NEVER delete these critical paths:
-- System directories: /etc, /usr, /bin, /sbin, /tmp, /var, /home, /root
+- System directories: /etc, /usr, /bin, /sbin, /tmp, /var, /home, /root, C:\Windows, C:\Users
 - Git metadata: .git/, .claude/
 - Project root files: go.mod, package.json, Cargo.toml, Makefile
 

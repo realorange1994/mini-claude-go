@@ -72,7 +72,24 @@ func compileDenyPatterns() []*regexp.Regexp {
 		`\b(shutdown|reboot|poweroff)\b`,             // power operations
 		`:\(\)\s*\{.*\};\s*:`,                        // fork bomb
 		`\w+\(\)\s*\{[^}]*\|\s*[^}]*&\s*\}\s*;\s*`,   // fork bomb variation
-		`&\S*&\S*&`,                                  // chained background processes
+		// PowerShell destructive cmdlets
+	`remove-item\s`,
+	`\bri\s+`,  // ri alias (PowerShell Remove-Item)
+	`remove-itemproperty\s`,
+	`rd\s+/[sS]\b`,  // rd /s (PowerShell recursive delete)
+	// Docker destructive operations
+	`docker\s+system\s+prune`,
+	`docker\s+\S+\s+prune`,
+	// Git destructive via exec
+	`git\s+push\s+.*--force`,
+	`git\s+push\s+-f\b`,
+	`git\s+clean\s+-[fd]`,
+	`git\s+reset\s+--hard`,
+	`git\s+checkout\s+--force`,
+	`git\s+rebase\s+--interactive`,
+	`git\s+filter-branch`,
+	`git\s+reflog\s+expire`,
+	`&\S*&\S*&`,                                  // chained background processes
 	}
 	result := make([]*regexp.Regexp, len(patterns))
 	for i, p := range patterns {
@@ -651,9 +668,12 @@ func extractQuotedRegions(cmd string) map[int]bool {
 
 // deletionCommands are commands that delete files/directories.
 var deletionCommands = map[string]bool{
-	"rm":     true,
-	"rmdir":  true,
-	"unlink": true,
+	"rm":            true,
+	"rmdir":         true,
+	"unlink":        true,
+	"remove-item":   true,
+	"ri":            true,
+	"rd":            true,
 }
 
 // dangerousUnixPaths are root-level directories that should never be deleted.
@@ -1158,6 +1178,18 @@ func isDestructiveCommand(cmd string) (bool, string) {
 		{"kubectl", "delete", "Kubernetes resource deletion"},
 		{"docker", "rm", "Container removal"},
 		{"docker", "rmi", "Image removal"},
+		{"docker", "system prune", "Docker system prune"},
+		{"docker", "container prune", "Docker container prune"},
+		{"docker", "image prune", "Docker image prune"},
+		{"docker", "volume prune", "Docker volume prune"},
+		{"docker", "network prune", "Docker network prune"},
+		{"remove-item", "", "PowerShell file deletion"},
+		{"ri", "", "PowerShell file deletion (alias)"},
+		{"git", "checkout --force", "Force checkout"},
+		{"git", "clean -fd", "Git clean removes untracked files"},
+		{"git", "rebase --interactive", "Interactive rebase rewrites history"},
+		{"git", "filter-branch", "filter-branch rewrites history"},
+		{"git", "reflog expire", "reflog expire can lose recovery data"},
 		{"terraform", "destroy", "Infrastructure destruction"},
 		{"mysql", "", "Database client command"},
 		{"psql", "", "Database client command"},

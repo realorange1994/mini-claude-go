@@ -157,7 +157,19 @@ func main() {
 	if len(args) > 0 {
 		prompt := strings.Join(args, " ")
 		result := agent.Run(prompt)
-		fmt.Println(result)
+
+		// When streaming is enabled and stdout is a terminal, TerminalHandler
+		// already displayed the text via stderr. Printing again would duplicate it.
+		stdoutIsTerm := func() bool {
+			fi, err := os.Stdout.Stat()
+			if err != nil {
+				return false
+			}
+			return fi.Mode()&os.ModeCharDevice != 0
+		}
+		if !agent.IsStreaming() || !stdoutIsTerm() {
+			fmt.Println(result)
+		}
 
 		// Drain any pending sub-agent notifications before exit
 		drainOneShotNotifications(agent)
