@@ -157,7 +157,7 @@ func (g *PermissionGate) askUser(toolName string, params map[string]any) bool {
 // After 3 consecutive denials, falls back to interactive prompt.
 func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any) *tools.ToolResult {
 	// Fast path: whitelisted tools are always allowed
-	if IsAutoAllowlisted(tool.Name()) {
+	if IsAutoAllowlisted(tool.Name(), params) {
 		g.denialCount = 0
 		return nil
 	}

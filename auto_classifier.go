@@ -41,31 +41,138 @@ const cacheTTL = 5 * time.Minute
 // AUTO_MODE_SAFE_TOOLS are tools that are always allowed in auto mode
 // without needing classifier evaluation. These are all read-only or
 // management tools that cannot cause destructive side effects.
+// Note: "git" is handled separately with operation-level granularity.
 var AUTO_MODE_SAFE_TOOLS = map[string]bool{
-	"read_file":      true,
-	"glob":           true,
-	"grep":           true,
-	"list_dir":       true,
-	"tool_search":    true,
-	"brief":          true,
-	"runtime_info":   true,
-	"memory_add":     true,
-	"memory_search":  true,
-	"task_create":    true,
-	"task_list":      true,
-	"task_get":       true,
-	"task_update":    true,
-	"list_mcp_tools": true,
-	"list_skills":    true,
-	"search_skills":  true,
-	"read_skill":     true,
+	"read_file":        true,
+	"glob":             true,
+	"grep":             true,
+	"list_dir":         true,
+	"tool_search":      true,
+	"brief":            true,
+	"runtime_info":     true,
+	"memory_add":       true,
+	"memory_search":    true,
+	"task_create":      true,
+	"task_list":        true,
+	"task_get":         true,
+	"task_update":      true,
+	"list_mcp_tools":   true,
+	"list_skills":      true,
+	"search_skills":    true,
+	"read_skill":       true,
 	"mcp_server_status": true,
 }
 
-// IsAutoAllowlisted returns true if the tool is in the safe whitelist
+// SAFE_GIT_OPERATIONS are read-only git operations that can be auto-allowed.
+// Write/destructive operations (push, commit, merge, rebase, reset, clean, etc.)
+// are NOT listed here and will go through the classifier.
+var SAFE_GIT_OPERATIONS = map[string]bool{
+	"info":      true,
+	"status":    true,
+	"log":       true,
+	"diff":      true,
+	"show":      true,
+	"reflog":    true,
+	"blame":     true,
+	"describe":  true,
+	"shortlog":  true,
+	"ls-tree":   true,
+	"rev-parse": true,
+	"rev-list":  true,
+}
+
+// SAFE_EXEC_PREFIXES are shell command prefixes that are always safe (read-only).
+// Any exec command NOT matching these prefixes will go through the classifier.
+var SAFE_EXEC_PREFIXES = []string{
+	// File listing / inspection
+	"ls", "dir", "find", "tree", "stat", "file", "wc", "du", "df",
+	// File reading
+	"cat", "head", "tail", "less", "more", "bat",
+	// Search
+	"grep", "rg", "ag", "ack", "which", "where", "whereis", "type",
+	// Diff / comparison
+	"diff", "cmp", "comm",
+	// Version / info
+	"go version", "go env", "go list", "go mod", "go doc",
+	"rustc --version", "cargo --version", "node --version", "npm --version",
+	"python --version", "python3 --version", "java -version",
+	"git --version", "gh --version",
+	// Environment
+	"env", "printenv", "whoami", "hostname", "uname", "date", "uptime",
+	// Process listing
+	"ps", "top", "htop",
+	// Network inspection (read-only)
+	"ping", "traceroute", "dig", "nslookup", "host", "ifconfig", "ip addr",
+	// Build / test / lint (within project, non-destructive)
+	"go build", "go test", "go vet", "go run",
+	"cargo build", "cargo test", "cargo check", "cargo clippy", "cargo run",
+	"npm test", "npm run", "npm start",
+	"make", "cmake",
+	// Archive inspection
+	"tar -t", "zipinfo", "unzip -l",
+}
+
+// DANGEROUS_EXEC_PATTERNS are shell patterns that should never be auto-allowed.
+var DANGEROUS_EXEC_PATTERNS = []string{
+	"| bash", "| sh", "| sudo", "&& sudo",
+	"curl ", "wget ",
+	"> /etc/", "> /usr/", "> /tmp/", ">> /etc/", ">> /usr/", ">> /tmp/",
+	"rm ", "rm\t", "chmod ", "chown ", "mkfs", "dd if=",
+	"sudo ", "su ", "exec ",
+}
+
+// hasDangerousPatterns checks if a command contains dangerous shell patterns.
+func hasDangerousPatterns(command string) bool {
+	lower := strings.ToLower(command)
+	for _, pattern := range DANGEROUS_EXEC_PATTERNS {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	if strings.Contains(command, ">>") && strings.Contains(command, "/etc") {
+		return true
+	}
+	return false
+}
+
+// isSafeExecCommand checks if an exec command is safe based on prefix matching.
+func isSafeExecCommand(command string) bool {
+	cmd := strings.TrimSpace(command)
+	if cmd == "" {
+		return false
+	}
+	if hasDangerousPatterns(cmd) {
+		return false
+	}
+	for _, prefix := range SAFE_EXEC_PREFIXES {
+		if cmd == prefix || strings.HasPrefix(cmd, prefix+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAutoAllowlisted returns true if the tool call is in the safe whitelist
 // and does not need classifier evaluation.
-func IsAutoAllowlisted(toolName string) bool {
-	return AUTO_MODE_SAFE_TOOLS[toolName]
+// For most tools this is a name-only check. For "git" and "exec", it also checks
+// the specific operation/command — only safe operations are auto-allowed.
+func IsAutoAllowlisted(toolName string, toolInput map[string]any) bool {
+	if AUTO_MODE_SAFE_TOOLS[toolName] {
+		return true
+	}
+	// Git: operation-level granularity — read-only ops auto-allowed
+	if toolName == "git" {
+		if op, ok := toolInput["operation"].(string); ok {
+			return SAFE_GIT_OPERATIONS[op]
+		}
+	}
+	// Exec: command-level granularity — safe commands auto-allowed
+	if toolName == "exec" {
+		if cmd, ok := toolInput["command"].(string); ok {
+			return isSafeExecCommand(cmd)
+		}
+	}
+	return false
 }
 
 // NewAutoModeClassifier creates a new classifier instance.
@@ -114,7 +221,7 @@ func (c *AutoModeClassifier) Classify(
 	}
 
 	// Check whitelist
-	if IsAutoAllowlisted(toolName) {
+	if IsAutoAllowlisted(toolName, toolInput) {
 		return ClassifierResult{Allow: true, Reason: "whitelisted tool"}
 	}
 
@@ -493,6 +600,12 @@ func (c *AutoModeClassifier) cacheKey(toolName string, input map[string]any) str
 				cmd = cmd[:100]
 			}
 			return "exec:" + cmd
+		}
+	}
+	// For git, cache by tool+operation
+	if toolName == "git" {
+		if op, ok := input["operation"].(string); ok {
+			return "git:" + op
 		}
 	}
 	// For file ops, cache by tool+path
