@@ -265,7 +265,7 @@ func runInteractive(agent *AgentLoop) {
 		var isEOF bool
 		select {
 		case <-ctrlCh:
-			// Ctrl+C while waiting for input
+			// Ctrl+C while waiting for input at the ">" prompt.
 			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
 			continue
 		case r := <-inputCh:
@@ -289,6 +289,7 @@ func runInteractive(agent *AgentLoop) {
 				select {
 				case <-ctrlCh:
 					// SIGINT confirmed -- reopen stdin and continue
+					fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
 					stdinReader = bufio.NewReader(os.Stdin)
 					go readStdin(stdinReader)
 					continue
@@ -297,6 +298,7 @@ func runInteractive(agent *AgentLoop) {
 					// (handler may have run but ctrlCh was already consumed)
 					prev := lastCtrlC.Load()
 					if prev != 0 && time.Since(time.Unix(0, prev)) < 2*time.Second {
+						fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
 						stdinReader = bufio.NewReader(os.Stdin)
 						go readStdin(stdinReader)
 						continue
@@ -422,6 +424,16 @@ func runInteractive(agent *AgentLoop) {
 		agent.SetInterrupted(false) // ensure clear before running
 		result := agent.Run(userInput)
 		agent.SetInterrupted(false) // clear after run
+
+		// Drain any stale Ctrl+C signal from the channel. When the user
+		// presses Ctrl+C to interrupt the agent, the signal handler sends
+		// to ctrlCh. The agent detects IsInterrupted() and returns, but the
+		// ctrlCh message is unconsumed. If we don't drain it, the next REPL
+		// loop will pick it up and print an extraneous "[WARN] Interrupting...".
+		select {
+		case <-ctrlCh:
+		default:
+		}
 
 		// After agent.Run(), the stdin reader goroutine may have died
 		// (Ctrl+C on Windows closes stdin, causing EOF). We must
