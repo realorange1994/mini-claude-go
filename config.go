@@ -88,10 +88,6 @@ type ClaudeSettings struct {
 		AnthropicAuthToken string `json:"ANTHROPIC_AUTH_TOKEN"`
 		AnthropicBaseURL   string `json:"ANTHROPIC_BASE_URL"`
 		AnthropicModel     string `json:"ANTHROPIC_MODEL"`
-		AnthropicSonnet    string `json:"ANTHROPIC_DEFAULT_SONNET_MODEL"`
-		AnthropicOpus      string `json:"ANTHROPIC_DEFAULT_OPUS_MODEL"`
-		AnthropicHaiku     string `json:"ANTHROPIC_DEFAULT_HAIKU_MODEL"`
-		AnthropicReasoning string `json:"ANTHROPIC_REASONING_MODEL"`
 	} `json:"env"`
 	MCP struct {
 		Servers map[string]MCPServerConfig `json:"servers"`
