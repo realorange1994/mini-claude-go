@@ -146,6 +146,8 @@ var SAFE_EXEC_PREFIXES = []string{
 	"git --version", "gh --version",
 	// Environment
 	"env", "printenv", "whoami", "hostname", "uname", "date", "uptime",
+	// Echo (safe output, but command substitution is caught by dangerous patterns)
+	"echo",
 	// Process listing
 	"ps", "top", "htop",
 	// Network inspection (read-only)
@@ -173,6 +175,8 @@ var DANGEROUS_EXEC_PATTERNS = []string{
 	"start-bitstransfer",
 	// Dangerous redirects
 	"> /etc/", "> /usr/", "> /tmp/", ">> /etc/", ">> /usr/", ">> /tmp/",
+	// Command substitution (prevents echo $(malicious) bypass)
+	"$(", "`",
 	// Unix destructive commands
 	"rm ", "rm\t", "chmod ", "chown ", "mkfs", "dd if=",
 	"sudo ", "su ", "exec ",
@@ -196,6 +200,7 @@ func hasDangerousPatterns(command string) bool {
 }
 
 // isSafeExecCommand checks if an exec command is safe based on prefix matching.
+// For combined commands (&& / || / ;), each segment is checked independently.
 func isSafeExecCommand(command string) bool {
 	cmd := strings.TrimSpace(command)
 	if cmd == "" {
@@ -204,12 +209,102 @@ func isSafeExecCommand(command string) bool {
 	if hasDangerousPatterns(cmd) {
 		return false
 	}
+	// Split on && / || / ; to check each command independently
+	// This prevents "safe && malicious" from auto-allowing
+	for _, seg := range splitShellCommands(cmd) {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		if hasDangerousPatterns(seg) {
+			return false
+		}
+		if !matchesSafePrefix(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchesSafePrefix checks if a single command matches a safe prefix.
+func matchesSafePrefix(cmd string) bool {
 	for _, prefix := range SAFE_EXEC_PREFIXES {
 		if cmd == prefix || strings.HasPrefix(cmd, prefix+" ") {
 			return true
 		}
 	}
 	return false
+}
+
+// splitShellCommands splits a command on && / || / ; while preserving
+// content inside single/double quotes and escaped characters.
+func splitShellCommands(cmd string) []string {
+	var segments []string
+	var current strings.Builder
+	depth := 0 // parentheses depth
+	inSingleQuote := false
+	inDoubleQuote := false
+	escaped := false
+
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		if escaped {
+			current.WriteByte(c)
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			current.WriteByte(c)
+			escaped = true
+			continue
+		}
+		if c == '\'' && !inDoubleQuote {
+			inSingleQuote = !inSingleQuote
+			current.WriteByte(c)
+			continue
+		}
+		if c == '"' && !inSingleQuote {
+			inDoubleQuote = !inDoubleQuote
+			current.WriteByte(c)
+			continue
+		}
+		if inSingleQuote || inDoubleQuote || depth > 0 {
+			current.WriteByte(c)
+			continue
+		}
+		if c == '(' {
+			depth++
+			current.WriteByte(c)
+			continue
+		}
+		if c == ')' {
+			depth--
+			current.WriteByte(c)
+			continue
+		}
+		// Check for && or ||
+		if (c == '&' || c == '|') && i+1 < len(cmd) && cmd[i+1] == c {
+			segments = append(segments, current.String())
+			current.Reset()
+			i += 2 // skip both operator chars
+			continue
+		}
+		// Check for ; (not inside $())
+		if c == ';' {
+			segments = append(segments, current.String())
+			current.Reset()
+			continue
+		}
+		current.WriteByte(c)
+	}
+	rest := strings.TrimSpace(current.String())
+	if rest != "" {
+		segments = append(segments, rest)
+	}
+	if len(segments) == 0 {
+		return []string{cmd}
+	}
+	return segments
 }
 
 // IsAutoAllowlisted returns true if the tool call is in the safe whitelist
