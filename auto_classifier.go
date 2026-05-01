@@ -110,6 +110,24 @@ var SAFE_PROCESS_OPERATIONS = map[string]bool{
 	"ps":     true,
 }
 
+// SAFE_FILEOPS_OPERATIONS are read-only fileops operations that can be auto-allowed.
+// Write/destructive operations are NOT listed here and will go through
+// the classifier (or be blocked outright if in DANGEROUS_FILEOPS_OPERATIONS).
+var SAFE_FILEOPS_OPERATIONS = map[string]bool{
+	"read":     true,
+	"stat":     true,
+	"checksum": true,
+	"exists":   true,
+	"ls":       true,
+}
+
+// DANGEROUS_FILEOPS_OPERATIONS are so destructive they should always be blocked,
+// even if the classifier were to allow them. These bypass the classifier
+// entirely and are unconditionally denied.
+var DANGEROUS_FILEOPS_OPERATIONS = map[string]bool{
+	"rmrf": true,
+}
+
 // SAFE_EXEC_PREFIXES are shell command prefixes that are always safe (read-only).
 // Any exec command NOT matching these prefixes will go through the classifier.
 var SAFE_EXEC_PREFIXES = []string{
@@ -143,11 +161,24 @@ var SAFE_EXEC_PREFIXES = []string{
 
 // DANGEROUS_EXEC_PATTERNS are shell patterns that should never be auto-allowed.
 var DANGEROUS_EXEC_PATTERNS = []string{
+	// Unix shell pipe-to-execute
 	"| bash", "| sh", "| sudo", "&& sudo",
+	// PowerShell pipe-to-execute (LLM may rewrite Unix commands to these)
+	"| invoke-expression", "| iex", "| cmd", "| powershell",
+	// Network downloads (Unix)
 	"curl ", "wget ",
+	// Network downloads (PowerShell -- LLM may rewrite curl/wget to these)
+	"invoke-webrequest", "iwr ",
+	"invoke-restmethod", "irm ",
+	"start-bitstransfer",
+	// Dangerous redirects
 	"> /etc/", "> /usr/", "> /tmp/", ">> /etc/", ">> /usr/", ">> /tmp/",
+	// Unix destructive commands
 	"rm ", "rm\t", "chmod ", "chown ", "mkfs", "dd if=",
 	"sudo ", "su ", "exec ",
+	// PowerShell destructive cmdlets
+	"remove-item ", "remove-itemproperty ",
+	"stop-process ", "set-executionpolicy ",
 }
 
 // hasDangerousPatterns checks if a command contains dangerous shell patterns.
@@ -183,7 +214,7 @@ func isSafeExecCommand(command string) bool {
 
 // IsAutoAllowlisted returns true if the tool call is in the safe whitelist
 // and does not need classifier evaluation.
-// For most tools this is a name-only check. For "git", "exec", and "process", it also checks
+// For most tools this is a name-only check. For "git", "exec", "process", and "fileops", it also checks
 // the specific operation/command — only safe operations are auto-allowed.
 func IsAutoAllowlisted(toolName string, toolInput map[string]any) bool {
 	if AUTO_MODE_SAFE_TOOLS[toolName] {
@@ -201,10 +232,35 @@ func IsAutoAllowlisted(toolName string, toolInput map[string]any) bool {
 			return SAFE_PROCESS_OPERATIONS[op]
 		}
 	}
+	// Fileops: operation-level granularity — read-only ops auto-allowed,
+	// destructive ops always blocked (see IsAlwaysBlocked), rest go through classifier
+	if toolName == "fileops" {
+		if op, ok := toolInput["operation"].(string); ok {
+			if IsAlwaysBlocked(toolName, toolInput) {
+				return false
+			}
+			return SAFE_FILEOPS_OPERATIONS[op]
+		}
+		// No operation field → go through classifier
+		return false
+	}
 	// Exec: command-level granularity — safe commands auto-allowed
 	if toolName == "exec" {
 		if cmd, ok := toolInput["command"].(string); ok {
 			return isSafeExecCommand(cmd)
+		}
+	}
+	return false
+}
+
+// IsAlwaysBlocked returns true if the tool call should always be blocked,
+// bypassing the classifier entirely. These are operations so destructive that
+// even a misbehaving classifier must not allow them.
+func IsAlwaysBlocked(toolName string, toolInput map[string]any) bool {
+	// Fileops: dangerous operations like rmrf are always blocked
+	if toolName == "fileops" {
+		if op, ok := toolInput["operation"].(string); ok {
+			return DANGEROUS_FILEOPS_OPERATIONS[op]
 		}
 	}
 	return false
@@ -241,12 +297,20 @@ func (c *AutoModeClassifier) IsEnabled() bool {
 }
 
 // Classify determines whether a tool call should be allowed in auto mode.
-// It first checks the cache, then makes an LLM call if needed.
+// It first checks always-blocked, then whitelist, then cache, then makes an LLM call if needed.
 func (c *AutoModeClassifier) Classify(
 	toolName string,
 	toolInput map[string]any,
 	transcript string,
 ) ClassifierResult {
+	// Check always-blocked first (e.g., fileops rmrf — never allow regardless)
+	if IsAlwaysBlocked(toolName, toolInput) {
+		return ClassifierResult{
+			Allow:  false,
+			Reason: "operation is always blocked in auto mode",
+		}
+	}
+
 	if !c.IsEnabled() {
 		// Classifier unavailable: fail-closed (block)
 		return ClassifierResult{
@@ -642,6 +706,12 @@ func (c *AutoModeClassifier) cacheKey(toolName string, input map[string]any) str
 		if op, ok := input["operation"].(string); ok {
 			return "git:" + op
 		}
+	}
+	// For fileops, cache by tool+operation+path
+	if toolName == "fileops" {
+		op, _ := input["operation"].(string)
+		path, _ := input["path"].(string)
+		return "fileops:" + op + ":" + path
 	}
 	// For file ops, cache by tool+path
 	if path, ok := input["path"].(string); ok {
