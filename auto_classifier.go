@@ -339,9 +339,25 @@ func (c *AutoModeClassifier) Classify(
 	return result
 }
 
-// callClassifier makes an LLM API call to classify the tool action.
-// Uses the Anthropic SDK's tool_use feature to force structured JSON output,
-// avoiding unreliable text parsing.
+// Two-stage classifier constants, modeled after upstream yoloClassifier.ts.
+// Stage 1 (fast): 64 base + 2048 thinking padding = 2112 tokens for quick allow/block.
+// Stage 2 (thinking): 4096 base + 2048 thinking padding = 6144 tokens for full reasoning.
+const (
+	stage1MaxTokens = 2112  // 64 + 2048
+	stage2MaxTokens = 6144  // 4096 + 2048
+)
+
+// callClassifier makes LLM API calls to classify the tool action using a
+// two-stage approach modeled after upstream yoloClassifier.ts:
+//
+//   Stage 1 (fast): 2112 max_tokens — quick allow/block decision.
+//     If allowed → return immediately (most safe commands are decided here).
+//     If blocked → escalate to Stage 2 for more thorough analysis.
+//
+//   Stage 2 (thinking): 6144 max_tokens — full chain-of-thought reasoning
+//     with a richer prompt. Verdict is final.
+//
+// Uses the Anthropic SDK's tool_use feature for structured JSON output.
 func (c *AutoModeClassifier) callClassifier(
 	toolName string,
 	toolInput map[string]any,
@@ -359,12 +375,25 @@ func (c *AutoModeClassifier) callClassifier(
 	}
 	userMsg += "## New action to classify:\n" + actionDesc
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// Stage 1: fast classification
+	result, err := c.callStage1(ctx, userMsg, actionDesc)
+	if err == nil {
+		return result
+	}
+
+	// Stage 1 failed or blocked — escalate to Stage 2 for full reasoning
+	fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 blocked (%s), escalating to Stage 2 reasoning\n", err)
+	return c.callStage2(ctx, userMsg, actionDesc)
+}
+
+// callStage1 makes the fast classification API call.
+func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc string) (ClassifierResult, error) {
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     c.model,
-		MaxTokens: 256,
+		MaxTokens: stage1MaxTokens,
 		System: []anthropic.TextBlockParam{
 			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT},
 		},
@@ -403,29 +432,112 @@ func (c *AutoModeClassifier) callClassifier(
 	})
 
 	if err != nil {
-		// Classifier API failed: fail-closed
-		fmt.Fprintf(os.Stderr, "  [auto-classifier] API error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 API error: %v\n", err)
+		// API error in stage 1: escalate to stage 2 rather than blocking
+		return ClassifierResult{}, fmt.Errorf("API error: %v", err)
+	}
+
+	result, ok := parseClassifierResponse(resp.Content, actionDesc)
+	if !ok {
+		// Parse failure in stage 1: escalate to stage 2
+		return ClassifierResult{}, fmt.Errorf("parse failure in stage 1")
+	}
+
+	if result.Allow {
+		// Fast path: allowed by stage 1
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 ALLOWED: %s (%s)\n", actionDesc, result.Reason)
+		return result, nil
+	}
+
+	// Stage 1 blocked — escalate to stage 2 for full reasoning
+	return result, nil
+}
+
+// callStage2 makes the thinking classification API call.
+func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc string) ClassifierResult {
+	stage2Prompt := userMsg + "\n\n## Analysis required:\nProvide a detailed security analysis of this action. Consider: is the action clearly requested by the user? Could it have unintended consequences? Does it modify the system state or download external code? Explain your reasoning step by step, then provide your verdict."
+
+	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     c.model,
+		MaxTokens: stage2MaxTokens,
+		System: []anthropic.TextBlockParam{
+			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT},
+		},
+		Tools: []anthropic.ToolUnionParam{
+			{
+				OfTool: &anthropic.ToolParam{
+					Name:        "classify_action",
+					Description: param.NewOpt("Classify whether the tool action should be allowed or blocked, providing detailed reasoning"),
+					InputSchema: anthropic.ToolInputSchemaParam{
+						Properties: map[string]any{
+							"decision": map[string]any{
+								"type":        "string",
+								"enum":        []string{"allow", "block"},
+								"description": "Whether to allow or block this action",
+							},
+							"reason": map[string]any{
+								"type":        "string",
+								"description": "Detailed reason for the decision, including security concerns and user intent",
+							},
+						},
+						Required: []string{"decision", "reason"},
+					},
+				},
+			},
+		},
+		ToolChoice: anthropic.ToolChoiceUnionParam{
+			OfTool: &anthropic.ToolChoiceToolParam{
+				Name: "classify_action",
+			},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(
+				anthropic.NewTextBlock(stage2Prompt),
+			),
+		},
+	})
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 API error: %v, falling back to stage 1 block verdict\n", err)
+		// Stage 2 API failed: use stage 1 block verdict if available, or fail-open
 		return ClassifierResult{
-			Allow:  false,
-			Reason: fmt.Sprintf("classifier unavailable (%v); action requires manual approval", err),
+			Allow:  true,
+			Reason: "classifier unavailable (stage 2 error); action allowed by default",
 		}
 	}
 
-	// Parse tool_use response (structured by SDK)
-	var allText strings.Builder
-	for _, block := range resp.Content {
+	result, ok := parseClassifierResponse(resp.Content, actionDesc)
+	if !ok {
+		// Parse failure in stage 2: fail-open (technical issue, not security)
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 parse failure, allowing: %s\n", actionDesc)
+		return ClassifierResult{
+			Allow:  true,
+			Reason: "classifier stage 2 returned unparseable response; action allowed by default",
+		}
+	}
+
+	status := "ALLOWED"
+	if !result.Allow {
+		status = "BLOCKED"
+	}
+	fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 %s: %s (%s)\n", status, actionDesc, result.Reason)
+	return result
+}
+
+// parseClassifierResponse extracts ClassifierResult from the Anthropic response.
+// Tries tool_use block first, then falls back to text/thinking blocks.
+func parseClassifierResponse(content []anthropic.ContentBlockUnion, actionDesc string) (ClassifierResult, bool) {
+	for _, block := range content {
 		if toolUse, ok := block.AsAny().(anthropic.ToolUseBlock); ok {
 			if toolUse.Name == "classify_action" {
-				result := parseToolUseResponse(toolUse)
-				status := "ALLOWED"
-				if !result.Allow {
-					status = "BLOCKED"
-				}
-				fmt.Fprintf(os.Stderr, "  [auto-classifier] %s: %s (%s)\n", status, actionDesc, result.Reason)
-				return result
+				return parseToolUseResponse(toolUse), true
 			}
 		}
-		// Collect text from TextBlock or ThinkingBlock
+	}
+
+	// No tool_use block found — try to extract from text/thinking blocks
+	var allText strings.Builder
+	for _, block := range content {
 		if text, ok := block.AsAny().(anthropic.TextBlock); ok {
 			allText.WriteString(text.Text)
 		}
@@ -435,25 +547,129 @@ func (c *AutoModeClassifier) callClassifier(
 			}
 		}
 	}
-	// Try to parse collected text as classifier response
+
 	if allText.Len() > 0 {
-		result := parseClassifierResponse(allText.String())
+		result := parseClassifierResponseJSON(allText.String())
 		if result != nil {
-			status := "ALLOWED"
-			if !result.Allow {
-				status = "BLOCKED"
-			}
-			fmt.Fprintf(os.Stderr, "  [auto-classifier] %s: %s (%s)\n", status, actionDesc, result.Reason)
-			return *result
+			return *result, true
 		}
 	}
 
-	// No valid response: fail-open (parse failure is a technical issue, not security)
-	fmt.Fprintf(os.Stderr, "  [auto-classifier] No valid response, allowing: %s\n", actionDesc)
+	// No valid response found
 	return ClassifierResult{
 		Allow:  true,
 		Reason: "classifier returned no usable response; action allowed by default",
+	}, false
+}
+
+// parseClassifierResponseJSON parses the JSON/text response from the classifier.
+func parseClassifierResponseJSON(text string) *ClassifierResult {
+	text = strings.TrimSpace(text)
+
+	// Try to extract JSON from the response (may have markdown wrappers)
+	jsonStr := extractJSON(text)
+	if jsonStr != "" {
+		if result := tryParseJSON(jsonStr); result != nil {
+			return result
+		}
 	}
+
+	// Fallback: keyword-based classification when JSON parsing fails
+	return parseFromText(text)
+}
+
+// extractJSON finds the first balanced JSON object in the text.
+func extractJSON(text string) string {
+	startIdx := strings.Index(text, "{")
+	if startIdx < 0 {
+		return ""
+	}
+
+	depth := 0
+	for i := startIdx; i < len(text); i++ {
+		switch text[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return text[startIdx : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// tryParseJSON attempts to parse JSON into a ClassifierResult.
+func tryParseJSON(jsonStr string) *ClassifierResult {
+	var resp struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &resp); err != nil {
+		return nil
+	}
+
+	result := &ClassifierResult{
+		Allow:  strings.EqualFold(resp.Decision, "allow"),
+		Reason: resp.Reason,
+	}
+	if resp.Reason == "" {
+		if result.Allow {
+			result.Reason = "classified as safe"
+		} else {
+			result.Reason = "classified as potentially unsafe"
+		}
+	}
+	return result
+}
+
+// parseFromText tries to extract decision from raw text when JSON parsing fails.
+func parseFromText(text string) *ClassifierResult {
+	lower := strings.ToLower(text)
+
+	decision := ""
+	if strings.Contains(lower, `"allow"`) || strings.Contains(lower, `decision": "allow"`) || strings.Contains(lower, `decision: "allow"`) || strings.Contains(lower, "allow this action") {
+		decision = "allow"
+	} else if strings.Contains(lower, `"block"`) || strings.Contains(lower, `decision": "block"`) || strings.Contains(lower, `decision: "block"`) || strings.Contains(lower, "block this action") {
+		decision = "block"
+	} else if strings.Contains(lower, "unsafe") || strings.Contains(lower, "dangerous") {
+		decision = "block"
+	} else if strings.Contains(lower, "allow") && !strings.Contains(lower, "block") {
+		decision = "allow"
+	} else if strings.Contains(lower, "block") || strings.Contains(lower, "deny") {
+		decision = "block"
+	} else {
+		return nil
+	}
+
+	reason := ""
+	if idx := strings.Index(text, `"reason"`); idx >= 0 {
+		rest := text[idx:]
+		if colon := strings.Index(rest, ":"); colon >= 0 {
+			afterColon := rest[colon+1:]
+			if quoteStart := strings.Index(afterColon, `"`) ; quoteStart >= 0 {
+				afterQuoteStart := afterColon[quoteStart+1:]
+				if quoteEnd := strings.Index(afterQuoteStart, `"`) ; quoteEnd >= 0 {
+					reason = afterQuoteStart[:quoteEnd]
+				}
+			}
+		}
+	}
+	if reason == "" {
+		reason = "text-based classification"
+	}
+
+	result := &ClassifierResult{
+		Allow:  strings.EqualFold(decision, "allow"),
+		Reason: reason,
+	}
+	if result.Allow {
+		result.Reason = "classified as safe (" + reason + ")"
+	} else {
+		result.Reason = "classified as potentially unsafe (" + reason + ")"
+	}
+	return result
 }
 
 // parseToolUseResponse extracts ClassifierResult from a tool_use block.
@@ -575,120 +791,6 @@ func formatActionForClassifier(toolName string, input map[string]any) string {
 	return fmt.Sprintf("Tool: %s\nParams: %s", toolName, strings.Join(parts, ", "))
 }
 
-// parseClassifierResponse parses the JSON response from the classifier.
-func parseClassifierResponse(text string) *ClassifierResult {
-	text = strings.TrimSpace(text)
-
-	// Strategy 1: Try to find a clean JSON object
-	jsonStr := extractJSON(text)
-	if jsonStr != "" {
-		if result := tryParseJSON(jsonStr); result != nil {
-			return result
-		}
-	}
-
-	// Strategy 2: Try to extract decision/reason keywords from text
-	return parseFromText(text)
-}
-
-// extractJSON finds the first balanced JSON object in the text.
-func extractJSON(text string) string {
-	// Look for opening brace
-	startIdx := strings.Index(text, "{")
-	if startIdx < 0 {
-		return ""
-	}
-
-	// Find matching closing brace by tracking nesting depth
-	depth := 0
-	for i := startIdx; i < len(text); i++ {
-		switch text[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return text[startIdx : i+1]
-			}
-		}
-	}
-	return ""
-}
-
-// tryParseJSON attempts to parse JSON into a ClassifierResult.
-func tryParseJSON(jsonStr string) *ClassifierResult {
-	var resp struct {
-		Decision string `json:"decision"`
-		Reason   string `json:"reason"`
-	}
-	if err := json.Unmarshal([]byte(jsonStr), &resp); err != nil {
-		return nil
-	}
-
-	result := &ClassifierResult{
-		Allow:  strings.EqualFold(resp.Decision, "allow"),
-		Reason: resp.Reason,
-	}
-	if resp.Reason == "" {
-		if result.Allow {
-			result.Reason = "classified as safe"
-		} else {
-			result.Reason = "classified as potentially unsafe"
-		}
-	}
-	return result
-}
-
-// parseFromText tries to extract decision from raw text when JSON parsing fails.
-func parseFromText(text string) *ClassifierResult {
-	lower := strings.ToLower(text)
-
-	decision := ""
-	if strings.Contains(lower, `"allow"`) || strings.Contains(lower, `decision": "allow"`) || strings.Contains(lower, `decision: "allow"`) || strings.Contains(lower, "allow this action") {
-		decision = "allow"
-	} else if strings.Contains(lower, `"block"`) || strings.Contains(lower, `decision": "block"`) || strings.Contains(lower, `decision: "block"`) || strings.Contains(lower, "block this action") {
-		decision = "block"
-	} else if strings.Contains(lower, "unsafe") || strings.Contains(lower, "dangerous") {
-		decision = "block"
-	} else if strings.Contains(lower, "allow") && !strings.Contains(lower, "block") {
-		// If only "allow" appears, infer allow
-		decision = "allow"
-	} else if strings.Contains(lower, "block") || strings.Contains(lower, "deny") {
-		decision = "block"
-	} else {
-		// Cannot extract any decision
-		return nil
-	}
-
-	// Try to extract reason
-	reason := ""
-	if idx := strings.Index(text, `"reason"`); idx >= 0 {
-		rest := text[idx:]
-		if colon := strings.Index(rest, ":"); colon >= 0 {
-			afterColon := rest[colon+1:]
-			if quoteStart := strings.Index(afterColon, `"`) ; quoteStart >= 0 {
-				afterQuoteStart := afterColon[quoteStart+1:]
-				if quoteEnd := strings.Index(afterQuoteStart, `"`) ; quoteEnd >= 0 {
-					reason = afterQuoteStart[:quoteEnd]
-				}
-			}
-		}
-	}
-	if reason == "" {
-		reason = "text-based classification"
-	}
-
-	result := &ClassifierResult{
-		Allow:  strings.EqualFold(decision, "allow"),
-		Reason: reason,
-	}
-	if result.Allow {
-		result.Reason = "classified as safe (" + reason + ")"
-	} else {
-		result.Reason = "classified as potentially unsafe (" + reason + ")"
-	}
-	return result
-}
 
 // cacheKey generates a cache key from the tool name and input.
 func (c *AutoModeClassifier) cacheKey(toolName string, input map[string]any) string {

@@ -261,7 +261,7 @@ func TestParseClassifierResponse(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		result := parseClassifierResponse(tc.input)
+		result := parseClassifierResponseJSON(tc.input)
 		if tc.wantReason == "" {
 			// Expect nil
 			if result != nil {
