@@ -1142,6 +1142,11 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 			return nil, nil, err // let Run loop handle recovery
 		}
 
+		// User interrupted -- don't fall back to non-streaming, return immediately
+		if strings.Contains(errMsg, "interrupted by user") {
+			return nil, nil, err
+		}
+
 		// Transient error (network, timeout, 5xx): decide retry strategy
 		if isTransientError(errMsg) {
 			fmt.Fprintf(os.Stderr, "\n[WARN] Transient error during stream: %v\n", err)

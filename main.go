@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -176,7 +175,10 @@ func runInteractive(agent *AgentLoop) {
 	var lastCtrlC atomic.Int64 // stores UnixNano of last Ctrl+C
 
 	// Set up Ctrl+C signal handler
+	// The handler goroutine consumes signalCh; REPL select uses ctrlCh for
+	// Ctrl+C notification (avoids two goroutines competing on signalCh).
 	signalCh := make(chan os.Signal, 1)
+	ctrlCh := make(chan struct{}, 1)
 	signal.Notify(signalCh, syscall.SIGINT)
 	go func() {
 		for range signalCh {
@@ -190,7 +192,11 @@ func runInteractive(agent *AgentLoop) {
 			}
 			lastCtrlC.Store(now)
 			agent.SetInterrupted(true)
-			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
+			// Non-blocking notify to REPL select (may already be processing)
+			select {
+			case ctrlCh <- struct{}{}:
+			default:
+			}
 		}
 	}()
 
@@ -216,24 +222,25 @@ func runInteractive(agent *AgentLoop) {
 	}
 	stdoutIsTerm := stdoutIsTerminal()
 
-	stdinReader := bufio.NewReader(os.Stdin)
+	// Run REPL read loop in a goroutine so the main loop can handle
+	// Ctrl+C signals without being blocked on ReadString.
+	// On Windows, Ctrl+C closes the stdin handle which can make
+	// reopenStdin unreliable -- this approach avoids needing it entirely.
+	type readResult struct {
+		line string
+		err  error
+	}
+	inputCh := make(chan readResult, 1)
 
-	// reopenStdin reopens stdin after Ctrl+C breaks it (Windows closes stdin on SIGINT)
-	reopenStdin := func() *bufio.Reader {
-		var f *os.File
-		var err error
-		if runtime.GOOS == "windows" {
-			f, err = os.OpenFile("CONIN$", os.O_RDWR, 0)
-		} else {
-			f, err = os.OpenFile("/dev/tty", os.O_RDWR, 0)
-		}
-		if err != nil {
-			// Fallback: can't reopen, program should exit
-			return nil
-		}
-		return bufio.NewReader(f)
+	readStdin := func(reader *bufio.Reader) {
+		line, err := reader.ReadString('\n')
+		inputCh <- readResult{line: line, err: err}
 	}
 
+	stdinReader := bufio.NewReader(os.Stdin)
+	go readStdin(stdinReader)
+
+	loop:
 	for {
 		// Drain async sub-agent notifications and display them
 		if notifications := agent.DrainNotifications(); len(notifications) > 0 {
@@ -249,42 +256,67 @@ func runInteractive(agent *AgentLoop) {
 
 		fmt.Print("\n> ")
 
-		line, err := stdinReader.ReadString('\n')
-		isEOF := err == io.EOF
-
-		if err != nil && !isEOF {
-			if interactive {
-				// Ctrl+C at prompt -- signal handler already tracks double-press.
-				// Just reopen stdin and continue; if double-pressed, signal handler
-				// already called os.Exit(0).
-				agent.SetInterrupted(false)
-				if newReader := reopenStdin(); newReader != nil {
-					stdinReader = newReader
+		// Wait for either user input or Ctrl+C signal.
+		// On Windows, Ctrl+C produces BOTH a SIGINT and may close stdin
+		// (EOF). The select picks whichever arrives first. To correctly
+		// detect Ctrl+C-triggered EOF, we check the lastCtrlC timestamp
+		// (set atomically by the signal handler) instead of ctrlCh.
+		var line string
+		var isEOF bool
+		select {
+		case <-ctrlCh:
+			// Ctrl+C while waiting for input
+			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
+			continue
+		case r := <-inputCh:
+			line = r.line
+			isEOF = r.err == io.EOF
+			if r.err != nil && !isEOF {
+				// Read error (not EOF) -- try to recover
+				if interactive {
+					stdinReader = bufio.NewReader(os.Stdin)
+					go readStdin(stdinReader)
 					continue
 				}
+				break loop
 			}
-			// Piped input ended or can't reopen -- exit
-			printResumeHint(agent)
-			break
+			if isEOF && strings.TrimSpace(line) == "" {
+				// On Windows, Ctrl+C closes stdin (producing EOF)
+				// at the same time as SIGINT. The signal handler goroutine
+				// may not have processed SIGINT yet, so lastCtrlC might
+				// still be 0. Wait briefly for either the ctrlCh signal
+				// or the lastCtrlC update, then decide.
+				select {
+				case <-ctrlCh:
+					// SIGINT confirmed -- reopen stdin and continue
+					stdinReader = bufio.NewReader(os.Stdin)
+					go readStdin(stdinReader)
+					continue
+				case <-time.After(200 * time.Millisecond):
+					// No ctrlCh signal -- check lastCtrlC one more time
+					// (handler may have run but ctrlCh was already consumed)
+					prev := lastCtrlC.Load()
+					if prev != 0 && time.Since(time.Unix(0, prev)) < 2*time.Second {
+						stdinReader = bufio.NewReader(os.Stdin)
+						go readStdin(stdinReader)
+						continue
+					}
+					// True EOF (piped input closed, Ctrl+D)
+					break loop
+				}
+			}
+			// Got real input -- drain any stale Ctrl+C so it doesn't
+			// fire on the next iteration and confuse the REPL.
+			select {
+			case <-ctrlCh:
+			default:
+			}
 		}
 
-		if isEOF && strings.TrimSpace(line) == "" {
-			// stdin exhausted (no more data) -- exit cleanly
-			printResumeHint(agent)
-			break
-		}
-
-		// Process the line. When io.EOF is returned with data (last line
-		// of piped input without trailing newline), ReadString returns both
-		// the data and io.EOF -- we process the data here and exit on the
-		// next iteration when ReadString returns io.EOF with empty data.
 		userInput := strings.TrimSpace(line)
 		if userInput == "" {
 			if !interactive {
-				// Piped stdin with empty line and no more data -- exit to
-				// avoid infinite spin loop calling ReadString on exhausted stdin.
-				printResumeHint(agent)
-				break
+				break loop
 			}
 			continue
 		}
@@ -305,8 +337,7 @@ func runInteractive(agent *AgentLoop) {
 				switch cmd {
 				case "/quit", "/exit", "/q":
 					fmt.Println("Goodbye!")
-					printResumeHint(agent)
-					return
+					break loop
 				case "/tools":
 					fmt.Println("\nAvailable tools:")
 					for _, t := range agent.registry.AllTools() {
@@ -391,6 +422,17 @@ func runInteractive(agent *AgentLoop) {
 		agent.SetInterrupted(false) // ensure clear before running
 		result := agent.Run(userInput)
 		agent.SetInterrupted(false) // clear after run
+
+		// After agent.Run(), the stdin reader goroutine may have died
+		// (Ctrl+C on Windows closes stdin, causing EOF). We must
+		// restart it for the next REPL turn. To avoid leaking a
+		// still-alive goroutine, we always create a fresh inputCh
+		// and reader -- the old goroutine (if still alive) will just
+		// block forever on the old, unreferenced channel.
+		stdinReader = bufio.NewReader(os.Stdin)
+		inputCh = make(chan readResult, 1)
+		go readStdin(stdinReader)
+
 		// In streaming mode, TerminalHandler displays output on stderr.
 		// When stdout is a terminal, skip printing to avoid duplication.
 		// When stdout is piped (not a terminal), always print so the
@@ -400,6 +442,9 @@ func runInteractive(agent *AgentLoop) {
 		}
 		fmt.Println()
 	}
+
+	// Print resume hint exactly once at final exit
+	printResumeHint(agent)
 }
 
 // printResumeHint prints a short resume hint on exit.
