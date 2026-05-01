@@ -165,18 +165,25 @@ func (sm *SessionMemory) loadFromDisk() {
 		return // no file yet
 	}
 
-	// Parse markdown format: ### Category\n- content\n
+	// Parse markdown format: ### Category\n<!-- timestamp -->\n- content\n
 	lines := strings.Split(string(data), "\n")
 	var currentCategory string
+	var lastTimestamp time.Time
 	for _, line := range lines {
 		if strings.HasPrefix(line, "### ") {
 			currentCategory = strings.TrimSpace(strings.TrimPrefix(line, "### "))
+		} else if strings.HasPrefix(line, "<!-- ") && strings.HasSuffix(line, " -->") {
+			ts := strings.TrimPrefix(line, "<!-- ")
+			ts = strings.TrimSuffix(ts, " -->")
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				lastTimestamp = t
+			}
 		} else if strings.HasPrefix(line, "- ") && currentCategory != "" {
 			content := strings.TrimSpace(strings.TrimPrefix(line, "- "))
 			sm.entries = append(sm.entries, MemoryEntry{
 				Category:  currentCategory,
 				Content:   content,
-				Timestamp: time.Now(), // disk format doesn't store timestamps
+				Timestamp: lastTimestamp,
 				Source:    "disk",
 			})
 		}
@@ -199,21 +206,22 @@ func (sm *SessionMemory) flushToDisk() error {
 	}
 
 	// Group by category
-	groups := make(map[string][]string)
+	groups := make(map[string][]MemoryEntry)
 	var categories []string
 	for _, e := range sm.entries {
 		if _, ok := groups[e.Category]; !ok {
 			categories = append(categories, e.Category)
 		}
-		groups[e.Category] = append(groups[e.Category], e.Content)
+		groups[e.Category] = append(groups[e.Category], e)
 	}
 	sort.Strings(categories)
 
 	var sb strings.Builder
 	for _, cat := range categories {
 		sb.WriteString(fmt.Sprintf("### %s\n", cat))
-		for _, content := range groups[cat] {
-			sb.WriteString(fmt.Sprintf("- %s\n", content))
+		for _, e := range groups[cat] {
+			sb.WriteString(fmt.Sprintf("<!-- %s -->\n", e.Timestamp.Format(time.RFC3339)))
+			sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
 		}
 		sb.WriteString("\n")
 	}

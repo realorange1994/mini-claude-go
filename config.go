@@ -48,6 +48,7 @@ type Config struct {
 	PostCompactMaxFileChars    int
 	PostCompactMaxSkillChars   int
 	PostCompactMaxTotalSkillChars int
+	PostCompactHistorySnipCount   int
 	SessionMemory           *SessionMemory
 	cachedPrompt           *CachedSystemPrompt
 }
@@ -263,6 +264,7 @@ func DefaultConfig() Config {
 		PostCompactMaxFileChars:       50000,
 		PostCompactMaxSkillChars:      5000,
 		PostCompactMaxTotalSkillChars: 25000,
+		PostCompactHistorySnipCount:   3,
 		cachedPrompt: NewCachedSystemPrompt(),
 	}
 }

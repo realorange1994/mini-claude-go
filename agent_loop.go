@@ -1626,10 +1626,13 @@ func getStringSlice(schema map[string]any, key string) []string {
 // PostCompactRecovery re-injects critical context after compaction.
 // This prevents the model from losing awareness of files it was working on
 // and skills it was using, reducing wasted turns re-reading them.
-func (a *AgentLoop) PostCompactRecovery() {
+// Returns the list of recovered file paths (for deduplication in AddHistorySnip).
+func (a *AgentLoop) PostCompactRecovery() []string {
 	if !a.config.PostCompactRecoverFiles {
-		return
+		return nil
 	}
+
+	var recoveredPaths []string
 
 	// --- File content recovery ---
 	if a.registry != nil {
@@ -1672,6 +1675,7 @@ func (a *AgentLoop) PostCompactRecovery() {
 			a.context.AddAttachment(attachment)
 			totalChars += len(content)
 			filesRecovered++
+			recoveredPaths = append(recoveredPaths, path)
 
 			// Re-mark file as read so edit checks still work
 			a.registry.MarkFileRead(path)
@@ -1721,6 +1725,8 @@ func (a *AgentLoop) PostCompactRecovery() {
 			fmt.Fprintf(os.Stderr, "[post-compact] Recovered %d skills (%d chars)\n", skillsRecovered, totalChars)
 		}
 	}
+
+	return recoveredPaths
 }
 
 // tryCompaction attempts LLM-driven compaction, falling back to truncation.
@@ -1756,10 +1762,14 @@ func (a *AgentLoop) tryCompaction() {
 		}
 
 		// Phase 2: Post-compact recovery — re-inject critical context
-		a.PostCompactRecovery()
+		recoveredPaths := a.PostCompactRecovery()
 
 		// Phase 3: History snip — preserve recent messages verbatim
-		a.context.AddHistorySnip(3)
+		snipCount := a.config.PostCompactHistorySnipCount
+		if snipCount <= 0 {
+			snipCount = 3
+		}
+		a.context.AddHistorySnip(snipCount, recoveredPaths)
 
 		// Rebuild messages from the actual context (summary + attachments + any tail entries)
 		// and calculate the real post-compact token count for cooldown.

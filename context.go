@@ -534,7 +534,9 @@ func (c *ConversationContext) AddAttachment(content string) {
 // AddHistorySnip preserves the most recent conversation entries verbatim
 // after compaction. This ensures the latest context is not lost in the summary.
 // Entries are added as user-role text messages with a [history-snip] prefix.
-func (c *ConversationContext) AddHistorySnip(count int) {
+// skipPaths contains file paths recovered by PostCompactRecovery; ToolResultContent
+// entries referencing those paths are skipped to avoid duplication.
+func (c *ConversationContext) AddHistorySnip(count int, skipPaths []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -562,6 +564,33 @@ func (c *ConversationContext) AddHistorySnip(count int) {
 		case CompactBoundaryContent, SummaryContent, AttachmentContent:
 			continue
 		default:
+			// Skip ToolResultContent entries that reference recovered file paths
+			if skipPaths != nil && len(skipPaths) > 0 {
+				if results, ok := entry.content.(ToolResultContent); ok {
+					skip := false
+					for _, r := range results {
+						for _, contentBlock := range r.Content {
+							if contentBlock.OfText != nil {
+								for _, path := range skipPaths {
+									if strings.Contains(contentBlock.OfText.Text, path) {
+										skip = true
+										break
+									}
+								}
+							}
+							if skip {
+								break
+							}
+						}
+						if skip {
+							break
+						}
+					}
+					if skip {
+						continue
+					}
+				}
+			}
 			snipEntries = append([]conversationEntry{entry}, snipEntries...)
 		}
 	}
