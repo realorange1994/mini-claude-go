@@ -7,6 +7,28 @@ import (
 	"miniclaudecode-go/tools"
 )
 
+// testRegistryTool is a minimal Tool implementation for testing buildSubAgentRegistry.
+type testRegistryTool struct {
+	name string
+}
+
+func (m testRegistryTool) Name() string                              { return m.name }
+func (m testRegistryTool) Description() string                       { return "" }
+func (m testRegistryTool) InputSchema() map[string]any             { return nil }
+func (m testRegistryTool) CheckPermissions(map[string]any) string  { return "" }
+func (m testRegistryTool) Execute(map[string]any) tools.ToolResult {
+	return tools.ToolResult{Output: ""}
+}
+
+// toolNames extracts tool names from a registry for assertion.
+func toolNames(reg *tools.Registry) map[string]bool {
+	names := make(map[string]bool)
+	for _, t := range reg.AllTools() {
+		names[t.Name()] = true
+	}
+	return names
+}
+
 func TestBuildSubAgentSystemPromptContainsSections(t *testing.T) {
 	registry := tools.NewRegistry()
 	cfg := Config{Model: "test-model", PermissionMode: "auto"}
@@ -215,3 +237,140 @@ func TestBuildSubAgentSystemPromptToolList(t *testing.T) {
 
 // Suppress unused import warnings
 var _ = tools.NewRegistry
+
+// TestBuildSubAgentRegistryDisallowedOverridesAllowed verifies that when a tool
+// appears in both allowed_tools and disallowed_tools, disallowed always wins.
+// This is the core test for the "disallowed_tools 对 exec 未完全阻止" issue.
+func TestBuildSubAgentRegistryDisallowedOverridesAllowed(t *testing.T) {
+	// Create a parent registry with test tools
+	parentRegistry := tools.NewRegistry()
+	parentRegistry.Register(testRegistryTool{"read_file"})
+	parentRegistry.Register(testRegistryTool{"exec"})
+	parentRegistry.Register(testRegistryTool{"grep"})
+	parentRegistry.Register(testRegistryTool{"write_file"})
+
+	// Create AgentLoop with the parent registry
+	loop := &AgentLoop{registry: parentRegistry}
+
+	// allowed=["read_file", "exec"], disallowed=["exec"]
+	// exec should NOT appear in the result because disallowed wins
+	child := loop.buildSubAgentRegistry(AgentTypeGeneral, []string{"read_file", "exec"}, []string{"exec"}, false)
+
+	names := toolNames(child)
+
+	if names["exec"] {
+		t.Error("exec should be excluded: it is in disallowed_tools, even though it is also in allowed_tools")
+	}
+	if !names["read_file"] {
+		t.Error("read_file should be included: it is in allowed_tools and not disallowed")
+	}
+
+	// grep and write_file should be excluded because they are not in the allowed list
+	if names["grep"] {
+		t.Error("grep should be excluded: not in allowed_tools")
+	}
+	if names["write_file"] {
+		t.Error("write_file should be excluded: not in allowed_tools")
+	}
+}
+
+// TestBuildSubAgentRegistryAllowedOnly verifies that allowed_tools works as a
+// whitelist when no disallowed_tools are specified.
+func TestBuildSubAgentRegistryAllowedOnly(t *testing.T) {
+	parentRegistry := tools.NewRegistry()
+	parentRegistry.Register(testRegistryTool{"read_file"})
+	parentRegistry.Register(testRegistryTool{"exec"})
+	parentRegistry.Register(testRegistryTool{"grep"})
+
+	loop := &AgentLoop{registry: parentRegistry}
+	child := loop.buildSubAgentRegistry(AgentTypeGeneral, []string{"read_file", "exec"}, nil, false)
+
+	names := toolNames(child)
+
+	if !names["read_file"] {
+		t.Error("read_file should be included")
+	}
+	if !names["exec"] {
+		t.Error("exec should be included")
+	}
+	if names["grep"] {
+		t.Error("grep should be excluded: not in allowed list")
+	}
+}
+
+// TestBuildSubAgentRegistryDisallowedOnly verifies that disallowed_tools works
+// as a deny list when no allowed_tools are specified.
+func TestBuildSubAgentRegistryDisallowedOnly(t *testing.T) {
+	parentRegistry := tools.NewRegistry()
+	parentRegistry.Register(testRegistryTool{"read_file"})
+	parentRegistry.Register(testRegistryTool{"exec"})
+	parentRegistry.Register(testRegistryTool{"grep"})
+
+	loop := &AgentLoop{registry: parentRegistry}
+	child := loop.buildSubAgentRegistry(AgentTypeGeneral, nil, []string{"exec"}, false)
+
+	names := toolNames(child)
+
+	if names["exec"] {
+		t.Error("exec should be excluded: in disallowed list")
+	}
+	if !names["read_file"] {
+		t.Error("read_file should be included: not disallowed")
+	}
+	if !names["grep"] {
+		t.Error("grep should be included: not disallowed")
+	}
+}
+
+// TestBuildSubAgentRegistryWildcardAllowed verifies that allowed=["*"] means
+// "all non-disallowed tools".
+func TestBuildSubAgentRegistryWildcardAllowed(t *testing.T) {
+	parentRegistry := tools.NewRegistry()
+	parentRegistry.Register(testRegistryTool{"read_file"})
+	parentRegistry.Register(testRegistryTool{"exec"})
+	parentRegistry.Register(testRegistryTool{"grep"})
+
+	loop := &AgentLoop{registry: parentRegistry}
+
+	// Wildcard allows everything, but disallowed still applies
+	child := loop.buildSubAgentRegistry(AgentTypeGeneral, []string{"*"}, []string{"exec"}, false)
+
+	names := toolNames(child)
+
+	if names["exec"] {
+		t.Error("exec should be excluded even with wildcard allowed")
+	}
+	if !names["read_file"] || !names["grep"] {
+		t.Error("read_file and grep should be included with wildcard")
+	}
+}
+
+// TestBuildSubAgentRegistryMultipleDisallowedOverridesAllowed tests that multiple
+// tools in the intersection are all excluded.
+func TestBuildSubAgentRegistryMultipleDisallowedOverridesAllowed(t *testing.T) {
+	parentRegistry := tools.NewRegistry()
+	parentRegistry.Register(testRegistryTool{"read_file"})
+	parentRegistry.Register(testRegistryTool{"exec"})
+	parentRegistry.Register(testRegistryTool{"grep"})
+	parentRegistry.Register(testRegistryTool{"write_file"})
+
+	loop := &AgentLoop{registry: parentRegistry}
+
+	// allowed=[read_file, exec, grep], disallowed=[exec, grep]
+	child := loop.buildSubAgentRegistry(AgentTypeGeneral, []string{"read_file", "exec", "grep"}, []string{"exec", "grep"}, false)
+
+	names := toolNames(child)
+
+	if names["exec"] {
+		t.Error("exec should be excluded")
+	}
+	if names["grep"] {
+		t.Error("grep should be excluded")
+	}
+	if !names["read_file"] {
+		t.Error("read_file should be included")
+	}
+	if names["write_file"] {
+		t.Error("write_file should be excluded: not in allowed list")
+	}
+}

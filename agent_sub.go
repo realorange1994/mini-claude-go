@@ -325,10 +325,11 @@ func (a *AgentLoop) SpawnSubAgent(
 
 			childLoop.context.SetSystemPrompt(childSysPrompt)
 
-			// Apply fork mode with cloned entries
+			// Apply fork mode with cloned entries (filtered same as sync path)
 			if inheritContext && len(parentEntries) > 0 {
+				filtered := filterEntriesForFork(parentEntries)
 				childLoop.context.mu.Lock()
-				for _, entry := range parentEntries {
+				for _, entry := range filtered {
 					childLoop.context.entries = append(childLoop.context.entries, entry)
 				}
 				childLoop.context.mu.Unlock()
@@ -614,53 +615,36 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry) (
 	return child, nil
 }
 
-// cloneContextForFork clones the parent's conversation context into the child agent.
-// Tool results are replaced with placeholders for prompt cache stability.
-// The last ToolUseContent (the agent tool that triggered this child) is NOT
-// copied, because the child does not have a corresponding tool_result for it.
-func (a *AgentLoop) cloneContextForFork(childLoop *AgentLoop) {
-	a.context.mu.RLock()
-	defer a.context.mu.RUnlock()
-
+// filterEntriesForFork filters parent conversation entries for use in a child agent's
+// forked context. It returns a copy of the entries with:
+//   - The last ToolUseContent entry removed (the agent tool that triggered this child
+//     has no corresponding tool_result in the child context, so including it would
+//     cause an API error for missing tool_result).
+//   - CompactBoundaryContent and AttachmentContent entries removed (not meaningful in
+//     the child's context).
+//   - All other entries (TextContent, ToolUseContent, ToolResultContent, SummaryContent)
+//     preserved as-is so the child can reference the parent's prior work.
+func filterEntriesForFork(entries []conversationEntry) []conversationEntry {
 	// Find the last ToolUseContent entry index (the agent tool that triggered this child)
 	lastToolUseIdx := -1
-	for i, entry := range a.context.entries {
+	for i, entry := range entries {
 		if _, ok := entry.content.(ToolUseContent); ok {
 			lastToolUseIdx = i
 		}
 	}
 
-	childLoop.context.mu.Lock()
-	defer childLoop.context.mu.Unlock()
-
-	for i, entry := range a.context.entries {
+	filtered := make([]conversationEntry, 0, len(entries))
+	for i, entry := range entries {
 		// Skip the last ToolUseContent (agent tool) -- the child has no tool_result for it
 		if i == lastToolUseIdx {
 			continue
 		}
 
-		switch v := entry.content.(type) {
-		case TextContent:
-			childLoop.context.entries = append(childLoop.context.entries, conversationEntry{
+		switch entry.content.(type) {
+		case TextContent, ToolUseContent, ToolResultContent, SummaryContent:
+			filtered = append(filtered, conversationEntry{
 				role:    entry.role,
-				content: v,
-			})
-		case ToolUseContent:
-			childLoop.context.entries = append(childLoop.context.entries, conversationEntry{
-				role:    entry.role,
-				content: v,
-			})
-		case ToolResultContent:
-			// Preserve tool results as-is so the child can reference them.
-			// The child needs actual content, not placeholders.
-			childLoop.context.entries = append(childLoop.context.entries, conversationEntry{
-				role:    entry.role,
-				content: v,
-			})
-		case SummaryContent:
-			childLoop.context.entries = append(childLoop.context.entries, conversationEntry{
-				role:    entry.role,
-				content: v,
+				content: entry.content,
 			})
 		case CompactBoundaryContent, AttachmentContent:
 			// Skip compact boundaries and attachments in fork mode
@@ -669,6 +653,21 @@ func (a *AgentLoop) cloneContextForFork(childLoop *AgentLoop) {
 			continue
 		}
 	}
+	return filtered
+}
+
+// cloneContextForFork clones the parent's conversation context into the child agent.
+// Tool results are preserved as-is so the child can reference the parent's work.
+// The last ToolUseContent (the agent tool that triggered this child) is NOT
+// copied, because the child does not have a corresponding tool_result for it.
+func (a *AgentLoop) cloneContextForFork(childLoop *AgentLoop) {
+	a.context.mu.RLock()
+	filtered := filterEntriesForFork(a.context.entries)
+	a.context.mu.RUnlock()
+
+	childLoop.context.mu.Lock()
+	defer childLoop.context.mu.Unlock()
+	childLoop.context.entries = append(childLoop.context.entries, filtered...)
 }
 
 // SendMessageToSubAgent sends a message to a running sub-agent or returns its status.

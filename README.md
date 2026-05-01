@@ -4,7 +4,7 @@ A lightweight implementation of Claude Code's agent loop framework written in Go
 
 ## Overview
 
-miniClaudeCode-go is a minimal AI agent framework that implements the core agentic loop pattern similar to Claude Code. It provides a tool-use paradigm where an LLM can execute various tools to accomplish complex tasks, with error handling, context management, and crash recovery.
+miniClaudeCode-go is a minimal AI agent framework that implements the core agentic loop pattern similar to Claude Code. It provides a tool-use paradigm where an LLM can execute various tools to accomplish complex tasks, with error handling, context management, and crash recovery. It supports Anthropic and OpenAI-compatible proxy endpoints through a unified configuration interface.
 
 ## Features
 
@@ -18,7 +18,7 @@ miniClaudeCode-go is a minimal AI agent framework that implements the core agent
   - Reactive compact: triggers on token spikes between turns
   - Fallback: round-based, smart, selective, and aggressive truncation phases
 - **@ Context References**: Inject file content, folder listings, git diffs, and URLs into prompts with `@file:path`, `@folder:path`, `@staged`, `@diff`, `@git:N`, `@url:URL`. Supports line ranges, token budget guardrails, and sensitive path protection
-- **Tool System**: 25+ built-in tools with argument type coercion and schema validation:
+- **Tool System**: 35+ built-in tools with argument type coercion and schema validation:
   - `exec` -- Shell command execution with safety patterns
   - `read_file` / `write_file` / `edit_file` / `multi_edit` -- File operations with read-before-edit enforcement
   - `glob` / `grep` / `list_dir` -- File system search and navigation
@@ -32,8 +32,34 @@ miniClaudeCode-go is a minimal AI agent framework that implements the core agent
   - `memory_add` / `memory_search` -- Session memory tools
   - `read_skill` / `list_skills` / `search_skills` -- Skill loading and discovery
   - `list_mcp_tools` / `call_mcp_tool` / `mcp_server_status` -- MCP tool integration
-- **File History**: Snapshot, diff, rewind, restore, checkout, tag, annotate, search, timeline, and batch operations -- 12 dedicated file history tools
+  - `agent` -- Sub-agent spawning for complex multi-step tasks, with support for specialized types (explore, plan, verify), background execution, tool whitelisting/blacklisting, and context inheritance
+  - `send_message` -- Send messages to running sub-agents or query status
+  - `task_output` -- Retrieve background sub-agent or bash task output with optional blocking wait
+  - `task_stop` -- Stop a running background task by ID
+  - `task_create` / `task_list` / `task_get` / `task_update` -- Work task management with dependency tracking (blocks/blockedBy), metadata, and owner assignment
+  - Background bash task spawning -- spawn shell commands as tracked background processes with output file collection, completion notifications, and task lifecycle management
+  - **File History**: 12 dedicated file history tools (snapshot, diff, rewind, restore, checkout, tag, annotate, search, timeline, batch)
 - **Permission Modes**: Three permission modes for different use cases (`ask`, `auto`, `plan`)
+- **Sub-Agent System (AgentTool)**: Spawn child agent loops to handle complex, multi-step tasks autonomously. Features:
+  - Specialized agent types: `explore` (read-only search), `plan` (read-only architecture planning), `verify` (adversarial testing), and general-purpose (default)
+  - Synchronous (block until completion) or asynchronous (run in background) execution
+  - Tool access control via whitelisting (`allowed_tools`) and blacklisting (`disallowed_tools`), with a wildcard `"*"` option
+  - Context inheritance (fork mode) -- sub-agent can inherit parent's full conversation history
+  - Recursive spawning protection -- sub-agents cannot spawn further agents
+  - Agent name registry for human-friendly references
+  - Completion notifications delivered to parent via buffered channel, injected into conversation context
+  - Task lifecycle tracking: pending -> running -> completed/failed/killed, with automatic eviction
+- **Work Task Management (TaskTool)**: Structured task tracking system for organizing complex work:
+  - Create, list, get, and update tasks with subject, description, and active form
+  - Dependency graph with `blocks`/`blockedBy` relationships and cycle detection
+  - Task status workflow: pending -> in_progress -> completed/deleted
+  - Owner assignment for sub-agent delegation
+  - Arbitrary metadata attachment (merge or delete individual keys)
+- **Background Bash Tasks**: Spawn shell commands as tracked background processes:
+  - Output written to disk files under `.claude/tasks/bash/`
+  - Completion notifications with exit code, duration, and status
+  - Process tracking for external kill support via `task_stop`
+  - Large output truncation (head + tail with truncation marker)
 - **MCP Support**: Model Context Protocol client for external tool integration (stdio + HTTP/SSE transports). Supports both project-level `.mcp.json` and home directory `~/.claude/.mcp.json`
 - **Skills System**: Extensible skill loader with read_skill, list_skills, and search_skills, plus a SkillTracker for progressive disclosure across turns. Supports both workspace skills and binary-bundled builtin skills
 - **Session Memory**: Persistent structured notes across the session stored in `.claude/session_memory.md`. Notes are categorized (preference, decision, state, reference) and flushed to disk periodically. Used by SM-compact as the summary source
@@ -56,11 +82,11 @@ go build -o miniclaudecode .
 ## Usage
 
 ```bash
-# Interactive mode (streaming is on by default)
+# Interactive mode (streaming is off by default)
 ./miniclaudecode
 
-# Disable streaming
-./miniclaudecode --no-stream
+# Enable streaming output
+./miniclaudecode --stream
 
 # Specify permission mode
 ./miniclaudecode --mode ask
@@ -78,7 +104,7 @@ go build -o miniclaudecode .
 ./miniclaudecode "Explain this code"
 
 # Combine options
-./miniclaudecode --mode auto --dir /path/to/project --resume last
+./miniclaudecode --stream --mode auto --dir /path/to/project --resume last
 ```
 
 ### Slash Commands (in interactive mode)
@@ -222,12 +248,71 @@ The memory:
 
 Switch modes interactively with `/mode auto`, `/mode ask`, or `/mode plan`.
 
+## Sub-Agent System
+
+The `agent` tool spawns a child `AgentLoop` with isolated conversation context and restricted tool access. Sub-agents are managed by a `TaskStore` that tracks lifecycle, results, and notifications.
+
+### Agent Types
+
+| Type | Read-Only | Purpose |
+|------|-----------|---------|
+| *(empty)* | No | General-purpose agent with full tool access |
+| `explore` | Yes | Codebase search and analysis specialist |
+| `plan` | Yes | Architecture and implementation planning specialist |
+| `verify` | No* | Adversarial verification specialist |
+
+*Verify agents can write ephemeral test scripts to temp directories but cannot modify the project.
+
+### Tool Access Control
+
+Sub-agent tool access is filtered in layers:
+
+1. **Layer 1**: Global disallowed tools (always denied, e.g., `agent` -- prevents recursive spawning)
+2. **Layer 2**: Async-specific disallowed tools (additionally denied for background agents)
+3. **Layer 3**: Agent type deny list (e.g., `explore`/`plan` agents have `write_file`, `edit_file`, `exec`, `git` denied)
+4. **Layer 4**: Explicit caller disallowed tools
+
+After filtering, if `allowed_tools` (whitelist) is provided, only those tools are included. Use `["*"]` as a wildcard to allow all non-disallowed tools.
+
+### Synchronous vs Asynchronous
+
+- **Synchronous** (default): Blocks until the sub-agent completes. Returns the result directly.
+- **Asynchronous** (`run_in_background=true`): Launches the sub-agent in a background goroutine. Returns the `agentId` immediately. Completion notifications are delivered via a buffered channel and injected into the parent's conversation context on the next prompt.
+
+### Context Inheritance (Fork Mode)
+
+When `inherit_context=true`, the sub-agent receives a clone of the parent's conversation history. Tool results are preserved as-is (not replaced with placeholders) so the child can reference them. Compact boundaries and attachments are excluded from the clone.
+
+### Background Bash Tasks
+
+The `exec` tool supports background bash task spawning. Commands are run as detached OS processes with output written to `.claude/tasks/bash/<taskID>.output`. The TaskStore tracks the process for kill support via `task_stop`. Completion notifications include exit code, duration, and status.
+
+### Resuming Async Agents
+
+Completed async agents can be resumed from their transcript via `ResumeAsyncAgent`. This creates a new `AgentLoop` loaded from the stored transcript, allowing continuation of a previously completed background task.
+
+## Work Task Management
+
+The work task system (distinct from the sub-agent task store) provides structured tracking for LLM work items:
+
+- **Create**: `task_create` -- create a task with subject, description, active form, and optional metadata
+- **List**: `task_list` -- display all tasks in a table with ID, subject, status, owner, and dependency info
+- **Get**: `task_get` -- retrieve full details including description, metadata, and dependency graph
+- **Update**: `task_update` -- change status, assign owner, edit description, or add dependency edges
+
+### Dependency Tracking
+
+Tasks support `blocks`/`blockedBy` relationships. Adding a `blockedBy` edge performs cycle detection using BFS across both `Blocks` and `BlockedBy` edges. Invalid references (non-existent task IDs) are silently removed. When a task is deleted, all references to it are cleaned up from other tasks.
+
 ## Architecture
 
 ```
 miniClaudeCode-go/
 ├── main.go                  # Entry point and REPL with slash commands
-├── agent_loop.go            # Core agent loop with IterationBudget, preflight compression
+├── agent_loop.go            # Core agent loop with IterationBudget, preflight compression, notification system
+├── agent_sub.go             # Sub-agent system: SpawnSubAgent, specialized agent types (explore/plan/verify), fork mode
+├── agent_task.go            # Sub-agent task store (TaskStore, TaskState), background bash task spawning
+├── work_task.go             # Work task management (WorkTaskStore, dependency graph with cycle detection)
 ├── streaming.go             # Streaming with ThinkFilter, StreamProgress, StreamAdapter
 ├── context.go               # ConversationContext with tool pairing and role alternation
 ├── context_references.go    # @ reference expansion (file, folder, git, url)
@@ -248,6 +333,10 @@ miniClaudeCode-go/
 ├── tools/                   # Built-in tool implementations
 │   ├── base.go            # ToolResultMetadata and schema validation
 │   ├── coercion.go        # Argument type coercion
+│   ├── agent_tool.go      # AgentTool -- sub-agent spawning with type, model, background support
+│   ├── send_message_tool.go # SendMessageTool -- send/query running sub-agents
+│   ├── task_tool.go       # TaskCreate/List/Get/Update/Stop tools for work task management
+│   ├── task_output_tool.go # TaskOutputTool -- retrieve background task output with blocking wait
 │   ├── exec_tool.go       # Shell command execution
 │   ├── file_read.go       # File reading
 │   ├── file_write.go      # File writing
@@ -278,10 +367,7 @@ miniClaudeCode-go/
 
 ## Compatibility
 
-Works with Anthropic API and compatible endpoints. Tested with:
-- Anthropic Claude models (sonnet-4-6, opus-4-6, haiku-4-5)
-- OpenAI-compatible proxies
-- MiniMax models (via compatible proxy)
+Works with Anthropic API and compatible endpoints. Set the model via `ANTHROPIC_MODEL` environment variable or `--model` flag.
 
 ## License
 
