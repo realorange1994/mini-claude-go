@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -297,6 +299,230 @@ func splitShellCommands(cmd string) []string {
 		return []string{cmd}
 	}
 	return segments
+}
+
+// isDangerousRemovalPath checks if a resolved path targets a system-critical directory.
+// Modeled after Claude Code's isDangerousRemovalPath() in pathValidation.ts.
+// Returns true for paths that should never be auto-allowed for deletion.
+func isDangerousRemovalPath(resolvedPath string) bool {
+	// Normalize: backslashes to forward slashes, trim trailing slashes
+	p := strings.ReplaceAll(resolvedPath, "\\", "/")
+
+	// Check exact root BEFORE trimming (TrimRight would turn "/" into "")
+	if p == "/" {
+		return true
+	}
+
+	p = strings.TrimRight(p, "/")
+	if p == "" {
+		return false // empty path after normalization
+	}
+
+	// Expand ~ to home directory
+	if strings.HasPrefix(p, "~") || strings.HasPrefix(p, "~/") {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return false // cannot resolve home, treat as safe
+		}
+		homeNorm := strings.ReplaceAll(filepath.ToSlash(homeDir), "\\", "/")
+		homeNorm = strings.TrimRight(homeNorm, "/")
+		if p == "~" {
+			p = homeNorm
+		} else {
+			p = homeNorm + p[1:]
+		}
+	}
+
+	// Exact root directory
+	if p == "/" {
+		return true
+	}
+
+	// Wildcard removal
+	if p == "*" || strings.HasSuffix(p, "/*") {
+		return true
+	}
+
+	// Home directory itself
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		homeNorm := strings.ReplaceAll(filepath.ToSlash(homeDir), "\\", "/")
+		homeNorm = strings.TrimRight(homeNorm, "/")
+		if p == homeNorm {
+			return true
+		}
+	}
+
+	// Direct child of root (e.g., /usr, /tmp, /etc, /bin, /var)
+	if strings.HasPrefix(p, "/") {
+		parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 2)
+		if len(parts) == 1 || parts[1] == "" {
+			// Exactly one component after root → direct child
+			return true
+		}
+	}
+
+	// Windows drive root: C:\, D:\, etc.
+	if matched, _ := regexp.MatchString(`^[A-Za-z]:\\?$`, resolvedPath); matched {
+		return true
+	}
+
+	// Windows drive direct children: C:\Windows, C:\Users, C:\Program Files, etc.
+	winProtectedDirs := []string{
+		"Windows", "Users", "Program Files", "Program Files (x86)",
+		"ProgramData", "PerfLogs",
+	}
+	for _, dir := range winProtectedDirs {
+		escaped := regexp.QuoteMeta(dir)
+		if matched, _ := regexp.MatchString(`^[A-Za-z]:\\`+escaped+`$`, resolvedPath); matched {
+			return true
+		}
+	}
+
+	return false
+}
+
+// extractRemovalPaths extracts path arguments from an rm/rmdir command string.
+// Skips flags starting with - (stops at --), returns remaining arguments as paths.
+func extractRemovalPaths(command string) []string {
+	var paths []string
+	args := tokenizeCommand(command)
+	if len(args) == 0 {
+		return paths
+	}
+	// Skip the command name (rm, rmdir, etc.)
+	i := 1
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--" {
+			i++
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			i++
+			continue
+		}
+		paths = append(paths, arg)
+		i++
+	}
+	// Remaining args after flags or --
+	for i < len(args) {
+		paths = append(paths, args[i])
+		i++
+	}
+	return paths
+}
+
+// tokenizeCommand splits a command string into tokens, respecting quoted strings.
+func tokenizeCommand(command string) []string {
+	var tokens []string
+	var current strings.Builder
+	inSingleQuote := false
+	inDoubleQuote := false
+
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if inSingleQuote {
+			if c == '\'' {
+				inSingleQuote = false
+			} else {
+				current.WriteByte(c)
+			}
+			continue
+		}
+		if inDoubleQuote {
+			if c == '"' {
+				inDoubleQuote = false
+			} else if c == '\\' && i+1 < len(command) {
+				i++
+				current.WriteByte(command[i])
+			} else {
+				current.WriteByte(c)
+			}
+			continue
+		}
+		if c == '\'' {
+			inSingleQuote = true
+			continue
+		}
+		if c == '"' {
+			inDoubleQuote = true
+			continue
+		}
+		if c == ' ' || c == '\t' {
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		current.WriteByte(c)
+	}
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+	return tokens
+}
+
+// resolveRemovalPath resolves a path relative to cwd for removal path checking.
+// Handles both Unix-style (/) and Windows-style (C:\) absolute paths.
+func resolveRemovalPath(path, cwd string) string {
+	// Check for Unix-style absolute path (starts with /)
+	if strings.HasPrefix(path, "/") {
+		return filepath.Clean(path)
+	}
+	// Check for Windows-style absolute path (X:\)
+	if len(path) >= 2 && path[1] == ':' && (path[0] >= 'A' && path[0] <= 'Z' || path[0] >= 'a' && path[0] <= 'z') {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(filepath.Join(cwd, path))
+}
+
+// checkDangerousRemovalPaths checks all paths in an rm command for dangerous targets.
+// Returns (isDangerous bool, reason string).
+func checkDangerousRemovalPaths(command string, cwd string) (bool, string) {
+	paths := extractRemovalPaths(command)
+	for _, p := range paths {
+		resolved := resolveRemovalPath(p, cwd)
+		if isDangerousRemovalPath(resolved) {
+			return true, fmt.Sprintf("rm targets critical system path %q", resolved)
+		}
+	}
+	return false, ""
+}
+
+// getExecSafetyContext provides classifier context for removal commands.
+// Returns a context string if the command is an rm/rmdir, empty string otherwise.
+func getExecSafetyContext(command string, cwd string) string {
+	trimmed := strings.TrimSpace(command)
+	if !strings.HasPrefix(trimmed, "rm ") && !strings.HasPrefix(trimmed, "rm\t") &&
+		trimmed != "rm" {
+		return ""
+	}
+	paths := extractRemovalPaths(command)
+	for _, p := range paths {
+		resolved := resolveRemovalPath(p, cwd)
+		if isDangerousRemovalPath(resolved) {
+			return fmt.Sprintf("DANGEROUS: rm targets critical system path %q. This is BLOCK ALWAYS (Irreversible Local Destruction).", resolved)
+		}
+	}
+	if len(paths) > 0 {
+		return "INFO: rm targets project-scoped paths only. User explicitly requested deletion."
+	}
+	return ""
+}
+
+// isFileopsDangerousRemovalPath checks if a fileops removal operation targets a dangerous path.
+// Used by IsAutoAllowlisted for fileops rm/rmrf operations.
+func isFileopsDangerousRemovalPath(operation string, path string, cwd string) bool {
+	if operation != "rm" && operation != "rmdir" && operation != "rmrf" {
+		return false
+	}
+	if path == "" {
+		return false
+	}
+	resolved := resolveRemovalPath(path, cwd)
+	return isDangerousRemovalPath(resolved)
 }
 
 // IsAutoAllowlisted returns true if the tool call is in the safe whitelist
@@ -820,7 +1046,12 @@ func formatActionForClassifier(toolName string, input map[string]any) string {
 	switch toolName {
 	case "exec":
 		if cmd, ok := input["command"].(string); ok {
-			return fmt.Sprintf("Tool: exec (shell command)\nCommand: %s", cmd)
+			cwd, _ := os.Getwd()
+			action := fmt.Sprintf("Tool: exec (shell command)\nCommand: %s", cmd)
+			if ctx := getExecSafetyContext(cmd, cwd); ctx != "" {
+				action += "\n" + ctx
+			}
+			return action
 		}
 	case "write_file":
 		path, _ := input["path"].(string)
@@ -838,7 +1069,14 @@ func formatActionForClassifier(toolName string, input map[string]any) string {
 	case "fileops":
 		op, _ := input["operation"].(string)
 		path, _ := input["path"].(string)
-		return fmt.Sprintf("Tool: fileops\nOperation: %s\nPath: %s", op, path)
+		action := fmt.Sprintf("Tool: fileops\nOperation: %s\nPath: %s", op, path)
+		cwd, _ := os.Getwd()
+		if isFileopsDangerousRemovalPath(op, path, cwd) {
+			action += "\nDANGEROUS: Fileops deletion targets critical system path. This is BLOCK ALWAYS (Irreversible Local Destruction)."
+		} else if op == "rm" || op == "rmdir" || op == "rmrf" {
+			action += "\nINFO: Fileops deletion targets project-scoped path. User explicitly requested deletion."
+		}
+		return action
 	case "git":
 		args, _ := input["args"].(string)
 		return fmt.Sprintf("Tool: git\nArgs: %s", args)

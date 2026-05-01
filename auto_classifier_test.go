@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 )
 
@@ -445,5 +446,165 @@ func TestPermissionGateAutoModeWhitelistResetsDenial(t *testing.T) {
 	gate.Check(whitelistedTool, map[string]any{})
 	if gate.denialCount != 0 {
 		t.Errorf("whitelisted tool should reset denial count, got %d", gate.denialCount)
+	}
+}
+
+// Tests for isDangerousRemovalPath
+
+func TestIsDangerousRemovalPath(t *testing.T) {
+	homeDir, _ := os.UserHomeDir()
+
+	// Dangerous paths
+	dangerousPaths := []string{
+		"/",
+		"/usr",
+		"/tmp",
+		"/etc",
+		"/home",
+		"/var",
+		"/bin",
+		"/sbin",
+		"/lib",
+		"/opt",
+		"/root",
+		"/boot",
+		"/dev",
+		"/proc",
+		"/sys",
+		"/run",
+		"/mnt",
+		"/media",
+		"/srv",
+		"/snap",
+		"*",
+		"/*",
+	}
+	for _, p := range dangerousPaths {
+		if !isDangerousRemovalPath(p) {
+			t.Errorf("isDangerousRemovalPath(%q) = false, want true", p)
+		}
+	}
+
+	// Home directory itself
+	if homeDir != "" && !isDangerousRemovalPath(homeDir) {
+		t.Errorf("isDangerousRemovalPath(%q) = false, want true", homeDir)
+	}
+
+	// Tilde expansion
+	if !isDangerousRemovalPath("~") {
+		t.Error("isDangerousRemovalPath(\"~\") = false, want true")
+	}
+
+	// Safe paths
+	safePaths := []string{
+		"/home/user/project/build",
+		"/home/user/project/node_modules",
+		"./build",
+		"./node_modules",
+		"./dist",
+		"./tmp",
+		"build",
+		"dist",
+		"/home/user/project/src/build",
+		"/var/log/myapp/debug",
+	}
+	for _, p := range safePaths {
+		if isDangerousRemovalPath(p) {
+			t.Errorf("isDangerousRemovalPath(%q) = true, want false", p)
+		}
+	}
+
+	// Windows paths
+	winDangerous := []string{
+		"C:\\",
+		"D:\\",
+		"C:\\Windows",
+		"C:\\Users",
+		"C:\\Program Files",
+		"C:\\Program Files (x86)",
+		"C:\\ProgramData",
+	}
+	for _, p := range winDangerous {
+		if !isDangerousRemovalPath(p) {
+			t.Errorf("isDangerousRemovalPath(%q) = false, want true", p)
+		}
+	}
+
+	winSafe := []string{
+		"C:\\Projects\\myapp",
+		"C:\\Users\\myuser\\project\\build",
+		"D:\\workspace\\dist",
+	}
+	for _, p := range winSafe {
+		if isDangerousRemovalPath(p) {
+			t.Errorf("isDangerousRemovalPath(%q) = true, want false", p)
+		}
+	}
+}
+
+func TestExtractRemovalPaths(t *testing.T) {
+	tests := []struct {
+		command string
+		want    []string
+	}{
+		{"rm -rf /tmp/build", []string{"/tmp/build"}},
+		{"rm -rf -v /tmp/a /tmp/b", []string{"/tmp/a", "/tmp/b"}},
+		{"rm -- /tmp/file", []string{"/tmp/file"}},
+		{"rm -rf -- /tmp/a /tmp/b", []string{"/tmp/a", "/tmp/b"}},
+		{"rm -f \"my file with spaces\"", []string{"my file with spaces"}},
+		{"rm -f 'single quotes'", []string{"single quotes"}},
+		{"rm ./build ./dist", []string{"./build", "./dist"}},
+		{"rmdir /tmp/empty", []string{"/tmp/empty"}},
+	}
+
+	for _, tc := range tests {
+		got := extractRemovalPaths(tc.command)
+		if len(got) != len(tc.want) {
+			t.Errorf("extractRemovalPaths(%q) = %v, want %v", tc.command, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("extractRemovalPaths(%q)[%d] = %q, want %q", tc.command, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestGetExecSafetyContext(t *testing.T) {
+	cwd := "/home/user/project"
+
+	// Dangerous rm (direct child of root)
+	ctx := getExecSafetyContext("rm -rf /", cwd)
+	if ctx == "" || !containsSubstring(ctx, "DANGEROUS") {
+		t.Errorf("getExecSafetyContext(\"rm -rf /\") should contain DANGEROUS, got %q", ctx)
+	}
+
+	ctx = getExecSafetyContext("rm -rf /usr", cwd)
+	if ctx == "" || !containsSubstring(ctx, "DANGEROUS") {
+		t.Errorf("getExecSafetyContext(\"rm -rf /usr\") should contain DANGEROUS, got %q", ctx)
+	}
+
+	ctx = getExecSafetyContext("rm -rf /tmp", cwd)
+	if ctx == "" || !containsSubstring(ctx, "DANGEROUS") {
+		t.Errorf("getExecSafetyContext(\"rm -rf /tmp\") should contain DANGEROUS, got %q", ctx)
+	}
+
+	// Safe rm (project-scoped paths, not direct children of root)
+	ctx = getExecSafetyContext("rm -rf ./build", cwd)
+	if ctx == "" || !containsSubstring(ctx, "INFO") {
+		t.Errorf("getExecSafetyContext(\"rm -rf ./build\") should contain INFO, got %q", ctx)
+	}
+
+	// /usr/local is not a direct child of root — goes through the classifier instead
+	ctx = getExecSafetyContext("rm -rf /usr/local", cwd)
+	if ctx == "" || !containsSubstring(ctx, "INFO") {
+		t.Errorf("getExecSafetyContext(\"rm -rf /usr/local\") should contain INFO (not direct child of root), got %q", ctx)
+	}
+
+	// Non-rm command
+	ctx = getExecSafetyContext("ls -la", cwd)
+	if ctx != "" {
+		t.Errorf("getExecSafetyContext(\"ls -la\") should be empty, got %q", ctx)
 	}
 }
