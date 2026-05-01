@@ -111,21 +111,13 @@ var SAFE_PROCESS_OPERATIONS = map[string]bool{
 }
 
 // SAFE_FILEOPS_OPERATIONS are read-only fileops operations that can be auto-allowed.
-// Write/destructive operations are NOT listed here and will go through
-// the classifier (or be blocked outright if in DANGEROUS_FILEOPS_OPERATIONS).
+// Write/destructive operations are NOT listed here and will go through the classifier.
 var SAFE_FILEOPS_OPERATIONS = map[string]bool{
 	"read":     true,
 	"stat":     true,
 	"checksum": true,
 	"exists":   true,
 	"ls":       true,
-}
-
-// DANGEROUS_FILEOPS_OPERATIONS are so destructive they should always be blocked,
-// even if the classifier were to allow them. These bypass the classifier
-// entirely and are unconditionally denied.
-var DANGEROUS_FILEOPS_OPERATIONS = map[string]bool{
-	"rmrf": true,
 }
 
 // SAFE_EXEC_PREFIXES are shell command prefixes that are always safe (read-only).
@@ -328,12 +320,9 @@ func IsAutoAllowlisted(toolName string, toolInput map[string]any) bool {
 		}
 	}
 	// Fileops: operation-level granularity — read-only ops auto-allowed,
-	// destructive ops always blocked (see IsAlwaysBlocked), rest go through classifier
+	// destructive ops go through classifier
 	if toolName == "fileops" {
 		if op, ok := toolInput["operation"].(string); ok {
-			if IsAlwaysBlocked(toolName, toolInput) {
-				return false
-			}
 			return SAFE_FILEOPS_OPERATIONS[op]
 		}
 		// No operation field → go through classifier
@@ -343,19 +332,6 @@ func IsAutoAllowlisted(toolName string, toolInput map[string]any) bool {
 	if toolName == "exec" {
 		if cmd, ok := toolInput["command"].(string); ok {
 			return isSafeExecCommand(cmd)
-		}
-	}
-	return false
-}
-
-// IsAlwaysBlocked returns true if the tool call should always be blocked,
-// bypassing the classifier entirely. These are operations so destructive that
-// even a misbehaving classifier must not allow them.
-func IsAlwaysBlocked(toolName string, toolInput map[string]any) bool {
-	// Fileops: dangerous operations like rmrf are always blocked
-	if toolName == "fileops" {
-		if op, ok := toolInput["operation"].(string); ok {
-			return DANGEROUS_FILEOPS_OPERATIONS[op]
 		}
 	}
 	return false
@@ -392,20 +368,12 @@ func (c *AutoModeClassifier) IsEnabled() bool {
 }
 
 // Classify determines whether a tool call should be allowed in auto mode.
-// It first checks always-blocked, then whitelist, then cache, then makes an LLM call if needed.
+// It first checks whitelist, then cache, then makes an LLM call if needed.
 func (c *AutoModeClassifier) Classify(
 	toolName string,
 	toolInput map[string]any,
 	transcript string,
 ) ClassifierResult {
-	// Check always-blocked first (e.g., fileops rmrf — never allow regardless)
-	if IsAlwaysBlocked(toolName, toolInput) {
-		return ClassifierResult{
-			Allow:  false,
-			Reason: "operation is always blocked in auto mode",
-		}
-	}
-
 	if !c.IsEnabled() {
 		// Classifier unavailable: fail-closed (block)
 		return ClassifierResult{
@@ -807,6 +775,15 @@ You receive a transcript of the conversation so far (user messages and previous 
 3. **Evaluate risk**: Assess the action against the categories below.
 
 ## Decision Categories
+
+## BLOCK ALWAYS Categories (reject any tool call matching these):
+
+1. **External Code Execution**: curl|bash, wget|sh, piping to shell, npm/pip from unverified sources
+2. **Irreversible Local Destruction**: rm -rf, recursive file deletion, file truncation, database drops, mkfs, dd if=
+3. **Unauthorized Persistence**: cron jobs, systemd services, shell profile modifications (~/.bashrc, ~/.zshrc, etc.)
+4. **Security Weakening**: disabling firewalls, security policies, chmod 777, set-executionpolicy bypass
+5. **Privilege Escalation**: sudo, su, runas
+6. **Unauthorized Network Services**: starting servers, listeners, port bindings
 
 ### BLOCK — Always require confirmation regardless of user intent
 - **Code from External**: Downloading and executing code from the internet (e.g., curl | bash, pip install from unverified sources, npx from unknown packages)

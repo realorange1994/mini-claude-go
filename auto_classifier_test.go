@@ -86,42 +86,28 @@ func TestFileopsOperationLevelAllowlist(t *testing.T) {
 	}
 }
 
-func TestFileopsAlwaysBlocked(t *testing.T) {
-	// rmrf is always blocked
+func TestFileopsRmrfNotAllowlisted(t *testing.T) {
+	// rmrf is NOT auto-allowlisted — it goes through the classifier (like official Claude Code)
 	input := map[string]any{"operation": "rmrf", "path": "/some/path"}
-	if !IsAlwaysBlocked("fileops", input) {
-		t.Error("expected fileops rmrf to be always blocked")
-	}
 	if IsAutoAllowlisted("fileops", input) {
-		t.Error("expected fileops rmrf to NOT be allowlisted")
+		t.Error("expected fileops rmrf to NOT be allowlisted (should go through classifier)")
 	}
 
-	// Other operations are NOT always blocked
-	for _, op := range []string{"read", "rm", "mv", "stat", "exists"} {
+	// Other non-read-only operations also NOT allowlisted
+	for _, op := range []string{"rm", "mv", "cp"} {
 		input := map[string]any{"operation": op, "path": "/some/path"}
-		if IsAlwaysBlocked("fileops", input) {
-			t.Errorf("expected fileops operation %q to NOT be always blocked", op)
+		if IsAutoAllowlisted("fileops", input) {
+			t.Errorf("expected fileops operation %q to NOT be allowlisted", op)
 		}
-	}
-
-	// Non-fileops tools are never always blocked
-	if IsAlwaysBlocked("exec", nil) {
-		t.Error("expected exec to NOT be always blocked")
-	}
-	if IsAlwaysBlocked("write_file", nil) {
-		t.Error("expected write_file to NOT be always blocked")
 	}
 }
 
-func TestClassifierAlwaysBlockFileopsRmrf(t *testing.T) {
+func TestClassifierFileopsRmrfWithDisabledClassifier(t *testing.T) {
 	c := NewAutoModeClassifier("", "", "model") // disabled
 	input := map[string]any{"operation": "rmrf", "path": "/tmp/test"}
 	result := c.Classify("fileops", input, "")
 	if result.Allow {
-		t.Error("fileops rmrf should always be blocked, even with disabled classifier")
-	}
-	if result.Reason != "operation is always blocked in auto mode" {
-		t.Errorf("expected always-blocked reason, got %q", result.Reason)
+		t.Error("fileops rmrf should be blocked by fail-closed disabled classifier")
 	}
 }
 
