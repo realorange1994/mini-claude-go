@@ -624,6 +624,13 @@ func (b *StreamBus) Close() {
 // StreamProgress -- tracks streaming metrics (TTFB, throughput)
 // ---------------------------------------------------------------------------
 
+// StreamSnapshot is a thread-safe copy of streaming progress metrics.
+type StreamSnapshot struct {
+	StartTime   time.Time
+	FirstByteAt time.Time
+	TokensRecv  int
+}
+
 // StreamProgress tracks timing and token metrics during a streaming response.
 type StreamProgress struct {
 	StartTime   time.Time
@@ -962,12 +969,15 @@ func (sa *StreamAdapter) DeltasState() DeltasState {
 	return sa.deltasState
 }
 
-// Progress returns a copy of the current stream progress metrics.
-func (sa *StreamAdapter) Progress() StreamProgress {
+// Progress returns a thread-safe snapshot of the current stream progress metrics.
+func (sa *StreamAdapter) Progress() StreamSnapshot {
 	sa.progress.mu.Lock()
 	defer sa.progress.mu.Unlock()
-	// Return a copy
-	return sa.progress
+	return StreamSnapshot{
+		StartTime:   sa.progress.StartTime,
+		FirstByteAt: sa.progress.FirstByteAt,
+		TokensRecv:  sa.progress.TokensRecv,
+	}
 }
 
 // trackDeltaState updates the deltas state based on each chunk type received.
