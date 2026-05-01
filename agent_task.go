@@ -172,6 +172,7 @@ func (ts *TaskStore) KillTask(agentID string) {
 }
 
 // CleanupEvicted removes tasks whose evictAfter timestamp has passed.
+// Also deletes associated output files for bash background tasks.
 // Safe to call periodically from a ticker goroutine.
 func (ts *TaskStore) CleanupEvicted() {
 	ts.mu.Lock()
@@ -179,6 +180,10 @@ func (ts *TaskStore) CleanupEvicted() {
 	now := time.Now()
 	for id, task := range ts.tasks {
 		if !task.evictAfter.IsZero() && now.After(task.evictAfter) {
+			// Clean up output file for bash background tasks
+			if task.OutputFile != "" {
+				_ = os.Remove(task.OutputFile)
+			}
 			delete(ts.tasks, id)
 		}
 	}

@@ -659,10 +659,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 	consecutiveEmptyResponses := 0
 	const maxEmptyResponses = 3
 
-	// Transition tracking (like Claude Code's state.transition)
-	// Records WHY we continued to the next iteration, for debugging.
-	var lastTransition string
-	_ = lastTransition // used for transcript/debugging
+
 
 	// Preflight compression for resumed sessions
 	const preflightThreshold = 100000 // ~100k tokens
@@ -732,7 +729,6 @@ func (a *AgentLoop) Run(userMessage string) string {
 				fmt.Fprintf(os.Stderr, "\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
 				a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
-				lastTransition = "model_confusion_retry"
 				continue
 			}
 			// 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
@@ -740,14 +736,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 				fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013), repairing context...\n")
 				a.context.ValidateToolPairing()
 				a.context.FixRoleAlternation()
-				lastTransition = "tool_pairing_repair"
 				continue
 			}
 			// Truncated tool arguments -- model cut off mid-tool-call
 			if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
 				fmt.Fprintf(os.Stderr, "\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
 				a.context.AddUserMessage("ERROR: Your tool call arguments was cut off due to length limits. Do NOT repeat the truncated tool call. If you need to make multiple tool calls, make them one at a time with shorter arguments.")
-				lastTransition = "tool_args_truncated_retry"
 				continue
 			}
 			// Stream stalled -- safety timeout fired; recover with truncation
@@ -767,7 +761,6 @@ func (a *AgentLoop) Run(userMessage string) string {
 					fmt.Fprintf(os.Stderr, "\n[WARN] Stream still stalled, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
-				lastTransition = "stall_recovery"
 				continue
 			}
 			if isContextLengthError(errMsg) {
@@ -787,7 +780,6 @@ func (a *AgentLoop) Run(userMessage string) string {
 					fmt.Fprintf(os.Stderr, "\n[WARN] Context still full, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
-				lastTransition = "context_overflow_recovery"
 				continue
 			}
 			return fmt.Sprintf("API error: %v", err)
@@ -814,7 +806,6 @@ func (a *AgentLoop) Run(userMessage string) string {
 					consecutiveEmptyResponses, maxEmptyResponses)
 				// Inject hint to encourage actual output
 				a.context.AddUserMessage("Please continue and provide your response in text or use a tool.")
-				lastTransition = "empty_response_retry"
 				continue
 			}
 			// Genuine final answer with text
@@ -827,7 +818,6 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if a.transcript != nil {
 				_ = a.transcript.WriteAssistant(finalText, a.config.Model)
 			}
-			lastTransition = "completed"
 			break
 		}
 
@@ -859,7 +849,6 @@ func (a *AgentLoop) Run(userMessage string) string {
 			return finalText
 		}
 
-		lastTransition = "next_turn"
 	}
 
 	// If max turns reached without a final response, try one last non-streaming call
@@ -2182,7 +2171,8 @@ func isLocalEndpoint(baseURL string) bool {
 		strings.Contains(lower, "127.0.0.1") ||
 		strings.Contains(lower, "0.0.0.0") ||
 		strings.Contains(lower, "::1") ||
-		strings.Contains(lower, "local")
+		strings.HasSuffix(lower, ".local") ||
+		strings.Contains(lower, "://localhost:")
 }
 
 // estimateMessageTokens roughly estimates token count (~4 chars per token).
