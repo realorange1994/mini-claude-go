@@ -724,16 +724,20 @@ func NewStreamAdapter(handler streamHandler, bus *StreamBus) *StreamAdapter {
 // WithStallTimeout sets dynamic stall timeouts.
 // isLocal=true → reduced timeouts to prevent long hangs.
 // estTokens estimates context size for scaling.
+// NOTE: Timeouts should be at least as long as the max tool execution timeout (600s)
+// to prevent stream stalls during long-running tool calls.
 func (sa *StreamAdapter) WithStallTimeout(isLocal bool, estTokens int) *StreamAdapter {
 	if isLocal {
-		sa.stallTimeoutMs = 60_000
-		sa.startupMs = 120_000
-	} else if estTokens > 100_000 {
+		// Local providers: 300s stall / 360s startup (up from 60s/120s)
+		// Still shorter than remote defaults to detect provider hangs faster
 		sa.stallTimeoutMs = 300_000
 		sa.startupMs = 360_000
+	} else if estTokens > 100_000 {
+		sa.stallTimeoutMs = 300_000
+		sa.startupMs = 600_000
 	} else if estTokens > 50_000 {
-		sa.stallTimeoutMs = 240_000
-		sa.startupMs = 300_000
+		sa.stallTimeoutMs = 300_000
+		sa.startupMs = 600_000
 	}
 	// else: keep defaults in Process()
 	return sa
@@ -765,14 +769,14 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 	//   - Local providers: 300s stall / 600s startup (cold start can be slow)
 	//   - >100K tokens: 300s stall / 360s startup
 	//   - >50K tokens: 240s stall / 300s startup
-	//   - Default: 90s stall / 120s startup
+	//   - Default: 300s stall / 600s startup (matches max tool execution timeout)
 	stallTO := sa.stallTimeoutMs
 	startupTO := sa.startupMs
 	if stallTO == 0 {
-		stallTO = 90_000
+		stallTO = 300_000
 	}
 	if startupTO == 0 {
-		startupTO = 120_000
+		startupTO = 600_000
 	}
 	stallReset := make(chan struct{}, 16)
 	done := make(chan struct{})

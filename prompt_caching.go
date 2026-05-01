@@ -168,3 +168,51 @@ func FormatCachedSystemPrompt(text string, ttl string) []map[string]any {
 		},
 	}
 }
+
+// FormatBoundaryCachedSystemPrompt splits the system prompt at the static/dynamic
+// boundary and applies separate caching scopes. The static part gets a "global"
+// cache scope (long-lived, survives across sessions), while the dynamic part
+// gets an "org" or no caching scope (short-lived, per-session).
+//
+// This means the static tool descriptions only need to be hashed once, and
+// changes to dynamic content (skills, memory, project instructions) don't
+// invalidate the static cache.
+func FormatBoundaryCachedSystemPrompt(text string, ttl string) []map[string]any {
+	staticPart, dynamicPart, found := SplitSystemPrompt(text)
+
+	if !found {
+		// No boundary found, fall back to single-block caching
+		return FormatCachedSystemPrompt(text, ttl)
+	}
+
+	// Static content: use global cache scope for long-lived caching.
+	// The static part (tool descriptions, rules) rarely changes,
+	// so a global cache scope maximizes cache hit rates.
+	globalMarker := map[string]any{"type": "ephemeral"}
+	if ttl == "1h" {
+		globalMarker = map[string]any{"type": "ephemeral", "ttl": "1h"}
+	}
+
+	// Dynamic content: use standard ephemeral cache (no extended TTL).
+	// This content changes per-session or per-turn, so no point in
+	// extending its cache lifetime beyond the default.
+	dynamicMarker := map[string]any{"type": "ephemeral"}
+
+	result := []map[string]any{
+		{
+			"type":          "text",
+			"text":          staticPart + "\n" + SYSTEM_PROMPT_STATIC_BOUNDARY,
+			"cache_control": globalMarker,
+		},
+	}
+
+	if dynamicPart != "" {
+		result = append(result, map[string]any{
+			"type":          "text",
+			"text":          dynamicPart,
+			"cache_control": dynamicMarker,
+		})
+	}
+
+	return result
+}

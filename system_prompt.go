@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os"
 	"runtime"
 	"strings"
@@ -13,7 +14,13 @@ import (
 	"miniclaudecode-go/tools"
 )
 
-const systemPromptTemplate = `You are miniClaudeCode (model: %s), a lightweight AI coding assistant that operates in the terminal.
+// SYSTEM_PROMPT_STATIC_BOUNDARY separates static (globally cacheable) content
+// from dynamic (per-session) content in the system prompt.
+// Static: environment info, tool descriptions, operating rules, decision tree.
+// Dynamic: project instructions, session memory, skills, permission mode.
+const SYSTEM_PROMPT_STATIC_BOUNDARY = "<!-- STATIC_PROMPT_END -->"
+
+const systemPromptTemplateStatic = `You are miniClaudeCode (model: %s), a lightweight AI coding assistant that operates in the terminal.
 
 ## Environment
 - OS: %s
@@ -50,10 +57,66 @@ You have access to the following tools to help the user with software engineerin
 14. **Task Workflow** -- Create tasks with clear, specific subjects in imperative form (e.g., "Fix authentication bug"). Use task_update to set status: pending → in_progress → completed. ONLY mark as completed when FULLY accomplished — if tests fail, implementation is partial, or you encountered unresolved errors, keep the task in_progress. If blocked, create a new task describing what needs to be resolved. After completing a task, check task_list to find the next available task. Do not batch up multiple tasks before marking them as completed — mark each one done as soon as it is finished.
 15. **Background Command Execution** -- For long-running commands, use run_in_background=true with the exec tool. You will receive a task ID and output file path immediately; you do not need to check the output right away. When the background task completes, you will be notified via a task-notification message. Use task_output to retrieve results. Use task_stop to stop a running background task if needed. Do NOT use sleep to poll for results — use run_in_background and wait for the notification.
 
+### Tool Selection Decision Tree
+
+When deciding which tool to use, follow these steps in order and stop at the first match:
+
+Step 0: Does this task need a tool at all? Pure knowledge questions, content already visible in context → answer directly, no tool call.
+
+Step 1: Is there a dedicated tool? Read/Edit/Write/Glob/Grep always beat exec equivalents. Stop here if a dedicated tool fits.
+
+Step 2: Is this a shell operation? Package installs, test runners, build commands, git operations → exec.
+
+Step 3: Should work run in parallel? Independent operations → parallel calls. Dependent operations → sequential.
+
+### When NOT to Use Tools
+
+Do not use tools when:
+- Answering questions about programming concepts, syntax, or design patterns you already know
+- The error message or content is already visible in context
+- The user asks for an explanation that does not require inspecting code
+- Summarizing content already in the conversation
+
+### Few-Shot Tool Selection Examples
+
+Use these patterns to select the right tool:
+- "find all .go files" → glob(pattern="**/*.go"), NOT exec("find ...")
+- "run tests" → exec("go test ./...")
+- "search for TODO" → grep(pattern="TODO")
+- "check if a file exists" → glob(pattern="path/to/file"), NOT exec("ls" or "test -f")
+- "find where UserService is defined" → grep(pattern="class UserService|func UserService")
+- "install a package" → exec("go get package-name")
+- "rename a variable across a file" → file_edit with replace_all, NOT exec("sed")
+- "list files in current directory" → list_dir, NOT exec("ls" or "dir")
+- "read a file's contents" → file_read, NOT exec("cat")
+
+### Tool Cost Awareness
+
+glob and grep are cheap operations — use them liberally rather than guessing file locations or code patterns. A search that returns nothing costs a second; proposing changes to code you haven't read costs the whole task.
+
+Reading a file before editing is cheap, but proposing changes to unread code is expensive.
+
+### Search Fallback Strategy
+
+When a grep/glob search returns nothing:
+1. Try a broader pattern — fewer terms, remove qualifiers
+2. Try alternate naming conventions — camelCase vs snake_case
+3. Try different file extensions — .go vs .rs vs .ts
+4. If exhausted after 3+ attempts — tell the user and ask for guidance
+
+### Search Effort Scale
+
+Scale search effort to task complexity:
+- Single file fix: 1-2 searches
+- Cross-cutting change: 3-5 searches
+- Architecture investigation: 5-10+ searches
+- Full codebase audit: use Agent with specialized sub-agent
+
 ## Tool Parameters
 
-All tools accept an optional "timeout" parameter (integer, seconds, range 1-600, default 600) to override the execution timeout. Use a larger timeout for operations that may take longer, such as scanning large directories with grep or glob.
+All tools accept an optional "timeout" parameter (integer, seconds, range 1-600, default 600) to override the execution timeout. Use a larger timeout for operations that may take longer, such as scanning large directories with grep or glob.`
 
+const systemPromptTemplateDynamic = `
 ## Current Permission Mode: %s
 %s
 %s
@@ -192,51 +255,280 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 	hours := offset / 3600
 	minutes := (offset % 3600) / 60
 	timezone := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
-	return fmt.Sprintf(systemPromptTemplate, modelName, envInfo, wd, currentTime, timezone, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection)
+
+	// Build static part (environment, tool descriptions, operating rules)
+	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, toolList)
+
+	// Build dynamic part (permission mode, project instructions, memory, skills)
+	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection)
+
+	// Combine with boundary
+	return staticPart + "\n" + SYSTEM_PROMPT_STATIC_BOUNDARY + "\n" + dynamicPart
 }
 
 func buildToolList(registry *tools.Registry) string {
+	// Usage hints for key tools to guide optimal tool selection
+	toolHints := map[string]string{
+		"glob":      "(fast, use liberally)",
+		"grep":      "(fast, use liberally)",
+		"file_read": "(use before file_edit)",
+		"exec":      "(for shell commands, package installs, git operations)",
+		"file_edit": "(MUST read file first)",
+		"file_write": "(overwrites entire file)",
+	}
+
 	var sb strings.Builder
 	for _, t := range registry.AllTools() {
-		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name(), t.Description()))
+		name := t.Name()
+		if hint, ok := toolHints[name]; ok {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s %s\n", name, t.Description(), hint))
+		} else {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", name, t.Description()))
+		}
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// CachedSystemPrompt caches the system prompt and only rebuilds when marked dirty.
+// CachedSystemPrompt caches the system prompt with static/dynamic separation.
+// Static content (tool descriptions, operating rules) is cached globally.
+// Dynamic content (project instructions, skills, memory) is cached per-session.
 type CachedSystemPrompt struct {
-	cached string
-	dirty  atomic.Bool
-	mu     sync.RWMutex
+	cachedStatic  string
+	cachedDynamic string
+	staticHash    uint64
+	staticDirty   atomic.Bool
+	dynamicDirty  atomic.Bool
+	mu            sync.RWMutex
 }
 
 // NewCachedSystemPrompt creates a new CachedSystemPrompt initialized as dirty.
 func NewCachedSystemPrompt() *CachedSystemPrompt {
 	cp := &CachedSystemPrompt{}
-	cp.dirty.Store(true)
+	cp.staticDirty.Store(true)
+	cp.dynamicDirty.Store(true)
 	return cp
 }
 
-// GetOrBuild returns the cached system prompt, rebuilding only if dirty.
+// GetOrBuild returns the cached system prompt, rebuilding only the dirty parts.
+// Static content (tool descriptions, rules) is rebuilt only when staticDirty.
+// Dynamic content (skills, memory, project instructions) is rebuilt when dynamicDirty.
 func (cp *CachedSystemPrompt) GetOrBuild(registry *tools.Registry, permissionMode, projectDir, modelName string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker, sessionMemory *SessionMemory) string {
-	if !cp.dirty.Load() {
+	needsStatic := cp.staticDirty.Load()
+	needsDynamic := cp.dynamicDirty.Load()
+
+	if !needsStatic && !needsDynamic {
 		cp.mu.RLock()
-		cached := cp.cached
+		cached := cp.cachedStatic + "\n" + SYSTEM_PROMPT_STATIC_BOUNDARY + "\n" + cp.cachedDynamic
 		cp.mu.RUnlock()
 		if cached != "" {
 			return cached
 		}
 	}
 
-	prompt := BuildSystemPrompt(registry, permissionMode, projectDir, modelName, skillLoader, skillTracker, sessionMemory)
+	// Rebuild static part if needed
+	var staticPart string
+	var staticHash uint64
+	if needsStatic {
+		staticPart, staticHash = buildStaticPart(registry, modelName)
+	} else {
+		cp.mu.RLock()
+		staticPart = cp.cachedStatic
+		staticHash = cp.staticHash
+		cp.mu.RUnlock()
+	}
+
+	// Rebuild dynamic part if needed
+	var dynamicPart string
+	if needsDynamic {
+		dynamicPart = buildDynamicPart(permissionMode, projectDir, skillLoader, skillTracker, sessionMemory)
+	} else {
+		cp.mu.RLock()
+		dynamicPart = cp.cachedDynamic
+		cp.mu.RUnlock()
+	}
+
 	cp.mu.Lock()
-	cp.cached = prompt
+	cp.cachedStatic = staticPart
+	cp.cachedDynamic = dynamicPart
+	cp.staticHash = staticHash
 	cp.mu.Unlock()
-	cp.dirty.Store(false)
-	return prompt
+	cp.staticDirty.Store(false)
+	cp.dynamicDirty.Store(false)
+
+	return staticPart + "\n" + SYSTEM_PROMPT_STATIC_BOUNDARY + "\n" + dynamicPart
 }
 
-// MarkDirty marks the cached system prompt as needing rebuild on next access.
+// MarkStaticDirty marks the static content as needing rebuild (e.g., tool registry changes).
+func (cp *CachedSystemPrompt) MarkStaticDirty() {
+	cp.staticDirty.Store(true)
+}
+
+// MarkDynamicDirty marks the dynamic content as needing rebuild (e.g., skills changed).
+func (cp *CachedSystemPrompt) MarkDynamicDirty() {
+	cp.dynamicDirty.Store(true)
+}
+
+// MarkDirty marks both static and dynamic content as needing rebuild.
 func (cp *CachedSystemPrompt) MarkDirty() {
-	cp.dirty.Store(true)
+	cp.staticDirty.Store(true)
+	cp.dynamicDirty.Store(true)
+}
+
+// GetStaticHash returns the hash of the static content for per-tool schema caching.
+// Returns 0 if static content has not been built yet.
+func (cp *CachedSystemPrompt) GetStaticHash() uint64 {
+	if cp.staticDirty.Load() {
+		return 0
+	}
+	cp.mu.RLock()
+	defer cp.mu.RUnlock()
+	return cp.staticHash
+}
+
+// buildStaticPart constructs the static portion of the system prompt (environment, tool descriptions, operating rules).
+// Returns the static content and its FNV-1a hash.
+func buildStaticPart(registry *tools.Registry, modelName string) (string, uint64) {
+	toolList := buildToolList(registry)
+	wd, _ := os.Getwd()
+	envInfo := fmt.Sprintf("%s / %s / %s", runtime.GOOS, runtime.Version(), runtime.GOARCH)
+
+	currentTime := time.Now().Format("2006-01-02 15:04:05")
+	_, offset := time.Now().Zone()
+	sign := "+"
+	if offset < 0 {
+		sign = "-"
+		offset = -offset
+	}
+	hours := offset / 3600
+	minutes := (offset % 3600) / 60
+	timezone := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
+
+	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, toolList)
+	hash := fnvHash(staticPart)
+	return staticPart, hash
+}
+
+// buildDynamicPart constructs the dynamic portion of the system prompt (permission mode, project instructions, memory, skills).
+func buildDynamicPart(permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker, sessionMemory *SessionMemory) string {
+	modeDesc := modeDescriptions[permissionMode]
+
+	projectInstructions := LoadProjectInstructions(projectDir)
+	var projectSection string
+	if projectInstructions != "" {
+		projectSection = "## Project Instructions (from CLAUDE.md)\n\n" + projectInstructions
+	}
+
+	var memorySection string
+	if sessionMemory != nil {
+		if mem := sessionMemory.FormatForPrompt(); mem != "" {
+			memorySection = mem
+		}
+	}
+
+	var skillsSection string
+	if skillLoader != nil {
+		var skillGuidance string
+		if skillTracker != nil {
+			skillGuidance = "\n## Skill System Guidance\n\n" +
+				"BLOCKING REQUIREMENT: When a skill matches the user's request, you MUST invoke the relevant skill tool BEFORE generating any other response.\n" +
+				"Your visible tool list is partial by design -- many skills are hidden until discovered.\n" +
+				"Discovery steps:\n" +
+				"1. Use **search_skills** to find skills by topic (e.g., search_skills 'testing')\n" +
+				"2. Use **read_skill** to load a skill's full instructions\n" +
+				"3. Follow the skill's instructions precisely\n\n"
+		}
+
+		allSkills := skillLoader.ListSkills(false)
+		var unsentSkills []skills.SkillInfo
+		if skillTracker != nil {
+			unsentSkills = skillTracker.GetUnsentSkills(allSkills)
+			for _, s := range unsentSkills {
+				if !s.Always {
+					skillTracker.MarkShown(s.Name)
+				}
+			}
+		} else {
+			for _, s := range allSkills {
+				if !s.Always {
+					unsentSkills = append(unsentSkills, s)
+				}
+			}
+		}
+
+		alwaysSkills := skillLoader.GetAlwaysSkills()
+		if len(alwaysSkills) > 0 {
+			var skillNames []string
+			for _, s := range alwaysSkills {
+				skillNames = append(skillNames, s.Name)
+			}
+			skillsSection = skillLoader.BuildSystemPrompt(skillNames)
+		}
+
+		var newSkills []skills.SkillInfo
+		for _, s := range unsentSkills {
+			if !s.Always {
+				newSkills = append(newSkills, s)
+			}
+		}
+		if len(newSkills) > 0 {
+			var sb strings.Builder
+			sb.WriteString("\n## Available Skills (New This Turn)\n\n")
+			sb.WriteString("The following skills are newly available. Use read_skill to load full instructions.\n\n")
+			budget := 4000
+			used := 0
+			for _, s := range newSkills {
+				entry := fmt.Sprintf("- **%s**: %s", s.Name, s.Description)
+				if s.WhenToUse != "" {
+					entry += fmt.Sprintf(" (%s)", s.WhenToUse)
+				}
+				if !s.Available {
+					entry += " (unavailable)"
+				}
+				entry += "\n"
+				if used+len(entry) > budget {
+					break
+				}
+				sb.WriteString(entry)
+				used += len(entry)
+			}
+			if skillsSection != "" {
+				skillsSection += "\n"
+			}
+			skillsSection += sb.String()
+		}
+
+		skillsSummary := skillLoader.BuildSkillsSummary()
+		if skillsSummary != "" {
+			if skillsSection != "" {
+				skillsSection += "\n"
+			}
+			skillsSection += "## Available Skills\n\n" + skillsSummary
+		}
+
+		if skillGuidance != "" && skillsSection != "" {
+			skillsSection = skillGuidance + skillsSection
+		}
+	}
+
+	return fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection)
+}
+
+// fnvHash computes a fast FNV-1a hash of a string for content-addressable caching.
+func fnvHash(s string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return h.Sum64()
+}
+
+// SplitSystemPrompt splits a full system prompt into static and dynamic parts
+// at the boundary marker. If no boundary is found, the entire prompt is treated
+// as static. Returns (static, dynamic, ok) where ok indicates the boundary was found.
+func SplitSystemPrompt(prompt string) (static, dynamic string, ok bool) {
+	idx := strings.Index(prompt, SYSTEM_PROMPT_STATIC_BOUNDARY)
+	if idx == -1 {
+		return prompt, "", false
+	}
+	static = strings.TrimRight(prompt[:idx], "\n")
+	dynamic = strings.TrimLeft(prompt[idx+len(SYSTEM_PROMPT_STATIC_BOUNDARY):], "\n")
+	return static, dynamic, true
 }

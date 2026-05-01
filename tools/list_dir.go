@@ -11,7 +11,11 @@ import (
 type ListDirTool struct{}
 
 func (*ListDirTool) Name() string        { return "list_dir" }
-func (*ListDirTool) Description() string { return "List directory contents. Shows files and subdirectories. Supports recursive listing with ignored directories (.git, node_modules, etc.)." }
+func (*ListDirTool) Description() string {
+	return "List directory contents. Shows files and subdirectories. " +
+		"ALWAYS use list_dir to explore directories. Prefer over exec('ls') or exec('dir'). " +
+		"Supports recursive listing with ignored directories (.git, node_modules, etc.)."
+}
 
 func (*ListDirTool) InputSchema() map[string]any {
 	return map[string]any{

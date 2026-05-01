@@ -25,7 +25,11 @@ type ExecTool struct {
 
 func (*ExecTool) Name() string { return "exec" }
 func (*ExecTool) Description() string {
-	return "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory. Supports running commands in the background with run_in_background=true."
+	return "Execute a shell command. Use for package installs, test runners, build commands, git operations, and any shell task. " +
+		"Do NOT use exec for file reading (use read_file), file searching (use grep or glob), or file editing (use edit_file). " +
+		"Commands run in the current working directory. " +
+		"On Windows, use PowerShell syntax. On Unix, use bash syntax. " +
+		"Supports running commands in the background with run_in_background=true."
 }
 
 func (*ExecTool) InputSchema() map[string]any {
@@ -262,7 +266,7 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 			cmd.Process.Kill()
 		}
 		<-errCh
-		return ToolResult{Output: fmt.Sprintf("Error: command timed out after %ds", timeout), IsError: true}
+		return ToolResult{Output: fmt.Sprintf("Error: command timed out after %ds. Consider using run_in_background: true for long-running commands.", timeout), IsError: true}
 	case err := <-errCh:
 		var stdoutOut, stderrOut string
 		for i := 0; i < 2; i++ {

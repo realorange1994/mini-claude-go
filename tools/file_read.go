@@ -16,7 +16,11 @@ const readFileMaxChars = 15000      // max chars in output
 type FileReadTool struct{}
 
 func (*FileReadTool) Name() string        { return "read_file" }
-func (*FileReadTool) Description() string { return "Read the contents of a file. Returns numbered lines for easy reference." }
+func (*FileReadTool) Description() string {
+	return "ALWAYS use this tool to read files. NEVER use exec with cat, head, or tail. " +
+		"You MUST read a file before editing it with edit_file. " +
+		"Returns numbered lines for easy reference."
+}
 
 func (*FileReadTool) InputSchema() map[string]any {
 	return map[string]any{

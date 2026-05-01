@@ -17,9 +17,10 @@ type GrepTool struct{}
 
 func (*GrepTool) Name() string { return "grep" }
 func (*GrepTool) Description() string {
-	return "Search file contents using regex in a codebase. Uses ripgrep (rg) if available, otherwise falls back to Go regexp. " +
-		"Supports glob and language type filters, context lines, and output modes. " +
-		"For advanced ripgrep features (multiline, PCRE2, JSON output, etc.) use the exec tool to call rg directly."
+	return "ALWAYS use grep for content search tasks. NEVER invoke grep or rg via exec. " +
+		"A powerful search tool built on ripgrep — cheap operation, use liberally. " +
+		"Supports full regex syntax. Filter files with glob parameter. " +
+		"Output modes: 'content' shows matching lines, 'files_with_matches' shows file paths, 'count' shows match counts."
 }
 
 func (*GrepTool) InputSchema() map[string]any {

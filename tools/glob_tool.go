@@ -17,7 +17,12 @@ const maxResults = 500
 type GlobTool struct{}
 
 func (*GlobTool) Name() string        { return "glob" }
-func (*GlobTool) Description() string { return "Find files matching a glob pattern. Returns matching file paths sorted by modification time." }
+func (*GlobTool) Description() string {
+	return "Fast file pattern matching tool — use it liberally rather than guessing file paths. " +
+		"ALWAYS use glob to find files by name pattern. NEVER use exec with 'find' command. " +
+		"Returns matching file paths sorted by modification time. " +
+		"Supports glob patterns like '**/*.go' or 'src/**/*.ts'."
+}
 
 func (*GlobTool) InputSchema() map[string]any {
 	return map[string]any{

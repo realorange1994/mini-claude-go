@@ -1024,7 +1024,7 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			time.Sleep(delay)
 		}
 
-		ctx, cancel := a.interruptCtx(context.Background(), 90*time.Second)
+		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
 		response, err := a.client.Messages.New(ctx, params)
 		cancel()
 
@@ -1304,7 +1304,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 			time.Sleep(delay)
 		}
 
-		ctx, cancel := a.interruptCtx(context.Background(), 120*time.Second)
+		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
 		response, err := a.client.Messages.New(ctx, params)
 		cancel()
 
@@ -1349,7 +1349,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			time.Sleep(delay)
 		}
 
-		ctx, cancel := a.interruptCtx(context.Background(), 120*time.Second)
+		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
 		response, err := a.client.Messages.New(ctx, params)
 		cancel()
 

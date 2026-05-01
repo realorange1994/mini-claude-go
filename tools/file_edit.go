@@ -11,7 +11,11 @@ type FileEditTool struct{}
 
 func (*FileEditTool) Name() string { return "edit_file" }
 func (*FileEditTool) Description() string {
-	return "Edit a file by replacing an exact string with a new string. You must read the file first with read_file before editing. Provide enough context in old_string to uniquely identify the target."
+	return "Edit a file by replacing an exact string with a new string. " +
+		"You MUST use read_file to read the file at least once before editing. " +
+		"ALWAYS prefer edit_file for modifying existing files — it only sends the diff. " +
+		"The edit will FAIL if old_string is not unique in the file. Provide enough context to uniquely match. " +
+		"Use replace_all to change every instance of old_string."
 }
 
 func (*FileEditTool) InputSchema() map[string]any {

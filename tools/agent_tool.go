@@ -26,10 +26,25 @@ type AgentTool struct {
 
 func (t *AgentTool) Name() string { return "agent" }
 func (t *AgentTool) Description() string {
-	return "Launch a sub-agent to handle a complex, multi-step task autonomously. " +
-		"Use this tool (NOT mcp_call_tool or any MCP LLM tool) when the user wants to dispatch, delegate, or assign a task to a sub-agent. " +
-		"Sub-agents have their own isolated conversation context and tool access. " +
-		"Supports both synchronous (default) and asynchronous (run_in_background=true) execution."
+	return `Launch a sub-agent to handle a complex, multi-step task autonomously. ` +
+		`Use this tool (NOT mcp_call_tool or any MCP LLM tool) when the user wants to dispatch, delegate, or assign a task to a sub-agent. ` +
+		`Sub-agents have their own isolated conversation context and tool access. ` +
+		`Supports both synchronous (default) and asynchronous (run_in_background=true) execution.
+
+When NOT to use the Agent tool:
+- If you want to read a specific file path → use file_read instead
+- If you are searching for a specific class/function definition → use grep instead
+- If you are searching within a specific file → use file_read instead
+- If the task is simple and can be done directly → do it yourself
+- If you need to run a single shell command → use exec instead
+
+When TO use the Agent tool:
+- Complex multi-step research tasks requiring independent exploration
+- Multiple independent subtasks that can run in parallel
+- Full codebase-wide investigations (use Agent with a specific goal)
+- Tasks that require specialized sub-context that would benefit from fork mode (inherit parent context)
+
+The Agent tool creates autonomous sub-agents with their own context and tool access. Each sub-agent runs independently and returns results when complete.`
 }
 
 func (t *AgentTool) InputSchema() map[string]any {
