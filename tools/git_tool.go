@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,7 +16,7 @@ type GitTool struct{}
 
 func (*GitTool) Name() string    { return "git" }
 func (*GitTool) Description() string {
-	return "Execute Git version control operations (clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, worktree, rm, mv, restore, switch, cherry-pick, revert, clean, blame, reflog, shortlog) and read-only GitHub CLI (gh) operations (pr view/list/diff/checks/status, issue view/list/status, run list/view, auth status, release list/view, search repos/issues/prs)."
+	return "Execute Git version control operations (clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, worktree, rm, mv, restore, switch, cherry-pick, revert, clean, blame, reflog, shortlog, info) and read-only GitHub CLI (gh) operations (pr view/list/diff/checks/status, issue view/list/status, run list/view, auth status, release list/view, search repos/issues/prs). Use operation='info' to get current repository state (branch, commit, dirty status, default branch, git root)."
 }
 
 func (*GitTool) InputSchema() map[string]interface{} {
@@ -30,7 +32,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 					"tag", "status", "diff", "log", "remote", "show", "describe",
 					"ls-files", "ls-tree", "rev-parse", "rev-list", "worktree",
 					"rm", "mv", "restore", "switch", "cherry-pick", "revert",
-					"clean", "blame", "reflog", "shortlog", "gh",
+					"clean", "blame", "reflog", "shortlog", "gh", "info",
 				},
 			},
 			"repo": map[string]interface{}{
@@ -171,7 +173,7 @@ func (*GitTool) CheckPermissions(params map[string]interface{}) string {
 	// Classify the operation
 	switch operation {
 	case "status", "diff", "log", "show", "describe", "blame", "shortlog",
-		"ls-files", "ls-tree", "rev-parse", "rev-list", "reflog":
+		"ls-files", "ls-tree", "rev-parse", "rev-list", "reflog", "info":
 		// Read-only operations: no warning needed
 		return ""
 
@@ -253,6 +255,17 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 	operation, _ := params["operation"].(string)
 	if operation == "" {
 		return ToolResult{Output: "Error: operation is required", IsError: true}
+	}
+
+	// Handle "info" operation specially — it uses utility functions, not git CLI
+	if operation == "info" {
+		var workDir string
+		if dir, _ := params["directory"].(string); dir != "" {
+			workDir = dir
+		} else {
+			workDir, _ = params["path"].(string)
+		}
+		return executeGitInfo(workDir)
 	}
 
 	// Validate flags before executing (git operations only, not gh)
@@ -1586,3 +1599,263 @@ func runGHCommand(ctx context.Context, args []string, workDir string, proxy stri
 	}
 	return strings.TrimSpace(string(out)), exitCode, nil
 }
+
+// ---------------------------------------------------------------------------
+// Git utility functions
+// ---------------------------------------------------------------------------
+
+// FindGitRoot walks up from dir looking for .git directory or file (worktree case)
+func FindGitRoot(dir string) (string, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	for {
+		gitPath := filepath.Join(absDir, ".git")
+		fi, err := os.Stat(gitPath)
+		if err == nil {
+			if fi.IsDir() {
+				return absDir, nil
+			}
+			// .git is a file (worktree case), read it to check for gitdir:
+			data, readErr := os.ReadFile(gitPath)
+			if readErr == nil && strings.HasPrefix(string(data), "gitdir:") {
+				return absDir, nil
+			}
+		}
+
+		parent := filepath.Dir(absDir)
+		if parent == absDir {
+			return "", fmt.Errorf("not in a git repository")
+		}
+		absDir = parent
+	}
+}
+
+// GetBranch runs git branch --show-current to get the current branch name
+func GetBranch(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "branch", "--show-current")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get branch: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// IsBareRepo checks if the repository is a bare repository
+func IsBareRepo(dir string) bool {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--is-bare-repository")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
+}
+
+// IsGitRepo checks if the directory is inside a git work tree
+func IsGitRepo(dir string) bool {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
+}
+
+// GetGitStatus runs git status --porcelain and returns a map of filename -> status code
+func GetGitStatus(dir string) (map[string]string, error) {
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get git status: %w", err)
+	}
+
+	result := make(map[string]string)
+	// Split on newlines; do NOT TrimSpace the whole output as that would
+	// remove the leading space from status codes like " M" (modified in
+	// worktree), breaking the fixed-column porcelain format.
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		// Trim trailing whitespace (e.g. \r on Windows) but preserve leading spaces
+		line = strings.TrimRight(line, " \r\t")
+		if len(line) < 3 {
+			continue
+		}
+		status := line[:2]
+		filename := line[3:] // Skip "XY " prefix (2 status chars + 1 space separator)
+		result[filename] = status
+	}
+	return result, nil
+}
+
+// HasUncommittedChanges checks if there are uncommitted changes (staged or unstaged)
+func HasUncommittedChanges(dir string) bool {
+	// Check unstaged changes
+	cmd := exec.Command("git", "-C", dir, "diff", "--quiet")
+	if err := cmd.Run(); err != nil {
+		return true
+	}
+
+	// Check staged changes
+	cmd = exec.Command("git", "-C", dir, "diff", "--cached", "--quiet")
+	if err := cmd.Run(); err != nil {
+		return true
+	}
+
+	return false
+}
+
+// GetDefaultBranch returns the default branch name (origin/HEAD), falling back to "main"
+func GetDefaultBranch(dir string) (string, error) {
+	// Try symbolic-ref first
+	cmd := exec.Command("git", "-C", dir, "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+
+	// Try rev-parse
+	cmd = exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "origin/HEAD")
+	out, err = cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+
+	// Default to main
+	return "main", nil
+}
+
+// GetCurrentCommitHash returns the full commit hash of HEAD
+func GetCurrentCommitHash(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current commit hash: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// IsDirty checks if the repository has any changes (unstaged, staged, or untracked files)
+func IsDirty(dir string) bool {
+	// Check unstaged changes
+	cmd := exec.Command("git", "-C", dir, "diff", "--quiet")
+	if err := cmd.Run(); err != nil {
+		return true
+	}
+
+	// Check staged changes
+	cmd = exec.Command("git", "-C", dir, "diff", "--cached", "--quiet")
+	if err := cmd.Run(); err != nil {
+		return true
+	}
+
+	// Check for untracked files
+	cmd = exec.Command("git", "-C", dir, "ls-files", "--others", "--exclude-standard")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
+// ---------------------------------------------------------------------------
+// Git info operation — returns comprehensive repository state
+// ---------------------------------------------------------------------------
+
+// executeGitInfo returns a formatted summary of git repository state using
+// the utility functions. Works without a directory (uses current working dir).
+func executeGitInfo(dir string) ToolResult {
+	root, err := FindGitRoot(dir)
+	if err != nil || root == "" {
+		return ToolResult{Output: "Not a git repository", IsError: false}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Git Repository Information:\n")
+	sb.WriteString(fmt.Sprintf("  Root: %s\n", root))
+
+	branch, err := GetBranch(root)
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("  Branch: (error: %s)\n", err))
+	} else if branch == "" {
+		sb.WriteString("  Branch: (detached HEAD)\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("  Branch: %s\n", branch))
+	}
+
+	defaultBranch, err := GetDefaultBranch(root)
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("  Default Branch: (error: %s)\n", err))
+	} else {
+		sb.WriteString(fmt.Sprintf("  Default Branch: %s\n", defaultBranch))
+	}
+
+	commit, err := GetCurrentCommitHash(root)
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("  Commit: (error: %s)\n", err))
+	} else {
+		if len(commit) > 12 {
+			sb.WriteString(fmt.Sprintf("  Commit: %s (%s...)\n", commit, commit[:7]))
+		} else {
+			sb.WriteString(fmt.Sprintf("  Commit: %s\n", commit))
+		}
+	}
+
+	dirty := IsDirty(root)
+	sb.WriteString(fmt.Sprintf("  Dirty: %t\n", dirty))
+
+	bare := IsBareRepo(root)
+	if bare {
+		sb.WriteString("  Bare Repo: true\n")
+	}
+
+	// If dirty, show a summary of changes
+	if dirty {
+		status, err := GetGitStatus(root)
+		if err == nil && len(status) > 0 {
+			sb.WriteString(fmt.Sprintf("  Changes: %d file(s) modified\n", len(status)))
+		} else if err == nil {
+			// HasUncommittedChanges or IsDirty said true but porcelain is empty
+			// — may have untracked files
+			sb.WriteString("  Changes: untracked files\n")
+		}
+	}
+
+	return ToolResult{Output: strings.TrimRight(sb.String(), "\n"), IsError: false}
+}
+
+// GetGitContext returns a short git context string for system prompt injection.
+// Returns empty string if not in a git repo. Designed to be called at startup
+// and injected into the "Environment" section of the system prompt.
+func GetGitContext() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	root, err := FindGitRoot(wd)
+	if err != nil || root == "" {
+		return ""
+	}
+
+	var sb strings.Builder
+	branch, _ := GetBranch(root)
+	if branch != "" {
+		sb.WriteString(fmt.Sprintf("- Git Branch: %s", branch))
+	}
+	commit, err := GetCurrentCommitHash(root)
+	if err == nil {
+		sha := commit
+		if len(commit) > 12 {
+			sha = commit[:12]
+		}
+		if sb.Len() > 0 {
+			sb.WriteString(fmt.Sprintf("\n- Git Commit: %s", sha))
+		}
+	}
+	dirty := IsDirty(root)
+	sb.WriteString(fmt.Sprintf("\n- Git Dirty: %t", dirty))
+
+	return sb.String()
+}
+

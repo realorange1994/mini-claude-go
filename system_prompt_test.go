@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -75,11 +76,33 @@ func TestBuildSystemPromptContainsSections(t *testing.T) {
 	checks := []string{
 		"You are",
 		"tool",
+		"Environment",
 	}
 
 	for _, check := range checks {
 		if !strings.Contains(strings.ToLower(prompt), strings.ToLower(check)) {
 			t.Errorf("system prompt should contain %q", check)
+		}
+	}
+}
+
+func TestBuildSystemPromptGitContext(t *testing.T) {
+	registry := tools.NewRegistry()
+	prompt := BuildSystemPrompt(registry, "auto", "/tmp/test", "test-model", nil, nil, nil)
+
+	// If we're in a git repo (likely during development), the prompt should contain
+	// git context in the Environment section. If not in a git repo, it should still
+	// have the Environment section.
+	if !strings.Contains(prompt, "Environment") {
+		t.Error("system prompt should contain Environment section")
+	}
+
+	// When in a git repo, verify git context injection
+	wd, _ := os.Getwd()
+	if _, err := tools.FindGitRoot(wd); err == nil {
+		// We're in a git repo, so the prompt should contain Git context
+		if !strings.Contains(prompt, "Git Branch:") && !strings.Contains(prompt, "Git Dirty:") {
+			t.Error("system prompt should contain git context when in a git repo")
 		}
 	}
 }

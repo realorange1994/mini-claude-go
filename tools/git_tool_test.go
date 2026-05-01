@@ -1,7 +1,12 @@
 package tools
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -565,5 +570,642 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 				t.Errorf("buildGitCommand() = %v, want %v", got, tt.wantArgs)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers for git utility functions
+// ---------------------------------------------------------------------------
+
+// createTestRepo creates a temporary git repo with an initial commit and returns
+// the repo path. The caller should clean up with os.RemoveAll.
+func createTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command %v failed: %v\noutput: %s", args, err, out)
+		}
+	}
+	// Create an initial file and commit
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\noutput: %s", err, out)
+	}
+	cmd = exec.Command("git", "commit", "-m", "initial commit")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit failed: %v\noutput: %s", err, out)
+	}
+	return dir
+}
+
+// ---------------------------------------------------------------------------
+// Tests for FindGitRoot
+// ---------------------------------------------------------------------------
+
+func TestFindGitRoot(t *testing.T) {
+	t.Run("find from repo root", func(t *testing.T) {
+		dir := createTestRepo(t)
+		got, err := FindGitRoot(dir)
+		if err != nil {
+			t.Fatalf("FindGitRoot() error = %v", err)
+		}
+		if got != dir {
+			t.Errorf("FindGitRoot() = %q, want %q", got, dir)
+		}
+	})
+
+	t.Run("find from subdirectory", func(t *testing.T) {
+		dir := createTestRepo(t)
+		sub := filepath.Join(dir, "a", "b")
+		if err := os.MkdirAll(sub, 0755); err != nil {
+			t.Fatal(err)
+		}
+		got, err := FindGitRoot(sub)
+		if err != nil {
+			t.Fatalf("FindGitRoot() error = %v", err)
+		}
+		if got != dir {
+			t.Errorf("FindGitRoot() = %q, want %q", got, dir)
+		}
+	})
+
+	t.Run("error not in git repo", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := FindGitRoot(dir)
+		if err == nil {
+			t.Fatal("FindGitRoot() expected error, got nil")
+		}
+	})
+
+	t.Run("find git worktree (file containing gitdir)", func(t *testing.T) {
+		// Create a parent repo
+		parentDir := t.TempDir()
+		cmds := [][]string{
+			{"git", "init"},
+			{"git", "config", "user.email", "test@test.com"},
+			{"git", "config", "user.name", "Test"},
+		}
+		for _, args := range cmds {
+			cmd := exec.Command(args[0], args[1:]...)
+			cmd.Dir = parentDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%v failed: %v\n%s", args, err, out)
+			}
+		}
+		// Create initial commit
+		if err := os.WriteFile(filepath.Join(parentDir, "init.txt"), []byte("init\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		run := func(args ...string) {
+			cmd := exec.Command(args[0], args[1:]...)
+			cmd.Dir = parentDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%v failed: %v\n%s", args, err, out)
+			}
+		}
+		run("git", "add", ".")
+		run("git", "commit", "-m", "init")
+
+		// Create a fake worktree directory with a .git file
+		worktreeDir := t.TempDir()
+		gitFile := filepath.Join(worktreeDir, ".git")
+		gitContent := "gitdir: " + filepath.Join(parentDir, ".git", "worktrees", "wt1") + "\n"
+		if err := os.WriteFile(gitFile, []byte(gitContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := FindGitRoot(worktreeDir)
+		if err != nil {
+			t.Fatalf("FindGitRoot() error = %v", err)
+		}
+		if got != worktreeDir {
+			t.Errorf("FindGitRoot() = %q, want %q", got, worktreeDir)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for GetBranch
+// ---------------------------------------------------------------------------
+
+func TestGetBranch(t *testing.T) {
+	t.Run("get current branch", func(t *testing.T) {
+		dir := createTestRepo(t)
+		branch, err := GetBranch(dir)
+		if err != nil {
+			t.Fatalf("GetBranch() error = %v", err)
+		}
+		// Default branch could be "main" or "master" depending on git config
+		if branch != "main" && branch != "master" {
+			t.Errorf("GetBranch() = %q, want 'main' or 'master'", branch)
+		}
+	})
+
+	t.Run("error not a git repo", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := GetBranch(dir)
+		if err == nil {
+			t.Fatal("GetBranch() expected error, got nil")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for IsBareRepo
+// ---------------------------------------------------------------------------
+
+func TestIsBareRepo(t *testing.T) {
+	t.Run("false for normal repo", func(t *testing.T) {
+		dir := createTestRepo(t)
+		if IsBareRepo(dir) {
+			t.Error("IsBareRepo() = true for normal repo, want false")
+		}
+	})
+
+	t.Run("true for bare repo", func(t *testing.T) {
+		bareDir := filepath.Join(t.TempDir(), "bare.git")
+		cmd := exec.Command("git", "init", "--bare", bareDir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init --bare failed: %v\n%s", err, out)
+		}
+		if !IsBareRepo(bareDir) {
+			t.Error("IsBareRepo() = false for bare repo, want true")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for IsGitRepo
+// ---------------------------------------------------------------------------
+
+func TestIsGitRepo(t *testing.T) {
+	t.Run("true inside git repo", func(t *testing.T) {
+		dir := createTestRepo(t)
+		if !IsGitRepo(dir) {
+			t.Error("IsGitRepo() = false inside git repo, want true")
+		}
+	})
+
+	t.Run("false outside git repo", func(t *testing.T) {
+		dir := t.TempDir()
+		if IsGitRepo(dir) {
+			t.Error("IsGitRepo() = true outside git repo, want false")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for GetGitStatus
+// ---------------------------------------------------------------------------
+
+func TestGetGitStatus(t *testing.T) {
+	t.Run("empty for clean repo", func(t *testing.T) {
+		dir := createTestRepo(t)
+		status, err := GetGitStatus(dir)
+		if err != nil {
+			t.Fatalf("GetGitStatus() error = %v", err)
+		}
+		if len(status) != 0 {
+			t.Errorf("GetGitStatus() returned %d entries for clean repo, want 0", len(status))
+		}
+	})
+
+	t.Run("shows modified file", func(t *testing.T) {
+		dir := createTestRepo(t)
+		// Modify a tracked file
+		if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("modified\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		status, err := GetGitStatus(dir)
+		if err != nil {
+			t.Fatalf("GetGitStatus() error = %v", err)
+		}
+		code, ok := status["hello.txt"]
+		if !ok {
+			t.Fatalf("GetGitStatus() missing entry for hello.txt, status = %v", status)
+		}
+		// Unstaged modification shows " M" (space in first column, M in second)
+		if strings.TrimSpace(code) != "M" {
+			t.Errorf("GetGitStatus() for modified file = %q, want something with 'M'", code)
+		}
+	})
+
+	t.Run("shows new untracked file", func(t *testing.T) {
+		dir := createTestRepo(t)
+		// Create an untracked file
+		if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("new\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		status, err := GetGitStatus(dir)
+		if err != nil {
+			t.Fatalf("GetGitStatus() error = %v", err)
+		}
+		code, ok := status["new.txt"]
+		if !ok {
+			t.Fatalf("GetGitStatus() missing entry for new.txt, status = %v", status)
+		}
+		// Untracked files show "??"
+		if code != "??" {
+			t.Errorf("GetGitStatus() for untracked file = %q, want '??'", code)
+		}
+	})
+
+	t.Run("shows deleted file", func(t *testing.T) {
+		dir := createTestRepo(t)
+		// Delete a tracked file
+		if err := os.Remove(filepath.Join(dir, "hello.txt")); err != nil {
+			t.Fatal(err)
+		}
+		status, err := GetGitStatus(dir)
+		if err != nil {
+			t.Fatalf("GetGitStatus() error = %v", err)
+		}
+		code, ok := status["hello.txt"]
+		if !ok {
+			t.Fatalf("GetGitStatus() missing entry for hello.txt, status = %v", status)
+		}
+		// Deleted file shows " D"
+		if strings.TrimSpace(code) != "D" {
+			t.Errorf("GetGitStatus() for deleted file = %q, want something with 'D'", code)
+		}
+	})
+
+	t.Run("shows staged file", func(t *testing.T) {
+		dir := createTestRepo(t)
+		// Create and stage a new file
+		if err := os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("git", "add", "staged.txt")
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git add failed: %v\n%s", err, out)
+		}
+		status, err := GetGitStatus(dir)
+		if err != nil {
+			t.Fatalf("GetGitStatus() error = %v", err)
+		}
+		code, ok := status["staged.txt"]
+		if !ok {
+			t.Fatalf("GetGitStatus() missing entry for staged.txt, status = %v", status)
+		}
+		// Staged new file shows "A "
+		if strings.TrimSpace(code) != "A" {
+			t.Errorf("GetGitStatus() for staged file = %q, want something with 'A'", code)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for HasUncommittedChanges
+// ---------------------------------------------------------------------------
+
+func TestHasUncommittedChanges(t *testing.T) {
+	t.Run("false for clean repo", func(t *testing.T) {
+		dir := createTestRepo(t)
+		if HasUncommittedChanges(dir) {
+			t.Error("HasUncommittedChanges() = true for clean repo, want false")
+		}
+	})
+
+	t.Run("true after modifying tracked file", func(t *testing.T) {
+		dir := createTestRepo(t)
+		// Modify a tracked file
+		if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("modified\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if !HasUncommittedChanges(dir) {
+			t.Error("HasUncommittedChanges() = false after modification, want true")
+		}
+	})
+
+	t.Run("true after staging changes", func(t *testing.T) {
+		dir := createTestRepo(t)
+		// Modify and stage a tracked file
+		if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("staged\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("git", "add", "hello.txt")
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git add failed: %v\n%s", err, out)
+		}
+		if !HasUncommittedChanges(dir) {
+			t.Error("HasUncommittedChanges() = false after staging, want true")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for GetDefaultBranch
+// ---------------------------------------------------------------------------
+
+func TestGetDefaultBranch(t *testing.T) {
+	t.Run("returns main or master for local-only repo", func(t *testing.T) {
+		dir := createTestRepo(t)
+		branch, err := GetDefaultBranch(dir)
+		if err != nil {
+			t.Fatalf("GetDefaultBranch() error = %v", err)
+		}
+		// Without origin/HEAD, should fall back to "main"
+		if branch != "main" && branch != "master" {
+			t.Errorf("GetDefaultBranch() = %q, want 'main' or 'master'", branch)
+		}
+	})
+
+	t.Run("falls back to main when no remote", func(t *testing.T) {
+		dir := createTestRepo(t)
+		branch, err := GetDefaultBranch(dir)
+		if err != nil {
+			t.Fatalf("GetDefaultBranch() error = %v", err)
+		}
+		if branch != "main" {
+			t.Errorf("GetDefaultBranch() = %q, want 'main' as fallback", branch)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for GetCurrentCommitHash
+// ---------------------------------------------------------------------------
+
+func TestGetCurrentCommitHash(t *testing.T) {
+	t.Run("returns valid hex hash", func(t *testing.T) {
+		dir := createTestRepo(t)
+		hash, err := GetCurrentCommitHash(dir)
+		if err != nil {
+			t.Fatalf("GetCurrentCommitHash() error = %v", err)
+		}
+		// SHA-1 hashes are 40 hex characters
+		matched, err := regexp.MatchString(`^[0-9a-f]{40}$`, hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matched {
+			t.Errorf("GetCurrentCommitHash() = %q, want a 40-char hex hash", hash)
+		}
+	})
+
+	t.Run("error not a git repo", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := GetCurrentCommitHash(dir)
+		if err == nil {
+			t.Fatal("GetCurrentCommitHash() expected error, got nil")
+		}
+	})
+
+	t.Run("returns consistent hash on repeated calls", func(t *testing.T) {
+		dir := createTestRepo(t)
+		hash1, err := GetCurrentCommitHash(dir)
+		if err != nil {
+			t.Fatalf("GetCurrentCommitHash() error = %v", err)
+		}
+		hash2, err := GetCurrentCommitHash(dir)
+		if err != nil {
+			t.Fatalf("GetCurrentCommitHash() error = %v", err)
+		}
+		if hash1 != hash2 {
+			t.Errorf("GetCurrentCommitHash() returned different hashes: %q vs %q", hash1, hash2)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for IsDirty
+// ---------------------------------------------------------------------------
+
+func TestIsDirty(t *testing.T) {
+	t.Run("false for clean repo", func(t *testing.T) {
+		dir := createTestRepo(t)
+		if IsDirty(dir) {
+			t.Error("IsDirty() = true for clean repo, want false")
+		}
+	})
+
+	t.Run("true after unstaged modification", func(t *testing.T) {
+		dir := createTestRepo(t)
+		if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("modified\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if !IsDirty(dir) {
+			t.Error("IsDirty() = false after unstaged modification, want true")
+		}
+	})
+
+	t.Run("true after staging changes", func(t *testing.T) {
+		dir := createTestRepo(t)
+		if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("staged\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("git", "add", "hello.txt")
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git add failed: %v\n%s", err, out)
+		}
+		if !IsDirty(dir) {
+			t.Error("IsDirty() = false after staging, want true")
+		}
+	})
+
+	t.Run("true with untracked files", func(t *testing.T) {
+		dir := createTestRepo(t)
+		// Create an untracked file
+		if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("new\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if !IsDirty(dir) {
+			t.Error("IsDirty() = false with untracked file, want true")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for info operation
+// ---------------------------------------------------------------------------
+
+func TestExecuteGitInfo(t *testing.T) {
+	t.Run("returns info for git repo", func(t *testing.T) {
+		dir := createTestRepo(t)
+		result := executeGitInfo(dir)
+		if result.IsError {
+			t.Fatalf("executeGitInfo() returned error: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Git Repository Information:") {
+			t.Errorf("executeGitInfo() missing header, got: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Root:") {
+			t.Errorf("executeGitInfo() missing Root, got: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Branch:") {
+			t.Errorf("executeGitInfo() missing Branch, got: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Commit:") {
+			t.Errorf("executeGitInfo() missing Commit, got: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Dirty:") {
+			t.Errorf("executeGitInfo() missing Dirty, got: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Dirty: false") {
+			t.Errorf("executeGitInfo() clean repo should show Dirty: false, got: %s", result.Output)
+		}
+	})
+
+	t.Run("shows dirty for modified repo", func(t *testing.T) {
+		dir := createTestRepo(t)
+		if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("modified\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		result := executeGitInfo(dir)
+		if result.IsError {
+			t.Fatalf("executeGitInfo() returned error: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Dirty: true") {
+			t.Errorf("executeGitInfo() dirty repo should show Dirty: true, got: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Changes:") {
+			t.Errorf("executeGitInfo() dirty repo should show Changes summary, got: %s", result.Output)
+		}
+	})
+
+	t.Run("not a git repo", func(t *testing.T) {
+		dir := t.TempDir()
+		result := executeGitInfo(dir)
+		if result.IsError {
+			t.Fatalf("executeGitInfo() should not return error for non-repo, got: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Not a git repository") {
+			t.Errorf("executeGitInfo() non-repo should say so, got: %s", result.Output)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for GetGitContext
+// ---------------------------------------------------------------------------
+
+func TestGetGitContext(t *testing.T) {
+	t.Run("empty for non-git dir", func(t *testing.T) {
+		origWd, _ := os.Getwd()
+		defer os.Chdir(origWd)
+
+		dir := t.TempDir()
+		os.Chdir(dir)
+		ctx := GetGitContext()
+		if ctx != "" {
+			t.Errorf("GetGitContext() = %q, want empty for non-git dir", ctx)
+		}
+	})
+
+	t.Run("returns context for git repo", func(t *testing.T) {
+		origWd, _ := os.Getwd()
+		defer os.Chdir(origWd)
+
+		dir := createTestRepo(t)
+		os.Chdir(dir)
+		ctx := GetGitContext()
+		if ctx == "" {
+			t.Fatal("GetGitContext() returned empty for git repo")
+		}
+		if !strings.Contains(ctx, "Git Branch:") {
+			t.Errorf("GetGitContext() missing Git Branch, got: %s", ctx)
+		}
+		if !strings.Contains(ctx, "Git Commit:") {
+			t.Errorf("GetGitContext() missing Git Commit, got: %s", ctx)
+		}
+		if !strings.Contains(ctx, "Git Dirty:") {
+			t.Errorf("GetGitContext() missing Git Dirty, got: %s", ctx)
+		}
+		if !strings.Contains(ctx, "Git Dirty: false") {
+			t.Errorf("GetGitContext() clean repo should show Git Dirty: false, got: %s", ctx)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for info operation in CheckPermissions
+// ---------------------------------------------------------------------------
+
+func TestGitTool_InfoCheckPermissions(t *testing.T) {
+	tool := &GitTool{}
+	params := map[string]interface{}{"operation": "info"}
+	warning := tool.CheckPermissions(params)
+	if warning != "" {
+		t.Errorf("CheckPermissions(info) = %q, want empty (read-only)", warning)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for info operation via GitTool.Execute
+// ---------------------------------------------------------------------------
+
+func TestGitTool_ExecuteInfo(t *testing.T) {
+	t.Run("info operation works via Execute", func(t *testing.T) {
+		dir := createTestRepo(t)
+		tool := &GitTool{}
+		params := map[string]interface{}{
+			"operation": "info",
+			"directory": dir,
+		}
+		result := tool.Execute(params)
+		if result.IsError {
+			t.Fatalf("Execute(info) returned error: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Git Repository Information:") {
+			t.Errorf("Execute(info) missing header, got: %s", result.Output)
+		}
+	})
+
+	t.Run("info operation with path param", func(t *testing.T) {
+		dir := createTestRepo(t)
+		tool := &GitTool{}
+		params := map[string]interface{}{
+			"operation": "info",
+			"path":      dir,
+		}
+		result := tool.Execute(params)
+		if result.IsError {
+			t.Fatalf("Execute(info) returned error: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Root:") {
+			t.Errorf("Execute(info) missing Root, got: %s", result.Output)
+		}
+	})
+
+	t.Run("info not a git repo", func(t *testing.T) {
+		tool := &GitTool{}
+		params := map[string]interface{}{
+			"operation": "info",
+			"directory": t.TempDir(),
+		}
+		result := tool.Execute(params)
+		if !strings.Contains(result.Output, "Not a git repository") {
+			t.Errorf("Execute(info) for non-repo should say so, got: %s", result.Output)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for buildGitCommand rejects info (handled separately)
+// ---------------------------------------------------------------------------
+
+func TestBuildGitCommand_InfoRejected(t *testing.T) {
+	params := map[string]interface{}{"operation": "info"}
+	_, err := buildGitCommand(params)
+	if err == nil {
+		t.Error("buildGitCommand(info) should return error (info is handled before buildGitCommand)")
 	}
 }

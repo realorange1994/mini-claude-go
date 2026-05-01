@@ -104,7 +104,7 @@ func (a *AgentLoop) registerTaskStopTool() {
 // registerBashBgTool wires the ExecTool's BackgroundTaskCallback to this loop's
 // spawnBackgroundBashCommand method, enabling run_in_background support.
 func (a *AgentLoop) registerBashBgTool() {
-	if tool := a.registry.Get("exec"); tool != nil {
+	if tool, ok := a.registry.Get("exec"); ok {
 		if execTool, ok := tool.(*tools.ExecTool); ok {
 			execTool.BackgroundTaskCallback = a.spawnBackgroundBashCommand
 		}
@@ -354,6 +354,13 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent.registerWorkTaskTools()
 	agent.registerBashBgTool()
 
+	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
+	if tst, ok := agent.registry.Get("tool_search"); ok {
+		if tst, ok := tst.(*tools.ToolSearchTool); ok {
+			tst.Registry = agent.registry
+		}
+	}
+
 	return agent, nil
 }
 
@@ -460,6 +467,13 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	agent.registerTaskStopTool()
 	agent.registerWorkTaskTools()
 	agent.registerBashBgTool()
+
+	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
+	if tst, ok := agent.registry.Get("tool_search"); ok {
+		if tst, ok := tst.(*tools.ToolSearchTool); ok {
+			tst.Registry = agent.registry
+		}
+	}
 
 	return agent, nil
 }
@@ -1492,7 +1506,7 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 		}
 
 		// Permission gate check (may read stdin in ask mode)
-		tool := a.registry.Get(toolName)
+		tool, _ := a.registry.Get(toolName)
 		if tool != nil {
 			denial := a.gate.Check(tool, input)
 			if denial != nil {
@@ -1607,7 +1621,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	}
 
 	// Coerce argument types to match schema
-	if tool := a.registry.Get(toolName); tool != nil {
+	if tool, ok := a.registry.Get(toolName); ok {
 		tools.CoerceArguments(tool.InputSchema(), input)
 	}
 
@@ -1638,8 +1652,8 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}
 	}
 
-	tool := a.registry.Get(toolName)
-	if tool == nil {
+	tool, toolFound := a.registry.Get(toolName)
+	if !toolFound {
 		msg := "Error: unknown tool '" + toolName + "'"
 		return anthropic.ToolResultBlockParam{
 			ToolUseID: toolUseID,

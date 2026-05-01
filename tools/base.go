@@ -187,9 +187,10 @@ func (r *Registry) Register(t Tool) {
 	r.tools[t.Name()] = t
 }
 
-// Get returns the tool by name, or nil if not found.
-func (r *Registry) Get(name string) Tool {
-	return r.tools[name]
+// Get returns the tool by name and whether it was found.
+func (r *Registry) Get(name string) (Tool, bool) {
+	t, ok := r.tools[name]
+	return t, ok
 }
 
 // AllTools returns all registered tools.

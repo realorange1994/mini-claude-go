@@ -299,6 +299,9 @@ func DefaultRegistry() *tools.Registry {
 	r.Register(&tools.GitTool{})
 	r.Register(&tools.SystemTool{})
 	r.Register(&tools.TerminalTool{})
+	// ToolSearchTool's Registry field is nil here; it is set by the agent loop
+	// after the registry is fully populated.
+	r.Register(&tools.ToolSearchTool{})
 	return r
 }
 
