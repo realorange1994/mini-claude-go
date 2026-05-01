@@ -727,6 +727,12 @@ func (c *ConversationContext) Entries() []conversationEntry {
 	return c.entries
 }
 
+// BuildCompactTranscript satisfies the TranscriptSource interface for the
+// auto mode classifier. Delegates to the standalone function in transcript_builder.go.
+func (c *ConversationContext) BuildCompactTranscript(maxMessages int) string {
+	return BuildCompactTranscript(c, maxMessages)
+}
+
 // Len returns the number of conversation entries.
 func (c *ConversationContext) Len() int {
 	c.mu.RLock()

@@ -612,6 +612,21 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry) (
 	}
 	child.gate = NewPermissionGate(&child.config)
 
+	// Wire auto mode classifier if enabled
+	if cfg.AutoClassifierEnabled && cfg.PermissionMode == ModeAuto {
+		classifierModel := cfg.AutoClassifierModel
+		if classifierModel == "" {
+			classifierModel = cfg.Model
+		}
+		apiKey := cfg.APIKey
+		if apiKey == "" {
+			apiKey = os.Getenv("ANTHROPIC_API_KEY")
+		}
+		classifier := NewAutoModeClassifier(apiKey, cfg.BaseURL, classifierModel)
+		child.gate.WithClassifier(classifier)
+		child.gate.WithTranscriptSource(child.context)
+	}
+
 	return child, nil
 }
 

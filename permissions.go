@@ -18,12 +18,31 @@ func (e PermissionDenied) Error() string { return e.Reason }
 
 // PermissionGate implements the two-layer permission check.
 type PermissionGate struct {
-	config *Config
+	config        *Config
+	classifier    *AutoModeClassifier
+	transcriptSrc TranscriptSource
+	denialCount   int // consecutive denial count for auto mode
 }
 
-// NewPermissionGate creates a new gate.
+// TranscriptSource provides compact transcript data for the classifier.
+type TranscriptSource interface {
+	BuildCompactTranscript(maxMessages int) string
+}
+
 func NewPermissionGate(cfg *Config) *PermissionGate {
 	return &PermissionGate{config: cfg}
+}
+
+// WithClassifier sets the auto mode classifier.
+func (g *PermissionGate) WithClassifier(c *AutoModeClassifier) *PermissionGate {
+	g.classifier = c
+	return g
+}
+
+// WithTranscriptSource sets the transcript source for the classifier.
+func (g *PermissionGate) WithTranscriptSource(src TranscriptSource) *PermissionGate {
+	g.transcriptSrc = src
+	return g
 }
 
 // Check runs the permission gauntlet. Returns a ToolResult if denied, nil if allowed.
@@ -99,9 +118,10 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
 			}
 		}
+	case ModeAuto:
+		return g.checkAutoMode(tool, params)
 	}
 
-	// ModeAuto or passed: allow
 	return nil
 }
 
@@ -130,6 +150,53 @@ func containsShellMetacharacters(s string) bool {
 
 func (g *PermissionGate) askUser(toolName string, params map[string]any) bool {
 	return g.askUserWithWarning(toolName, params, "")
+}
+
+// checkAutoMode implements the auto mode permission check using the classifier.
+// Safe tools are auto-allowed. Other tools are evaluated by the LLM classifier.
+// After 3 consecutive denials, falls back to interactive prompt.
+func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any) *tools.ToolResult {
+	// Fast path: whitelisted tools are always allowed
+	if IsAutoAllowlisted(tool.Name()) {
+		g.denialCount = 0
+		return nil
+	}
+
+	// If classifier is not available, fall back to legacy behavior: allow all
+	if g.classifier == nil || !g.classifier.IsEnabled() {
+		// No classifier configured: auto mode allows all tools (old behavior)
+		return nil
+	}
+
+	// Build transcript for classifier context
+	transcript := ""
+	if g.transcriptSrc != nil {
+		transcript = g.transcriptSrc.BuildCompactTranscript(20)
+	}
+
+	// Call classifier
+	result := g.classifier.Classify(tool.Name(), params, transcript)
+
+	if !result.Allow {
+		g.denialCount++
+		// After 3 consecutive denials, fall back to interactive prompt
+		if g.denialCount >= 3 {
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] %d consecutive denials, falling back to manual approval\n", g.denialCount)
+			if g.askUser(tool.Name(), params) {
+				g.denialCount = 0
+				return nil
+			}
+			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+		}
+		return &tools.ToolResult{
+			Output:  fmt.Sprintf("Permission denied: %s", result.Reason),
+			IsError: true,
+		}
+	}
+
+	// Allowed: reset denial count
+	g.denialCount = 0
+	return nil
 }
 
 func (g *PermissionGate) askUserWithWarning(toolName string, params map[string]any, warning string) bool {

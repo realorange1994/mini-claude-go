@@ -322,6 +322,22 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	// Fix gate to point to agent's config (not the local cfg copy)
 	agent.gate = NewPermissionGate(&agent.config)
 
+	// Wire auto mode classifier if enabled
+	if cfg.AutoClassifierEnabled && cfg.PermissionMode == ModeAuto {
+		classifierModel := cfg.AutoClassifierModel
+		if classifierModel == "" {
+			classifierModel = cfg.Model // default: same as main model
+		}
+		classifier := NewAutoModeClassifier(apiKey, cfg.BaseURL, classifierModel)
+		agent.gate.WithClassifier(classifier)
+		agent.gate.WithTranscriptSource(agent.context)
+		if classifier.IsEnabled() {
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] enabled (model=%s)\n", classifierModel)
+		} else {
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] disabled (no API key or model)\n")
+		}
+	}
+
 	// Start grace eviction ticker: clean up completed tasks after 30s
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
@@ -434,6 +450,20 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		evictionDone:       make(chan struct{}),
 		agentNameRegistry:  make(map[string]string),
 		workTaskStore:      NewWorkTaskStore(),
+	}
+
+	// Fix gate to point to agent's config
+	agent.gate = NewPermissionGate(&agent.config)
+
+	// Wire auto mode classifier if enabled
+	if cfg.AutoClassifierEnabled && cfg.PermissionMode == ModeAuto {
+		classifierModel := cfg.AutoClassifierModel
+		if classifierModel == "" {
+			classifierModel = cfg.Model
+		}
+		classifier := NewAutoModeClassifier(apiKey, cfg.BaseURL, classifierModel)
+		agent.gate.WithClassifier(classifier)
+		agent.gate.WithTranscriptSource(agent.context)
 	}
 
 	// Start grace eviction ticker: clean up completed tasks after 30s

@@ -60,6 +60,11 @@ type Config struct {
 	// Sub-agent settings
 	SubAgentMaxTurns int  // max turns for sub-agent loops (default 50)
 	SubAgentEnabled  bool // enable/disable the agent tool (default true)
+	// Auto mode classifier settings
+	AutoClassifierEnabled   bool   // enable LLM classifier in auto mode (default true)
+	AutoClassifierModel     string // model for classifier (default: same as main model)
+	AutoClassifierMaxTokens int    // max tokens for classifier response (default 128)
+	AutoDenialLimit         int    // consecutive denials before fallback (default 3)
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -276,6 +281,9 @@ func DefaultConfig() Config {
 		cachedPrompt: NewCachedSystemPrompt(),
 		SubAgentMaxTurns:          50,
 		SubAgentEnabled:           true,
+		AutoClassifierEnabled:   true,
+		AutoClassifierMaxTokens: 128,
+		AutoDenialLimit:         3,
 	}
 }
 
