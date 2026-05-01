@@ -238,7 +238,7 @@ func removeString(slice []string, s string) []string {
 }
 
 // wouldCreateCycle checks if adding blockerID as a dependency of taskID would create a cycle.
-// It does a BFS from blockerID following Blocks edges. If we reach taskID, the edge creates a cycle.
+// It searches BOTH BlockedBy and Blocks edges from blockerID. If we reach taskID, the edge creates a cycle.
 func (s *WorkTaskStore) wouldCreateCycle(taskID, blockerID string) bool {
 	if taskID == blockerID {
 		return true
@@ -257,6 +257,7 @@ func (s *WorkTaskStore) wouldCreateCycle(taskID, blockerID string) bool {
 		visited[id] = true
 		if t, ok := s.tasks[id]; ok {
 			queue = append(queue, t.Blocks...)
+			queue = append(queue, t.BlockedBy...)
 		}
 	}
 	return false

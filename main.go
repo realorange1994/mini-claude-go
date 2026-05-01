@@ -183,8 +183,9 @@ func runInteractive(agent *AgentLoop) {
 			now := time.Now().UnixNano()
 			prev := lastCtrlC.Load()
 			if prev != 0 && time.Duration(now-prev) < 2*time.Second {
-				// Double Ctrl+C within 2s -- exit immediately
+				// Double Ctrl+C within 2s -- exit immediately (clean up first)
 				printResumeHint(agent)
+				agent.Close()
 				os.Exit(0)
 			}
 			lastCtrlC.Store(now)
@@ -502,7 +503,10 @@ func loadTranscriptList() ([]transcriptEntry, error) {
 	var files []transcriptEntry
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
-			info, _ := e.Info()
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
 			files = append(files, transcriptEntry{name: e.Name(), mod: info.ModTime()})
 		}
 	}

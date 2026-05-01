@@ -1694,6 +1694,17 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	resultCh := make(chan tools.ToolResult, 1)
 	start := time.Now()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				select {
+				case resultCh <- tools.ToolResult{
+					Output:  fmt.Sprintf("Tool panic: %v", r),
+					IsError: true,
+				}:
+				default:
+				}
+			}
+		}()
 		resultCh <- tools.ExecuteWithContext(ctx, tool, input)
 	}()
 
