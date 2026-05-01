@@ -41,7 +41,7 @@ const cacheTTL = 5 * time.Minute
 // AUTO_MODE_SAFE_TOOLS are tools that are always allowed in auto mode
 // without needing classifier evaluation. These are all read-only or
 // management tools that cannot cause destructive side effects.
-// Note: "git" is handled separately with operation-level granularity.
+// Note: "git", "exec", "process" are handled separately with operation-level granularity.
 var AUTO_MODE_SAFE_TOOLS = map[string]bool{
 	"read_file":        true,
 	"glob":             true,
@@ -56,11 +56,29 @@ var AUTO_MODE_SAFE_TOOLS = map[string]bool{
 	"task_list":        true,
 	"task_get":         true,
 	"task_update":      true,
+	"task_output":      true,
+	"task_stop":        true,
 	"list_mcp_tools":   true,
 	"list_skills":      true,
 	"search_skills":    true,
 	"read_skill":       true,
 	"mcp_server_status": true,
+	// System info (all read-only)
+	"system": true,
+	// Web (all read-only)
+	"web_search":          true,
+	"web_search_scraper":  true,
+	"web_fetch":           true,
+	// File history (read-only + non-destructive metadata)
+	"file_history":          true,
+	"file_history_read":     true,
+	"file_history_grep":     true,
+	"file_history_diff":     true,
+	"file_history_search":   true,
+	"file_history_summary":  true,
+	"file_history_timeline": true,
+	"file_history_annotate": true,
+	"file_history_tag":      true,
 }
 
 // SAFE_GIT_OPERATIONS are read-only git operations that can be auto-allowed.
@@ -79,6 +97,17 @@ var SAFE_GIT_OPERATIONS = map[string]bool{
 	"ls-tree":   true,
 	"rev-parse": true,
 	"rev-list":  true,
+}
+
+// SAFE_PROCESS_OPERATIONS are read-only process operations that can be auto-allowed.
+// Destructive operations (kill, pkill, terminate) are NOT listed here
+// and will go through the classifier.
+var SAFE_PROCESS_OPERATIONS = map[string]bool{
+	"list":   true,
+	"pgrep":  true,
+	"top":    true,
+	"pstree": true,
+	"ps":     true,
 }
 
 // SAFE_EXEC_PREFIXES are shell command prefixes that are always safe (read-only).
@@ -154,7 +183,7 @@ func isSafeExecCommand(command string) bool {
 
 // IsAutoAllowlisted returns true if the tool call is in the safe whitelist
 // and does not need classifier evaluation.
-// For most tools this is a name-only check. For "git" and "exec", it also checks
+// For most tools this is a name-only check. For "git", "exec", and "process", it also checks
 // the specific operation/command — only safe operations are auto-allowed.
 func IsAutoAllowlisted(toolName string, toolInput map[string]any) bool {
 	if AUTO_MODE_SAFE_TOOLS[toolName] {
@@ -164,6 +193,12 @@ func IsAutoAllowlisted(toolName string, toolInput map[string]any) bool {
 	if toolName == "git" {
 		if op, ok := toolInput["operation"].(string); ok {
 			return SAFE_GIT_OPERATIONS[op]
+		}
+	}
+	// Process: operation-level granularity — list/pgrep safe, kill/pkill go through classifier
+	if toolName == "process" {
+		if op, ok := toolInput["operation"].(string); ok {
+			return SAFE_PROCESS_OPERATIONS[op]
 		}
 	}
 	// Exec: command-level granularity — safe commands auto-allowed
