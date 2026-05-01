@@ -341,13 +341,29 @@ func (a *AgentLoop) spawnBackgroundBashCommand(command, workingDir string) (stri
 		}
 		defer f.Close()
 
+	// Look up the task to set the Process reference
+		task := a.taskStore.GetTask(taskID)
+
 		cmd := exec.Command(shell, flag, command)
 		cmd.Dir = workingDir
 		cmd.Stdout = f
 		cmd.Stderr = f
 		cmd.Stdin = nil
 
-		runErr := cmd.Run()
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(f, "Error: failed to start command: %v\n", err)
+			a.finishBashBgTask(taskID, 1, fmt.Sprintf("Error: failed to start command: %v", err))
+			return
+		}
+
+		// Track the process for KillTask
+		if task != nil {
+			task.mu.Lock()
+			task.Process = cmd.Process
+			task.mu.Unlock()
+		}
+
+		runErr := cmd.Wait()
 		elapsed := time.Since(start)
 
 		exitCode := 0
