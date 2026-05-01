@@ -212,3 +212,252 @@ func TestExecToolInputSchema(t *testing.T) {
 		t.Error("expected command in schema")
 	}
 }
+
+func TestDetectCommandSubstitution(t *testing.T) {
+	// Should be blocked: command substitution
+	blocked := []string{
+		"echo $(whoami)",
+		"curl `ls`",
+		"cat /etc/passwd | $(grep root)",
+		"diff <(ls) <(ls /)",
+		"echo $((1+$(whoami)))",
+	}
+	for _, cmd := range blocked {
+		reason := detectCommandSubstitution(cmd)
+		if reason == "" {
+			t.Errorf("expected detection for: %s", cmd)
+		}
+	}
+
+	// Should be allowed: safe variable expansions
+	allowed := []string{
+		"echo $HOME",
+		"ls $PATH",
+		"echo ${HOME}",
+		"echo ${PATH}",
+		"echo $USER",
+		"cd $PWD",
+		"git commit -m ${GIT_AUTHOR_NAME}",
+		"echo $CI",
+		"echo $?",
+		"echo $$",
+		"echo $!",
+		"echo $1",
+		"echo $2",
+		"echo $#",
+		"echo $@",
+		"echo $*",
+		"echo ${HOME:-/default}",
+		"echo ${PATH:+alternate}",
+		"make -e GOPATH=$GOPATH",
+		"env FOO=bar ./script.sh",
+	}
+	for _, cmd := range allowed {
+		reason := detectCommandSubstitution(cmd)
+		if reason != "" {
+			t.Errorf("expected no detection for: %s, got: %s", cmd, reason)
+		}
+	}
+
+	// Should be blocked: dangerous variable expansions
+	dangerous := []string{
+		"echo ${IFS}",
+		"echo ${!VAR}",
+		"echo ${BASH_VERSION}",
+		"echo ${DANGER_VAR}",
+	}
+	for _, cmd := range dangerous {
+		reason := detectCommandSubstitution(cmd)
+		if reason == "" {
+			t.Errorf("expected detection for: %s", cmd)
+		}
+	}
+}
+
+func TestDetectExpansion(t *testing.T) {
+	// Should be blocked in destructive commands
+	destructiveBlocked := []string{
+		"rm -rf *.txt",
+		"rm file?.log",
+		"mv *.bak /backup/",
+		"cp file[0-9].dat /dest/",
+		"chmod 777 {a,b,c}",
+		"chown user:group {1..10}",
+		"git rm *.tmp",
+		"git clean -f *.log",
+	}
+	for _, cmd := range destructiveBlocked {
+		reason := detectExpansion(cmd)
+		if reason == "" {
+			t.Errorf("expected expansion detection for: %s", cmd)
+		}
+	}
+
+	// Should be allowed: quoted globs
+	quotedAllowed := []string{
+		`ls "*.go"`,
+		"grep pattern '*.txt'",
+		`find . -name "*.log"`,
+	}
+	for _, cmd := range quotedAllowed {
+		reason := detectExpansion(cmd)
+		if reason != "" {
+			t.Errorf("expected no detection for: %s, got: %s", cmd, reason)
+		}
+	}
+
+	// Should be allowed: non-destructive commands with globs
+	safe := []string{
+		"ls *.go",
+		"find . -name '*.txt'",
+		"grep pattern *.log",
+		"echo *.txt",
+		"cat config.ini",
+	}
+	for _, cmd := range safe {
+		reason := detectExpansion(cmd)
+		if reason != "" {
+			t.Errorf("expected no detection for: %s, got: %s", cmd, reason)
+		}
+	}
+}
+
+func TestSplitCompoundCommand(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"cmd1; cmd2", []string{"cmd1", "cmd2"}},
+		{"cmd1 && cmd2", []string{"cmd1", "cmd2"}},
+		{"cmd1 || cmd2", []string{"cmd1", "cmd2"}},
+		{"cmd1 | cmd2", []string{"cmd1", "cmd2"}},
+		{"cmd1\ncmd2", []string{"cmd1", "cmd2"}},
+		{"cmd1 | cmd2 && cmd3; cmd4", []string{"cmd1", "cmd2", "cmd3", "cmd4"}},
+		{`echo "hello; world"`, []string{`echo "hello; world"`}},
+		{"echo 'hello && world'", []string{"echo 'hello && world'"}},
+		{"echo `date`", []string{"echo `date`"}},
+		{"ls", []string{"ls"}},
+		{"", nil},
+		{"   ", nil},
+		{"cmd1; cmd2; cmd3", []string{"cmd1", "cmd2", "cmd3"}},
+	}
+	for _, tc := range tests {
+		result := splitCompoundCommand(tc.input)
+		if len(result) != len(tc.expected) {
+			t.Errorf("splitCompoundCommand(%q): expected %v, got %v", tc.input, tc.expected, result)
+		} else {
+			for i := range result {
+				if result[i] != tc.expected[i] {
+					t.Errorf("splitCompoundCommand(%q): expected %v, got %v", tc.input, tc.expected, result)
+				}
+			}
+		}
+	}
+}
+
+func TestStripSafeWrappers(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"timeout 30 rm -rf /tmp", "rm -rf /tmp"},
+		{"nice -n 10 make build", "make build"},
+		{"nohup ./script.sh &", "./script.sh &"},
+		{"time make test", "make test"},
+		{"stdbuf -oL grep pattern file", "grep pattern file"},
+		{"ionice -c 3 make build", "make build"},
+		{"env FOO=bar ./script.sh", "./script.sh"},
+		{"env FOO=bar BAR=baz ./script.sh", "./script.sh"},
+		{"command ls -la", "ls -la"},
+		{"builtin echo hello", "echo hello"},
+		{"unbuffer ssh host cmd", "ssh host cmd"},
+		{"rm -rf /tmp", "rm -rf /tmp"},
+		{"ls -la", "ls -la"},
+	}
+	for _, tc := range tests {
+		result := stripSafeWrappers(tc.input)
+		if result != tc.expected {
+			t.Errorf("stripSafeWrappers(%q): expected %q, got %q", tc.input, tc.expected, result)
+		}
+	}
+}
+
+func TestCheckPermissionsCommandSubstitution(t *testing.T) {
+	tool := &ExecTool{}
+	dangerous := []string{
+		"echo $(whoami)",
+		"cat `ls`",
+		"diff <(ls) <(ls /)",
+		"echo $((1+$(id)))",
+	}
+	for _, cmd := range dangerous {
+		result := tool.CheckPermissions(map[string]any{"command": cmd})
+		if result == "" {
+			t.Errorf("expected denial for: %s", cmd)
+		}
+	}
+}
+
+func TestCheckPermissionsGlobExpansion(t *testing.T) {
+	tool := &ExecTool{}
+	// Should be denied in destructive commands
+	dangerous := []string{
+		"rm *.log",
+		"mv *.bak /tmp",
+		"cp file?.dat /dest",
+		"chmod 777 {a,b,c}",
+		"git rm *.tmp",
+	}
+	for _, cmd := range dangerous {
+		result := tool.CheckPermissions(map[string]any{"command": cmd})
+		if result == "" {
+			t.Errorf("expected denial for: %s", cmd)
+		}
+	}
+
+	// Should be allowed in non-destructive commands
+	safe := []string{
+		"ls *.go",
+		"grep pattern *.txt",
+		"find . -name '*.log'",
+	}
+	for _, cmd := range safe {
+		result := tool.CheckPermissions(map[string]any{"command": cmd})
+		if result != "" {
+			t.Errorf("expected allowance for: %s, got: %s", cmd, result)
+		}
+	}
+}
+
+func TestCheckPermissionsCompoundCommand(t *testing.T) {
+	tool := &ExecTool{}
+	// Any dangerous subcommand should block the whole command
+	dangerous := []string{
+		"echo hello; rm -rf /",
+		"ls && rm -rf /tmp",
+		"cat file || $(malicious)",
+		"echo test | $(whoami)",
+	}
+	for _, cmd := range dangerous {
+		result := tool.CheckPermissions(map[string]any{"command": cmd})
+		if result == "" {
+			t.Errorf("expected denial for compound command: %s", cmd)
+		}
+	}
+}
+
+func TestCheckPermissionsWrapperStripping(t *testing.T) {
+	tool := &ExecTool{}
+	// Wrapped dangerous commands should still be blocked
+	dangerous := []string{
+		"timeout 5 rm -rf /tmp/test",
+		"nice -n 10 rm -rf /tmp/test",
+		"nohup rm -rf /tmp/test",
+	}
+	for _, cmd := range dangerous {
+		result := tool.CheckPermissions(map[string]any{"command": cmd})
+		if result == "" {
+			t.Errorf("expected denial for wrapped command: %s", cmd)
+		}
+	}
+}

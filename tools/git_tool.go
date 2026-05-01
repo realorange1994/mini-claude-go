@@ -4,15 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
-// GitTool provides Git version control operations.
+// GitTool provides Git version control and GitHub CLI (gh) operations.
 type GitTool struct{}
 
 func (*GitTool) Name() string    { return "git" }
 func (*GitTool) Description() string {
-	return "Execute Git version control operations. Supports clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, worktree, rm, mv, restore, switch, cherry-pick, revert, clean, blame, reflog, and shortlog operations."
+	return "Execute Git version control operations (clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, worktree, rm, mv, restore, switch, cherry-pick, revert, clean, blame, reflog, shortlog) and read-only GitHub CLI (gh) operations (pr view/list/diff/checks/status, issue view/list/status, run list/view, auth status, release list/view, search repos/issues/prs)."
 }
 
 func (*GitTool) InputSchema() map[string]interface{} {
@@ -28,7 +30,7 @@ func (*GitTool) InputSchema() map[string]interface{} {
 					"tag", "status", "diff", "log", "remote", "show", "describe",
 					"ls-files", "ls-tree", "rev-parse", "rev-list", "worktree",
 					"rm", "mv", "restore", "switch", "cherry-pick", "revert",
-					"clean", "blame", "reflog", "shortlog",
+					"clean", "blame", "reflog", "shortlog", "gh",
 				},
 			},
 			"repo": map[string]interface{}{
@@ -134,24 +136,109 @@ func (*GitTool) InputSchema() map[string]interface{} {
 				"description": "Don't edit the commit message (only for revert)",
 			},
 			"stash_subcommand": map[string]interface{}{
-			"type":        "string",
-			"description": "Stash subcommand: pop, apply, drop, list, show (for stash operation). Default is 'push' (just 'git stash')",
-		},
-		"stash_include_untracked": map[string]interface{}{
-			"type":        "boolean",
-			"description": "Include untracked files in stash (for stash push, adds -u flag)",
-		},
-		"proxy": map[string]interface{}{
+				"type":        "string",
+				"description": "Stash subcommand: pop, apply, drop, list, show (for stash operation). Default is 'push' (just 'git stash')",
+			},
+			"stash_include_untracked": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Include untracked files in stash (for stash push, adds -u flag)",
+			},
+			"proxy": map[string]interface{}{
 				"type":        "string",
 				"description": "HTTP/SOCKS proxy URL for git operations (e.g. 'http://127.0.0.1:7890', 'socks5://127.0.0.1:1080'). Sets https_proxy and http_proxy environment variables for the git command.",
+			},
+			"gh_command": map[string]interface{}{
+				"type":        "array",
+				"description": "gh CLI subcommand and arguments (only for gh operation). Example: [\"pr\", \"view\", \"123\"] or [\"issue\", \"list\", \"--state\", \"open\"]. Only read-only commands are allowed.",
+				"items":       map[string]interface{}{"type": "string"},
 			},
 		},
 		"required": []string{"operation"},
 	}
 }
 
+// CheckPermissions checks if the git operation is allowed and returns a warning message if not.
+// Returns empty string if allowed, or a non-empty warning message to show the user.
 func (*GitTool) CheckPermissions(params map[string]interface{}) string {
-	return ""
+	operation, _ := params["operation"].(string)
+	flags := getStringArray(params, "flags")
+
+	// Check for explicitly dangerous operations/flags
+	if dangerous, msg := isDangerousOperation(operation, flags); dangerous {
+		return msg
+	}
+
+	// Classify the operation
+	switch operation {
+	case "status", "diff", "log", "show", "describe", "blame", "shortlog",
+		"ls-files", "ls-tree", "rev-parse", "rev-list", "reflog":
+		// Read-only operations: no warning needed
+		return ""
+
+	case "commit":
+		return "Warning: This commit will modify repository history."
+	case "push":
+		return "Warning: This push will transfer commits to the remote repository."
+	case "pull":
+		return "Warning: This pull will fetch and merge commits from the remote."
+	case "fetch":
+		return "Warning: This fetch will update remote-tracking references."
+	case "merge":
+		return "Warning: This merge will create a new commit integrating changes."
+	case "rebase":
+		return "Warning: This rebase will rewrite commit history."
+	case "reset":
+		return "Warning: This reset will move HEAD and potentially modify the index."
+	case "clean":
+		return "Warning: This clean will remove untracked files from the working tree."
+	case "checkout":
+		return "Warning: This checkout will modify the working tree."
+	case "switch":
+		return "Warning: This switch will change the current branch."
+	case "restore":
+		return "Warning: This restore will overwrite files in the working tree."
+	case "stash":
+		return "Warning: This stash will temporarily shelve changes."
+	case "branch":
+		// Branch listing is safe, creation is a write
+		hasListFlag := false
+		for _, f := range flags {
+			if f == "-l" || f == "--list" || f == "-a" || f == "--all" ||
+				f == "-r" || f == "--remotes" {
+				hasListFlag = true
+				break
+			}
+		}
+		if hasListFlag || len(flags) == 0 {
+			return "" // List-only is read-only
+		}
+		return "Warning: This branch operation will modify repository state."
+	case "tag":
+		// Tag listing is safe
+		for _, f := range flags {
+			if f == "-l" || f == "--list" {
+				return ""
+			}
+		}
+		return "Warning: This tag operation will modify repository state."
+	case "remote":
+		// Remote listing is safe
+		return ""
+	case "add":
+		return "Warning: This add will stage changes for commit."
+	case "rm":
+		return "Warning: This rm will remove files from the working tree and/or index."
+	case "mv":
+		return "Warning: This mv will move/rename files."
+	case "cherry-pick":
+		return "Warning: This cherry-pick will apply commits to the current branch."
+	case "revert":
+		return "Warning: This revert will create new commits that undo changes."
+	case "worktree":
+		return "Warning: This worktree operation will modify linked working trees."
+	default:
+		return ""
+	}
 }
 
 func (*GitTool) Execute(params map[string]interface{}) ToolResult {
@@ -166,6 +253,14 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 	operation, _ := params["operation"].(string)
 	if operation == "" {
 		return ToolResult{Output: "Error: operation is required", IsError: true}
+	}
+
+	// Validate flags before executing (git operations only, not gh)
+	if operation != "gh" {
+		flags := getStringArray(params, "flags")
+		if err := validateGitFlags(operation, flags); err != nil {
+			return ToolResult{Output: fmt.Sprintf("Flag validation error: %v", err), IsError: true}
+		}
 	}
 
 	// Determine working directory:
@@ -183,20 +278,20 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 	}
 
 	// Check remote configuration for operations that need it
-	if (operation == "push" || operation == "pull" || operation == "fetch") {
+	if operation == "push" || operation == "pull" || operation == "fetch" {
 		remote, _ := params["remote"].(string)
 		if remote == "" {
 			// Check if there's an origin remote configured
 			checkOut, _, _ := runGitCommandWithExitCode(ctx, []string{"remote"}, workDir, "")
 			if checkOut == "" {
 				return ToolResult{
-					Output:   "Error: cannot determine git remotes",
+					Output:  "Error: cannot determine git remotes",
 					IsError: true,
 				}
 			}
 			if !strings.Contains(checkOut, "origin") {
 				return ToolResult{
-					Output:   fmt.Sprintf("Error: no remote specified and no 'origin' remote found. Available remotes:\n%s", checkOut),
+					Output:  fmt.Sprintf("Error: no remote specified and no 'origin' remote found. Available remotes:\n%s", checkOut),
 					IsError: true,
 				}
 			}
@@ -211,16 +306,550 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 	// Get proxy from params
 	proxy, _ := params["proxy"].(string)
 
-	out, exitCode, _ := runGitCommandWithExitCode(ctx, cmd, workDir, proxy)
+	var out string
+	var exitCode int
+
+	if operation == "gh" {
+		out, exitCode, _ = runGHCommand(ctx, cmd, workDir, proxy)
+	} else {
+		out, exitCode, _ = runGitCommandWithExitCode(ctx, cmd, workDir, proxy)
+	}
 
 	if exitCode != 0 {
+		binary := "git"
+		if operation == "gh" {
+			binary = "gh"
+		}
 		return ToolResult{
-			Output:  fmt.Sprintf("Error executing 'git %s' (exit code: %d)\n\nOutput:\n%s", strings.Join(cmd, " "), exitCode, out),
+			Output:  fmt.Sprintf("Error executing '%s %s' (exit code: %d)\n\nOutput:\n%s", binary, strings.Join(cmd, " "), exitCode, out),
 			IsError: true,
 		}
 	}
 
 	return ToolResult{Output: out, IsError: false}
+}
+
+// ---------------------------------------------------------------------------
+// Git flag-level safety validation
+// ---------------------------------------------------------------------------
+
+// gitFlagType classifies how a flag's argument should be validated
+type gitFlagType int
+
+const (
+	gitFlagNone   gitFlagType = iota // No argument (--stat, --oneline)
+	gitFlagNumber                    // Integer argument (-n, --max-count=N)
+	gitFlagString                    // Any string argument (--author, --grep)
+)
+
+// gitFlagConfig maps flag names to their expected argument types
+type gitFlagConfig map[string]gitFlagType
+
+// Per-subcommand safe flag maps
+var (
+	gitDiffFlags = gitFlagConfig{
+		"--cached":               gitFlagNone,
+		"--staged":               gitFlagNone,
+		"--stat":                 gitFlagNone,
+		"--stat-width":           gitFlagString,
+		"--name-only":            gitFlagNone,
+		"--name-status":          gitFlagNone,
+		"--stat-only":            gitFlagNone,
+		"--color":                gitFlagString,
+		"--no-color":             gitFlagNone,
+		"--color=always":         gitFlagNone,
+		"--color=never":          gitFlagNone,
+		"--unified":              gitFlagString,
+		"--diff-filter":          gitFlagString,
+		"--ignore-space-at-eol":  gitFlagNone,
+		"--ignore-space-change":  gitFlagNone,
+		"--ignore-all-space":     gitFlagNone,
+		"--ignore-blank-lines":   gitFlagNone,
+		"--inter-hunk-context":   gitFlagString,
+		"--function-context":     gitFlagNone,
+		"--exit-code":            gitFlagNone,
+		"--quiet":                gitFlagNone,
+		"--patch-with-stat":      gitFlagNone,
+		"--word-diff":            gitFlagNone,
+		"--word-diff-regex":      gitFlagString,
+		"--color-words":          gitFlagNone,
+		"--no-renames":           gitFlagNone,
+		"--check":                gitFlagNone,
+		"--full-index":           gitFlagNone,
+		"--binary":               gitFlagNone,
+		"--abbrev":               gitFlagString,
+		"--find-renames":         gitFlagNone,
+		"--find-copies":          gitFlagNone,
+		"--find-copies-harder":   gitFlagNone,
+		"--irreversible-delete":  gitFlagNone,
+		"--diff-algorithm":       gitFlagString,
+		"--histogram":            gitFlagNone,
+		"--patience":             gitFlagNone,
+		"--minimal":              gitFlagNone,
+		"--relative":             gitFlagString,
+		"-p":                     gitFlagNone,
+		"-u":                     gitFlagNone,
+		"-s":                     gitFlagNone,
+		"-M":                     gitFlagNone,
+		"-C":                     gitFlagNone,
+		"-B":                     gitFlagNone,
+		"-D":                     gitFlagNone,
+		"-l":                     gitFlagNone,
+		"-R":                     gitFlagNone,
+		"-S":                     gitFlagString, // pickaxe search
+		"-G":                     gitFlagString, // pickaxe regex
+	}
+
+	gitLogFlags = gitFlagConfig{
+		"--oneline":       gitFlagNone,
+		"--graph":         gitFlagNone,
+		"--decorate":      gitFlagNone,
+		"--no-decorate":   gitFlagNone,
+		"--date":          gitFlagString,
+		"--relative-date": gitFlagNone,
+		"--all":           gitFlagNone,
+		"--branches":      gitFlagNone,
+		"--tags":          gitFlagNone,
+		"--remotes":       gitFlagNone,
+		"--max-count":     gitFlagString,
+		"-n":              gitFlagString,
+		"--since":         gitFlagString,
+		"--after":         gitFlagString,
+		"--until":         gitFlagString,
+		"--before":        gitFlagString,
+		"--author":        gitFlagString,
+		"--committer":     gitFlagString,
+		"--grep":          gitFlagString,
+		"--no-merges":     gitFlagNone,
+		"--merges":        gitFlagNone,
+		"--format":        gitFlagString,
+		"--pretty":        gitFlagString,
+		"--stat":          gitFlagNone,
+		"--name-status":   gitFlagNone,
+		"--name-only":     gitFlagNone,
+		"--diff-filter":   gitFlagString,
+		"--reverse":       gitFlagNone,
+		"--skip":          gitFlagString,
+		"--follow":        gitFlagNone,
+		"--left-right":    gitFlagNone,
+		"--source":        gitFlagNone,
+		"--first-parent":  gitFlagNone,
+		"--topo-order":    gitFlagNone,
+		"--date-order":    gitFlagNone,
+		"--abbrev-commit": gitFlagNone,
+		"--patch":         gitFlagNone,
+		"-p":              gitFlagNone,
+		"-s":              gitFlagNone,
+		"--no-patch":      gitFlagNone,
+		"-S":              gitFlagString,
+		"-G":              gitFlagString,
+	}
+
+	gitShowFlags = gitFlagConfig{
+		"--oneline":         gitFlagNone,
+		"--graph":           gitFlagNone,
+		"--decorate":         gitFlagNone,
+		"--date":            gitFlagString,
+		"--stat":            gitFlagNone,
+		"--name-status":     gitFlagNone,
+		"--name-only":       gitFlagNone,
+		"--color":           gitFlagString,
+		"--no-color":        gitFlagNone,
+		"--patch":           gitFlagNone,
+		"-p":                gitFlagNone,
+		"--no-patch":        gitFlagNone,
+		"--diff-filter":     gitFlagString,
+		"--format":          gitFlagString,
+		"--pretty":          gitFlagString,
+		"--abbrev-commit":   gitFlagNone,
+		"--first-parent":    gitFlagNone,
+		"--raw":             gitFlagNone,
+		"-m":                gitFlagNone,
+		"--quiet":           gitFlagNone,
+		"-s":                gitFlagNone,
+		"--word-diff":       gitFlagNone,
+		"--word-diff-regex": gitFlagString,
+		"--color-words":     gitFlagNone,
+		"-S":                gitFlagString,
+		"-G":                gitFlagString,
+	}
+
+	gitStatusFlags = gitFlagConfig{
+		"--short":             gitFlagNone,
+		"-s":                 gitFlagNone,
+		"--branch":            gitFlagNone,
+		"-b":                 gitFlagNone,
+		"--porcelain":         gitFlagNone,
+		"--porcelain=2":       gitFlagNone,
+		"--long":              gitFlagNone,
+		"--verbose":           gitFlagNone,
+		"-v":                  gitFlagNone,
+		"--untracked-files":   gitFlagString,
+		"-u":                  gitFlagString,
+		"--ignored":           gitFlagNone,
+		"--ignore-submodules": gitFlagString,
+		"--renames":           gitFlagNone,
+		"--no-renames":        gitFlagNone,
+		"--find-renames":      gitFlagString,
+		"-M":                 gitFlagString,
+		"--column":            gitFlagNone,
+		"--no-column":         gitFlagNone,
+		"--ahead-behind":      gitFlagNone,
+		"--no-ahead-behind":   gitFlagNone,
+	}
+
+	gitBranchFlags = gitFlagConfig{
+		"-l":             gitFlagNone,
+		"--list":         gitFlagNone,
+		"-a":             gitFlagNone,
+		"--all":          gitFlagNone,
+		"-r":             gitFlagNone,
+		"--remotes":      gitFlagNone,
+		"-v":             gitFlagNone,
+		"-vv":            gitFlagNone,
+		"--verbose":      gitFlagNone,
+		"--color":        gitFlagNone,
+		"--no-color":     gitFlagNone,
+		"--column":       gitFlagNone,
+		"--no-column":    gitFlagNone,
+		"--contains":     gitFlagString,
+		"--no-contains":  gitFlagString,
+		"--merged":       gitFlagNone,
+		"--no-merged":    gitFlagNone,
+		"--points-at":    gitFlagString,
+		"--sort":         gitFlagString,
+		"--show-current": gitFlagNone,
+		"--abbrev":       gitFlagString,
+	}
+
+	gitStashListFlags = gitFlagConfig{
+		"--oneline":   gitFlagNone,
+		"--graph":    gitFlagNone,
+		"--decorate": gitFlagNone,
+		"--all":      gitFlagNone,
+		"-n":         gitFlagString,
+		"--max-count": gitFlagString,
+	}
+
+	gitReflogShowFlags = gitFlagConfig{
+		"--oneline":   gitFlagNone,
+		"--graph":     gitFlagNone,
+		"--decorate":  gitFlagNone,
+		"--date":      gitFlagString,
+		"--all":       gitFlagNone,
+		"-n":          gitFlagString,
+		"--max-count": gitFlagString,
+		"--author":    gitFlagString,
+		"--committer": gitFlagString,
+		"--grep":      gitFlagString,
+	}
+
+	gitTagFlags = gitFlagConfig{
+		"-l":            gitFlagNone,
+		"--list":        gitFlagNone,
+		"-n":            gitFlagString,
+		"--contains":    gitFlagString,
+		"--no-contains": gitFlagString,
+		"--merged":      gitFlagString,
+		"--no-merged":   gitFlagString,
+		"--sort":        gitFlagString,
+		"--format":      gitFlagString,
+		"--points-at":   gitFlagString,
+		"--column":      gitFlagNone,
+		"--no-column":   gitFlagNone,
+	}
+
+	gitRemoteFlags = gitFlagConfig{
+		"-v":        gitFlagNone,
+		"--verbose": gitFlagNone,
+	}
+
+	// reset flags: --soft, --mixed, --merge allowed; --hard intentionally excluded
+	gitResetFlags = gitFlagConfig{
+		"--soft":   gitFlagNone,
+		"--mixed":  gitFlagNone,
+		"--merge":  gitFlagNone,
+		"--keep":   gitFlagNone,
+		"--quiet":  gitFlagNone,
+		"-q":       gitFlagNone,
+		"--patch":  gitFlagNone,
+	}
+
+	gitMergeFlags = gitFlagConfig{
+		"--no-ff":        gitFlagNone,
+		"--squash":       gitFlagNone,
+		"--abort":        gitFlagNone,
+		"--continue":     gitFlagNone,
+		"--quit":         gitFlagNone,
+		"--no-commit":    gitFlagNone,
+		"--edit":         gitFlagNone,
+		"-e":             gitFlagNone,
+		"--no-edit":      gitFlagNone,
+		"--message":      gitFlagString,
+		"-m":             gitFlagString,
+		"--quiet":        gitFlagNone,
+		"-q":             gitFlagNone,
+		"--verbose":      gitFlagNone,
+		"-v":             gitFlagNone,
+		"--no-verify":    gitFlagNone,
+		"-X":             gitFlagString,
+		"--strategy-option": gitFlagString,
+	}
+
+	gitRebaseFlags = gitFlagConfig{
+		"--interactive":   gitFlagNone,
+		"-i":              gitFlagNone,
+		"--onto":          gitFlagString,
+		"--continue":      gitFlagNone,
+		"--abort":         gitFlagNone,
+		"--skip":          gitFlagNone,
+		"--quit":          gitFlagNone,
+		"--autosquash":    gitFlagNone,
+		"--no-autosquash": gitFlagNone,
+		"--autostash":     gitFlagNone,
+		"--no-autostash":  gitFlagNone,
+		"--whitespace":    gitFlagString,
+		"--verify":        gitFlagNone,
+		"--no-verify":     gitFlagNone,
+		"-q":              gitFlagNone,
+		"--quiet":         gitFlagNone,
+		"--verbose":       gitFlagNone,
+		"-v":              gitFlagNone,
+		"--force-rebase":  gitFlagNone,
+		"-m":              gitFlagNone,
+		"--root":          gitFlagNone,
+	}
+
+	gitStashPushFlags = gitFlagConfig{
+		"--index":              gitFlagNone,
+		"--no-index":           gitFlagNone,
+		"--include-untracked":  gitFlagNone,
+		"-u":                   gitFlagNone,
+		"--all":                gitFlagNone,
+		"--patch":              gitFlagNone,
+		"--message":            gitFlagString,
+		"--keep-index":         gitFlagNone,
+		"--no-keep-index":      gitFlagNone,
+		"--quiet":              gitFlagNone,
+		"-q":                   gitFlagNone,
+		"--staged":             gitFlagNone,
+	}
+
+	// push flags: --force intentionally excluded, --force-with-lease allowed
+	gitPushFlags = gitFlagConfig{
+		"--force-with-lease":     gitFlagNone,
+		"--dry-run":              gitFlagNone,
+		"--quiet":                gitFlagNone,
+		"-q":                     gitFlagNone,
+		"--verbose":              gitFlagNone,
+		"-v":                     gitFlagNone,
+		"--delete":               gitFlagNone,
+		"-d":                     gitFlagNone,
+		"--all":                  gitFlagNone,
+		"--mirror":               gitFlagNone,
+		"--tags":                 gitFlagNone,
+		"--set-upstream":         gitFlagNone,
+		"-u":                     gitFlagNone,
+		"--set-upstream-to":      gitFlagString,
+		"--force-if-includes":    gitFlagNone,
+		"--no-force-if-includes": gitFlagNone,
+		"--receive-pack":         gitFlagString,
+		"--exec":                 gitFlagString,
+		"--push-option":          gitFlagString,
+		"-o":                     gitFlagString,
+		"--thin":                 gitFlagNone,
+		"--no-thin":              gitFlagNone,
+		"--follow-tags":          gitFlagNone,
+		"--signed":               gitFlagString,
+		"--no-signed":            gitFlagNone,
+		"--atomic":               gitFlagNone,
+		"--no-atomic":            gitFlagNone,
+	}
+
+	gitPullFlags = gitFlagConfig{
+		"--rebase":                gitFlagNone,
+		"--no-rebase":             gitFlagNone,
+		"-r":                      gitFlagNone,
+		"--ff-only":               gitFlagNone,
+		"--ff":                    gitFlagNone,
+		"--no-ff":                 gitFlagNone,
+		"--rerere-autoupdate":     gitFlagNone,
+		"--no-rerere-autoupdate":  gitFlagNone,
+		"--quiet":                 gitFlagNone,
+		"-q":                      gitFlagNone,
+		"--verbose":               gitFlagNone,
+		"-v":                      gitFlagNone,
+		"--no-commit":             gitFlagNone,
+		"--no-edit":               gitFlagNone,
+		"--edit":                  gitFlagNone,
+		"-e":                      gitFlagNone,
+		"--autostash":             gitFlagNone,
+		"--no-autostash":          gitFlagNone,
+		"--verify":                gitFlagNone,
+		"--no-verify":             gitFlagNone,
+		"--stat":                  gitFlagNone,
+		"--no-stat":               gitFlagNone,
+		"-s":                      gitFlagString,
+		"--strategy":              gitFlagString,
+		"-X":                      gitFlagString,
+		"--strategy-option":       gitFlagString,
+		"--gpg-sign":              gitFlagString,
+		"--no-gpg-sign":           gitFlagNone,
+		"--allow-unrelated-histories":    gitFlagNone,
+		"--no-allow-unrelated-histories": gitFlagNone,
+	}
+)
+
+// gitFlagRegex matches valid flag tokens
+var gitFlagRegex = regexp.MustCompile(`^-[a-zA-Z0-9_-]`)
+
+// getGitFlagConfig returns the safe flags config for a given git operation
+func getGitFlagConfig(operation string) gitFlagConfig {
+	switch operation {
+	case "diff":
+		return gitDiffFlags
+	case "log":
+		return gitLogFlags
+	case "show":
+		return gitShowFlags
+	case "status":
+		return gitStatusFlags
+	case "branch":
+		return gitBranchFlags
+	case "reflog":
+		return gitReflogShowFlags
+	case "tag":
+		return gitTagFlags
+	case "remote":
+		return gitRemoteFlags
+	case "reset":
+		return gitResetFlags
+	case "merge":
+		return gitMergeFlags
+	case "rebase":
+		return gitRebaseFlags
+	case "push":
+		return gitPushFlags
+	case "pull":
+		return gitPullFlags
+	default:
+		return nil
+	}
+}
+
+// validateGitFlags validates flags from the `flags` parameter against the
+// per-subcommand whitelist. Returns nil if all flags are valid.
+func validateGitFlags(operation string, flags []string) error {
+	config := getGitFlagConfig(operation)
+	if config == nil {
+		// Operations without a specific flag config (clone, init, add, etc.)
+		// only accept flags from params, not from arbitrary user input.
+		return nil
+	}
+
+	for i, flag := range flags {
+		if flag == "" {
+			continue
+		}
+
+		// Handle -- separator: everything after is positional args
+		if flag == "--" {
+			break
+		}
+
+		// Handle numeric shorthand like -20 for log/show/reflog
+		if len(flag) > 1 && flag[0] == '-' && flag[1] >= '0' && flag[1] <= '9' {
+			// Pure numeric: -20, -5, etc.
+			if operation == "log" || operation == "show" || operation == "reflog" {
+				continue
+			}
+			return fmt.Errorf("invalid flag '%s' for git %s: numeric shorthand not allowed", flag, operation)
+		}
+
+		// Skip non-flag tokens (positional arguments like file paths, commit refs)
+		if !strings.HasPrefix(flag, "-") {
+			continue
+		}
+
+		// Parse the flag
+		flagName := flag
+		hasEquals := strings.Contains(flag, "=")
+		if hasEquals {
+			flagName = strings.SplitN(flag, "=", 2)[0]
+		}
+
+		// Check against the whitelist (exact match first, then prefix)
+		expectedType, exists := config[flag]
+		if !exists {
+			// Try the flagName without = (for --flag=value)
+			expectedType, exists = config[flagName]
+		}
+		if !exists {
+			return fmt.Errorf("invalid flag '%s' for git %s: flag not in allowed list", flag, operation)
+		}
+
+		// Validate based on expected type
+		switch expectedType {
+		case gitFlagNone:
+			if hasEquals {
+				return fmt.Errorf("flag '%s' does not take an argument", flagName)
+			}
+		case gitFlagNumber:
+			var argValue string
+			if hasEquals {
+				argValue = strings.TrimPrefix(flag, flagName+"=")
+			} else if i+1 < len(flags) {
+				argValue = flags[i+1]
+				i++ // consume the argument token
+			}
+			if argValue == "" {
+				return fmt.Errorf("flag '%s' requires a numeric argument", flagName)
+			}
+			for _, c := range argValue {
+				if c < '0' || c > '9' {
+					return fmt.Errorf("flag '%s' requires a numeric argument, got '%s'", flagName, argValue)
+				}
+			}
+		case gitFlagString:
+			// String args are always valid
+			if !hasEquals && i+1 < len(flags) {
+				i++ // consume the argument token
+			}
+		}
+	}
+
+	return nil
+}
+
+// isDangerousOperation checks if the operation + flags combination is explicitly dangerous
+func isDangerousOperation(operation string, flags []string) (bool, string) {
+	switch operation {
+	case "reset":
+		for _, f := range flags {
+			if f == "--hard" || f == "-h" {
+				return true, "DANGEROUS: git reset --hard will discard ALL uncommitted changes. This is irreversible and will cause data loss."
+			}
+		}
+	case "push":
+		for _, f := range flags {
+			if f == "--force" || f == "-f" {
+				return true, "DANGEROUS: git push --force will overwrite remote history, potentially discarding commits from collaborators. Use --force-with-lease instead."
+			}
+		}
+	case "clean":
+		for _, f := range flags {
+			if f == "-f" || f == "--force" {
+				return true, "DANGEROUS: git clean -f will permanently delete untracked files from the working directory. This action cannot be undone."
+			}
+		}
+	case "branch":
+		for _, f := range flags {
+			if f == "-D" {
+				return true, "DANGEROUS: git branch -D will force-delete a branch without checking if it is merged. This can cause data loss."
+			}
+		}
+	}
+	return false, ""
 }
 
 func buildGitCommand(params map[string]interface{}) ([]string, error) {
@@ -564,6 +1193,13 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		}
 		args = []string{"shortlog", "-sn", fmt.Sprintf("-%d", n), "HEAD"}
 
+	case "gh":
+		ghCmd := getStringArray(params, "gh_command")
+		if len(ghCmd) == 0 {
+			return nil, fmt.Errorf("gh_command is required for gh operation (e.g. [\"pr\", \"view\", \"123\"])")
+		}
+		return buildGHCommand(ghCmd)
+
 	default:
 		return nil, fmt.Errorf("unknown operation: %s", operation)
 	}
@@ -574,6 +1210,10 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 
 	return args, nil
 }
+
+// ---------------------------------------------------------------------------
+// Shared utility functions
+// ---------------------------------------------------------------------------
 
 func runGitCommand(ctx context.Context, args []string, workDir string, proxy string) (string, int, error) {
 	return runGitCommandWithExitCode(ctx, args, workDir, proxy)
@@ -618,4 +1258,331 @@ func getStringArray(params map[string]interface{}, key string) []string {
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// GitHub CLI (gh) read-only command support
+// ---------------------------------------------------------------------------
+
+// ghFlagType classifies how a flag's argument should be validated.
+type ghFlagType int
+
+const (
+	ghFlagNone   ghFlagType = iota // No argument (e.g. --comments, --web)
+	ghFlagString                   // Any string argument
+	ghFlagNumber                   // Integer argument
+)
+
+// ghFlagSpec describes a single allowed flag.
+type ghFlagSpec struct {
+	argType ghFlagType
+}
+
+// GHSafeFlags maps "subcommand" -> map of allowed flags.
+// Only flags listed here are permitted; all others are rejected.
+var GHSafeFlags = map[string]map[string]ghFlagSpec{
+	"pr view": {
+		"--json":     {ghFlagString},
+		"--comments": {ghFlagNone},
+		"--web":      {ghFlagNone},
+		"--repo":     {ghFlagString},
+		"-R":         {ghFlagString},
+	},
+	"pr list": {
+		"--state":  {ghFlagString},
+		"-s":       {ghFlagString},
+		"--author": {ghFlagString},
+		"--label":  {ghFlagString},
+		"--limit":  {ghFlagNumber},
+		"-L":       {ghFlagNumber},
+		"--json":   {ghFlagString},
+		"--repo":   {ghFlagString},
+		"-R":       {ghFlagString},
+	},
+	"pr diff": {
+		"--name-only": {ghFlagNone},
+		"--json":      {ghFlagString},
+		"--repo":      {ghFlagString},
+		"-R":          {ghFlagString},
+	},
+	"pr checks": {
+		"--required": {ghFlagNone},
+		"--json":     {ghFlagString},
+		"--repo":     {ghFlagString},
+		"-R":         {ghFlagString},
+	},
+	"pr status": {
+		"--conflict-status": {ghFlagNone},
+		"-c":                {ghFlagNone},
+		"--json":            {ghFlagString},
+		"--repo":            {ghFlagString},
+		"-R":                {ghFlagString},
+	},
+	"issue view": {
+		"--json":     {ghFlagString},
+		"--comments": {ghFlagNone},
+		"--repo":     {ghFlagString},
+		"-R":         {ghFlagString},
+	},
+	"issue list": {
+		"--state":  {ghFlagString},
+		"-s":       {ghFlagString},
+		"--author": {ghFlagString},
+		"--label":  {ghFlagString},
+		"--limit":  {ghFlagNumber},
+		"-L":       {ghFlagNumber},
+		"--json":   {ghFlagString},
+		"--repo":   {ghFlagString},
+		"-R":       {ghFlagString},
+	},
+	"issue status": {
+		"--json": {ghFlagString},
+		"--repo": {ghFlagString},
+		"-R":     {ghFlagString},
+	},
+	"run list": {
+		"--status":   {ghFlagString},
+		"-s":         {ghFlagString},
+		"--workflow": {ghFlagString},
+		"-w":         {ghFlagString},
+		"--limit":    {ghFlagNumber},
+		"-L":         {ghFlagNumber},
+		"--json":     {ghFlagString},
+		"--repo":     {ghFlagString},
+		"-R":         {ghFlagString},
+		"--branch":   {ghFlagString},
+		"-b":         {ghFlagString},
+	},
+	"run view": {
+		"--log":         {ghFlagNone},
+		"--log-failed":  {ghFlagNone},
+		"--json":        {ghFlagString},
+		"--repo":        {ghFlagString},
+		"-R":            {ghFlagString},
+		"--job":         {ghFlagString},
+		"-j":            {ghFlagString},
+	},
+	"auth status": {
+		"--json": {ghFlagString},
+	},
+	"release list": {
+		"--json":  {ghFlagString},
+		"--limit": {ghFlagNumber},
+		"-L":      {ghFlagNumber},
+		"--repo":  {ghFlagString},
+		"-R":      {ghFlagString},
+	},
+	"release view": {
+		"--json": {ghFlagString},
+		"--repo": {ghFlagString},
+		"-R":     {ghFlagString},
+	},
+	"search repos": {
+		"--json":     {ghFlagString},
+		"--limit":    {ghFlagNumber},
+		"-L":         {ghFlagNumber},
+		"--owner":    {ghFlagString},
+		"--language": {ghFlagString},
+		"--stars":    {ghFlagString},
+	},
+	"search issues": {
+		"--json":   {ghFlagString},
+		"--limit":  {ghFlagNumber},
+		"-L":       {ghFlagNumber},
+		"--state":  {ghFlagString},
+		"--repo":   {ghFlagString},
+		"-R":       {ghFlagString},
+		"--owner":  {ghFlagString},
+		"--label":  {ghFlagString},
+		"--author": {ghFlagString},
+	},
+	"search prs": {
+		"--json":   {ghFlagString},
+		"--limit":  {ghFlagNumber},
+		"-L":       {ghFlagNumber},
+		"--state":  {ghFlagString},
+		"--repo":   {ghFlagString},
+		"-R":       {ghFlagString},
+		"--owner":  {ghFlagString},
+		"--label":  {ghFlagString},
+		"--author": {ghFlagString},
+	},
+}
+
+// ghSubcommand extracts the subcommand key from gh_command tokens.
+func ghSubcommand(tokens []string) string {
+	if len(tokens) >= 3 {
+		candidate := tokens[0] + " " + tokens[1]
+		if _, ok := GHSafeFlags[candidate]; ok {
+			return candidate
+		}
+	}
+	if len(tokens) >= 2 {
+		return tokens[0] + " " + tokens[1]
+	}
+	if len(tokens) == 1 {
+		return tokens[0]
+	}
+	return ""
+}
+
+// ghIsDangerousRepo checks if any token contains a dangerous --repo value.
+func ghIsDangerousRepo(tokens []string) bool {
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		value := token
+		if strings.HasPrefix(token, "-") {
+			eqIdx := strings.Index(token, "=")
+			if eqIdx == -1 {
+				continue
+			}
+			value = token[eqIdx+1:]
+			if value == "" {
+				continue
+			}
+		}
+		if !strings.Contains(value, "/") && !strings.Contains(value, "://") && !strings.Contains(value, "@") {
+			continue
+		}
+		if strings.Contains(value, "://") {
+			return true
+		}
+		if strings.Contains(value, "@") {
+			return true
+		}
+		slashCount := strings.Count(value, "/")
+		if slashCount >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// ghFlagPattern matches valid flag names
+var ghFlagPattern = regexp.MustCompile(`^-[a-zA-Z0-9_-]`)
+
+// validateGHFlags validates that all flags in the token list are in the
+// safe-flags whitelist for the given subcommand.
+func validateGHFlags(subcmd string, tokens []string) error {
+	allowed, ok := GHSafeFlags[subcmd]
+	if !ok {
+		return fmt.Errorf("gh subcommand not allowed: %q (only read-only commands are permitted)", subcmd)
+	}
+
+	skip := 2
+	if strings.Count(subcmd, " ") == 2 {
+		skip = 3
+	}
+
+	if ghIsDangerousRepo(tokens) {
+		return fmt.Errorf("gh command contains dangerous --repo value: URLs, SSH-style, or HOST/OWNER/REPO formats are not allowed")
+	}
+
+	i := skip
+	for i < len(tokens) {
+		token := tokens[i]
+		if token == "" {
+			i++
+			continue
+		}
+
+		if !strings.HasPrefix(token, "-") || !ghFlagPattern.MatchString(token) {
+			i++
+			continue
+		}
+
+		hasEquals := strings.Contains(token, "=")
+		var flag string
+		var inlineValue string
+		if hasEquals {
+			parts := strings.SplitN(token, "=", 2)
+			flag = parts[0]
+			inlineValue = parts[1]
+		} else {
+			flag = token
+		}
+
+		spec, found := allowed[flag]
+		if !found {
+			return fmt.Errorf("gh flag not allowed: %q (not in safe flags for %q)", flag, subcmd)
+		}
+
+		switch spec.argType {
+		case ghFlagNone:
+			if hasEquals {
+				return fmt.Errorf("gh flag %q does not take an argument", flag)
+			}
+			i++
+		case ghFlagString:
+			if hasEquals {
+				i++
+			} else {
+				if i+1 >= len(tokens) {
+					return fmt.Errorf("gh flag %q requires an argument", flag)
+				}
+				i += 2
+			}
+		case ghFlagNumber:
+			var argValue string
+			if hasEquals {
+				argValue = inlineValue
+				i++
+			} else {
+				if i+1 >= len(tokens) {
+					return fmt.Errorf("gh flag %q requires a numeric argument", flag)
+				}
+				argValue = tokens[i+1]
+				i += 2
+			}
+			if _, err := strconv.Atoi(argValue); err != nil {
+				return fmt.Errorf("gh flag %q requires a numeric argument, got %q", flag, argValue)
+			}
+		}
+	}
+
+	return nil
+}
+
+// buildGHCommand constructs the gh CLI args from the given gh_command tokens,
+// validates them against the safe-flags whitelist, and returns the validated args.
+func buildGHCommand(ghCmd []string) ([]string, error) {
+	if len(ghCmd) == 0 {
+		return nil, fmt.Errorf("gh_command is required for gh operation")
+	}
+
+	subcmd := ghSubcommand(ghCmd)
+	if subcmd == "" {
+		return nil, fmt.Errorf("gh_command must specify a subcommand (e.g. [\"pr\", \"view\", \"123\"])")
+	}
+
+	if err := validateGHFlags(subcmd, ghCmd); err != nil {
+		return nil, err
+	}
+
+	return ghCmd, nil
+}
+
+// runGHCommand executes a gh CLI command with the given args.
+func runGHCommand(ctx context.Context, args []string, workDir string, proxy string) (string, int, error) {
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	if proxy != "" {
+		cmd.Env = append(cmd.Environ(),
+			"https_proxy="+proxy,
+			"http_proxy="+proxy,
+			"HTTPS_PROXY="+proxy,
+			"HTTP_PROXY="+proxy,
+		)
+	}
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	out, err := cmd.CombinedOutput()
+
+	exitCode := 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		exitCode = exitErr.ExitCode()
+	}
+	return strings.TrimSpace(string(out)), exitCode, nil
 }

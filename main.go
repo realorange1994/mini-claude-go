@@ -242,6 +242,20 @@ func runInteractive(agent *AgentLoop) {
 
 	loop:
 	for {
+		// Always restart the stdin reader goroutine at the start of each
+		// iteration. This is necessary because:
+		// 1. After agent.Run(), the goroutine may have died (Ctrl+C on Windows
+		//    closes stdin, producing EOF). We must create a fresh one.
+		// 2. After slash commands (which use `continue`), the old goroutine is
+		//    also dead (same reason). Moving restart here ensures it runs for
+		//    both code paths, fixing the bug where /help, /tools etc. caused
+		//    the REPL to deadlock waiting for input on the next iteration.
+		// The old goroutine (if still alive) will just block forever on the
+		// old, unreferenced channel.
+		stdinReader = bufio.NewReader(os.Stdin)
+		inputCh = make(chan readResult, 1)
+		go readStdin(stdinReader)
+
 		// Drain async sub-agent notifications and display them
 		if notifications := agent.DrainNotifications(); len(notifications) > 0 {
 			fmt.Println("\n--- Sub-agent notifications ---")
@@ -434,16 +448,6 @@ func runInteractive(agent *AgentLoop) {
 		case <-ctrlCh:
 		default:
 		}
-
-		// After agent.Run(), the stdin reader goroutine may have died
-		// (Ctrl+C on Windows closes stdin, causing EOF). We must
-		// restart it for the next REPL turn. To avoid leaking a
-		// still-alive goroutine, we always create a fresh inputCh
-		// and reader -- the old goroutine (if still alive) will just
-		// block forever on the old, unreferenced channel.
-		stdinReader = bufio.NewReader(os.Stdin)
-		inputCh = make(chan readResult, 1)
-		go readStdin(stdinReader)
 
 		// In streaming mode, TerminalHandler displays output on stderr.
 		// When stdout is a terminal, skip printing to avoid duplication.

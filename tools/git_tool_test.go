@@ -281,7 +281,274 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	// --- gh operations ---
+	ghTests := []struct {
+		name      string
+		params    map[string]interface{}
+		wantArgs  []string
+		wantError bool
+	}{
+		// gh pr view
+		{
+			name:     "gh pr view basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123"}},
+			wantArgs: []string{"pr", "view", "123"},
+		},
+		{
+			name:     "gh pr view with --json",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--json", "title,state,author"}},
+			wantArgs: []string{"pr", "view", "123", "--json", "title,state,author"},
+		},
+		{
+			name:     "gh pr view with --comments",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--comments"}},
+			wantArgs: []string{"pr", "view", "123", "--comments"},
+		},
+		{
+			name:     "gh pr view with --repo",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--repo", "owner/repo"}},
+			wantArgs: []string{"pr", "view", "123", "--repo", "owner/repo"},
+		},
+		{
+			name:     "gh pr view with --web",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--web"}},
+			wantArgs: []string{"pr", "view", "123", "--web"},
+		},
+
+		// gh pr list
+		{
+			name:     "gh pr list basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "list"}},
+			wantArgs: []string{"pr", "list"},
+		},
+		{
+			name:     "gh pr list with state and limit",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "list", "--state", "open", "--limit", "50"}},
+			wantArgs: []string{"pr", "list", "--state", "open", "--limit", "50"},
+		},
+		{
+			name:     "gh pr list with author and label",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "list", "--author", "me", "--label", "bug"}},
+			wantArgs: []string{"pr", "list", "--author", "me", "--label", "bug"},
+		},
+
+		// gh pr diff
+		{
+			name:     "gh pr diff basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "diff", "123"}},
+			wantArgs: []string{"pr", "diff", "123"},
+		},
+		{
+			name:     "gh pr diff with --name-only",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "diff", "123", "--name-only"}},
+			wantArgs: []string{"pr", "diff", "123", "--name-only"},
+		},
+
+		// gh pr checks
+		{
+			name:     "gh pr checks basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "checks", "123"}},
+			wantArgs: []string{"pr", "checks", "123"},
+		},
+		{
+			name:     "gh pr checks with --required",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "checks", "123", "--required"}},
+			wantArgs: []string{"pr", "checks", "123", "--required"},
+		},
+
+		// gh pr status
+		{
+			name:     "gh pr status basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "status"}},
+			wantArgs: []string{"pr", "status"},
+		},
+
+		// gh issue view
+		{
+			name:     "gh issue view basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"issue", "view", "456"}},
+			wantArgs: []string{"issue", "view", "456"},
+		},
+		{
+			name:     "gh issue view with --comments",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"issue", "view", "456", "--comments"}},
+			wantArgs: []string{"issue", "view", "456", "--comments"},
+		},
+
+		// gh issue list
+		{
+			name:     "gh issue list basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"issue", "list"}},
+			wantArgs: []string{"issue", "list"},
+		},
+		{
+			name:     "gh issue list with state",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"issue", "list", "--state", "closed", "--limit", "20"}},
+			wantArgs: []string{"issue", "list", "--state", "closed", "--limit", "20"},
+		},
+
+		// gh issue status
+		{
+			name:     "gh issue status basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"issue", "status"}},
+			wantArgs: []string{"issue", "status"},
+		},
+
+		// gh run list
+		{
+			name:     "gh run list basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"run", "list"}},
+			wantArgs: []string{"run", "list"},
+		},
+		{
+			name:     "gh run list with status and workflow",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"run", "list", "--status", "success", "--workflow", "CI", "--limit", "10"}},
+			wantArgs: []string{"run", "list", "--status", "success", "--workflow", "CI", "--limit", "10"},
+		},
+		{
+			name:     "gh run list with branch",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"run", "list", "--branch", "main"}},
+			wantArgs: []string{"run", "list", "--branch", "main"},
+		},
+
+		// gh run view
+		{
+			name:     "gh run view basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"run", "view", "123456"}},
+			wantArgs: []string{"run", "view", "123456"},
+		},
+		{
+			name:     "gh run view with --log",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"run", "view", "123456", "--log"}},
+			wantArgs: []string{"run", "view", "123456", "--log"},
+		},
+		{
+			name:     "gh run view with --log-failed",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"run", "view", "123456", "--log-failed"}},
+			wantArgs: []string{"run", "view", "123456", "--log-failed"},
+		},
+		{
+			name:     "gh run view with --job",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"run", "view", "123456", "--job", "987"}},
+			wantArgs: []string{"run", "view", "123456", "--job", "987"},
+		},
+
+		// gh auth status
+		{
+			name:     "gh auth status basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"auth", "status"}},
+			wantArgs: []string{"auth", "status"},
+		},
+
+		// gh release list
+		{
+			name:     "gh release list basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"release", "list"}},
+			wantArgs: []string{"release", "list"},
+		},
+		{
+			name:     "gh release list with limit",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"release", "list", "--limit", "5"}},
+			wantArgs: []string{"release", "list", "--limit", "5"},
+		},
+
+		// gh release view
+		{
+			name:     "gh release view basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"release", "view", "v1.0.0"}},
+			wantArgs: []string{"release", "view", "v1.0.0"},
+		},
+
+		// gh search repos
+		{
+			name:     "gh search repos basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"search", "repos", "kubernetes"}},
+			wantArgs: []string{"search", "repos", "kubernetes"},
+		},
+		{
+			name:     "gh search repos with flags",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"search", "repos", "kubernetes", "--language", "Go", "--stars", ">10000", "--limit", "10"}},
+			wantArgs: []string{"search", "repos", "kubernetes", "--language", "Go", "--stars", ">10000", "--limit", "10"},
+		},
+
+		// gh search issues
+		{
+			name:     "gh search issues basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"search", "issues", "memory leak"}},
+			wantArgs: []string{"search", "issues", "memory leak"},
+		},
+		{
+			name:     "gh search issues with state",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"search", "issues", "bug", "--state", "open", "--limit", "20"}},
+			wantArgs: []string{"search", "issues", "bug", "--state", "open", "--limit", "20"},
+		},
+
+		// gh search prs
+		{
+			name:     "gh search prs basic",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"search", "prs", "feature request"}},
+			wantArgs: []string{"search", "prs", "feature request"},
+		},
+		{
+			name:     "gh search prs with state",
+			params:   map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"search", "prs", "fix", "--state", "closed", "--limit", "10"}},
+			wantArgs: []string{"search", "prs", "fix", "--state", "closed", "--limit", "10"},
+		},
+
+		// -- Security: dangerous --repo values should be rejected --
+		{
+			name:      "gh pr view --repo with URL",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--repo", "https://evil.com/owner/repo"}},
+			wantError: true,
+		},
+		{
+			name:      "gh pr view --repo with SSH-style",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--repo", "git@evil.com:owner/repo"}},
+			wantError: true,
+		},
+		{
+			name:      "gh pr view --repo with HOST/OWNER/REPO (3 segments)",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--repo", "evil.com/SECRET/repo"}},
+			wantError: true,
+		},
+		{
+			name:      "gh pr view with --repo= form with URL",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--repo=https://evil.com/owner/repo"}},
+			wantError: true,
+		},
+		{
+			name:      "gh pr view with --repo= form with HOST/OWNER/REPO",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--repo=evil.com/SECRET/repo"}},
+			wantError: true,
+		},
+		{
+			name:      "gh pr view with unknown flag",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123", "--unknown"}},
+			wantError: true,
+		},
+		{
+			name:      "gh missing gh_command",
+			params:    map[string]interface{}{"operation": "gh"},
+			wantError: true,
+		},
+		{
+			name:      "gh with empty gh_command",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{}},
+			wantError: true,
+		},
+		{
+			name:      "gh with write-only subcommand (pr create)",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "create"}},
+			wantError: true,
+		},
+		{
+			name:      "gh with non-numeric limit",
+			params:    map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "list", "--limit", "abc"}},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range append(tests, ghTests...) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := buildGitCommand(tt.params)
 			if tt.wantError {
