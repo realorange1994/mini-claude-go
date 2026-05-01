@@ -27,7 +27,7 @@ type AgentTool struct {
 func (t *AgentTool) Name() string { return "agent" }
 func (t *AgentTool) Description() string {
 	return "Launch a sub-agent to handle a complex, multi-step task autonomously. " +
-		"Use this tool to delegate specialized work that can be completed independently. " +
+		"Use this tool (NOT mcp_call_tool or any MCP LLM tool) when the user wants to dispatch, delegate, or assign a task to a sub-agent. " +
 		"Sub-agents have their own isolated conversation context and tool access. " +
 		"Supports both synchronous (default) and asynchronous (run_in_background=true) execution."
 }

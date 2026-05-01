@@ -702,6 +702,7 @@ func (a *AgentLoop) GetSubAgentStatus(agentID string) string {
 
 // GetSubAgentOutput retrieves the output of a sub-agent task, optionally
 // blocking until the task completes. This is the callback wired to TaskOutputTool.
+// For bash background tasks (with OutputFile), it reads output from the disk file.
 func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.Duration) (string, string) {
 	if a.taskStore == nil {
 		return "", "task store not available"
@@ -713,9 +714,12 @@ func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.D
 	}
 
 	if task.IsTerminal() {
-		result := fmt.Sprintf("Agent: %s\nStatus: %d\nResult: %s", task.ID, task.Status, task.Result)
-		if tp := task.GetTranscriptPath(); tp != "" {
-			result += fmt.Sprintf("\nTranscriptPath: %s", tp)
+		result := formatTaskResult(task)
+		// For bash tasks with output file, append the file contents
+		if task.OutputFile != "" && task.Result == "" {
+			if data, err := os.ReadFile(task.OutputFile); err == nil {
+				result += fmt.Sprintf("\n\n--- Output from %s ---\n%s", task.OutputFile, string(data))
+			}
 		}
 		return result, ""
 	}
@@ -726,9 +730,11 @@ func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.D
 		for time.Now().Before(deadline) {
 			time.Sleep(500 * time.Millisecond)
 			if task.IsTerminal() {
-				result := fmt.Sprintf("Agent: %s\nStatus: %d\nResult: %s", task.ID, task.Status, task.Result)
-				if tp := task.GetTranscriptPath(); tp != "" {
-					result += fmt.Sprintf("\nTranscriptPath: %s", tp)
+				result := formatTaskResult(task)
+				if task.OutputFile != "" && task.Result == "" {
+					if data, err := os.ReadFile(task.OutputFile); err == nil {
+						result += fmt.Sprintf("\n\n--- Output from %s ---\n%s", task.OutputFile, string(data))
+					}
 				}
 				return result, ""
 			}
@@ -737,6 +743,15 @@ func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.D
 	}
 
 	return fmt.Sprintf("Agent: %s\nStatus: %d (still running)", task.ID, task.Status), ""
+}
+
+// formatTaskResult formats a task's result for display.
+func formatTaskResult(task *TaskState) string {
+	result := fmt.Sprintf("Agent: %s\nStatus: %d\nResult: %s", task.ID, task.Status, task.Result)
+	if tp := task.GetTranscriptPath(); tp != "" {
+		result += fmt.Sprintf("\nTranscriptPath: %s", tp)
+	}
+	return result
 }
 
 // getPartialResult extracts the last assistant text from the conversation
@@ -773,6 +788,25 @@ func (a *AgentLoop) CancelSubAgent(agentID string) {
 		task.CancelFunc()
 	}
 	a.taskStore.UpdateStatus(agentID, TaskStatusKilled)
+}
+
+// StopBackgroundTask forcibly stops a running background task (async sub-agent or bash task).
+// It kills the OS process if one is tracked, or cancels the context for async agents,
+// then marks the task as killed. Returns an error if the task is not found or not running.
+func (a *AgentLoop) StopBackgroundTask(taskID string) error {
+	if a.taskStore == nil {
+		return fmt.Errorf("task store not available")
+	}
+	task := a.taskStore.GetTask(taskID)
+	if task == nil {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+	if task.IsTerminal() {
+		return fmt.Errorf("task %s is not running (status: %d)", taskID, task.Status)
+	}
+
+	a.taskStore.KillTask(taskID)
+	return nil
 }
 
 // resolveAgentID resolves a name or agent ID to an agent ID.

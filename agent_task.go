@@ -2,6 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,6 +23,23 @@ const (
 	TaskStatusFailed                      // Task encountered an error
 	TaskStatusKilled                      // Task was forcibly terminated
 )
+
+func (s TaskStatus) String() string {
+	switch s {
+	case TaskStatusPending:
+		return "pending"
+	case TaskStatusRunning:
+		return "running"
+	case TaskStatusCompleted:
+		return "completed"
+	case TaskStatusFailed:
+		return "failed"
+	case TaskStatusKilled:
+		return "killed"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(s))
+	}
+}
 
 // TaskState holds the state of a running or completed sub-agent.
 type TaskState struct {
@@ -34,6 +58,8 @@ type TaskState struct {
 	EndTime         time.Time
 	PendingMessages []string
 	CancelFunc      context.CancelFunc // cancels the sub-agent's context (for async agents)
+	Process         *os.Process        // tracked OS process (for bash background tasks)
+	OutputFile      string             // path to output file (for bash background tasks)
 	evictAfter      time.Time          // set when task completes; zero means no eviction
 }
 
@@ -127,6 +153,24 @@ func (ts *TaskStore) FailTask(agentID string, errText string) {
 	}
 }
 
+// KillTask forcibly terminates a running task and marks it as killed.
+func (ts *TaskStore) KillTask(agentID string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if task, ok := ts.tasks[agentID]; ok {
+		if task.Process != nil {
+			_ = task.Process.Kill()
+		}
+		if task.CancelFunc != nil {
+			task.CancelFunc()
+		}
+		task.Status = TaskStatusKilled
+		task.Error = "stopped by user"
+		task.EndTime = time.Now()
+		task.evictAfter = time.Now().Add(30 * time.Second)
+	}
+}
+
 // CleanupEvicted removes tasks whose evictAfter timestamp has passed.
 // Safe to call periodically from a ticker goroutine.
 func (ts *TaskStore) CleanupEvicted() {
@@ -204,4 +248,231 @@ func (ts *TaskStore) Delete(agentID string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	delete(ts.tasks, agentID)
+}
+
+// RegisterBashBgTask registers a new background bash task with its output file path.
+func (ts *TaskStore) RegisterBashBgTask(agentID, description, outputFile string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	task := &TaskState{
+		ID:           agentID,
+		Status:       TaskStatusRunning,
+		Description:  description,
+		SubagentType: "bash_background",
+		OutputFile:   outputFile,
+		StartTime:    time.Now(),
+	}
+	ts.tasks[agentID] = task
+}
+
+// --- Bash background task functions (consolidated from bash_bg_task.go) ---
+
+// generateBashTaskID generates a unique task ID with the format "b" + 8 random alphanumeric chars.
+func generateBashTaskID() string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 8)
+	rand.Read(b)
+	result := make([]byte, 8)
+	for i := range 8 {
+		result[i] = chars[int(b[i])%len(chars)]
+	}
+	return "b" + string(result)
+}
+
+// bashBgTasksDir returns the directory for background bash task output files.
+func bashBgTasksDir() string {
+	return filepath.Join(".claude", "tasks", "bash")
+}
+
+// spawnBackgroundBashCommand spawns a command as a background process,
+// writes output to a file, and tracks the task in the store.
+// Returns (taskID, outputFilePath, errText).
+func (a *AgentLoop) spawnBackgroundBashCommand(command, workingDir string) (string, string, string) {
+	taskID := generateBashTaskID()
+
+	// Create output directory
+	outputDir := bashBgTasksDir()
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return "", "", fmt.Sprintf("Error: failed to create task output directory: %v", err)
+	}
+
+	outputFile := filepath.Join(outputDir, taskID+".output")
+
+	// Create/truncate the output file
+	f, err := os.Create(outputFile)
+	if err != nil {
+		return "", "", fmt.Sprintf("Error: failed to create output file: %v", err)
+	}
+
+	// Write header to output file
+	fmt.Fprintf(f, "--- Background Task: %s ---\n", taskID)
+	fmt.Fprintf(f, "Command: %s\n", command)
+	fmt.Fprintf(f, "Working Dir: %s\n", workingDir)
+	fmt.Fprintf(f, "Started: %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(f, "--- Output ---\n\n")
+	f.Close()
+
+	// Register in the main task store
+	a.taskStore.RegisterBashBgTask(taskID, command, outputFile)
+
+	// Determine shell
+	var shell, flag string
+	if runtime.GOOS == "windows" {
+		if _, err := exec.LookPath("powershell"); err == nil {
+			shell, flag = "powershell", "-Command"
+		} else if _, err := exec.LookPath("bash"); err == nil {
+			shell, flag = "bash", "-c"
+		} else {
+			shell, flag = "cmd", "/C"
+		}
+	} else {
+		shell, flag = "bash", "-c"
+	}
+
+	// Spawn the command in a goroutine
+	go func() {
+		start := time.Now()
+
+		// Open output file for appending
+		f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			a.finishBashBgTask(taskID, 1, fmt.Sprintf("Error: failed to open output file: %v", err))
+			return
+		}
+		defer f.Close()
+
+		cmd := exec.Command(shell, flag, command)
+		cmd.Dir = workingDir
+		cmd.Stdout = f
+		cmd.Stderr = f
+		cmd.Stdin = nil
+
+		runErr := cmd.Run()
+		elapsed := time.Since(start)
+
+		exitCode := 0
+		if runErr != nil {
+			if exitErr, ok := runErr.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+
+		// Write footer
+		fmt.Fprintf(f, "\n--- Task Complete ---\n")
+		fmt.Fprintf(f, "Exit code: %d\n", exitCode)
+		fmt.Fprintf(f, "Duration: %s\n", elapsed.Round(time.Millisecond))
+		status := "completed"
+		if exitCode != 0 {
+			status = "failed"
+		}
+		fmt.Fprintf(f, "Status: %s\n", status)
+
+		a.finishBashBgTask(taskID, exitCode, "")
+	}()
+
+	return taskID, outputFile, ""
+}
+
+// finishBashBgTask marks a background bash task as completed and sends a notification.
+func (a *AgentLoop) finishBashBgTask(taskID string, exitCode int, errMsg string) {
+	// Look up the task from the task store for the notification
+	task := a.taskStore.GetTask(taskID)
+
+	// Update the main task store
+	if exitCode == 0 && errMsg == "" {
+		durationMs := time.Since(task.StartTime).Milliseconds()
+		a.taskStore.CompleteTask(taskID, fmt.Sprintf("Background command completed (exit code 0)"), 1, durationMs)
+	} else {
+		errDetail := errMsg
+		if errDetail == "" {
+			errDetail = fmt.Sprintf("Command failed with exit code %d", exitCode)
+		}
+		a.taskStore.FailTask(taskID, errDetail)
+	}
+
+	// Send notification
+	status := "completed"
+	summary := "Command completed successfully"
+	if exitCode != 0 || errMsg != "" {
+		status = "failed"
+		summary = fmt.Sprintf("Command failed (exit code %d)", exitCode)
+		if errMsg != "" {
+			summary = errMsg
+		}
+	}
+
+	outputFile := ""
+	command := ""
+	if task != nil {
+		outputFile = task.OutputFile
+		command = task.Description
+	}
+
+	notification := fmt.Sprintf(`<task-notification>
+<task_id>%s</task_id>
+<task_type>bash_background</task_type>
+<status>%s</status>
+<output_file>%s</output_file>
+<command>%s</command>
+<summary>%s</summary>
+</task-notification>`, taskID, status, outputFile, escapeXML(command), escapeXML(summary))
+
+	select {
+	case a.notificationChan <- notification:
+	default:
+		// Channel is full, drop the notification
+	}
+}
+
+// escapeXML escapes special characters for XML content.
+func escapeXML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&apos;")
+	return s
+}
+
+// readBashBgTaskOutput reads the output file of a background bash task.
+// Returns (output, errorText).
+func (a *AgentLoop) readBashBgTaskOutput(taskID string, block bool, timeout time.Duration) (string, string) {
+	task := a.taskStore.GetTask(taskID)
+	if task == nil {
+		return "", fmt.Sprintf("Background task %s not found", taskID)
+	}
+
+	// If block is true, wait for completion
+	if block {
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if task.IsTerminal() {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	// Read the output file
+	if task.OutputFile == "" {
+		return "", fmt.Sprintf("Task %s has no output file", taskID)
+	}
+	data, err := os.ReadFile(task.OutputFile)
+	if err != nil {
+		return "", fmt.Sprintf("Error reading output file: %v", err)
+	}
+
+	output := string(data)
+
+	// Truncate if too large
+	const maxOutput = 50000
+	if len(output) > maxOutput {
+		half := maxOutput / 2
+		truncated := len(output) - maxOutput
+		output = output[:half] + fmt.Sprintf("\n\n... (%d chars truncated) ...\n\n", truncated) + output[len(output)-half:]
+	}
+
+	return fmt.Sprintf("Task %s (%s):\n%s", taskID, task.Status, output), ""
 }

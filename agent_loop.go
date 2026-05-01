@@ -94,6 +94,86 @@ func (a *AgentLoop) registerTaskOutputTool() {
 	a.registry.Register(taskOutputTool)
 }
 
+// registerTaskStopTool registers the TaskStopTool with this loop's callback.
+func (a *AgentLoop) registerTaskStopTool() {
+	taskStopTool := &tools.TaskStopTool{
+		StopFunc: a.StopBackgroundTask,
+	}
+	a.registry.Register(taskStopTool)
+}
+
+// registerBashBgTool wires the ExecTool's BackgroundTaskCallback to this loop's
+// spawnBackgroundBashCommand method, enabling run_in_background support.
+func (a *AgentLoop) registerBashBgTool() {
+	if tool := a.registry.Get("exec"); tool != nil {
+		if execTool, ok := tool.(*tools.ExecTool); ok {
+			execTool.BackgroundTaskCallback = a.spawnBackgroundBashCommand
+		}
+	}
+}
+
+// registerWorkTaskTools registers the TaskCreate/List/Get/Update tools
+// wired to this loop's WorkTaskStore.
+func (a *AgentLoop) registerWorkTaskTools() {
+	if a.workTaskStore == nil {
+		return
+	}
+
+	a.registry.Register(&tools.TaskCreateTool{
+		CreateFunc: a.workTaskStore.CreateTask,
+	})
+
+	a.registry.Register(&tools.TaskListTool{
+		ListFunc: func() []tools.WorkTaskInfo {
+			tasks := a.workTaskStore.ListTasks()
+			result := make([]tools.WorkTaskInfo, len(tasks))
+			for i, t := range tasks {
+				result[i] = tools.WorkTaskInfo{
+					ID:          t.ID,
+					Subject:     t.Subject,
+					Description: t.Description,
+					ActiveForm:  t.ActiveForm,
+					Status:      string(t.Status),
+					Owner:       t.Owner,
+					Metadata:    t.Metadata,
+					Blocks:      t.Blocks,
+					BlockedBy:   t.BlockedBy,
+					CreatedAt:   t.CreatedAt.Format(time.RFC3339),
+					UpdatedAt:   t.UpdatedAt.Format(time.RFC3339),
+				}
+			}
+			return result
+		},
+	})
+
+	a.registry.Register(&tools.TaskGetTool{
+		GetFunc: func(id string) (*tools.WorkTaskInfo, bool) {
+			task := a.workTaskStore.GetTask(id)
+			if task == nil {
+				return nil, false
+			}
+			info := &tools.WorkTaskInfo{
+				ID:          task.ID,
+				Subject:     task.Subject,
+				Description: task.Description,
+				ActiveForm:  task.ActiveForm,
+				Status:      string(task.Status),
+				Owner:       task.Owner,
+				Metadata:    task.Metadata,
+				Blocks:      task.Blocks,
+				BlockedBy:   task.BlockedBy,
+				CreatedAt:   task.CreatedAt.Format(time.RFC3339),
+				UpdatedAt:   task.UpdatedAt.Format(time.RFC3339),
+			}
+			return info, true
+		},
+	})
+
+	a.registry.Register(&tools.TaskUpdateTool{
+		UpdateFunc: a.workTaskStore.UpdateTask,
+	})
+}
+
 // EnqueueAgentNotification pushes a formatted task notification XML to the notification channel.
 func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptPath string, toolsUsed int, durationMs int64) {
 	notification := fmt.Sprintf(`<task-notification>
@@ -168,6 +248,7 @@ type AgentLoop struct {
 	agentNameRegistry map[string]string // maps short agent names to task IDs
 	cancelCtx      context.Context   // cancellable context for async sub-agents
 	cancelFunc     context.CancelFunc // cancel function for async sub-agents
+	workTaskStore  *WorkTaskStore    // tracks LLM work items (TODO list)
 }
 
 // newHTTPClient creates an HTTP client with sensible timeouts to prevent
@@ -238,6 +319,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		notificationChan: make(chan string, 10),
 		evictionDone:    make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
+		workTaskStore:     NewWorkTaskStore(),
 	}
 	// Fix gate to point to agent's config (not the local cfg copy)
 	agent.gate = NewPermissionGate(&agent.config)
@@ -259,10 +341,10 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	}()
 
 	if cfg.cachedPrompt != nil {
-		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
+		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.Model, cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		ctx.SetSystemPrompt(sysPrompt)
 	} else {
-		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
+		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.Model, cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		ctx.SetSystemPrompt(sysPrompt)
 	}
 
@@ -270,6 +352,9 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent.registerAgentTool()
 	agent.registerSendMessageTool()
 	agent.registerTaskOutputTool()
+	agent.registerTaskStopTool()
+	agent.registerWorkTaskTools()
+	agent.registerBashBgTool()
 
 	return agent, nil
 }
@@ -343,6 +428,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		notificationChan:   make(chan string, 10),
 		evictionDone:       make(chan struct{}),
 		agentNameRegistry:  make(map[string]string),
+		workTaskStore:      NewWorkTaskStore(),
 	}
 
 	// Start grace eviction ticker: clean up completed tasks after 30s
@@ -362,12 +448,20 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	}()
 
 	if cfg.cachedPrompt != nil {
-		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
+		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.Model, cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		convCtx.SetSystemPrompt(sysPrompt)
 	} else {
-		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
+		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.Model, cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		convCtx.SetSystemPrompt(sysPrompt)
 	}
+
+	// Register the sub-agent tools
+	agent.registerAgentTool()
+	agent.registerSendMessageTool()
+	agent.registerTaskOutputTool()
+	agent.registerTaskStopTool()
+	agent.registerWorkTaskTools()
+	agent.registerBashBgTool()
 
 	return agent, nil
 }
@@ -609,10 +703,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		// Rebuild system prompt each turn to update skill discovery
 		if a.config.cachedPrompt != nil {
-			sysPrompt := a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
+			sysPrompt := a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.Model, a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
 			a.context.SetSystemPrompt(sysPrompt)
 		} else if a.config.SkillLoader != nil {
-			sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
+			sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.Model, a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
 			a.context.SetSystemPrompt(sysPrompt)
 		}
 
@@ -796,11 +890,17 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 // Close releases resources (transcript writer) and stops background goroutines.
 func (a *AgentLoop) Close() {
-	// Cancel all running async sub-agents
+	// Kill all running background tasks (sub-agents and bash tasks)
 	if a.taskStore != nil {
 		for _, task := range a.taskStore.AllTasks() {
-			if !task.IsTerminal() && task.CancelFunc != nil {
-				task.CancelFunc()
+			if !task.IsTerminal() {
+				if task.Process != nil {
+					_ = task.Process.Kill()
+				}
+				if task.CancelFunc != nil {
+					task.CancelFunc()
+				}
+				task.Status = TaskStatusKilled
 			}
 		}
 	}

@@ -14,13 +14,13 @@ func TestCachedSystemPromptGetOrBuild(t *testing.T) {
 	registry := tools.NewRegistry()
 
 	// First call should build
-	prompt1 := csp.GetOrBuild(registry, "auto", "/tmp/test", nil, nil, nil)
+	prompt1 := csp.GetOrBuild(registry, "auto", "/tmp/test", "test-model", nil, nil, nil)
 	if prompt1 == "" {
 		t.Error("GetOrBuild should return non-empty prompt")
 	}
 
 	// Second call should return cached (same content)
-	prompt2 := csp.GetOrBuild(registry, "auto", "/tmp/test", nil, nil, nil)
+	prompt2 := csp.GetOrBuild(registry, "auto", "/tmp/test", "test-model", nil, nil, nil)
 	if prompt1 != prompt2 {
 		t.Error("GetOrBuild should return cached prompt on second call")
 	}
@@ -31,13 +31,13 @@ func TestCachedSystemPromptMarkDirty(t *testing.T) {
 	registry := tools.NewRegistry()
 
 	// Build initial prompt
-	_ = csp.GetOrBuild(registry, "auto", "/tmp/test", nil, nil, nil)
+	_ = csp.GetOrBuild(registry, "auto", "/tmp/test", "test-model", nil, nil, nil)
 
 	// Mark dirty
 	csp.MarkDirty()
 
 	// Next call should rebuild (same content since same config)
-	prompt2 := csp.GetOrBuild(registry, "auto", "/tmp/test", nil, nil, nil)
+	prompt2 := csp.GetOrBuild(registry, "auto", "/tmp/test", "test-model", nil, nil, nil)
 	if prompt2 == "" {
 		t.Error("GetOrBuild after MarkDirty should return non-empty prompt")
 	}
@@ -54,7 +54,7 @@ func TestCachedSystemPromptConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx] = csp.GetOrBuild(registry, "auto", "/tmp/test", nil, nil, nil)
+			results[idx] = csp.GetOrBuild(registry, "auto", "/tmp/test", "test-model", nil, nil, nil)
 		}(i)
 	}
 	wg.Wait()
@@ -69,7 +69,7 @@ func TestCachedSystemPromptConcurrent(t *testing.T) {
 
 func TestBuildSystemPromptContainsSections(t *testing.T) {
 	registry := tools.NewRegistry()
-	prompt := BuildSystemPrompt(registry, "auto", "/tmp/test", nil, nil, nil)
+	prompt := BuildSystemPrompt(registry, "auto", "/tmp/test", "test-model", nil, nil, nil)
 
 	// Should contain key sections
 	checks := []string{
@@ -97,7 +97,7 @@ func TestBuildSystemPromptModeSpecific(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		prompt := BuildSystemPrompt(registry, tt.mode, "/tmp/test", nil, nil, nil)
+		prompt := BuildSystemPrompt(registry, tt.mode, "/tmp/test", "test-model", nil, nil, nil)
 		if !strings.Contains(prompt, tt.keyword) {
 			t.Errorf("mode %s prompt should contain %q", tt.mode, tt.keyword)
 		}
@@ -109,7 +109,7 @@ func TestBuildSystemPromptWithSkills(t *testing.T) {
 	loader := skills.NewLoader("/tmp/skills")
 	tracker := skills.NewSkillTracker()
 
-	prompt := BuildSystemPrompt(registry, "auto", "/tmp/test", loader, tracker, nil)
+	prompt := BuildSystemPrompt(registry, "auto", "/tmp/test", "test-model", loader, tracker, nil)
 	if prompt == "" {
 		t.Error("prompt with skills should be non-empty")
 	}

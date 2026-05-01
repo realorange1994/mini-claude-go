@@ -11,12 +11,20 @@ import (
 	"time"
 )
 
+// BashBgTaskCallback is called when a command should run in the background.
+// Returns (taskID, outputFilePath, errorText).
+type BashBgTaskCallback func(command, workingDir string) (taskID, outputFilePath, errText string)
+
 // ExecTool executes shell commands with security guards.
-type ExecTool struct{}
+type ExecTool struct {
+	// BackgroundTaskCallback, when set, enables run_in_background support.
+	// When nil, background requests fall through to foreground execution.
+	BackgroundTaskCallback BashBgTaskCallback
+}
 
 func (*ExecTool) Name() string { return "exec" }
 func (*ExecTool) Description() string {
-	return "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory."
+	return "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory. Supports running commands in the background with run_in_background=true."
 }
 
 func (*ExecTool) InputSchema() map[string]any {
@@ -34,6 +42,10 @@ func (*ExecTool) InputSchema() map[string]any {
 			"timeout": map[string]any{
 				"type":        "integer",
 				"description": "Timeout in seconds (default 600, max 600).",
+			},
+			"run_in_background": map[string]any{
+				"type":        "boolean",
+				"description": "Set to true to run this command in the background. Returns immediately with a task ID. Use task_output to read results later.",
 			},
 		},
 		"required": []string{"command"},
@@ -82,13 +94,52 @@ func (*ExecTool) CheckPermissions(params map[string]any) string {
 	return ""
 }
 
-func (*ExecTool) Execute(params map[string]any) ToolResult {
+func (et *ExecTool) Execute(params map[string]any) ToolResult {
+	// Check for background execution request
+	if bg, ok := params["run_in_background"].(bool); ok && bg {
+		return et.execInBackground(params)
+	}
 	return execToolExecute(context.Background(), params)
 }
 
 // ExecuteContext runs the command with context support for cancellation.
-func (*ExecTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+func (et *ExecTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	// Check for background execution request
+	if bg, ok := params["run_in_background"].(bool); ok && bg {
+		return et.execInBackground(params)
+	}
 	return execToolExecute(ctx, params)
+}
+
+// execInBackground handles the run_in_background=true case.
+// It delegates to the BackgroundTaskCallback to spawn the process and track it.
+func (et *ExecTool) execInBackground(params map[string]any) ToolResult {
+	command, _ := params["command"].(string)
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ToolResult{Output: "Error: empty command", IsError: true}
+	}
+
+	if et.BackgroundTaskCallback == nil {
+		// Fallback: run in foreground if callback not set
+		return execToolExecute(context.Background(), params)
+	}
+
+	// Determine working directory
+	wd, _ := params["working_dir"].(string)
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
+
+	taskID, outputFile, errText := et.BackgroundTaskCallback(command, wd)
+	if errText != "" {
+		return ToolResult{Output: errText, IsError: true}
+	}
+
+	return ToolResult{
+		Output: fmt.Sprintf("Background task started.\nTask ID: %s\nOutput file: %s\nUse the task_output tool to check results when ready.", taskID, outputFile),
+		IsError: false,
+	}.WithMetadata(NewToolResultMetadata("exec", 0))
 }
 
 func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
