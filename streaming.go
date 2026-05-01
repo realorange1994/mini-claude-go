@@ -285,9 +285,7 @@ func (h *CollectHandler) AsParsedResponse() ([]map[string]any, []string) {
 	for _, tc := range h.ToolCalls {
 		input := make(map[string]any)
 		if tc.Arguments != "" {
-			if err := json.Unmarshal([]byte(tc.Arguments), &input); err != nil {
-				fmt.Fprintf(os.Stderr, "[DEBUG] AsParsedResponse: unmarshal failed: %v\n", err)
-			}
+			_ = json.Unmarshal([]byte(tc.Arguments), &input) // ignore parse errors for unknown tools
 		}
 		toolCalls = append(toolCalls, map[string]any{
 			"id":    tc.ID,
@@ -484,9 +482,7 @@ func (h *TerminalHandler) flushToolCall() {
 func toolArgSummary(toolName, argsJSON string) string {
 	var input map[string]any
 	if argsJSON != "" {
-		if err := json.Unmarshal([]byte(argsJSON), &input); err != nil {
-			fmt.Fprintf(os.Stderr, "[DEBUG] toolArgSummary: unmarshal failed: %v\n", err)
-		}
+		_ = json.Unmarshal([]byte(argsJSON), &input) // ignore parse errors for unknown tools
 	}
 	if input == nil {
 		input = make(map[string]any)

@@ -1431,9 +1431,7 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 		case anthropic.ToolUseBlock:
 			var input map[string]any
 			if len(v.Input) > 0 {
-				if err := json.Unmarshal(v.Input, &input); err != nil {
-					fmt.Fprintf(os.Stderr, "[DEBUG] parseResponse: unmarshal input failed: %v\n", err)
-				}
+				_ = json.Unmarshal(v.Input, &input) // ignore parse errors for unknown tools
 			}
 			if input == nil {
 				input = make(map[string]any)
