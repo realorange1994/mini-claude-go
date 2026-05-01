@@ -69,6 +69,14 @@ func (b *IterationBudget) GraceCall() bool {
 	return !b.graceCalled.Swap(true)
 }
 
+// registerAgentTool registers the AgentTool with this loop's SpawnFunc.
+func (a *AgentLoop) registerAgentTool() {
+	agentTool := &tools.AgentTool{
+		SpawnFunc: a.SpawnSubAgent,
+	}
+	a.registry.Register(agentTool)
+}
+
 // AgentLoop drives the core agentic loop.
 type AgentLoop struct {
 	config       Config
@@ -90,6 +98,7 @@ type AgentLoop struct {
 	lastDeltasState DeltasState // tracks what was streamed in last attempt
 	rateLimitState  RateLimitState // rate limit headers from API responses
 	prevTurnTokens  int            // tracks token count from previous turn for reactive compact
+	activeSubAgents atomic.Int32   // count of currently running sub-agents
 }
 
 // newHTTPClient creates an HTTP client with sensible timeouts to prevent
@@ -167,6 +176,9 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		ctx.SetSystemPrompt(sysPrompt)
 	}
+
+	// Register the sub-agent tool (wires AgentTool.SpawnFunc to this loop's SpawnSubAgent)
+	agent.registerAgentTool()
 
 	return agent, nil
 }

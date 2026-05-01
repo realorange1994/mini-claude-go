@@ -57,6 +57,9 @@ type Config struct {
 	// Partial compaction: directional compaction settings
 	PartialCompactEnabled bool
 	cachedPrompt           *CachedSystemPrompt
+	// Sub-agent settings
+	SubAgentMaxTurns int  // max turns for sub-agent loops (default 50)
+	SubAgentEnabled  bool // enable/disable the agent tool (default true)
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -275,6 +278,8 @@ func DefaultConfig() Config {
 		ReactiveCompactThreshold:  5000,
 		PartialCompactEnabled:     true,
 		cachedPrompt: NewCachedSystemPrompt(),
+		SubAgentMaxTurns:          50,
+		SubAgentEnabled:           true,
 	}
 }
 

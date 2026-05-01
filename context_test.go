@@ -613,8 +613,17 @@ func TestMicroCompactEntriesDefaultValues(t *testing.T) {
 	cfg := DefaultConfig()
 	ctx := NewConversationContext(cfg)
 
-	// Add 8 tool results
+	// Add 8 tool_use + tool_result pairs (tool results need matching tool_use entries for compactable check)
 	for i := 0; i < 8; i++ {
+		toolCalls := []map[string]any{
+			{
+				"id":   fmt.Sprintf("tool_%d", i),
+				"name": "read_file",
+				"input": map[string]any{"path": fmt.Sprintf("file_%d.go", i)},
+			},
+		}
+		ctx.AddAssistantToolCalls(toolCalls)
+
 		results := []anthropic.ToolResultBlockParam{
 			{
 				ToolUseID: fmt.Sprintf("tool_%d", i),
