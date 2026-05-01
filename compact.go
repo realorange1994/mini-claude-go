@@ -928,6 +928,7 @@ type CompactTrigger int
 const (
 	CompactTriggerAuto CompactTrigger = iota
 	CompactTriggerManual
+	CompactTriggerSMCompact // SM-compact: uses session memory as summary, no LLM call
 )
 
 func (t CompactTrigger) String() string {
@@ -936,6 +937,8 @@ func (t CompactTrigger) String() string {
 		return "auto"
 	case CompactTriggerManual:
 		return "manual"
+	case CompactTriggerSMCompact:
+		return "sm-compact"
 	default:
 		return "unknown"
 	}
@@ -1630,6 +1633,385 @@ Previous Summary:
 {previous_summary}
 
 Write your analysis in <analysis> tags, then the updated summary in <summary> tags with the same 9-field structure.`
+
+// ─── Partial Compaction (Directional) ────────────────────────────────────────
+
+// PartialCompactDirection indicates which part of the conversation to summarize.
+type PartialCompactDirection string
+
+const (
+	// PartialCompactUpTo summarizes everything UP TO the pivot index,
+	// keeping recent context intact (suffix-preserving).
+	PartialCompactUpTo PartialCompactDirection = "up_to"
+
+	// PartialCompactFrom summarizes everything FROM the pivot index forward,
+	// keeping early context intact (prefix-preserving).
+	PartialCompactFrom PartialCompactDirection = "from"
+)
+
+// PartialCompactResult holds the outcome of a partial compaction operation.
+type PartialCompactResult struct {
+	Summary           string // generated summary of the compacted region
+	Direction         PartialCompactDirection
+	PivotIndex        int    // index where the split occurred
+	MessagesKept      int    // number of messages preserved
+	MessagesSummarized int  // number of messages that were summarized
+	TokensBefore      int
+	TokensAfter       int
+	TokensSaved       int
+}
+
+// PartialCompact performs directional partial compaction on conversation entries.
+//
+//   - "up_to": Summarize entries 0..pivotIndex, keep entries pivotIndex..end.
+//     This preserves recent context. Use when early conversation is less relevant.
+//   - "from": Summarize entries pivotIndex..end (keeping the last N entries),
+//     keep entries 0..pivotIndex. This preserves early context (goals, decisions).
+//     Use when the end of conversation has redundant tool output.
+//
+// Both directions preserve tool_use/tool_result pairing integrity by adjusting
+// the pivot to avoid splitting pairs.
+func (c *ConversationContext) PartialCompact(
+	direction PartialCompactDirection,
+	pivotIndex int,
+	keepTail int, // for "from" direction: number of recent entries to always keep
+) (*PartialCompactResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entries := c.entries
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no entries to partially compact")
+	}
+
+	// Clamp pivotIndex to valid range
+	if pivotIndex < 0 {
+		pivotIndex = 0
+	}
+	if pivotIndex > len(entries) {
+		pivotIndex = len(entries)
+	}
+	if keepTail <= 0 {
+		keepTail = 3
+	}
+
+	var summarizeEntries []conversationEntry
+	var keepEntries []conversationEntry
+
+	switch direction {
+	case PartialCompactUpTo:
+		// Summarize 0..pivotIndex, keep pivotIndex..end
+		// Adjust pivot to avoid splitting tool pairs
+		adjustedPivot := adjustPivotForToolPairs(entries, pivotIndex, "up_to")
+		if adjustedPivot <= 1 {
+			return nil, fmt.Errorf("not enough messages to summarize before pivot")
+		}
+		summarizeEntries = entries[:adjustedPivot]
+		keepEntries = entries[adjustedPivot:]
+
+	case PartialCompactFrom:
+		// Summarize pivotIndex..(end-keepTail), keep 0..pivotIndex + last keepTail
+		adjustedPivot := adjustPivotForToolPairs(entries, pivotIndex, "from")
+		tailStart := len(entries) - keepTail
+		if tailStart < 0 {
+			tailStart = 0
+		}
+		if adjustedPivot >= tailStart {
+			return nil, fmt.Errorf("pivot too close to end; not enough to summarize")
+		}
+		// Entries to summarize: pivotIndex..tailStart
+		summarizeEntries = entries[adjustedPivot:tailStart]
+		if len(summarizeEntries) == 0 {
+			return nil, fmt.Errorf("no messages to summarize in from direction")
+		}
+		// Entries to keep: 0..pivotIndex + tailStart..end
+		keepEntries = make([]conversationEntry, 0, adjustedPivot+keepTail)
+		keepEntries = append(keepEntries, entries[:adjustedPivot]...)
+		keepEntries = append(keepEntries, entries[tailStart:]...)
+
+	default:
+		return nil, fmt.Errorf("unknown partial compact direction: %s", direction)
+	}
+
+	// Calculate token counts
+	tokensBefore := c.estimateEntriesTokens(summarizeEntries)
+	if tokensBefore == 0 {
+		return nil, fmt.Errorf("no tokens to save in entries to summarize")
+	}
+
+	// Generate summary by converting entries to text
+	summaryText := entriesToSummaryText(summarizeEntries)
+
+	tokensAfter := EstimateTokens(summaryText)
+	tokensSaved := tokensBefore - tokensAfter
+
+	// Build replacement: boundary marker + summary + kept entries
+	var newEntries []conversationEntry
+
+	// Insert compact boundary
+	newEntries = append(newEntries, conversationEntry{
+		role: "system",
+		content: CompactBoundaryContent{
+			Trigger:          CompactTriggerAuto,
+			PreCompactTokens: tokensBefore,
+		},
+	})
+
+	// Insert summary as user message
+	newEntries = append(newEntries, conversationEntry{
+		role:    "user",
+		content: SummaryContent(fmt.Sprintf("[partial-compact: %s, %d tokens compressed]\n\n%s", direction, tokensBefore, summaryText)),
+	})
+
+	// Append kept entries
+	newEntries = append(newEntries, keepEntries...)
+
+	// Replace context entries
+	c.entries = newEntries
+	c.ValidateToolPairing()
+	c.FixRoleAlternation()
+
+	fmt.Fprintf(os.Stderr, "\n[partial-compact: %s] %d entries summarized, %d kept, ~%d tokens saved\n",
+		direction, len(summarizeEntries), len(keepEntries), tokensSaved)
+
+	return &PartialCompactResult{
+		Summary:           summaryText,
+		Direction:         direction,
+		PivotIndex:        pivotIndex,
+		MessagesKept:      len(keepEntries),
+		MessagesSummarized: len(summarizeEntries),
+		TokensBefore:      tokensBefore,
+		TokensAfter:       tokensAfter,
+		TokensSaved:       tokensSaved,
+	}, nil
+}
+
+// adjustPivotForToolPairs adjusts the pivot index to avoid splitting
+// tool_use/tool_result pairs. For "up_to", if the pivot lands on a
+// tool_result, move it back to include the matching tool_use. For "from",
+// if the pivot lands mid-pair, move it forward to complete the pair.
+func adjustPivotForToolPairs(entries []conversationEntry, pivot int, direction PartialCompactDirection) int {
+	if pivot <= 0 || pivot >= len(entries) {
+		return pivot
+	}
+
+	// Build tool_use_id map
+	toolUseIDs := make(map[string]int) // tool_use_id -> index of ToolUseContent
+	for i, entry := range entries {
+		if blocks, ok := entry.content.(ToolUseContent); ok {
+			for _, b := range blocks {
+				if b.OfToolUse != nil && b.OfToolUse.ID != "" {
+					toolUseIDs[b.OfToolUse.ID] = i
+				}
+			}
+		}
+	}
+
+	if direction == PartialCompactUpTo {
+		// If pivot lands on a tool_result, check if its tool_use is before pivot
+		// If so, move pivot back to include the tool_use
+		for i := pivot; i < len(entries); i++ {
+			if results, ok := entries[i].content.(ToolResultContent); ok {
+				for _, r := range results {
+					if useIdx, ok := toolUseIDs[r.ToolUseID]; ok && useIdx < pivot {
+						// tool_use is in summarize region, tool_result would be in keep region
+						// Move pivot back to include tool_use (it's already in summarize)
+						// No adjustment needed since tool_use is already summarized
+					}
+				}
+			}
+		}
+		// Check if entry just before pivot is a tool_use whose result is after pivot
+		// In that case, move pivot forward to include the result too
+		for i := pivot; i < len(entries); i++ {
+			if results, ok := entries[i].content.(ToolResultContent); ok {
+				for _, r := range results {
+					if useIdx, ok := toolUseIDs[r.ToolUseID]; ok && useIdx == pivot-1 {
+						// tool_use at pivot-1, tool_result at i (in keep region)
+						// Move pivot forward to include this result
+						pivot = i + 1
+						break
+					}
+				}
+			}
+		}
+	} else {
+		// "from" direction: tool_use in keep region, tool_result in summarize region
+		// Move pivot back to include tool_use in summarize too
+		for i := pivot - 1; i >= 0; i-- {
+			if blocks, ok := entries[i].content.(ToolUseContent); ok {
+				for _, b := range blocks {
+					if b.OfToolUse != nil {
+						// Check if any result in summarize region references this tool_use
+						for j := pivot; j < len(entries); j++ {
+							if results, ok := entries[j].content.(ToolResultContent); ok {
+								for _, r := range results {
+									if r.ToolUseID == b.OfToolUse.ID {
+										// tool_use at i, tool_result in summarize region
+										// Move pivot back to include tool_use
+										pivot = i
+										break
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return pivot
+}
+
+// estimateEntriesTokens estimates token count for a slice of entries.
+func (c *ConversationContext) estimateEntriesTokens(entries []conversationEntry) int {
+	totalChars := 0
+	for _, entry := range entries {
+		switch v := entry.content.(type) {
+		case TextContent:
+			totalChars += len(v)
+		case ToolUseContent:
+			for _, b := range v {
+				if b.OfText != nil {
+					totalChars += len(b.OfText.Text)
+				}
+				if b.OfToolUse != nil {
+					totalChars += len(b.OfToolUse.ID) + len(b.OfToolUse.Name)
+					if m, ok := b.OfToolUse.Input.(map[string]any); ok {
+						for k, val := range m {
+							totalChars += len(k) + len(fmt.Sprintf("%v", val))
+						}
+					}
+				}
+			}
+		case ToolResultContent:
+			for _, r := range v {
+				for _, cb := range r.Content {
+					if cb.OfText != nil {
+						totalChars += len(cb.OfText.Text)
+					}
+				}
+			}
+		case SummaryContent:
+			totalChars += len(v)
+		}
+	}
+	if totalChars < 4 {
+		return 0
+	}
+	return totalChars / 4
+}
+
+// entriesToSummaryText converts entries to a readable summary string.
+// For text entries, includes the content (truncated if long).
+// For tool entries, includes a one-line description.
+func entriesToSummaryText(entries []conversationEntry) string {
+	var sb strings.Builder
+	turnCount := 0
+	toolCallCount := 0
+	filesMentioned := make(map[string]bool)
+
+	for _, entry := range entries {
+		switch v := entry.content.(type) {
+		case TextContent:
+			text := string(v)
+			if entry.role == "user" {
+				turnCount++
+				// Include user message content (truncated)
+				preview := text
+				if len(preview) > 200 {
+					preview = preview[:200] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("User: %s\n", preview))
+			} else if entry.role == "assistant" {
+				preview := text
+				if len(preview) > 200 {
+					preview = preview[:200] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("Assistant: %s\n", preview))
+			}
+		case ToolUseContent:
+			for _, b := range v {
+				if b.OfToolUse != nil {
+					toolCallCount++
+					name := b.OfToolUse.Name
+					// Extract file paths from tool arguments
+					if m, ok := b.OfToolUse.Input.(map[string]any); ok {
+						if path, ok := m["path"].(string); ok {
+							filesMentioned[path] = true
+						}
+					}
+					sb.WriteString(fmt.Sprintf("[tool call: %s]\n", name))
+				}
+			}
+		case ToolResultContent:
+			for _, r := range v {
+				for _, cb := range r.Content {
+					if cb.OfText != nil {
+						text := cb.OfText.Text
+						// Extract key info from tool result
+						lines := strings.Count(text, "\n")
+						preview := text
+						if len(preview) > 100 {
+							preview = preview[:100] + "..."
+						}
+						sb.WriteString(fmt.Sprintf("[tool result: %d lines] %s\n", lines+1, preview))
+					}
+				}
+			}
+		}
+	}
+
+	// Append summary statistics
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("Summary of %d conversation turns with %d tool calls.\n", turnCount, toolCallCount))
+	if len(filesMentioned) > 0 {
+		files := make([]string, 0, len(filesMentioned))
+		for f := range filesMentioned {
+			files = append(files, f)
+		}
+		summary.WriteString(fmt.Sprintf("Files mentioned: %s\n", strings.Join(files, ", ")))
+	}
+	summary.WriteString("---\n")
+	summary.WriteString(sb.String())
+	return summary.String()
+}
+
+// ─── Reactive Compaction ─────────────────────────────────────────────────────
+
+// ReactiveCompactResult holds the result of a reactive compaction.
+type ReactiveCompactResult struct {
+	Triggered        bool
+	PreTokens        int
+	PreviousTokens   int
+	TokenDelta       int
+	CompactionMethod string // "sm-compact", "partial-compact", or "llm-compact"
+}
+
+// CheckReactiveCompact checks if a token spike warrants proactive compaction.
+// Returns a non-nil result if compaction should be triggered.
+//
+// A "token spike" is when the token count has increased significantly
+// (delta > threshold) compared to the previous turn. This catches situations
+// where a large file read or search result suddenly inflates the context.
+func CheckReactiveCompact(currentTokens, previousTokens, threshold int) *ReactiveCompactResult {
+	if threshold <= 0 {
+		threshold = 5000 // default threshold
+	}
+
+	delta := currentTokens - previousTokens
+	if delta <= 0 || delta < threshold {
+		return nil // No spike detected
+	}
+
+	return &ReactiveCompactResult{
+		Triggered:      true,
+		PreTokens:      currentTokens,
+		PreviousTokens: previousTokens,
+		TokenDelta:     delta,
+	}
+}
 
 // ─── Sensitive info redaction ────────────────────────────────────────────────
 

@@ -608,10 +608,31 @@ func (c *ConversationContext) AddHistorySnip(count int, skipPaths []string) {
 	}
 }
 
+// compactableToolNames is the set of tool names whose results should be cleared
+// during micro-compaction. These are read/search/web/write tools where the raw
+// output is large and not needed for context after the turn passes.
+// Tools like git, memory, skill, list_dir, etc. are NOT compacted because their
+// results contain structural information the model may need later.
+var compactableToolNames = map[string]bool{
+	"read_file":    true,
+	"exec":         true,
+	"edit_file":    true,
+	"write_file":   true,
+	"multi_edit":   true,
+	"grep":         true,
+	"glob":         true,
+	"web_fetch":    true,
+	"web_search":   true,
+}
+
 // MicroCompactEntries clears content of old tool results beyond the keepRecent
 // window. Operates directly on conversation entries (no serialization round-trip).
 // Returns the number of tool result entries that were cleared.
 // ToolUseID is preserved in cleared results to maintain pairing validity.
+//
+// Two improvements over the original:
+//  1. Dedup: skips tool results already cleared to the placeholder string.
+//  2. Whitelist: only clears results from compactable tools (read/exec/edit/grep/glob/web/write).
 func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -622,7 +643,21 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 		placeholder = "[Old tool result content cleared]"
 	}
 
-	// Count tool_result entries from the end (recent first)
+	// Pass 1: Build tool_use_id -> tool_name mapping from ToolUseContent entries.
+	toolNameMap := make(map[string]string) // tool_use_id -> tool_name
+	for _, entry := range c.entries {
+		blocks, ok := entry.content.(ToolUseContent)
+		if !ok {
+			continue
+		}
+		for _, b := range blocks {
+			if b.OfToolUse != nil && b.OfToolUse.ID != "" {
+				toolNameMap[b.OfToolUse.ID] = b.OfToolUse.Name
+			}
+		}
+	}
+
+	// Pass 2: Iterate backwards, clearing eligible tool results.
 	recentCount := 0
 	cleared := 0
 	for i := len(c.entries) - 1; i >= 0; i-- {
@@ -635,16 +670,49 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 			recentCount++
 			continue
 		}
-		// Clear this tool result: replace content with placeholder, keep ToolUseIDs
+
+		// Check each block: is it already cleared? is it a compactable tool?
+		allCleared := true
+		hasCompactable := false
+		for _, r := range results {
+			// Check if already cleared to placeholder
+			alreadyCleared := false
+			for _, c := range r.Content {
+				if c.OfText != nil && c.OfText.Text == placeholder {
+					alreadyCleared = true
+					break
+				}
+			}
+			if !alreadyCleared {
+				allCleared = false
+			}
+
+			// Check if this tool is compactable
+			if toolName, ok := toolNameMap[r.ToolUseID]; ok && compactableToolNames[toolName] {
+				hasCompactable = true
+			}
+		}
+
+		// Skip if all blocks are already cleared, or none are compactable
+		if allCleared || !hasCompactable {
+			continue
+		}
+
+		// Clear only compactable tool results; leave others untouched
 		var clearedResults []anthropic.ToolResultBlockParam
 		for _, r := range results {
-			clearedResults = append(clearedResults, anthropic.ToolResultBlockParam{
-				ToolUseID: r.ToolUseID,
-				Content: []anthropic.ToolResultBlockParamContentUnion{
-					{OfText: &anthropic.TextBlockParam{Text: placeholder}},
-				},
-				IsError: r.IsError,
-			})
+			if toolName, ok := toolNameMap[r.ToolUseID]; ok && compactableToolNames[toolName] {
+				clearedResults = append(clearedResults, anthropic.ToolResultBlockParam{
+					ToolUseID: r.ToolUseID,
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: placeholder}},
+					},
+					IsError: r.IsError,
+				})
+			} else {
+				// Not a compactable tool — keep the original result
+				clearedResults = append(clearedResults, r)
+			}
 		}
 		entry.content = ToolResultContent(clearedResults)
 		cleared++

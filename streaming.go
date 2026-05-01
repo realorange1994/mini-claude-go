@@ -323,6 +323,7 @@ type TerminalHandler struct {
 	curToolArgs    strings.Builder
 	thinkState     ThinkFilterState
 	thinkBuf       string
+	thinkingPrinted bool // tracks if thinking was already printed (avoid double-print in Done)
 }
 
 // filterThinking runs text through the think filter state machine.
@@ -412,6 +413,7 @@ func (h *TerminalHandler) Handle(chunk StreamChunk) error {
 				preview = preview[:120] + "..."
 			}
 			fmt.Fprintf(os.Stderr, "\n[THINK] %s\n", preview)
+			h.thinkingPrinted = true
 		}
 		h.thinkingBuf.Reset()
 		h.curToolName = chunk.Name
@@ -429,8 +431,8 @@ func (h *TerminalHandler) Handle(chunk StreamChunk) error {
 		if h.curToolName != "" {
 			h.flushToolCall()
 		}
-		// Flush buffered thinking if no tool call was seen
-		if !h.seenToolCall && h.thinkingBuf.Len() > 0 {
+		// Flush buffered thinking if no tool call was seen and not already printed
+		if !h.seenToolCall && h.thinkingBuf.Len() > 0 && !h.thinkingPrinted {
 			th := h.thinkingBuf.String()
 			lines := strings.Split(th, "\n")
 			preview := lines[0]
@@ -444,6 +446,18 @@ func (h *TerminalHandler) Handle(chunk StreamChunk) error {
 		// Flush any pending tool call before printing text
 		if h.curToolName != "" {
 			h.flushToolCall()
+		}
+		// Flush buffered thinking if any (thinking arrives before text in stream)
+		if h.thinkingBuf.Len() > 0 {
+			th := h.thinkingBuf.String()
+			lines := strings.Split(th, "\n")
+			preview := lines[0]
+			if len(preview) > 120 {
+				preview = preview[:120] + "..."
+			}
+			fmt.Fprintf(os.Stderr, "\n[THINK] %s\n", preview)
+			h.thinkingBuf.Reset()
+			h.thinkingPrinted = true
 		}
 		// Run through think filter state machine before output
 		filtered := h.filterThinking(chunk.Content)

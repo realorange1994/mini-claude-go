@@ -89,6 +89,7 @@ type AgentLoop struct {
 	interruptOnce sync.Once    // ensures single interrupt watcher goroutine
 	lastDeltasState DeltasState // tracks what was streamed in last attempt
 	rateLimitState  RateLimitState // rate limit headers from API responses
+	prevTurnTokens  int            // tracks token count from previous turn for reactive compact
 }
 
 // newHTTPClient creates an HTTP client with sensible timeouts to prevent
@@ -465,6 +466,24 @@ func (a *AgentLoop) Run(userMessage string) string {
 			return finalText
 		}
 
+		// Reactive compaction: check for token spike before proceeding.
+		// If the token count has jumped significantly (e.g., large file read),
+		// proactively compact before the context becomes too large.
+		if a.config.ReactiveCompactEnabled {
+			currentTokens := a.context.EstimatedTokens()
+			threshold := a.config.ReactiveCompactThreshold
+			if threshold <= 0 {
+				threshold = 5000
+			}
+			if result := CheckReactiveCompact(currentTokens, a.prevTurnTokens, threshold); result != nil {
+				fmt.Fprintf(os.Stderr, "\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
+					a.prevTurnTokens, currentTokens, result.TokenDelta, threshold)
+				a.tryCompaction()
+			}
+			// Update previous token count for next turn
+			a.prevTurnTokens = a.context.EstimatedTokens()
+		}
+
 		// Rebuild system prompt each turn to update skill discovery
 		if a.config.cachedPrompt != nil {
 			sysPrompt := a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
@@ -700,6 +719,50 @@ func (a *AgentLoop) ClearHistory() int {
 		a.config.cachedPrompt.MarkDirty()
 	}
 	return count
+}
+
+// ForcePartialCompact forces a directional partial compaction (for /partialcompact command).
+// Direction "up_to" summarizes everything before the pivot, keeping recent context.
+// Direction "from" summarizes everything after the pivot, keeping early context.
+func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
+	if !a.config.PartialCompactEnabled {
+		fmt.Println("[partial-compact] Partial compaction is disabled.")
+		return
+	}
+
+	dir := PartialCompactDirection(direction)
+	if dir != PartialCompactUpTo && dir != PartialCompactFrom {
+		fmt.Printf("[partial-compact] Invalid direction: %s (use 'up_to' or 'from')\n", direction)
+		return
+	}
+
+	entries := a.context.Entries()
+	if len(entries) == 0 {
+		fmt.Println("[partial-compact] No messages to compact.")
+		return
+	}
+
+	// Auto-detect pivot if not specified
+	if pivotIndex <= 0 {
+		// Default: midpoint of conversation
+		pivotIndex = len(entries) / 2
+	}
+	if pivotIndex >= len(entries) {
+		pivotIndex = len(entries) - 1
+	}
+
+	result, err := a.context.PartialCompact(dir, pivotIndex, 3)
+	if err != nil {
+		fmt.Printf("[partial-compact] Error: %v\n", err)
+		return
+	}
+
+	fmt.Printf("[partial-compact: %s] %d entries summarized, %d kept, ~%d tokens saved\n",
+		dir, result.MessagesSummarized, result.MessagesKept, result.TokensSaved)
+
+	if a.config.cachedPrompt != nil {
+		a.config.cachedPrompt.MarkDirty()
+	}
 }
 
 func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
@@ -1730,6 +1793,8 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 }
 
 // tryCompaction attempts LLM-driven compaction, falling back to truncation.
+// When session memory exists and has content, uses SM-compact (免 API 压缩)
+// to skip the LLM call and use session memory as the summary directly.
 func (a *AgentLoop) tryCompaction() {
 	// Phase 0: Micro-compact — clear old tool results every turn (cheap, no LLM call)
 	if a.config.MicroCompactEnabled {
@@ -1748,6 +1813,87 @@ func (a *AgentLoop) tryCompaction() {
 		return
 	}
 
+	// Phase 1: SM-compact — use session memory as summary instead of calling LLM API.
+	// This is the preferred path when memory is available: saves an LLM API call
+	// and leverages incrementally collected session memory as the context summary.
+	if a.config.SessionMemory != nil {
+		if memContent := a.config.SessionMemory.FormatForPrompt(); memContent != "" {
+			a.trySMCompact(memContent)
+			// Mark system prompt dirty after compaction
+			if a.config.cachedPrompt != nil {
+				a.config.cachedPrompt.MarkDirty()
+			}
+			return
+		}
+	}
+
+	// Phase 2: LLM-driven compaction (existing path)
+	a.tryLLMCompaction()
+
+	// Mark system prompt dirty after compaction
+	if a.config.cachedPrompt != nil {
+		a.config.cachedPrompt.MarkDirty()
+	}
+}
+
+// trySMCompact performs compaction using session memory as the summary,
+// skipping the LLM API call entirely. Inspired by the official Claude Code
+// SM-compact mechanism (sessionMemoryCompact.ts).
+func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
+	messages := a.context.BuildMessages()
+	preTokens := estimateMessageParamsTokens(messages)
+
+	if !a.compactor.ShouldCompact(messages) {
+		return // Not enough tokens to justify compaction
+	}
+
+	// Cooldown: skip if tokens haven't grown 25% since last compaction
+	// (handled inside ShouldCompact, but double-check pre-compact tokens)
+	a.compactor.mu.Lock()
+	postTokens := a.compactor.postCompactTokens
+	a.compactor.mu.Unlock()
+	if postTokens > 0 {
+		cooldownThreshold := postTokens + postTokens/4
+		if preTokens < cooldownThreshold {
+			return // Still in cooldown period
+		}
+	}
+
+	// Format the session memory as a compact summary
+	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
+	summaryContent := fmt.Sprintf("%s\n\n%s", boundaryText, sessionMemoryContent)
+
+	fmt.Fprintf(os.Stderr, "\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
+		preTokens, EstimateTokens(summaryContent)+6)
+
+	// Inject boundary + summary into context
+	a.context.AddCompactBoundary(CompactTriggerSMCompact, preTokens)
+	a.context.AddSummary(summaryContent)
+
+	// Update session memory with compaction state
+	if a.config.SessionMemory != nil {
+		a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction (sm-compact): %d tokens compressed", preTokens), "auto")
+	}
+
+	// Phase 2: Post-compact recovery — re-inject critical context
+	recoveredPaths := a.PostCompactRecovery()
+
+	// Phase 3: History snip — preserve recent messages verbatim
+	snipCount := a.config.PostCompactHistorySnipCount
+	if snipCount <= 0 {
+		snipCount = 3
+	}
+	a.context.AddHistorySnip(snipCount, recoveredPaths)
+
+	// Calculate real post-compact token count for cooldown
+	actualMessages := a.context.BuildMessages()
+	actualPostTokens := estimateMessageParamsTokens(actualMessages)
+	a.compactor.SetPostCompactTokens(actualPostTokens)
+}
+
+// tryLLMCompaction performs LLM-driven compaction (the existing path).
+// Returns true if compaction was performed.
+func (a *AgentLoop) tryLLMCompaction() {
 	messages := a.context.BuildMessages()
 	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL)
 	if performed && summary != "" {
@@ -1773,8 +1919,6 @@ func (a *AgentLoop) tryCompaction() {
 
 		// Rebuild messages from the actual context (summary + attachments + any tail entries)
 		// and calculate the real post-compact token count for cooldown.
-		// Previously postCompactTokens only counted summary tokens, causing
-		// immediate re-compaction every turn (thrashing).
 		actualMessages := a.context.BuildMessages()
 		postTokens := estimateMessageParamsTokens(actualMessages)
 		a.compactor.SetPostCompactTokens(postTokens)
@@ -1784,17 +1928,6 @@ func (a *AgentLoop) tryCompaction() {
 	// LLM compaction was not performed (not needed or disabled).
 	// Do NOT fall through to CompactContext() -- the LLM compactor's
 	// ShouldCompact() check already determined that compaction isn't needed.
-	// Previously, this unconditional fallback caused thrashing: after a
-	// successful LLM compaction, CompactContext() would run every turn
-	// because it used entriesToCompactionMessages() which didn't respect
-	// the compact boundary, seeing inflated token counts.
-	// CompactContext() is still available when called directly from the
-	// truncation fallback path (e.g., after context overflow errors).
-
-	// Mark system prompt dirty after compaction
-	if a.config.cachedPrompt != nil {
-		a.config.cachedPrompt.MarkDirty()
-	}
 }
 
 // isLocalEndpoint detects if the base URL points to a local provider.

@@ -50,6 +50,12 @@ type Config struct {
 	PostCompactMaxTotalSkillChars int
 	PostCompactHistorySnipCount   int
 	SessionMemory           *SessionMemory
+	// Reactive compaction: trigger compaction when token count spikes above
+	// this threshold between turns, even if not exceeding the max buffer.
+	ReactiveCompactEnabled    bool
+	ReactiveCompactThreshold  int // default 5000 tokens
+	// Partial compaction: directional compaction settings
+	PartialCompactEnabled bool
 	cachedPrompt           *CachedSystemPrompt
 }
 
@@ -265,6 +271,9 @@ func DefaultConfig() Config {
 		PostCompactMaxSkillChars:      5000,
 		PostCompactMaxTotalSkillChars: 25000,
 		PostCompactHistorySnipCount:   3,
+		ReactiveCompactEnabled:    true,
+		ReactiveCompactThreshold:  5000,
+		PartialCompactEnabled:     true,
 		cachedPrompt: NewCachedSystemPrompt(),
 	}
 }

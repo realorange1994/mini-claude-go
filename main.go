@@ -251,7 +251,7 @@ func runInteractive(agent *AgentLoop) {
 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
-				cmd == "/compact" || cmd == "/clear"
+				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact"
 
 			if !isKnownCmd {
 				// Not a recognized command -- treat as normal prompt
@@ -284,16 +284,28 @@ func runInteractive(agent *AgentLoop) {
 					continue
 				case "/help":
 					fmt.Println("Commands:")
-					fmt.Println("  /help    -- Show available commands")
-					fmt.Println("  /compact -- Force context compaction")
-					fmt.Println("  /clear   -- Clear conversation history")
-					fmt.Println("  /mode    -- Switch permission mode (ask|auto|plan)")
-					fmt.Println("  /resume  -- Resume a previous session")
-					fmt.Println("  /tools   -- List available tools")
-					fmt.Println("  /quit    -- Exit")
+					fmt.Println("  /help           -- Show available commands")
+					fmt.Println("  /compact        -- Force context compaction")
+					fmt.Println("  /partialcompact -- Directional partial compaction (up_to|from, [pivot])")
+					fmt.Println("  /clear          -- Clear conversation history")
+					fmt.Println("  /mode           -- Switch permission mode (ask|auto|plan)")
+					fmt.Println("  /resume         -- Resume a previous session")
+					fmt.Println("  /tools          -- List available tools")
+					fmt.Println("  /quit           -- Exit")
 					continue
 				case "/compact":
 					agent.ForceCompact()
+					continue
+				case "/partialcompact":
+					dir := "up_to"
+					pivot := 0
+					if len(parts) > 1 {
+						dir = strings.ToLower(parts[1])
+					}
+					if len(parts) > 2 {
+						fmt.Sscanf(parts[2], "%d", &pivot)
+					}
+					agent.ForcePartialCompact(dir, pivot)
 					continue
 				case "/clear":
 					count := agent.ClearHistory()
