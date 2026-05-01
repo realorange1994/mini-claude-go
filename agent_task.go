@@ -396,6 +396,33 @@ func (a *AgentLoop) finishBashBgTask(taskID string, exitCode int, errMsg string)
 	// Look up the task from the task store for the notification
 	task := a.taskStore.GetTask(taskID)
 
+	// Guard: if the task was already killed by KillTask, don't overwrite the status
+	if task != nil {
+		task.mu.Lock()
+		alreadyTerminal := task.Status == TaskStatusKilled
+		task.mu.Unlock()
+		if alreadyTerminal {
+			// Still send a notification so the LLM knows the task ended
+			status := "killed"
+			summary := "Command was stopped"
+			outputFile := task.OutputFile
+			command := task.Description
+			notification := fmt.Sprintf(`<task-notification>
+<task_id>%s</task_id>
+<task_type>bash_background</task_type>
+<status>%s</status>
+<output_file>%s</output_file>
+<command>%s</command>
+<summary>%s</summary>
+</task-notification>`, taskID, status, outputFile, escapeXML(command), escapeXML(summary))
+			select {
+			case a.notificationChan <- notification:
+			default:
+			}
+			return
+		}
+	}
+
 	// Update the main task store
 	if exitCode == 0 && errMsg == "" {
 		durationMs := time.Since(task.StartTime).Milliseconds()
