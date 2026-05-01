@@ -27,6 +27,7 @@ type SessionMemory struct {
 	filePath   string
 	dirty      bool
 	stopCh     chan struct{}
+	wg         sync.WaitGroup // waits for flush goroutine to complete
 	maxEntries int
 	// onAdd is an optional callback invoked when a note is added.
 	// Used to mark the system prompt dirty so memory appears in the next turn.
@@ -237,7 +238,9 @@ func (sm *SessionMemory) flushToDisk() error {
 // StartFlushLoop starts a background goroutine that periodically flushes
 // memory to disk. Call Stop() to terminate.
 func (sm *SessionMemory) StartFlushLoop() {
+	sm.wg.Add(1)
 	go func() {
+		defer sm.wg.Done()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
@@ -256,7 +259,8 @@ func (sm *SessionMemory) StartFlushLoop() {
 	}()
 }
 
-// Stop signals the background flush goroutine to stop and does a final flush.
+// Stop signals the background flush goroutine to stop and waits for the final flush to complete.
 func (sm *SessionMemory) Stop() {
 	close(sm.stopCh)
+	sm.wg.Wait()
 }
