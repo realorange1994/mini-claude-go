@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,34 +157,48 @@ func (s *WorkTaskStore) UpdateTask(id string, updates map[string]any) error {
 		case "addBlocks":
 			if arr, ok := val.([]any); ok {
 				for _, item := range arr {
-					if blockID, ok := item.(string); ok {
-						if !containsString(task.Blocks, blockID) {
-							task.Blocks = append(task.Blocks, blockID)
-						}
-						// Also update the blocked task's BlockedBy
-						if blocked, exists := s.tasks[blockID]; exists {
-							if !containsString(blocked.BlockedBy, id) {
-								blocked.BlockedBy = append(blocked.BlockedBy, id)
-							}
+					depID := fmt.Sprintf("%v", item)
+					depID = strings.TrimPrefix(depID, "#")
+					if depID == "" {
+						continue
+					}
+					if !containsString(task.Blocks, depID) {
+						task.Blocks = append(task.Blocks, depID)
+					}
+					// Also update the blocked task's BlockedBy
+					if blocked, exists := s.tasks[depID]; exists {
+						if !containsString(blocked.BlockedBy, id) {
+							blocked.BlockedBy = append(blocked.BlockedBy, id)
 						}
 					}
 				}
+				// Silently remove references to non-existent tasks
+				task.Blocks = s.filterValidDeps(task.Blocks)
 			}
 		case "addBlockedBy":
 			if arr, ok := val.([]any); ok {
 				for _, item := range arr {
-					if blockerID, ok := item.(string); ok {
-						if !containsString(task.BlockedBy, blockerID) {
-							task.BlockedBy = append(task.BlockedBy, blockerID)
-						}
-						// Also update the blocking task's Blocks
-						if blocker, exists := s.tasks[blockerID]; exists {
-							if !containsString(blocker.Blocks, id) {
-								blocker.Blocks = append(blocker.Blocks, id)
-							}
+					depID := fmt.Sprintf("%v", item)
+					depID = strings.TrimPrefix(depID, "#")
+					if depID == "" {
+						continue
+					}
+					// Skip if adding this edge would create a cycle
+					if s.wouldCreateCycle(depID, id) {
+						continue
+					}
+					if !containsString(task.BlockedBy, depID) {
+						task.BlockedBy = append(task.BlockedBy, depID)
+					}
+					// Also update the blocking task's Blocks
+					if blocker, exists := s.tasks[depID]; exists {
+						if !containsString(blocker.Blocks, id) {
+							blocker.Blocks = append(blocker.Blocks, id)
 						}
 					}
 				}
+				// Silently remove references to non-existent tasks
+				task.BlockedBy = s.filterValidDeps(task.BlockedBy)
 			}
 		}
 	}
@@ -217,6 +232,42 @@ func removeString(slice []string, s string) []string {
 	for _, item := range slice {
 		if item != s {
 			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// wouldCreateCycle checks if adding blockerID as a dependency of taskID would create a cycle.
+// It does a BFS from blockerID following Blocks edges. If we reach taskID, the edge creates a cycle.
+func (s *WorkTaskStore) wouldCreateCycle(taskID, blockerID string) bool {
+	if taskID == blockerID {
+		return true
+	}
+	visited := map[string]bool{}
+	queue := []string{blockerID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if id == taskID {
+			return true
+		}
+		if visited[id] {
+			continue
+		}
+		visited[id] = true
+		if t, ok := s.tasks[id]; ok {
+			queue = append(queue, t.Blocks...)
+		}
+	}
+	return false
+}
+
+// filterValidDeps removes IDs that do not correspond to existing tasks from a dependency list.
+func (s *WorkTaskStore) filterValidDeps(ids []string) []string {
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, exists := s.tasks[id]; exists {
+			result = append(result, id)
 		}
 	}
 	return result

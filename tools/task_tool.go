@@ -328,6 +328,25 @@ func (t *TaskUpdateTool) Execute(params map[string]any) ToolResult {
 		updates["owner"] = v
 		updatedFields = append(updatedFields, "owner")
 	}
+	// Coerce scalar to array for add_blocked_by
+	if v, ok := params["add_blocked_by"]; ok {
+		switch val := v.(type) {
+		case float64:
+			params["add_blocked_by"] = []any{fmt.Sprintf("%d", int(val))}
+		case string:
+			params["add_blocked_by"] = []any{val}
+		}
+	}
+	// Coerce scalar to array for add_blocks
+	if v, ok := params["add_blocks"]; ok {
+		switch val := v.(type) {
+		case float64:
+			params["add_blocks"] = []any{fmt.Sprintf("%d", int(val))}
+		case string:
+			params["add_blocks"] = []any{val}
+		}
+	}
+
 	if v, ok := params["add_blocks"].([]any); ok && len(v) > 0 {
 		updates["addBlocks"] = v
 		updatedFields = append(updatedFields, "blocks")

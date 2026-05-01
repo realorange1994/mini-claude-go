@@ -56,11 +56,11 @@ go build -o miniclaudecode .
 ## Usage
 
 ```bash
-# Interactive mode
+# Interactive mode (streaming is on by default)
 ./miniclaudecode
 
-# With streaming (real-time output)
-./miniclaudecode --stream
+# Disable streaming
+./miniclaudecode --no-stream
 
 # Specify permission mode
 ./miniclaudecode --mode ask
@@ -78,7 +78,7 @@ go build -o miniclaudecode .
 ./miniclaudecode "Explain this code"
 
 # Combine options
-./miniclaudecode --stream --mode auto --dir /path/to/project --resume last
+./miniclaudecode --mode auto --dir /path/to/project --resume last
 ```
 
 ### Slash Commands (in interactive mode)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"miniclaudecode-go/tools"
 )
 
 func TestWorkTaskStore_CreateTask(t *testing.T) {
@@ -296,5 +298,203 @@ func TestWorkTaskStore_UpdateTask_MultipleBlocksAndBlockedBy(t *testing.T) {
 	task3 := store.GetTask(id3)
 	if len(task3.BlockedBy) != 1 || task3.BlockedBy[0] != id1 {
 		t.Errorf("expected task3 blocked by task1, got %v", task3.BlockedBy)
+	}
+}
+
+// --- Bug fix tests ---
+
+// Bug 1: Integer format scalar should be coerced to array in TaskUpdateTool
+func TestTaskUpdateTool_ScalarAddBlockedBy(t *testing.T) {
+	store := NewWorkTaskStore()
+	store.CreateTask("Task 1", "Desc 1", "", nil)
+	store.CreateTask("Task 2", "Desc 2", "", nil)
+
+	tool := &tools.TaskUpdateTool{
+		UpdateFunc: store.UpdateTask,
+	}
+
+	// Simulate LLM passing add_blocked_by as float64 (integer) instead of array
+	result := tool.Execute(map[string]any{
+		"task_id":        "2",
+		"add_blocked_by": float64(1),
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Output)
+	}
+
+	task2 := store.GetTask("2")
+	if len(task2.BlockedBy) != 1 || task2.BlockedBy[0] != "1" {
+		t.Errorf("expected task2.BlockedBy = ['1'], got %v", task2.BlockedBy)
+	}
+}
+
+// Bug 1: Integer format scalar should be coerced to array in TaskUpdateTool for add_blocks
+func TestTaskUpdateTool_ScalarAddBlocks(t *testing.T) {
+	store := NewWorkTaskStore()
+	store.CreateTask("Task 1", "Desc 1", "", nil)
+	store.CreateTask("Task 2", "Desc 2", "", nil)
+
+	tool := &tools.TaskUpdateTool{
+		UpdateFunc: store.UpdateTask,
+	}
+
+	// Simulate LLM passing add_blocks as float64 (integer) instead of array
+	result := tool.Execute(map[string]any{
+		"task_id":    "1",
+		"add_blocks": float64(2),
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Output)
+	}
+
+	task1 := store.GetTask("1")
+	if len(task1.Blocks) != 1 || task1.Blocks[0] != "2" {
+		t.Errorf("expected task1.Blocks = ['2'], got %v", task1.Blocks)
+	}
+}
+
+// Bug 2: Integer elements in array should be converted to strings
+func TestWorkTaskStore_UpdateTask_IntegerElementsInArray(t *testing.T) {
+	store := NewWorkTaskStore()
+	store.CreateTask("Task 1", "Desc 1", "", nil)
+	store.CreateTask("Task 2", "Desc 2", "", nil)
+
+	// LLM sends [1] (float64 elements) instead of ["1"]
+	err := store.UpdateTask("2", map[string]any{
+		"addBlockedBy": []any{float64(1)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task2 := store.GetTask("2")
+	if len(task2.BlockedBy) != 1 || task2.BlockedBy[0] != "1" {
+		t.Errorf("expected task2.BlockedBy = ['1'], got %v", task2.BlockedBy)
+	}
+}
+
+// Bug 3: Non-existent task IDs should be silently removed
+func TestWorkTaskStore_UpdateTask_NonExistentDependency(t *testing.T) {
+	store := NewWorkTaskStore()
+	store.CreateTask("Task 1", "Desc 1", "", nil)
+
+	// Reference to non-existent task 9999 should be silently removed
+	err := store.UpdateTask("1", map[string]any{
+		"addBlockedBy": []any{"9999"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task1 := store.GetTask("1")
+	if len(task1.BlockedBy) != 0 {
+		t.Errorf("expected task1.BlockedBy to be empty (non-existent deps removed), got %v", task1.BlockedBy)
+	}
+}
+
+// Bug 3: Non-existent task IDs in Blocks should be silently removed
+func TestWorkTaskStore_UpdateTask_NonExistentBlocks(t *testing.T) {
+	store := NewWorkTaskStore()
+	store.CreateTask("Task 1", "Desc 1", "", nil)
+
+	// Reference to non-existent task 8888 should be silently removed
+	err := store.UpdateTask("1", map[string]any{
+		"addBlocks": []any{"8888"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task1 := store.GetTask("1")
+	if len(task1.Blocks) != 0 {
+		t.Errorf("expected task1.Blocks to be empty (non-existent deps removed), got %v", task1.Blocks)
+	}
+}
+
+// Bug 4: Circular dependency should be detected and prevented
+func TestWorkTaskStore_UpdateTask_CircularDependency(t *testing.T) {
+	store := NewWorkTaskStore()
+	id1 := store.CreateTask("Task 1", "Desc 1", "", nil)
+	id2 := store.CreateTask("Task 2", "Desc 2", "", nil)
+
+	// Task 2 is blocked by Task 1
+	err := store.UpdateTask(id2, map[string]any{
+		"addBlockedBy": []any{id1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now try to make Task 1 blocked by Task 2 — this would create a cycle
+	err = store.UpdateTask(id1, map[string]any{
+		"addBlockedBy": []any{id2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task1 := store.GetTask(id1)
+	// The circular edge should be silently skipped
+	if containsString(task1.BlockedBy, id2) {
+		t.Error("expected circular dependency to be prevented, but task1.BlockedBy contains task2")
+	}
+}
+
+// Bug 4: Self-dependency should be detected
+func TestWorkTaskStore_UpdateTask_SelfDependency(t *testing.T) {
+	store := NewWorkTaskStore()
+	id1 := store.CreateTask("Task 1", "Desc 1", "", nil)
+
+	// Task blocking itself should be prevented
+	err := store.UpdateTask(id1, map[string]any{
+		"addBlockedBy": []any{id1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task1 := store.GetTask(id1)
+	if containsString(task1.BlockedBy, id1) {
+		t.Error("expected self-dependency to be prevented")
+	}
+}
+
+// Bug 5: Hash prefix should be stripped from task IDs
+func TestWorkTaskStore_UpdateTask_HashPrefix(t *testing.T) {
+	store := NewWorkTaskStore()
+	store.CreateTask("Task 1", "Desc 1", "", nil)
+	store.CreateTask("Task 2", "Desc 2", "", nil)
+
+	// "#1" should be normalized to "1"
+	err := store.UpdateTask("2", map[string]any{
+		"addBlockedBy": []any{"#1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task2 := store.GetTask("2")
+	if len(task2.BlockedBy) != 1 || task2.BlockedBy[0] != "1" {
+		t.Errorf("expected task2.BlockedBy = ['1'] (hash stripped), got %v", task2.BlockedBy)
+	}
+}
+
+// Bug 5: Hash prefix in addBlocks should also be stripped
+func TestWorkTaskStore_UpdateTask_HashPrefixBlocks(t *testing.T) {
+	store := NewWorkTaskStore()
+	store.CreateTask("Task 1", "Desc 1", "", nil)
+	store.CreateTask("Task 2", "Desc 2", "", nil)
+
+	// "#2" should be normalized to "2"
+	err := store.UpdateTask("1", map[string]any{
+		"addBlocks": []any{"#2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task1 := store.GetTask("1")
+	if len(task1.Blocks) != 1 || task1.Blocks[0] != "2" {
+		t.Errorf("expected task1.Blocks = ['2'] (hash stripped), got %v", task1.Blocks)
 	}
 }

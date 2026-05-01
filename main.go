@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -204,6 +205,16 @@ func runInteractive(agent *AgentLoop) {
 	}
 	interactive := isTerminal()
 
+	// Detect if stdout is a terminal (for streaming output decision)
+	stdoutIsTerminal := func() bool {
+		fi, err := os.Stdout.Stat()
+		if err != nil {
+			return false
+		}
+		return fi.Mode()&os.ModeCharDevice != 0
+	}
+	stdoutIsTerm := stdoutIsTerminal()
+
 	stdinReader := bufio.NewReader(os.Stdin)
 
 	// reopenStdin reopens stdin after Ctrl+C breaks it (Windows closes stdin on SIGINT)
@@ -238,7 +249,9 @@ func runInteractive(agent *AgentLoop) {
 		fmt.Print("\n> ")
 
 		line, err := stdinReader.ReadString('\n')
-		if err != nil {
+		isEOF := err == io.EOF
+
+		if err != nil && !isEOF {
 			if interactive {
 				// Ctrl+C at prompt -- signal handler already tracks double-press.
 				// Just reopen stdin and continue; if double-pressed, signal handler
@@ -254,8 +267,24 @@ func runInteractive(agent *AgentLoop) {
 			break
 		}
 
+		if isEOF && strings.TrimSpace(line) == "" {
+			// stdin exhausted (no more data) -- exit cleanly
+			printResumeHint(agent)
+			break
+		}
+
+		// Process the line. When io.EOF is returned with data (last line
+		// of piped input without trailing newline), ReadString returns both
+		// the data and io.EOF -- we process the data here and exit on the
+		// next iteration when ReadString returns io.EOF with empty data.
 		userInput := strings.TrimSpace(line)
 		if userInput == "" {
+			if !interactive {
+				// Piped stdin with empty line and no more data -- exit to
+				// avoid infinite spin loop calling ReadString on exhausted stdin.
+				printResumeHint(agent)
+				break
+			}
 			continue
 		}
 
@@ -361,7 +390,11 @@ func runInteractive(agent *AgentLoop) {
 		agent.SetInterrupted(false) // ensure clear before running
 		result := agent.Run(userInput)
 		agent.SetInterrupted(false) // clear after run
-		if !agent.IsStreaming() {
+		// In streaming mode, TerminalHandler displays output on stderr.
+		// When stdout is a terminal, skip printing to avoid duplication.
+		// When stdout is piped (not a terminal), always print so the
+		// result is available on stdout for programmatic consumption.
+		if !agent.IsStreaming() || !stdoutIsTerm {
 			fmt.Println(result)
 		}
 		fmt.Println()
