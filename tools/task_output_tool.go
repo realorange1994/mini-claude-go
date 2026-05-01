@@ -1,0 +1,70 @@
+package tools
+
+import (
+	"fmt"
+	"time"
+)
+
+// TaskOutputFunc is the callback to get a task's output.
+// Returns (result, errorText).
+type TaskOutputFunc func(agentID string, block bool, timeout time.Duration) (string, string)
+
+// TaskOutputTool reads the output of a background sub-agent task.
+type TaskOutputTool struct {
+	GetOutputFunc TaskOutputFunc
+}
+
+func (t *TaskOutputTool) Name() string { return "task_output" }
+func (t *TaskOutputTool) Description() string {
+	return "Retrieve the output of a background sub-agent task. " +
+		"Supports blocking wait for completion with a configurable timeout."
+}
+
+func (t *TaskOutputTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"required": []string{"task_id"},
+		"properties": map[string]any{
+			"task_id": map[string]any{
+				"type":        "string",
+				"description": "The agent ID of the task to read output from",
+			},
+			"block": map[string]any{
+				"type":        "boolean",
+				"description": "If true, block until the task completes (default: false)",
+			},
+			"timeout": map[string]any{
+				"type":        "number",
+				"description": "Maximum seconds to wait when block=true (default: 30)",
+			},
+		},
+	}
+}
+
+func (t *TaskOutputTool) CheckPermissions(params map[string]any) string { return "" }
+
+func (t *TaskOutputTool) Execute(params map[string]any) ToolResult {
+	if t.GetOutputFunc == nil {
+		return ToolResultError("task output system not initialized")
+	}
+
+	taskID, _ := params["task_id"].(string)
+	if taskID == "" {
+		return ToolResultError("task_id is required")
+	}
+
+	block, _ := params["block"].(bool)
+	timeoutSec, _ := params["timeout"].(float64)
+	if timeoutSec <= 0 {
+		timeoutSec = 30
+	}
+
+	result, errText := t.GetOutputFunc(taskID, block, time.Duration(timeoutSec*float64(time.Second)))
+	if errText != "" {
+		return ToolResultError(errText)
+	}
+	if result == "" {
+		return ToolResultOK(fmt.Sprintf("Agent %s: no output available yet", taskID))
+	}
+	return ToolResultOK(result)
+}

@@ -158,6 +158,10 @@ func main() {
 		prompt := strings.Join(args, " ")
 		result := agent.Run(prompt)
 		fmt.Println(result)
+
+		// Drain any pending sub-agent notifications before exit
+		drainOneShotNotifications(agent)
+
 		agent.Close()
 		return
 	}
@@ -219,6 +223,15 @@ func runInteractive(agent *AgentLoop) {
 	}
 
 	for {
+		// Drain async sub-agent notifications and display them
+		if notifications := agent.DrainNotifications(); len(notifications) > 0 {
+			fmt.Println("\n--- Sub-agent notifications ---")
+			for _, n := range notifications {
+				fmt.Println(n)
+			}
+			fmt.Println("------------------------------")
+		}
+
 		fmt.Print("\n> ")
 
 		line, err := stdinReader.ReadString('\n')
@@ -363,6 +376,20 @@ func printResumeHint(agent *AgentLoop) {
 	// Strip .jsonl extension
 	stem := strings.TrimSuffix(name, ".jsonl")
 	fmt.Fprintf(os.Stderr, "\nTo resume this session: --resume %s\n", stem)
+}
+
+// drainOneShotNotifications drains sub-agent notifications in one-shot mode.
+// It waits briefly for any pending notifications from background agents.
+func drainOneShotNotifications(agent *AgentLoop) {
+	// Brief wait to allow any in-flight notifications to arrive
+	time.Sleep(100 * time.Millisecond)
+	if notifications := agent.DrainNotifications(); len(notifications) > 0 {
+		fmt.Println("\n--- Sub-agent notifications ---")
+		for _, n := range notifications {
+			fmt.Println(n)
+		}
+		fmt.Println("------------------------------")
+	}
 }
 
 // findTranscript resolves a transcript reference (number, filename, or 'last').

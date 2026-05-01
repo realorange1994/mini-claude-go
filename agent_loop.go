@@ -77,6 +77,53 @@ func (a *AgentLoop) registerAgentTool() {
 	a.registry.Register(agentTool)
 }
 
+// registerSendMessageTool registers the SendMessage tool with this loop's callback.
+func (a *AgentLoop) registerSendMessageTool() {
+	sendMsgTool := &tools.SendMessageTool{
+		SendMessageFunc: a.SendMessageToSubAgent,
+		GetStatusFunc:   a.GetSubAgentStatus,
+	}
+	a.registry.Register(sendMsgTool)
+}
+
+// registerTaskOutputTool registers the TaskOutputTool with this loop's callback.
+func (a *AgentLoop) registerTaskOutputTool() {
+	taskOutputTool := &tools.TaskOutputTool{
+		GetOutputFunc: a.GetSubAgentOutput,
+	}
+	a.registry.Register(taskOutputTool)
+}
+
+// EnqueueAgentNotification pushes a formatted task notification XML to the notification channel.
+func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result string, toolsUsed int, durationMs int64) {
+	notification := fmt.Sprintf(`<task-notification>
+<agentId>%s</agentId>
+<status>%s</status>
+<result>%s</result>
+<output_file></output_file>
+<usage><total_tokens>%d</total_tokens><tool_uses>%d</tool_uses><duration_ms>%d</duration_ms></usage>
+</task-notification>`, taskID, status, result, toolsUsed, toolsUsed, durationMs)
+
+	select {
+	case a.notificationChan <- notification:
+	default:
+		// Channel is full, drop the notification
+	}
+}
+
+// DrainNotifications returns all pending notifications and clears the channel.
+func (a *AgentLoop) DrainNotifications() []string {
+	var notifications []string
+	for {
+		select {
+		case n := <-a.notificationChan:
+			notifications = append(notifications, n)
+		default:
+			return notifications
+		}
+	}
+}
+
 // AgentLoop drives the core agentic loop.
 type AgentLoop struct {
 	config       Config
@@ -99,6 +146,12 @@ type AgentLoop struct {
 	rateLimitState  RateLimitState // rate limit headers from API responses
 	prevTurnTokens  int            // tracks token count from previous turn for reactive compact
 	activeSubAgents atomic.Int32   // count of currently running sub-agents
+	taskStore       *TaskStore     // tracks all sub-agent tasks
+	notificationChan chan string   // buffered channel for async task notifications
+	evictionDone    chan struct{}  // signals the eviction ticker goroutine to stop
+	agentNameRegistry map[string]string // maps short agent names to task IDs
+	cancelCtx      context.Context   // cancellable context for async sub-agents
+	cancelFunc     context.CancelFunc // cancel function for async sub-agents
 }
 
 // newHTTPClient creates an HTTP client with sensible timeouts to prevent
@@ -165,9 +218,29 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		toolTimeout:  600 * time.Second,
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
+		taskStore:       NewTaskStore(),
+		notificationChan: make(chan string, 10),
+		evictionDone:    make(chan struct{}),
+		agentNameRegistry: make(map[string]string),
 	}
 	// Fix gate to point to agent's config (not the local cfg copy)
 	agent.gate = NewPermissionGate(&agent.config)
+
+	// Start grace eviction ticker: clean up completed tasks after 30s
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if agent.taskStore != nil {
+					agent.taskStore.CleanupEvicted()
+				}
+			case <-agent.evictionDone:
+				return
+			}
+		}
+	}()
 
 	if cfg.cachedPrompt != nil {
 		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
@@ -179,6 +252,8 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 
 	// Register the sub-agent tool (wires AgentTool.SpawnFunc to this loop's SpawnSubAgent)
 	agent.registerAgentTool()
+	agent.registerSendMessageTool()
+	agent.registerTaskOutputTool()
 
 	return agent, nil
 }
@@ -234,21 +309,41 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	}
 
 	agent := &AgentLoop{
-		config:       cfg,
-		registry:     registry,
-		gate:         gate,
-		context:      convCtx,
-		client:       client,
-		snapshots:    cfg.FileHistory,
-		transcript:   tw,
-		skillTracker: cfg.SkillTracker,
-		compactor:    NewCompactor(),
-		useStream:    useStream,
-		maxToolChars: 8192,
-		toolTimeout:  600 * time.Second,
-		maxTurns:     maxTurns,
-		budget:       NewIterationBudget(maxTurns),
+		config:           cfg,
+		registry:         registry,
+		gate:             gate,
+		context:          convCtx,
+		client:           client,
+		snapshots:        cfg.FileHistory,
+		transcript:       tw,
+		skillTracker:     cfg.SkillTracker,
+		compactor:        NewCompactor(),
+		useStream:        useStream,
+		maxToolChars:     8192,
+		toolTimeout:      600 * time.Second,
+		maxTurns:         maxTurns,
+		budget:           NewIterationBudget(maxTurns),
+		taskStore:          NewTaskStore(),
+		notificationChan:   make(chan string, 10),
+		evictionDone:       make(chan struct{}),
+		agentNameRegistry:  make(map[string]string),
 	}
+
+	// Start grace eviction ticker: clean up completed tasks after 30s
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if agent.taskStore != nil {
+					agent.taskStore.CleanupEvicted()
+				}
+			case <-agent.evictionDone:
+				return
+			}
+		}
+	}()
 
 	if cfg.cachedPrompt != nil {
 		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
@@ -683,8 +778,21 @@ func (a *AgentLoop) Run(userMessage string) string {
 	return finalText
 }
 
-// Close releases resources (transcript writer).
+// Close releases resources (transcript writer) and stops background goroutines.
 func (a *AgentLoop) Close() {
+	// Cancel all running async sub-agents
+	if a.taskStore != nil {
+		for _, task := range a.taskStore.AllTasks() {
+			if !task.IsTerminal() && task.CancelFunc != nil {
+				task.CancelFunc()
+			}
+		}
+	}
+	// Signal the eviction ticker to stop
+	if a.evictionDone != nil {
+		close(a.evictionDone)
+		a.evictionDone = nil
+	}
 	if a.transcript != nil {
 		_ = a.transcript.Close()
 	}

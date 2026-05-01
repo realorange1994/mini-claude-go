@@ -318,11 +318,18 @@ func TestFixRoleAlternationTypeMismatchTextToolResult(t *testing.T) {
 	}
 
 	ctx.FixRoleAlternation()
-	if len(ctx.entries) != 1 {
-		t.Errorf("expected 1 entry after fix (merged), got %d", len(ctx.entries))
+	// Type-mismatched entries (TextContent + ToolResultContent) are now kept
+	// separate instead of converting to TextContent, which destroyed tool pairing.
+	if len(ctx.entries) != 2 {
+		t.Errorf("expected 2 entries after fix (kept separate), got %d", len(ctx.entries))
 	}
+	// First entry should still be TextContent
 	if _, ok := ctx.entries[0].content.(TextContent); !ok {
-		t.Errorf("expected merged entry to be TextContent, got %T", ctx.entries[0].content)
+		t.Errorf("expected first entry to be TextContent, got %T", ctx.entries[0].content)
+	}
+	// Second entry should still be ToolResultContent (not converted to TextContent)
+	if _, ok := ctx.entries[1].content.(ToolResultContent); !ok {
+		t.Errorf("expected second entry to be ToolResultContent, got %T", ctx.entries[1].content)
 	}
 }
 

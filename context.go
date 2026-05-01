@@ -869,19 +869,10 @@ func (c *ConversationContext) FixRoleAlternation() {
 						continue
 					}
 				}
-				// Type mismatch — cannot merge directly.
-			// Convert both to TextContent so nothing is silently lost.
-			// This handles edge cases like TextContent followed by
-			// ToolResultContent (same role) after truncation.
-			lastText := entryContentToText(last.content)
-			entryText := entryContentToText(entry.content)
-			if lastText != "" && entryText != "" {
-				last.content = TextContent(lastText + "\n\n" + entryText)
-			} else if entryText != "" {
-				last.content = TextContent(entryText)
-			}
-			// If both empty, keep original (last)
-			continue
+				// Type mismatch - keep entries separate instead of converting.
+				// CRITICAL: Never convert ToolResultContent to TextContent.
+				// Doing so destroys the tool_use/tool_result pairing, causing 2013.
+				// Just fall through to append entry at line 887.
 		}
 	}
 	merged = append(merged, entry)

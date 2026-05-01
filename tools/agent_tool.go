@@ -3,11 +3,11 @@ package tools
 import (
 	"fmt"
 	"strings"
-	"time"
 )
 
 // AgentSpawnFunc is the callback function to spawn a child agent loop.
-// It returns (result, errorText, toolsUsed, durationMs).
+// It returns (agentID, result, errorText, toolsUsed, durationMs).
+// The agentID is always generated and returned first, even for async launches.
 type AgentSpawnFunc func(
 	prompt string,
 	subagentType string,
@@ -17,7 +17,7 @@ type AgentSpawnFunc func(
 	disallowedTools []string,
 	inheritContext bool,
 	parentMessages []map[string]any,
-) (result string, errText string, toolsUsed int, durationMs int64)
+) (agentID string, result string, errText string, toolsUsed int, durationMs int64)
 
 // AgentTool spawns a child agent to execute a specialized task.
 type AgentTool struct {
@@ -67,6 +67,10 @@ func (t *AgentTool) InputSchema() map[string]any {
 				"items":       map[string]any{"type": "string"},
 				"description": "Tools the agent cannot use (optional). The 'agent' tool is always disallowed.",
 			},
+			"inherit_context": map[string]any{
+				"type":        "boolean",
+				"description": "Fork mode: inherit the parent's conversation history (optional, default false). When true, the sub-agent sees the parent's full conversation context.",
+			},
 		},
 	}
 }
@@ -90,6 +94,7 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 
 	allowedTools := extractStringList(params["allowed_tools"])
 	disallowedTools := extractStringList(params["disallowed_tools"])
+	inheritContext, _ := params["inherit_context"].(bool)
 
 	// Always disallow recursive agent spawning
 	disallowedTools = append(disallowedTools, "agent")
@@ -97,14 +102,11 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	_ = description // logged by parent via transcript
 
 	if runInBackground {
-		// Async path: launch goroutine and return immediately
-		agentID := fmt.Sprintf("agent-%d", time.Now().UnixNano())
-		go func() {
-			t.SpawnFunc(
-				prompt, subagentType, model, true,
-				allowedTools, disallowedTools, false, nil,
-			)
-		}()
+		// Async path: SpawnFunc launches the goroutine internally and returns the agentID
+		agentID, _, _, _, _ := t.SpawnFunc(
+			prompt, subagentType, model, true,
+			allowedTools, disallowedTools, inheritContext, nil,
+		)
 		return ToolResultOK(fmt.Sprintf(
 			"Agent launched in background.\n\n"+
 				"agentId: %s\n"+
@@ -115,16 +117,18 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	}
 
 	// Sync path: block until complete
-	result, errText, toolsUsed, durationMs := t.SpawnFunc(
+	agentID, result, errText, toolsUsed, durationMs := t.SpawnFunc(
 		prompt, subagentType, model, false,
-		allowedTools, disallowedTools, false, nil,
+		allowedTools, disallowedTools, inheritContext, nil,
 	)
 
 	if errText != "" {
 		return ToolResultError(errText)
 	}
 
-	return ToolResultOK(formatAgentResult(result, toolsUsed, durationMs))
+	// Explore and plan agents return raw results without usage trailer
+	skipUsage := subagentType == "explore" || subagentType == "plan"
+	return ToolResultOK(formatAgentResult(result, agentID, subagentType, toolsUsed, durationMs, skipUsage))
 }
 
 // extractStringList converts an interface{} (from JSON array) to []string.
@@ -146,10 +150,21 @@ func extractStringList(v any) []string {
 }
 
 // formatAgentResult formats a sub-agent's output with usage metadata.
-func formatAgentResult(result string, toolsUsed int, durationMs int64) string {
+// When skipUsage is true, only the result text is returned (used for explore/plan agents).
+// agentID and agentType are included in the output footer for traceability.
+func formatAgentResult(result string, agentID string, agentType string, toolsUsed int, durationMs int64, skipUsage bool) string {
+	if skipUsage {
+		return result
+	}
 	var sb strings.Builder
 	sb.WriteString(result)
 	sb.WriteString("\n\n---\n")
+	if agentID != "" {
+		sb.WriteString(fmt.Sprintf("agentId: %s\n", agentID))
+	}
+	if agentType != "" {
+		sb.WriteString(fmt.Sprintf("agentType: %s\n", agentType))
+	}
 	sb.WriteString(fmt.Sprintf("<usage>tool_uses: %d\nduration_ms: %d</usage>", toolsUsed, durationMs))
 	return sb.String()
 }
