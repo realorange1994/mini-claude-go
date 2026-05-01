@@ -2,13 +2,12 @@
 *.exe
 *.exe~
 
-# Transcripts (runtime data)
-.claude/transcripts/
+# runtime data
+.claude/**/
 
 # OS files
 .DS_Store
 Thumbs.db
-.claude/snapshots/
 
 # MCP config (may contain API keys)
 .mcp.json
