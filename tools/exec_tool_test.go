@@ -461,3 +461,137 @@ func TestCheckPermissionsWrapperStripping(t *testing.T) {
 		}
 	}
 }
+
+func TestValidatePathsDangerous(t *testing.T) {
+	cases := []struct {
+		cmd     string
+		blocked bool
+	}{
+		// System root paths - should block
+		{"rm -rf /", true},
+		{"rm -rf /home", true},
+		{"rm -rf /tmp", true},
+		{"rm -rf /etc", true},
+		{"rm -rf /usr", true},
+		{"rm -rf /bin", true},
+		{"rm -rf /sbin", true},
+		{"rm -rf /var", true},
+		{"rm -rf /root", true},
+		{"rm -rf /opt", true},
+		{"rm -rf /boot", true},
+		{"rm -rf /sys", true},
+		{"rm -rf /proc", true},
+		{"rm -rf /dev", true},
+		{"rm -rf /lib", true},
+		{"rm -rf /lib64", true},
+		// Home directory - should block
+		{"rm -rf ~", true},
+		{"rm -rf ~/Downloads", true},
+		{"rm -rf $HOME", true},
+		// Relative paths - should NOT block
+		{"rm -rf .", false},
+		{"rm file.txt", false},
+		{"rm ./file.txt", false},
+		{"rm -rf node_modules", false},
+		// rmdir - should block on dangerous paths
+		{"rmdir /tmp", true},
+		{"rmdir /etc", true},
+		// unlink - should block on dangerous paths
+		{"unlink /etc/passwd", true},
+		// Path escape via --
+		{"rm -- -/../secret", true},
+		// Safe commands on relative paths should pass
+		{"rm -rf src/build", false},
+		{"rm *.log", false},
+		{"rmdir build/dist", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			reason := validatePaths(tc.cmd)
+			blocked := reason != ""
+			if blocked != tc.blocked {
+				t.Errorf("validatePaths(%q): blocked=%v (expected %v), reason=%q", tc.cmd, blocked, tc.blocked, reason)
+			}
+		})
+	}
+}
+
+func TestExtractDeletionTargets(t *testing.T) {
+	tests := []struct {
+		args   []string
+		expect []string
+	}{
+		{[]string{"-rf", "file.txt"}, []string{"file.txt"}},
+		{[]string{"-rf", "--", "file.txt"}, []string{"file.txt"}},
+		{[]string{"--", "-f"}, []string{"-f"}},
+		{[]string{"--", "-/../secret"}, []string{"-/../secret"}},
+		{[]string{"-rf", "a.txt", "b.txt"}, []string{"a.txt", "b.txt"}},
+		{[]string{"--", "file1", "-rf"}, []string{"file1", "-rf"}},
+	}
+	for _, tc := range tests {
+		result := extractDeletionTargets(tc.args)
+		if len(result) != len(tc.expect) {
+			t.Errorf("extractDeletionTargets(%v): expected %v, got %v", tc.args, tc.expect, result)
+			continue
+		}
+		for i := range result {
+			if result[i] != tc.expect[i] {
+				t.Errorf("extractDeletionTargets(%v): expected %v, got %v", tc.args, tc.expect, result)
+				break
+			}
+		}
+	}
+}
+
+func TestCheckPermissionsPathProtection(t *testing.T) {
+	tool := &ExecTool{}
+	dangerous := []string{
+		"rm -rf /",
+		"rm -rf /home",
+		"rm -rf /tmp",
+		"rm -rf ~/Downloads",
+		"rmdir /etc",
+	}
+	for _, cmd := range dangerous {
+		result := tool.CheckPermissions(map[string]any{"command": cmd})
+		if result == "" {
+			t.Errorf("expected denial for: %s", cmd)
+		}
+	}
+}
+
+func TestCheckPermissionsCriticalProjectFiles(t *testing.T) {
+	tool := &ExecTool{}
+	dangerous := []string{
+		"rm -rf .git",
+		"rm .gitignore",
+		"rm .gitconfig",
+		"rm go.mod",
+		"rm package.json",
+		"rm Cargo.toml",
+		"rm Makefile",
+		"rm -rf .claude",
+	}
+	for _, cmd := range dangerous {
+		result := tool.CheckPermissions(map[string]any{"command": cmd})
+		if result == "" {
+			t.Errorf("expected denial for critical project file: %s", cmd)
+		}
+	}
+}
+
+func TestCheckPermissionsWindowsPaths(t *testing.T) {
+	tool := &ExecTool{}
+	dangerous := []string{
+		`rm -rf C:\Windows`,
+		`rm -rf "C:\Program Files"`,
+		`rm -rf C:\ProgramData`,
+	}
+	for _, cmd := range dangerous {
+		result := tool.CheckPermissions(map[string]any{"command": cmd})
+		if result == "" {
+			t.Logf("expected denial for Windows path: %s (got: %s)", cmd, result)
+		}
+	}
+}

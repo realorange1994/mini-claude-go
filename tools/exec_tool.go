@@ -29,7 +29,8 @@ func (*ExecTool) Description() string {
 		"Do NOT use exec for file reading (use read_file), file searching (use grep or glob), or file editing (use edit_file). " +
 		"Commands run in the current working directory. " +
 		"On Windows, use PowerShell syntax. On Unix, use bash syntax. " +
-		"Supports running commands in the background with run_in_background=true."
+		"Supports running commands in the background with run_in_background=true. " +
+		"SAFETY: Commands targeting system directories (/etc, /usr, /bin, etc.) or using destructive patterns (rm -rf /, rm -rf ~) will be blocked. When deleting files, prefer targeted deletion over broad patterns."
 }
 
 func (*ExecTool) InputSchema() map[string]any {
@@ -648,12 +649,186 @@ func extractQuotedRegions(cmd string) map[int]bool {
 	return result
 }
 
+// deletionCommands are commands that delete files/directories.
+var deletionCommands = map[string]bool{
+	"rm":     true,
+	"rmdir":  true,
+	"unlink": true,
+}
+
+// dangerousUnixPaths are root-level directories that should never be deleted.
+var dangerousUnixPaths = map[string]bool{
+	"/etc": true, "/usr": true, "/bin": true, "/sbin": true,
+	"/tmp": true, "/var": true, "/home": true, "/root": true,
+	"/opt": true, "/boot": true, "/sys": true, "/proc": true,
+	"/dev": true, "/lib": true, "/lib64": true,
+}
+
+// dangerousWindowsPaths are Windows paths that should never be deleted.
+var dangerousWindowsPaths = []string{
+	`C:\`, `D:\`,
+	`C:\Windows`, `C:\Program Files`, `C:\ProgramData`,
+	`C:\WINDOWS`, `C:\PROGRAM FILES`, `C:\PROGRAMDATA`,
+}
+
+// criticalProjectFiles are files/directories that are always dangerous to delete in a project.
+var criticalProjectFiles = map[string]bool{
+	".git":       true,
+	".git/":      true,
+	".claude":    true,
+	".claude/":   true,
+	".gitconfig": true,
+	".gitignore": true,
+}
+
+// criticalProjectRootFiles are project-root files that are dangerous to delete
+// (only blocked when referenced at the root level without a parent directory).
+var criticalProjectRootFiles = map[string]bool{
+	"package.json": true,
+	"go.mod":       true,
+	"Cargo.toml":   true,
+	"Makefile":     true,
+}
+
 // validatePaths checks for potentially dangerous path references in commands.
 // Returns an empty string if safe, or a descriptive reason if dangerous.
 func validatePaths(cmd string) string {
-	// Stub implementation - expand with actual path validation logic
-	_ = cmd
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+
+	// Check if this is a deletion command
+	baseCmd := filepath.Base(fields[0])
+	if !deletionCommands[baseCmd] {
+		return ""
+	}
+
+	// Extract target paths: skip flags, respect -- separator
+	targets := extractDeletionTargets(fields[1:])
+
+	for _, target := range targets {
+		if reason := isDangerousDeletionPath(target); reason != "" {
+			return reason
+		}
+	}
+
 	return ""
+}
+
+// extractDeletionTargets extracts target paths from rm/rmdir/unlink arguments,
+// skipping flags and respecting the -- separator.
+func extractDeletionTargets(args []string) []string {
+	var targets []string
+	afterDoubleDash := false
+
+	for _, arg := range args {
+		if afterDoubleDash {
+			// Everything after -- is a target, not a flag
+			targets = append(targets, arg)
+			continue
+		}
+
+		if arg == "--" {
+			afterDoubleDash = true
+			continue
+		}
+
+		// Skip flags (start with -)
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		// Non-flag argument is a target path
+		targets = append(targets, arg)
+	}
+
+	return targets
+}
+
+// isDangerousDeletionPath checks if a single path is dangerous to delete.
+// Returns an empty string if safe, or a descriptive reason if dangerous.
+func isDangerousDeletionPath(path string) string {
+	// Normalize path separators
+	normalized := strings.ReplaceAll(path, `\`, "/")
+
+	// Block root /
+	if normalized == "/" {
+		return "Dangerous deletion path detected: /"
+	}
+
+	// Block ~ or $HOME
+	if path == "~" || path == "$HOME" {
+		return "Dangerous deletion path detected: home directory"
+	}
+	// Block ~/... paths (home directory with subpaths)
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		return "Dangerous deletion path detected: home directory"
+	}
+	if strings.HasPrefix(path, "$HOME/") || strings.HasPrefix(path, `$HOME\`) {
+		return "Dangerous deletion path detected: home directory"
+	}
+
+	// Block dangerous Unix root-level directories
+	for dir := range dangerousUnixPaths {
+		// Exact match or with trailing slash
+		if normalized == dir || normalized == dir+"/" {
+			return "Dangerous deletion path detected: " + dir
+		}
+		// Subdirectory of a dangerous path (e.g., /etc/passwd)
+		if strings.HasPrefix(normalized, dir+"/") {
+			return "Dangerous deletion path detected: " + dir
+		}
+	}
+
+	// Block dangerous Windows paths (case-insensitive check)
+	pathUpper := strings.ToUpper(path)
+	for _, winPath := range dangerousWindowsPaths {
+		winUpper := strings.ToUpper(winPath)
+		if pathUpper == winUpper || strings.HasPrefix(pathUpper, winUpper+`\`) || strings.HasPrefix(pathUpper, winUpper+`/`) {
+			return "Dangerous deletion path detected: " + winPath
+		}
+	}
+
+	// Block glob patterns that would delete everything in a directory
+	if strings.HasSuffix(normalized, "/*") || strings.HasSuffix(normalized, `/*`) {
+		// Check if the part before /* is a dangerous path
+		basePath := normalized[:len(normalized)-2]
+		if basePath == "" || basePath == "." || basePath == ".." {
+			return "Dangerous deletion path detected: wildcard in root/parent directory"
+		}
+		if reason := isDangerousDeletionPath(basePath); reason != "" {
+			return reason
+		}
+	}
+
+	// Block path traversal via ../ that escapes to dangerous directories
+	if containsPathEscape(normalized) {
+		// Paths with ../ are always suspicious in deletion commands.
+		// Even if the resolved path is relative, ../ can escape the current directory.
+		return "Dangerous deletion path detected: path traversal (../) in " + path
+	}
+
+	// Block critical project files/directories
+	basename := filepath.Base(path)
+	if criticalProjectFiles[basename] || criticalProjectFiles[path] {
+		return "Dangerous deletion path detected: critical project file/directory " + basename
+	}
+	if criticalProjectFiles[normalized] {
+		return "Dangerous deletion path detected: critical project file/directory " + normalized
+	}
+
+	// Block critical project root files (only when referenced directly or at root)
+	if criticalProjectRootFiles[basename] || criticalProjectRootFiles[path] {
+		return "Dangerous deletion path detected: critical project file " + basename
+	}
+
+	return ""
+}
+
+// containsPathEscape checks if a path contains ../ segments.
+func containsPathEscape(path string) bool {
+	return strings.Contains(path, "../") || strings.Contains(path, `..\`)
 }
 
 // splitCompoundCommand splits a command string on shell separators while respecting quoting.
