@@ -50,6 +50,7 @@ All tools accept an optional "timeout" parameter (integer, seconds, range 1-600,
 ## Current Permission Mode: %s
 %s
 %s
+%s
 %s`
 
 var modeDescriptions = map[string]string{
@@ -59,7 +60,7 @@ var modeDescriptions = map[string]string{
 }
 
 // BuildSystemPrompt constructs the system prompt from tool list, mode, project instructions, and skills.
-func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker) string {
+func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker, sessionMemory *SessionMemory) string {
 	toolList := buildToolList(registry)
 
 	modeDesc := modeDescriptions[permissionMode]
@@ -71,6 +72,14 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 	var projectSection string
 	if projectInstructions != "" {
 		projectSection = "## Project Instructions (from CLAUDE.md)\n\n" + projectInstructions
+	}
+
+	// Inject session memory
+	var memorySection string
+	if sessionMemory != nil {
+		if mem := sessionMemory.FormatForPrompt(); mem != "" {
+			memorySection = mem
+		}
 	}
 
 	// Build skills section
@@ -176,7 +185,7 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir stri
 	hours := offset / 3600
 	minutes := (offset % 3600) / 60
 	timezone := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
-	return fmt.Sprintf(systemPromptTemplate, envInfo, wd, currentTime, timezone, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection)
+	return fmt.Sprintf(systemPromptTemplate, envInfo, wd, currentTime, timezone, toolList, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection)
 }
 
 func buildToolList(registry *tools.Registry) string {
@@ -202,7 +211,7 @@ func NewCachedSystemPrompt() *CachedSystemPrompt {
 }
 
 // GetOrBuild returns the cached system prompt, rebuilding only if dirty.
-func (cp *CachedSystemPrompt) GetOrBuild(registry *tools.Registry, permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker) string {
+func (cp *CachedSystemPrompt) GetOrBuild(registry *tools.Registry, permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker, sessionMemory *SessionMemory) string {
 	if !cp.dirty.Load() {
 		cp.mu.RLock()
 		cached := cp.cached
@@ -212,7 +221,7 @@ func (cp *CachedSystemPrompt) GetOrBuild(registry *tools.Registry, permissionMod
 		}
 	}
 
-	prompt := BuildSystemPrompt(registry, permissionMode, projectDir, skillLoader, skillTracker)
+	prompt := BuildSystemPrompt(registry, permissionMode, projectDir, skillLoader, skillTracker, sessionMemory)
 	cp.mu.Lock()
 	cp.cached = prompt
 	cp.mu.Unlock()

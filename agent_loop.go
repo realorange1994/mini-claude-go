@@ -160,10 +160,10 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent.gate = NewPermissionGate(&agent.config)
 
 	if cfg.cachedPrompt != nil {
-		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
+		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		ctx.SetSystemPrompt(sysPrompt)
 	} else {
-		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
+		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		ctx.SetSystemPrompt(sysPrompt)
 	}
 
@@ -238,10 +238,10 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	}
 
 	if cfg.cachedPrompt != nil {
-		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
+		sysPrompt := cfg.cachedPrompt.GetOrBuild(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		convCtx.SetSystemPrompt(sysPrompt)
 	} else {
-		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker)
+		sysPrompt := BuildSystemPrompt(registry, string(cfg.PermissionMode), "", cfg.SkillLoader, cfg.SkillTracker, cfg.SessionMemory)
 		convCtx.SetSystemPrompt(sysPrompt)
 	}
 
@@ -467,10 +467,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		// Rebuild system prompt each turn to update skill discovery
 		if a.config.cachedPrompt != nil {
-			sysPrompt := a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker)
+			sysPrompt := a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
 			a.context.SetSystemPrompt(sysPrompt)
 		} else if a.config.SkillLoader != nil {
-			sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker)
+			sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
 			a.context.SetSystemPrompt(sysPrompt)
 		}
 
@@ -1749,6 +1749,11 @@ func (a *AgentLoop) tryCompaction() {
 		preTokens := a.context.EstimatedTokens()
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 		a.context.AddSummary(summary)
+
+		// Save compaction summary to session memory
+		if a.config.SessionMemory != nil {
+			a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction: %s", summary), "auto")
+		}
 
 		// Phase 2: Post-compact recovery — re-inject critical context
 		a.PostCompactRecovery()

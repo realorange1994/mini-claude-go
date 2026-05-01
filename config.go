@@ -48,6 +48,7 @@ type Config struct {
 	PostCompactMaxFileChars    int
 	PostCompactMaxSkillChars   int
 	PostCompactMaxTotalSkillChars int
+	SessionMemory           *SessionMemory
 	cachedPrompt           *CachedSystemPrompt
 }
 
@@ -299,9 +300,34 @@ func RegisterMCPAndSkills(r *tools.Registry, cfg *Config) {
 	r.Register(&tools.SearchSkillsTool{Loader: cfg.SkillLoader})
 }
 
+// RegisterMemoryTools adds memory tools to the registry using the SessionMemory instance.
+func RegisterMemoryTools(r *tools.Registry, sm *SessionMemory) {
+	if sm == nil {
+		return
+	}
+	r.Register(&tools.MemoryAddTool{
+		OnAdd: func(category, content, source string) {
+			sm.AddNote(category, content, source)
+		},
+	})
+	r.Register(&tools.MemorySearchTool{
+		OnSearch: func(query string) []tools.MemorySearchResult {
+			notes := sm.SearchNotes(query)
+			results := make([]tools.MemorySearchResult, len(notes))
+			for i, n := range notes {
+				results[i] = tools.MemorySearchResult{Category: n.Category, Content: n.Content}
+			}
+			return results
+		},
+	})
+}
+
 // Close cleans up resources held by the config (MCP servers, etc).
 func (cfg *Config) Close() {
 	if cfg.MCPManager != nil {
 		cfg.MCPManager.StopAll()
+	}
+	if cfg.SessionMemory != nil {
+		cfg.SessionMemory.Stop()
 	}
 }

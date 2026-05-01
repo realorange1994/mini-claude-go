@@ -102,6 +102,20 @@ func main() {
 	RegisterMCPAndSkills(registry, &cfg)
 	RegisterFileHistoryTools(registry, cfg.FileHistory)
 
+	// Initialize SessionMemory
+	if wd, err := os.Getwd(); err == nil {
+		sm := NewSessionMemory(wd)
+		cfg.SessionMemory = sm
+		RegisterMemoryTools(registry, sm)
+		// Mark cached prompt dirty when memory is updated so it appears in next turn
+		if cfg.cachedPrompt != nil {
+			sm.SetOnAdd(func() {
+				cfg.cachedPrompt.MarkDirty()
+			})
+		}
+		sm.StartFlushLoop()
+	}
+
 	var agent *AgentLoop
 	var err error
 
