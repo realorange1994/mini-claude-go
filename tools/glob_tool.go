@@ -32,7 +32,7 @@ func (*GlobTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Glob pattern (e.g. '**/*.py'). Patterns without '**/' are auto-prefixed.",
 			},
-			"directory": map[string]any{
+			"path": map[string]any{
 				"type":        "string",
 				"description": "Directory to search in (default: current directory).",
 			},
@@ -55,7 +55,11 @@ func (*GlobTool) CheckPermissions(params map[string]any) string { return "" }
 func (*GlobTool) Execute(params map[string]any) ToolResult {
 	pattern, _ := params["pattern"].(string)
 
-	dirStr, _ := params["directory"].(string)
+	// Support path (official) and directory (legacy alias)
+	dirStr, _ := params["path"].(string)
+	if dirStr == "" {
+		dirStr, _ = params["directory"].(string)
+	}
 	if dirStr == "" {
 		dirStr = "."
 	}
@@ -153,7 +157,7 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 			files = append(files, fileInfo{m, info.Size(), info.ModTime().Unix()})
 		}
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].modified > files[j].modified })
+	sort.Slice(files, func(i, j int) bool { return files[i].modified < files[j].modified })
 
 	lines := make([]string, 0, len(files))
 	for _, f := range files {

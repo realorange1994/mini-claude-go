@@ -21,11 +21,11 @@ func (*FileWriteTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"file_path": map[string]any{
 				"type":        "string",
-				"description": "The absolute path to the file to write.",
+				"description": "The absolute path to the file to write (must be absolute, not relative)",
 			},
 			"content": map[string]any{
 				"type":        "string",
-				"description": "The content to write.",
+				"description": "The content to write to the file",
 			},
 		},
 		"required": []string{"file_path", "content"},

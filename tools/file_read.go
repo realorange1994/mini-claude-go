@@ -30,11 +30,11 @@ func (*FileReadTool) InputSchema() map[string]any {
 			},
 			"offset": map[string]any{
 				"type":        "integer",
-				"description": "1-based start line (optional).",
+				"description": "The line number to start reading from. Only provide if the file is too large to read at once.",
 			},
 			"limit": map[string]any{
 				"type":        "integer",
-				"description": "Number of lines to read (optional).",
+				"description": "The number of lines to read. Only provide if the file is too large to read at once.",
 			},
 		},
 		"required": []string{"file_path"},
@@ -70,6 +70,10 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 	}
 
 	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	// Strip UTF-8 BOM (matching official Claude Code behavior)
+	if strings.HasPrefix(content, "\xEF\xBB\xBF") {
+		content = content[3:]
+	}
 	lines := strings.Split(content, "\n")
 	// Remove trailing empty element from split
 	if len(lines) > 0 && lines[len(lines)-1] == "" {

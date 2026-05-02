@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -28,11 +29,11 @@ func (*FileEditTool) InputSchema() map[string]any {
 			},
 			"old_string": map[string]any{
 				"type":        "string",
-				"description": "Exact text to find (must be unique in the file).",
+				"description": "Exact text to find. Use empty string to create a new file.",
 			},
 			"new_string": map[string]any{
 				"type":        "string",
-				"description": "Text to replace it with.",
+				"description": "The text to replace it with (must be different from old_string).",
 			},
 			"replace_all": map[string]any{
 				"type":        "boolean",
@@ -56,8 +57,28 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 
 	fp := expandPath(pathStr)
 
+	// Check for identical old/new strings (matching official behavior)
+	if oldStr == newStr {
+		return ToolResult{Output: fmt.Sprintf("Error: old_string and new_string must be different"), IsError: true}
+	}
+
 	if oldStr == "" {
-		return ToolResult{Output: "Error: old_string must not be empty", IsError: true}
+		// Official: allows creating a new file when old_string is empty
+		exists := true
+		if _, err := os.Stat(fp); os.IsNotExist(err) {
+			exists = false
+		}
+		if exists {
+			return ToolResult{Output: "Error: cannot create new file - file already exists with content", IsError: true}
+		}
+		dir := filepath.Dir(fp)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+		}
+		if err := os.WriteFile(fp, []byte(newStr), 0o644); err != nil {
+			return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
+		}
+		return ToolResult{Output: fmt.Sprintf("Successfully created %s", fp)}
 	}
 
 	data, err := os.ReadFile(fp)
