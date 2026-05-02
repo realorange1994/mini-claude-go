@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -486,11 +487,12 @@ func (a *AgentLoop) buildSubAgentConfig(model string) Config {
 		childCfg.Model = model
 	}
 
-	// Limit child agent turns
+	// Limit child agent turns only if explicitly configured.
+	// Matching Claude Code: General/Explore/Plan/Verify agents have no max turns limit.
 	if childCfg.SubAgentMaxTurns > 0 {
 		childCfg.MaxTurns = childCfg.SubAgentMaxTurns
 	} else {
-		childCfg.MaxTurns = 200 // sensible default for sub-agents (matches Claude fork agent)
+		childCfg.MaxTurns = 0 // no limit; sub-agents stop naturally when done
 	}
 
 	// Disable session memory for sub-agents (they don't need to persist notes)
@@ -670,9 +672,9 @@ func sharedSubAgentNotes() string {
 // agentType: the type of sub-agent (affects system prompt construction)
 // parentSystemPrompt: for fork mode, the parent's rendered system prompt (used verbatim)
 func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry, agentType AgentType, parentSystemPrompt string) (*AgentLoop, error) {
-	maxTurns := cfg.MaxTurns
+maxTurns := cfg.MaxTurns
 	if maxTurns <= 0 {
-		maxTurns = 50
+		maxTurns = math.MaxInt // no limit; sub-agents stop naturally when done
 	}
 
 	// Create child context
