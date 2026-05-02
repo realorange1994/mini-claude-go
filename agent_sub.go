@@ -26,6 +26,12 @@ var allAgentDisallowedTools = map[string]bool{
 	"agent":         true, // no recursive agent spawning
 	"task_output":   true, // sub-agents cannot read other agents' output
 	"plan_approval": true, // sub-agents cannot approve plans
+	"task_create":   true, // sub-agents execute directly, not via task delegation
+	"task_update":   true, // sub-agents don't manage task lists
+	"task_list":     true, // sub-agents don't read task lists
+	"task_get":      true, // sub-agents don't read task details
+	"task_stop":     true, // sub-agents don't stop tasks they didn't create
+	"send_message":  true, // sub-agents don't message other agents — they execute and report
 }
 
 // asyncAgentDisallowedTools are additional tools denied for async sub-agents.
