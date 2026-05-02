@@ -6,6 +6,30 @@ import (
 	"strings"
 )
 
+// DESANITIZATIONS maps sanitized token strings to their original API format.
+// These are applied when old_string fails to match — the LLM outputs sanitized
+// versions of XML-like tokens that need to be restored before matching.
+var DESANITIZATIONS = map[string]string{
+	"<fnr>":           "<function_results>",
+	"<n>":             "<name>",
+	"</n>":            "</name>",
+	"<o>":             "<output>",
+	"</o>":            "</output>",
+	"<e>":             "<error>",
+	"</e>":            "</error>",
+	"<s>":             "<system>",
+	"</s>":            "</system>",
+	"<r>":             "<result>",
+	"</r>":            "</result>",
+	"< META_START >":  "<META_START>",
+	"< META_END >":    "<META_END>",
+	"< EOT >":         "<EOT>",
+	"< META >":        "<META>",
+	"< SOS >":         "<SOS>",
+	"\n\nH:":          "\n\nHuman:",
+	"\n\nA:":            "\n\nAssistant:",
+}
+
 // MultiEditTool applies multiple search/replace edits atomically.
 // If any old_string is not found, the entire operation is aborted.
 type MultiEditTool struct{}
@@ -34,6 +58,10 @@ func (*MultiEditTool) InputSchema() map[string]any {
 						"new_string": map[string]any{
 							"type":        "string",
 							"description": "Text to replace it with.",
+						},
+						"replace_all": map[string]any{
+							"type":        "boolean",
+							"description": "Replace all occurrences of this old_string (default: false).",
 						},
 					},
 					"required": []string{"old_string", "new_string"},
@@ -67,7 +95,11 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: "Error: edits must not be empty", IsError: true}
 	}
 
-	type edit struct{ old, new string }
+	type edit struct {
+		old        string
+		new        string
+		replaceAll bool
+	}
 	var edits []edit
 	for i, e := range editsSlice {
 		m, ok := e.(map[string]any)
@@ -76,10 +108,11 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 		}
 		oldStr, _ := m["old_string"].(string)
 		newStr, _ := m["new_string"].(string)
+		replaceAll, _ := m["replace_all"].(bool)
 		if oldStr == "" {
 			return ToolResult{Output: fmt.Sprintf("Error: edit %d: old_string must not be empty", i+1), IsError: true}
 		}
-		edits = append(edits, edit{old: oldStr, new: newStr})
+		edits = append(edits, edit{old: oldStr, new: newStr, replaceAll: replaceAll})
 	}
 
 	fp := expandPath(pathStr)
@@ -102,15 +135,56 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
-	// Dry run: validate all edits
+	// Normalize curly quotes to straight quotes (matching official)
+	content = normalizeQuotes(content)
+	for i := range edits {
+		edits[i].old = normalizeQuotes(edits[i].old)
+		edits[i].new = normalizeQuotes(edits[i].new)
+	}
+
+	// Track applied new strings for overlapping edit detection
+	var appliedNewStrings []string
+
+	// Dry run: validate all edits and detect overlapping
 	for i, e := range edits {
-		if !strings.Contains(content, e.old) {
+		oldTrimmed := strings.TrimRight(e.old, "\n")
+
+		// Overlapping edit detection: old_string must not be a substring of any previously applied new_string
+		for _, prevNew := range appliedNewStrings {
+			if oldTrimmed != "" && strings.Contains(prevNew, oldTrimmed) {
+				return ToolResult{
+					Output: fmt.Sprintf("Error: edit %d failed: old_string is a substring of a new_string from a previous edit", i+1),
+					IsError: true,
+				}
+			}
+		}
+
+		// Find the edit location
+		idx := findEditLocation(content, e.old)
+		if idx < 0 {
+			// Try desanitized version of old_string
+			desanitizedOld := desanitize(e.old)
+			desanitizedNew := desanitize(e.new)
+			idx = findEditLocation(content, desanitizedOld)
+			if idx >= 0 {
+				edits[i].old = desanitizedOld
+				edits[i].new = desanitizedNew
+			}
+		}
+		if idx < 0 {
 			return ToolResult{
 				Output: fmt.Sprintf("Error: edit %d failed: old_text not found: %q", i+1, truncate(e.old, 80)),
 				IsError: true,
 			}
 		}
-		content = strings.Replace(content, e.old, e.new, 1)
+
+		// Apply in test content
+		if e.replaceAll {
+			content = strings.ReplaceAll(content, e.old, e.new)
+		} else {
+			content = strings.Replace(content, e.old, e.new, 1)
+		}
+		appliedNewStrings = append(appliedNewStrings, e.new)
 	}
 
 	// Apply atomically
@@ -122,6 +196,30 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return ToolResult{Output: fmt.Sprintf("Applied %d edits to %s", len(edits), fp)}
+}
+
+// findEditLocation finds old_string in content, first trying exact match, then
+// with trailing whitespace stripped.
+func findEditLocation(content, old string) int {
+	idx := strings.Index(content, old)
+	if idx >= 0 {
+		return idx
+	}
+	// Try with trailing newlines stripped (matching official)
+	trimmed := strings.TrimRight(old, "\n")
+	if trimmed != old {
+		return strings.Index(content, trimmed)
+	}
+	return -1
+}
+
+// desanitize applies all known sanitization reversals to a string.
+func desanitize(s string) string {
+	result := s
+	for from, to := range DESANITIZATIONS {
+		result = strings.ReplaceAll(result, from, to)
+	}
+	return result
 }
 
 func truncate(s string, maxLen int) string {
