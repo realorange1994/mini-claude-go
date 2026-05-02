@@ -39,19 +39,19 @@ func (*ExecTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"command": map[string]any{
 				"type":        "string",
-				"description": "The shell command to execute.",
+				"description": "The command to execute.",
 			},
 			"working_dir": map[string]any{
 				"type":        "string",
-				"description": "Working directory for the command (default: current directory).",
+				"description": "Working directory for the command (default: current directory). To avoid blocking the user, prefer using absolute paths instead of changing directories.",
 			},
 			"description": map[string]any{
 				"type":        "string",
-				"description": "A short description of what this command does.",
+				"description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
 			},
 			"timeout": map[string]any{
 				"type":        "integer",
-				"description": "Timeout in seconds (default 600, max 600).",
+				"description": "Timeout in milliseconds (max 600000 / 10 minutes). Default: 120000 (2 minutes).",
 			},
 			"run_in_background": map[string]any{
 				"type":        "boolean",
@@ -205,20 +205,20 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 		return ToolResult{Output: "Error: empty command", IsError: true}
 	}
 
-	timeout := 600
+	timeoutMs := 120000 // default: 2 minutes (matching official Claude Code)
 	if t, ok := params["timeout"]; ok {
 		switch v := t.(type) {
 		case float64:
-			timeout = int(v)
+			timeoutMs = int(v)
 		case int:
-			timeout = v
+			timeoutMs = v
 		}
 	}
-	if timeout <= 0 {
-		timeout = 600
+	if timeoutMs <= 0 {
+		timeoutMs = 120000
 	}
-	if timeout > 600 {
-		timeout = 600
+	if timeoutMs > 600000 { // max 10 minutes
+		timeoutMs = 600000
 	}
 
 	var shell, flag string
@@ -243,7 +243,7 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 		wd = expandPath(wd)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, shell, flag, command)
@@ -288,7 +288,7 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 			cmd.Process.Kill()
 		}
 		<-errCh
-		return ToolResult{Output: fmt.Sprintf("Error: command timed out after %ds. Consider using run_in_background: true for long-running commands.", timeout), IsError: true}
+		return ToolResult{Output: fmt.Sprintf("Error: command timed out after %dms. Consider using run_in_background: true for long-running commands.", timeoutMs), IsError: true}
 	case err := <-errCh:
 		var stdoutOut, stderrOut string
 		for i := 0; i < 2; i++ {
