@@ -40,6 +40,7 @@ const (
 	AgentTypeExplore AgentType = "explore" // Read-only exploration agent
 	AgentTypePlan    AgentType = "plan"    // Read-only planning agent
 	AgentTypeVerify  AgentType = "verify"  // Verification agent
+	AgentTypeFork    AgentType = "fork"    // Fork agent — inherits parent's full context and system prompt
 )
 
 // agentTypeConfig defines the tool restrictions and system prompt for each agent type.
@@ -220,7 +221,54 @@ PARTIAL is for environmental limitations only (no test framework, tool unavailab
 - **PARTIAL**: what was verified, what could not be and why, what the implementer should know.`,
 		denyTools: []string{"write_file", "edit_file", "multi_edit", "fileops"},
 	},
+
+	AgentTypeFork: {
+		// Fork agents receive the parent system prompt verbatim;
+		// the fork boilerplate is prepended to the users directive in the first user message.
+		promptModifier: `You are a forked worker process. You are NOT the main agent.
+
+RULES:
+- Do NOT spawn sub-agents — execute tasks directly yourself
+- Do NOT converse, ask questions, or suggest next steps
+- Do NOT editorialize or add meta-commentary
+- USE your tools directly: Bash, Read, Write, etc.
+- Do NOT emit text between tool calls — use tools silently, then report once at the end
+- Stay strictly within your directive scope
+- Your response MUST begin with Scope: followed by a one-line summary
+- REPORT structured facts, then stop`,
+		denyTools: []string{}, // fork agents use parent's full tool set
+	},
 }
+
+// forkBoilerplate is the directive message prepended to the user's prompt
+// when inheritContext=true (fork mode). It tells the fork child to execute
+// directly without spawning sub-agents and report structured facts.
+const forkBoilerplate = `<fork_boilerplate>
+STOP. READ THIS FIRST.
+
+You are a forked worker process. You are NOT the main agent.
+
+RULES (non-negotiable):
+1. Do NOT spawn sub-agents; execute directly
+2. Do NOT converse, ask questions, or suggest next steps
+3. Do NOT editorialize or add meta-commentary
+4. USE your tools directly: Bash, Read, Write, etc.
+5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
+6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
+7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most.
+8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
+9. Your response MUST begin with "Scope:". No preamble, no thinking-out-loud.
+10. REPORT structured facts, then stop
+
+Output format (plain text labels, not markdown headers):
+  Scope: <echo back your assigned scope in one sentence>
+  Result: <the answer or key findings, limited to the scope above>
+  Key files: <relevant file paths — include for research tasks>
+  Files changed: <list with commit hash — include only if you modified files>
+  Issues: <list — include only if there are issues to flag>
+</fork_boilerplate>
+
+<fork_directive>`
 
 // ParseAgentType converts a string to an AgentType.
 func ParseAgentType(s string) AgentType {
@@ -253,12 +301,16 @@ func (a *AgentLoop) SpawnSubAgent(
 	// Convert string subagentType to AgentType
 	agentType := ParseAgentType(subagentType)
 
+	// Fork mode detection: when inheritContext=true and no specific agent type
+	// is specified, use the fork agent type (matches Claude Code's implicit fork path).
+	isForkMode := inheritContext && agentType == ""
+	if isForkMode {
+		agentType = AgentTypeFork
+	}
+
 	// Build child config and registry
 	childCfg := a.buildSubAgentConfig(model)
 	childRegistry := a.buildSubAgentRegistry(agentType, allowedTools, disallowedTools, runInBackground)
-
-	// Build child system prompt (includes agent type specialization)
-	childSysPrompt := buildSubAgentSystemPrompt(childRegistry, childCfg, agentType)
 
 	// Create task in task store with compact hex ID
 	taskID := fmt.Sprintf("agent-%s", generateShortID())
@@ -278,11 +330,19 @@ func (a *AgentLoop) SpawnSubAgent(
 
 		// Capture parent context for fork mode
 		var parentEntries []conversationEntry
+		var parentSystemPrompt string
 		if inheritContext && a.context != nil {
 			a.context.mu.RLock()
 			parentEntries = make([]conversationEntry, len(a.context.entries))
 			copy(parentEntries, a.context.entries)
+			parentSystemPrompt = a.context.SystemPrompt()
 			a.context.mu.RUnlock()
+		}
+
+		// For fork mode, wrap the user's directive with the fork boilerplate.
+		forkUserMessage := ""
+		if isForkMode {
+			forkUserMessage = fmt.Sprintf("%s\n%s\n</fork_directive>", forkBoilerplate, prompt)
 		}
 
 		// Create independent cancellable context for async sub-agent
@@ -316,7 +376,7 @@ func (a *AgentLoop) SpawnSubAgent(
 					bgTask.SetStatus(tools.TaskRunning)
 			}
 
-			childLoop, err := a.createChildAgentLoop(childCfg, childRegistry)
+			childLoop, err := a.createChildAgentLoop(childCfg, childRegistry, agentType, parentSystemPrompt)
 			if err != nil {
 				if a.taskStore != nil {
 					a.taskStore.FailTask(taskID, fmt.Sprintf("failed to create: %v", err))
@@ -360,10 +420,9 @@ func (a *AgentLoop) SpawnSubAgent(
 				}
 			}
 
-			childLoop.context.SetSystemPrompt(childSysPrompt)
 
 			// Apply fork mode with cloned entries (filtered same as sync path)
-			if inheritContext && len(parentEntries) > 0 {
+			if isForkMode && len(parentEntries) > 0 {
 				filtered := filterEntriesForFork(parentEntries)
 				childLoop.context.mu.Lock()
 				for _, entry := range filtered {
@@ -372,7 +431,13 @@ func (a *AgentLoop) SpawnSubAgent(
 				childLoop.context.mu.Unlock()
 			}
 
-			childResult := childLoop.Run(prompt)
+			// For fork mode, the user message is wrapped with fork boilerplate + directive
+			userPrompt := prompt
+			if isForkMode && forkUserMessage != "" {
+				userPrompt = forkUserMessage
+			}
+
+			childResult := childLoop.Run(userPrompt)
 
 			// If Run returned empty, try to recover partial results from conversation context
 			if childResult == "" {
@@ -408,7 +473,18 @@ func (a *AgentLoop) SpawnSubAgent(
 		a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
 	}
 
-	childLoop, err := a.createChildAgentLoop(childCfg, childRegistry)
+	// Capture parent context for sync fork mode before child creation
+	var syncParentEntries []conversationEntry
+	var syncParentSystemPrompt string
+	if isForkMode && a.context != nil {
+		a.context.mu.RLock()
+		syncParentEntries = make([]conversationEntry, len(a.context.entries))
+		copy(syncParentEntries, a.context.entries)
+		syncParentSystemPrompt = a.context.SystemPrompt()
+		a.context.mu.RUnlock()
+	}
+
+	childLoop, err := a.createChildAgentLoop(childCfg, childRegistry, agentType, syncParentSystemPrompt)
 	if err != nil {
 		if a.taskStore != nil {
 			a.taskStore.FailTask(taskID, err.Error())
@@ -424,13 +500,23 @@ func (a *AgentLoop) SpawnSubAgent(
 		}
 	}
 
-	childLoop.context.SetSystemPrompt(childSysPrompt)
-
-	if inheritContext {
-		a.cloneContextForFork(childLoop)
+	// For fork mode, clone parent entries into child's context
+	if isForkMode && syncParentEntries != nil {
+		filtered := filterEntriesForFork(syncParentEntries)
+		childLoop.context.mu.Lock()
+		for _, entry := range filtered {
+			childLoop.context.entries = append(childLoop.context.entries, entry)
+		}
+		childLoop.context.mu.Unlock()
 	}
 
-	result = childLoop.Run(prompt)
+	// For fork mode, wrap the user's directive with fork boilerplate
+	userPrompt := prompt
+	if isForkMode {
+		userPrompt = fmt.Sprintf("%s\n%s\n</fork_directive>", forkBoilerplate, prompt)
+	}
+
+	result = childLoop.Run(userPrompt)
 
 	// If Run returned empty, try to recover partial results from conversation context
 	if result == "" {
@@ -445,6 +531,8 @@ func (a *AgentLoop) SpawnSubAgent(
 	}
 
 	return taskID, result, "", turnsUsed, durationMs
+}
+
 }
 
 // buildSubAgentConfig creates a Config for the child agent by copying the parent's config
@@ -550,7 +638,18 @@ func (a *AgentLoop) buildSubAgentRegistry(agentType AgentType, allowedTools, dis
 // buildSubAgentSystemPrompt creates a system prompt for the child agent.
 // For Explore/Plan agents, CLAUDE.md and gitStatus are omitted for efficiency
 // (saves ~5-15 Gtok/week and ~1-3 Gtok/week respectively).
-func buildSubAgentSystemPrompt(registry *tools.Registry, cfg Config, agentType AgentType) string {
+func buildSubAgentSystemPrompt(registry *tools.Registry, cfg Config, agentType AgentType, parentSystemPrompt string) string {
+	// Fork mode: use the parent's system prompt verbatim, just like Claude Code's fork path.
+	// The fork boilerplate directive is prepended to the user's message (not the system prompt).
+	if agentType == AgentTypeFork && parentSystemPrompt != "" {
+		var sb strings.Builder
+		sb.WriteString(parentSystemPrompt)
+		sb.WriteString("\n\n")
+		// Append the Notes section which is shared across all agent types
+		sb.WriteString(sharedSubAgentNotes())
+		return sb.String()
+	}
+
 	toolList := buildToolList(registry)
 
 	wd, _ := os.Getwd()
@@ -599,33 +698,28 @@ func buildSubAgentSystemPrompt(registry *tools.Registry, cfg Config, agentType A
 	sb.WriteString(toolList)
 	sb.WriteString("\n\n")
 
-	// Output format section
-	sb.WriteString("## Output Format\n")
-	sb.WriteString("- Share file paths as absolute paths (never relative).\n")
-	sb.WriteString("- Avoid emojis — plain text communication only.\n")
-	sb.WriteString("- Do not use a colon before tool calls.\n")
-	sb.WriteString("- Do NOT ask the user questions — you must complete the task autonomously.\n")
-	sb.WriteString("- When done, provide your final answer concisely.\n")
-	sb.WriteString("- If you cannot complete the task, explain what you found and what is missing.\n\n")
-
-	// Operational notes
-	sb.WriteString("## Operational Notes\n")
-	sb.WriteString("- Agent threads always have their cwd reset between bash calls — only use absolute file paths.\n")
-	sb.WriteString("- Be thorough but efficient — avoid redundant reads or searches.\n\n")
-
-	// Security section for sub-agents
-	sb.WriteString("## Security\n")
-	sb.WriteString("- You are a sub-agent with limited access.\n")
-	sb.WriteString("- Do not attempt to modify system configuration or security settings.\n")
-	sb.WriteString("- If you encounter sensitive data, report it but do not store it.\n")
-	sb.WriteString("- Follow the principle of least privilege.\n")
+	// Append the shared Notes section (matching Claude Code's enhanceSystemPromptWithEnvDetails)
+	sb.WriteString(sharedSubAgentNotes())
 
 	return sb.String()
 }
 
+// sharedSubAgentNotes returns the Notes section that Claude Code appends to all
+// sub-agent system prompts via enhanceSystemPromptWithEnvDetails.
+func sharedSubAgentNotes() string {
+	return `Notes:
+- Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths.
+- In your final response, share file paths (always absolute, never relative) that are relevant to the task.
+- For clear communication with the user the assistant MUST avoid using emojis.
+- Do not use a colon before tool calls.
+`
+}
+
 // createChildAgentLoop creates a new AgentLoop for a child, reusing the parent's
 // HTTP client and API configuration.
-func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry) (*AgentLoop, error) {
+// agentType: the type of sub-agent (affects system prompt construction)
+// parentSystemPrompt: for fork mode, the parent's rendered system prompt (used verbatim)
+func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry, agentType AgentType, parentSystemPrompt string) (*AgentLoop, error) {
 	maxTurns := cfg.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 50
@@ -639,6 +733,9 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry) (
 	transcriptDir := filepath.Join(".claude", "transcripts", "sub-agents")
 	tw := transcript.NewWriter(sessionID, filepath.Join(transcriptDir, sessionID+".jsonl"))
 	_ = tw.WriteSystem(fmt.Sprintf("sub-agent: model=%s, mode=%s", cfg.Model, cfg.PermissionMode))
+
+	// Build system prompt (must be done after ctx is created but before child struct is initialized)
+	childSysPrompt := buildSubAgentSystemPrompt(registry, cfg, agentType, parentSystemPrompt)
 
 	child := &AgentLoop{
 		config:       cfg,
@@ -655,8 +752,18 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry) (
 		toolTimeout:  a.toolTimeout,
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
+		taskStore:    NewTaskStore(), // track background bash tasks spawned by this sub-agent
+		agentOutput:  io.Discard,    // default: discard output; background agents override with taskOutputWriter
 	}
 	child.gate = NewPermissionGate(&child.config)
+
+	// Wire BashTool's BackgroundTaskCallback so sub-agents can spawn background
+	// bash commands. When this child agent exits, childLoop.Close() kills all
+	// tasks tracked in its taskStore — matching Claude Code's killShellTasksForAgent.
+	child.registerBashBgTool()
+
+	// Set system prompt on the child's context
+	child.context.SetSystemPrompt(childSysPrompt)
 
 	// Wire auto mode classifier if enabled
 	if cfg.AutoClassifierEnabled && cfg.PermissionMode == ModeAuto {
