@@ -63,23 +63,24 @@ func (t *AgentTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"description": map[string]any{
 				"type":        "string",
-				"description": "Brief 3-5 word description of what the agent will do",
+				"description": "A short (3-5 word) description of the task",
 			},
 			"prompt": map[string]any{
 				"type":        "string",
-				"description": "The complete task for the agent to perform. Be specific and include all necessary context.",
+				"description": "The task for the agent to perform",
 			},
 			"subagent_type": map[string]any{
 				"type":        "string",
-				"description": "Type of specialized agent to use (optional). Leave blank for general-purpose.",
+				"description": "The type of specialized agent to use for this task (optional). Leave blank for general-purpose.",
 			},
 			"model": map[string]any{
 				"type":        "string",
-				"description": "Model override for the agent (optional). Defaults to parent's model.",
+				"enum":        []string{"sonnet", "opus", "haiku"},
+				"description": "Optional model override for this agent. Takes precedence over the agent definition's model. If omitted, inherits from the parent.",
 			},
 			"run_in_background": map[string]any{
 				"type":        "boolean",
-				"description": "Run the agent in the background and return immediately (optional, default false).",
+				"description": "DEPRECATED — sub-agents always run in background. This parameter is ignored.",
 			},
 			"allowed_tools": map[string]any{
 				"type":        "array",
