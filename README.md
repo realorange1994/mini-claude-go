@@ -72,10 +72,38 @@ Switch modes interactively with `/mode auto`, `/mode ask`, or `/mode plan`.
 In `auto` mode, an LLM-powered security classifier (using Anthropic SDK's `tool_use` structured output) evaluates actions that are not in the safe whitelist:
 
 - **Git**: read-only operations (`info`, `status`, `log`, `diff`, `show`, `reflog`, `blame`, `describe`, `shortlog`, `ls-tree`, `rev-parse`, `rev-list`) are auto-allowed. Write/destructive operations (`push`, `commit`, `merge`, `rebase`, `reset`, `clean`, etc.) go through the classifier.
-- **Exec**: safe command prefixes are auto-allowed (file listing/reading, search, diff, version checks, build/test/lint, network inspection). Dangerous patterns (`rm`, `sudo`, `curl|bash`, `mkfs`, `dd if=`, etc.) always blocked. Unknown commands go through the classifier.
+- **Exec**: safe command prefixes are auto-allowed (file listing/reading, search, diff, version checks, build/test/lint, network inspection). Dangerous patterns (`rm`, `sudo`, `chmod`, `chown`, `mkfs`, `dd if=`, `curl|bash`, `wget|sh`, redirects to system directories) are not auto-allowlisted. Unknown commands go through the classifier. Combined commands (`&&`, `||`, `;`) are split and each segment is checked independently — `safe_cmd && evil_cmd` correctly blocks.
 - **Process**: read-only operations (`list`, `pgrep`, `top`, `pstree`, `ps`) are auto-allowed. Destructive operations (`kill`, `pkill`, `terminate`) go through the classifier.
+- **Fileops**: read-only operations (`read`, `stat`, `checksum`, `exists`, `ls`) are auto-allowed. Write/destructive operations (`rmrf`, `rm`, `mv`, `cp`, `chmod`, etc.) go through the classifier — no unconditional hard blocks, matching Claude Code's upstream design.
 - **Cache**: classifier results cached by command/operation with 5-minute TTL to reduce API calls.
 - **Fallback**: after 3 consecutive classifier denials, falls back to interactive user prompt.
+
+#### Two-Stage Classifier
+
+The classifier uses a two-stage approach modeled after Claude Code's upstream `yoloClassifier.ts`:
+
+- **Stage 1 (fast)**: 2112 max_tokens — quick allow/block decision. Most safe commands are decided here.
+- **Stage 2 (thinking)**: 6144 max_tokens with 2048-token thinking padding — full chain-of-thought reasoning with a richer prompt. Triggered when Stage 1 blocks, for deeper security analysis.
+
+#### Dangerous Removal Path Validation
+
+`rm`/`rmdir` commands are checked against system-critical paths before classification. The following paths are hard-blocked (cannot be auto-allowlisted):
+- `/` (root directory)
+- `~` and `*` / `/*` (wildcards)
+- Direct children of `/` (`/usr`, `/tmp`, `/etc`, `/bin`, `/var`, etc.)
+- Windows drive roots (`C:\`, `D:\`) and protected directories (`C:\Windows`, `C:\Users`, `C:\Program Files`)
+
+Project-scoped paths (`./build`, `./node_modules`, `/home/user/project/dist`) pass the path check and are evaluated by the classifier.
+
+#### Classifier Decision Categories
+
+The classifier uses BLOCK ALWAYS semantic categories (modeled after upstream):
+1. External Code Execution: `curl|bash`, `wget|sh`, piping to shell
+2. Irreversible Local Destruction: `rm -rf`, recursive deletion, file truncation, database drops
+3. Unauthorized Persistence: cron jobs, systemd services, shell profile modifications
+4. Security Weakening: disabling firewalls, security policies, `chmod 777`
+5. Privilege Escalation: `sudo`, `su`, `runas`
+6. Unauthorized Network Services: starting servers, listeners, port bindings
 
 ### Sub-Agent System
 
@@ -297,7 +325,7 @@ miniClaudeCode-go/
 ├── agent_sub.go             # Sub-agent system: SpawnSubAgent, specialized types, fork mode
 ├── agent_task.go            # Task store (TaskStore, TaskState), background bash tasks
 ├── work_task.go             # Work task management (dependency graph, cycle detection)
-├── auto_classifier.go       # LLM-based auto mode security classifier with operation-level allowlists
+├── auto_classifier.go       # Two-stage LLM classifier, dangerous path validation, combined command splitting, operation-level allowlists
 ├── permissions.go           # Permission gate (ask/auto/plan modes), denied patterns
 ├── streaming.go             # SSE streaming, ThinkFilter, StreamProgress, CollectHandler
 ├── context.go               # ConversationContext, entry types, compaction boundaries
