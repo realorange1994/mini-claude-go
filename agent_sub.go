@@ -490,7 +490,7 @@ func (a *AgentLoop) buildSubAgentConfig(model string) Config {
 	if childCfg.SubAgentMaxTurns > 0 {
 		childCfg.MaxTurns = childCfg.SubAgentMaxTurns
 	} else {
-		childCfg.MaxTurns = 50 // sensible default for sub-agents
+		childCfg.MaxTurns = 200 // sensible default for sub-agents (matches Claude fork agent)
 	}
 
 	// Disable session memory for sub-agents (they don't need to persist notes)
@@ -505,6 +505,11 @@ func (a *AgentLoop) buildSubAgentConfig(model string) Config {
 	// Sub-agents always run in auto mode — they should not block for user input
 	// (matching Claude Code's behavior of always using auto for child agents)
 	childCfg.PermissionMode = ModeAuto
+
+	// Sub-agents must never show interactive permission prompts. When a tool
+	// would normally require user approval, it is auto-denied instead.
+	// (Matching Claude Code's shouldAvoidPermissionPrompts: true for getAppState)
+	childCfg.ShouldAvoidPermissionPrompts = true
 
 	return childCfg
 }

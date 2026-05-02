@@ -58,13 +58,17 @@ type Config struct {
 	PartialCompactEnabled bool
 	cachedPrompt           *CachedSystemPrompt
 	// Sub-agent settings
-	SubAgentMaxTurns int  // max turns for sub-agent loops (default 50)
+	SubAgentMaxTurns int  // max turns for sub-agent loops (default 200, matching Claude fork agent)
 	SubAgentEnabled  bool // enable/disable the agent tool (default true)
 	// Auto mode classifier settings
 	AutoClassifierEnabled   bool   // enable LLM classifier in auto mode (default true)
 	AutoClassifierModel     string // model for classifier (default: same as main model)
 	AutoClassifierMaxTokens int    // max tokens for classifier response (default 128)
 	AutoDenialLimit         int    // consecutive denials before fallback (default 3)
+	// ShouldAvoidPermissionPrompts, when true, causes any tool that would
+	// normally trigger an interactive permission prompt to be auto-denied
+	// instead. Sub-agents set this to true so they never block on user input.
+	ShouldAvoidPermissionPrompts bool
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -279,7 +283,7 @@ func DefaultConfig() Config {
 		ReactiveCompactThreshold:  5000,
 		PartialCompactEnabled:     true,
 		cachedPrompt: NewCachedSystemPrompt(),
-		SubAgentMaxTurns:          50,
+		SubAgentMaxTurns:          200,
 		SubAgentEnabled:           true,
 		AutoClassifierEnabled:   true,
 		AutoClassifierMaxTokens: 128,
