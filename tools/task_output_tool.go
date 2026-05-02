@@ -39,7 +39,7 @@ func (t *TaskOutputTool) InputSchema() map[string]any {
 			},
 			"timeout": map[string]any{
 				"type":        "number",
-				"description": "Maximum seconds to wait when block=true (default: 30)",
+				"description": "Max wait time in milliseconds (default: 30000, max: 600000)",
 			},
 		},
 	}
@@ -58,12 +58,15 @@ func (t *TaskOutputTool) Execute(params map[string]any) ToolResult {
 	}
 
 	block, _ := params["block"].(bool)
-	timeoutSec, _ := params["timeout"].(float64)
-	if timeoutSec <= 0 {
-		timeoutSec = 30
+	timeoutMs, _ := params["timeout"].(float64)
+	if timeoutMs <= 0 {
+		timeoutMs = 30000 // default: 30 seconds (matching official)
+	}
+	if timeoutMs > 600000 {
+		timeoutMs = 600000
 	}
 
-	result, errText := t.GetOutputFunc(taskID, block, time.Duration(timeoutSec*float64(time.Second)))
+	result, errText := t.GetOutputFunc(taskID, block, time.Duration(timeoutMs)*time.Millisecond)
 	if errText != "" {
 		return ToolResultError(errText)
 	}
