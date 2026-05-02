@@ -79,20 +79,15 @@ Your strengths:
 - Searching code and text with powerful regex patterns
 - Reading and analyzing file contents
 
-Guidelines:
-- Use glob for broad file pattern matching (e.g., "src/**/*.go", "**/*.json")
-- Use grep for searching file contents with regex
-- Use read_file when you know the specific file path you need to read
-- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, grep, cat, head, tail)
-- NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
-- Adapt your search approach based on the thoroughness level specified by the caller
-- Make efficient use of tools: be smart about how you search — spawn multiple parallel tool calls where possible
-- Communicate your final report directly as a regular message — do NOT attempt to create files
+## Investigation Method
 
-Be thorough but efficient. In order to achieve speed:
-- Make parallel tool calls wherever possible
-- Start with broad searches (glob) to narrow down, then read specific files
-- Avoid redundant reads or searches
+**Hypothesis first**: Before reading any file, form a hypothesis about what you'll find and why. State it explicitly in your thinking. Only read files that test a hypothesis. Never read files "to see what's there."
+
+**Build a mental model**: Track what you learn incrementally. After each file read, note the key facts (file path, line number, key detail) so you don't forget. Build a running list of what you know and what you still need to find.
+
+**Stop when verified**: If you can point to a specific line and explain the mechanism, you understand it. Stop investigating.
+
+**Parallelize**: When investigating independent questions, use parallel tool calls.
 
 When you are done, provide your final answer concisely. Do NOT ask the user questions — complete the task autonomously. If you cannot complete the task, explain what you found and what is missing.`,
 		denyTools: []string{"write_file", "edit_file", "multi_edit", "fileops", "exec", "terminal", "git"},
@@ -118,12 +113,11 @@ You will be provided with a set of requirements and optionally a perspective on 
 
 1. **Understand Requirements**: Focus on the requirements provided and apply your assigned perspective throughout the design process.
 
-2. **Explore Thoroughly**:
-   - Read any files provided to you in the initial prompt
-   - Find existing patterns and conventions using glob, grep, and read_file
-   - Understand the current architecture
-   - Identify similar features as reference
-   - Trace through relevant code paths
+2. **Explore Efficiently**:
+   - Use glob and grep first to find relevant files before reading them
+   - Once you've read a file, you know its contents — do not re-read
+   - Never repeat a search query that already returned results
+   - After reading each file, note the key facts you learned
    - Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, grep, cat, head, tail)
    - NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
 
@@ -675,6 +669,42 @@ func sharedSubAgentNotes() string {
 - In your final response, share file paths (always absolute, never relative) that are relevant to the task.
 - For clear communication with the user the assistant MUST avoid using emojis.
 - Do not use a colon before tool calls.
+
+## Efficiency Rules
+
+1. **Hypothesis-Driven Investigation** -- Before reading a file, state what you expect to find and why. Form a hypothesis first, then verify it. If your hypothesis is confirmed, act on it immediately — do not continue browsing. If disproven, form a new hypothesis before your next action. Never read files "just to see what's there" without a specific question you're trying to answer.
+
+2. **No Redundant Reads** -- Never re-read a file you have already read in this session. The content does not change. If you need to recall a detail, reference it from your earlier reading. If you forgot, re-read ONLY the specific section you need (with offset), not the entire file.
+
+3. **No Redundant Searches** -- Never repeat a grep/glob query you have already run. If the first search returned results, those results are still valid. If it returned nothing, try a meaningfully different pattern (different keywords, different naming convention, different file extension) — never re-run the identical query expecting different results.
+
+4. **Stop When You Understand** -- If you can point to specific code lines and explain the mechanism, you understand the issue. Stop investigating and report your findings. Saying "Now I understand" without citing concrete evidence means you don't actually understand — keep investigating until you can.
+
+5. **Build Mental Models Incrementally** -- After each file read or search, update your understanding. Write down what you now know: key function signatures, data flow, type definitions. This prevents re-reading and lets you reason about what to investigate next without guessing.
+
+6. **Use Compilation Errors as Compass** -- When debugging, run the build first. Compilation errors tell you exactly which files and lines have problems. This is faster than reading 20 files hoping to stumble on the issue.
+
+7. **Parallelize Independent Searches** -- When you need to check multiple unrelated things (e.g., "is X defined in file A?" and "is Y used in file B?"), make all searches in a single tool call. Sequential searches on independent questions waste turns.
+
+8. **Report Early, Report Often** -- When you have a finding, report it immediately in your thinking. Do not wait until you've investigated everything. Early reports help you track progress and avoid redundant investigation of already-solved sub-problems.
+
+9. **See ALL Errors Before Diagnosing** -- When running a build or test that produces errors, ALWAYS read the full output. Never use head/tail to truncate error output. All errors must be visible at once so you can see the full scope of the problem. Truncating errors to "the first few lines" hides the true extent and causes misdiagnosis.
+
+10. **Classify Errors, Then Identify Root Cause** -- When facing multiple errors, do not fix them one by one in discovery order. First categorize them: (a) duplicate definition errors, (b) undefined type/function errors, (c) type mismatch errors. Then find the single root cause that explains the most errors. Fix the root cause first — it often resolves dozens of downstream errors at once.
+
+11. **Map Producer/Consumer Relationships Before Editing** -- Before modifying any file, understand the full data flow: what types does the parser/file-producer create? What types does the consumer file expect? Are they consistent? Drawing this dependency map in your thinking prevents fixes that solve one error while breaking three more.
+
+12. **No Patching — Plan Before You Edit** -- Do not make piecemeal fixes. After understanding the full error landscape, formulate a complete fix plan that addresses all issues. Then execute the plan. If you find yourself "trying something" without a complete mental model of the fix, stop and think first.
+
+13. **Fix Grep Patterns, Do Not Abandon Them** -- When a grep returns no results, do not immediately switch to brute-force read_file. First check: is the pattern correct? Try variations: different keywords, different naming conventions, different file extensions. Only fall back to read_file when you have a specific file in mind and a specific section to check.
+
+14. **No Irrelevant Exec Commands** -- Only use exec for operations that directly advance the investigation: running builds/tests, reading diagnostic output. Do not use wc, find, stat, or similar commands just to "get a sense of" the codebase — these waste bandwidth and produce no useful signal.
+
+15. **Cite Specific Evidence for Every Claim** -- When you state that something is true ("X is defined in Y", "Z calls function F"), you MUST cite the specific file and line number: e.g., "defined in src/parser.go:42". Do NOT claim things without citing evidence. If you cannot cite a specific file:line, you do not yet know the answer — keep investigating.
+
+16. **Vague Claims Are Wrong Claims** -- Phrases like "I understand", "I see the pattern", "the mechanism is clear", "I know what's happening" are forbidden unless immediately followed by a specific file:line citation. Every conclusion must be grounded in concrete code. If you catch yourself writing "Now I understand" without citing evidence, stop and find the evidence first.
+
+17. **Use Session State to Track Progress** -- The system prompt contains a "Session State" section that lists files you have already read and searches you have already run. USE IT. Before reading a file or running a search, check Session State first. If the file or search is already listed, do NOT repeat it. After each finding, the system automatically records it — but you should also explicitly state your conclusions with file:line citations so they are captured.
 `
 }
 
@@ -717,6 +747,7 @@ maxTurns := cfg.MaxTurns
 		budget:       NewIterationBudget(maxTurns),
 		taskStore:    NewTaskStore(), // track background bash tasks spawned by this sub-agent
 		agentOutput:  io.Discard,    // default: discard output; background agents override with taskOutputWriter
+			toolStateTracker: NewToolStateTracker(), // track tool state for sub-agent
 	}
 	child.gate = NewPermissionGate(&child.config)
 

@@ -45,6 +45,10 @@ func (*ExecTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Working directory for the command (default: current directory).",
 			},
+			"description": map[string]any{
+				"type":        "string",
+				"description": "A short description of what this command does.",
+			},
 			"timeout": map[string]any{
 				"type":        "integer",
 				"description": "Timeout in seconds (default 600, max 600).",

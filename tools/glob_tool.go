@@ -11,7 +11,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 )
 
-const maxResults = 500
+const maxResults = 100
 
 // GlobTool finds files matching a glob pattern.
 type GlobTool struct{}
@@ -38,7 +38,7 @@ func (*GlobTool) InputSchema() map[string]any {
 			},
 			"head_limit": map[string]any{
 				"type":        "integer",
-				"description": "Maximum number of results to return (default: 500).",
+				"description": "Maximum number of results to return (default: 100).",
 			},
 			"excludes": map[string]any{
 				"type":        "array",

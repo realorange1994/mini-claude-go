@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -263,6 +264,7 @@ type AgentLoop struct {
 	workTaskStore  *WorkTaskStore    // tracks LLM work items (TODO list)
 	agentOutput    io.Writer         // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
 	drainPendingMessagesFunc func() []string // called at turn boundaries to drain pending messages from parent task store
+	toolStateTracker         *ToolStateTracker // tracks tool state for injection into system prompt
 }
 
 // out writes formatted output to the agent's configured output writer.
@@ -347,6 +349,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		agentNameRegistry: make(map[string]string),
 		workTaskStore:     NewWorkTaskStore(),
 		agentOutput:       os.Stderr,
+		toolStateTracker:  NewToolStateTracker(),
 	}
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
@@ -671,14 +674,37 @@ func (a *AgentLoop) TranscriptPath() string {
 	return a.transcript.FilePath()
 }
 
-// interruptCtx creates a context that is cancelled either by the timeout
-// or when the interrupted flag is set (whichever comes first).
-// Each call starts its own watcher goroutine that exits when the context
-// is done, so there are no goroutine leaks.
+// extractConclusions scans assistant text for stated conclusions and records them.
+// This helps the agent remember key findings across turns without relying on
+// its own unreliable extraction from the conversation history.
+func (a *AgentLoop) extractConclusions(text string) {
+	// Patterns that signal a concrete conclusion was reached
+	patterns := []string{
+		// "defined in <file>", "defined at <file:line>"
+		`(?i)(?:defined in|defined at)\s+([^\s.,]+)`,
+		// "returns <type>" or "yields <type>" at end of a sentence
+		`(?i)(?:returns?|yields?)\s+([^\s.,]+)`,
+		// "uses <name> for" or "calls <name>"
+		`(?i)(?:uses?|calls?)\s+([^\s.,]+)\s+for\s+`,
+		// "is defined as" or "is a struct"
+		`(?i)(?:is defined as|is an?)\s+([^\s.,]+)`,
+	}
+	for _, pat := range patterns {
+		re := regexp.MustCompile(pat)
+		matches := re.FindAllStringSubmatch(text, -1)
+		for _, m := range matches {
+			if len(m) > 1 && len(m[1]) > 3 {
+				a.toolStateTracker.RecordConclusion(m[1])
+			}
+		}
+	}
+}
+
+
 func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(baseCtx, timeout)
 
-	// Watch for interrupt flag in background
+	// Watch for interrupt flag and cancelCtx in background
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
@@ -694,6 +720,18 @@ func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration)
 			}
 		}
 	}()
+
+	// Also watch cancelCtx (for sub-agent Kill from parent)
+	if a.cancelCtx != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-a.cancelCtx.Done():
+				cancel()
+			}
+		}()
+	}
 
 	return ctx, cancel
 }
@@ -751,9 +789,19 @@ func (a *AgentLoop) Run(userMessage string) string {
 	}
 
 	for a.budget.Consume() {
+		// Check for cancelCtx (set by sub-agent Kill) at the start of each turn
+		if a.cancelCtx != nil {
+			select {
+			case <-a.cancelCtx.Done():
+				a.out("\n[WARN] Cancelled by parent.\n")
+				return finalText
+			default:
+			}
+		}
+
 		// Check for interrupt at the start of each turn
 		if a.IsInterrupted() {
-			a.out( "\n[WARN] Interrupted by user.\n")
+			a.out("\n[WARN] Interrupted by user.\n")
 			a.SetInterrupted(false) // reset for next request
 			return finalText
 		}
@@ -784,6 +832,15 @@ func (a *AgentLoop) Run(userMessage string) string {
 			sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.Model, a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
 			a.context.SetSystemPrompt(sysPrompt)
 		}
+
+			// Inject tool state tracker session state into system prompt.
+			// This gives the agent visibility into what it has already done,
+			// preventing redundant reads and searches.
+			if a.toolStateTracker != nil {
+				currentPrompt := a.context.SystemPrompt()
+				sessionState := a.toolStateTracker.BuildSessionStateNote()
+				a.context.SetSystemPrompt(currentPrompt + "\n\n" + sessionState)
+			}
 
 		var toolCalls []map[string]any
 		var textParts []string
@@ -829,6 +886,9 @@ func (a *AgentLoop) Run(userMessage string) string {
 					a.out( "\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
+				if a.toolStateTracker != nil {
+					a.toolStateTracker.OnCompaction()
+				}
 				if contextErrors <= 1 {
 					a.out( "\n[WARN] Stream stalled, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
@@ -848,6 +908,9 @@ func (a *AgentLoop) Run(userMessage string) string {
 					return finalText
 				}
 
+				if a.toolStateTracker != nil {
+					a.toolStateTracker.OnCompaction()
+				}
 				if contextErrors <= 1 {
 					a.out( "\n[WARN] Context length exceeded, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
@@ -896,6 +959,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if a.transcript != nil {
 				_ = a.transcript.WriteAssistant(finalText, a.config.Model)
 			}
+			// Extract key findings from the final answer for next-turn reference
+			if a.toolStateTracker != nil {
+				a.extractConclusions(finalText)
+			}
 			break
 		}
 
@@ -903,6 +970,13 @@ func (a *AgentLoop) Run(userMessage string) string {
 		consecutiveEmptyResponses = 0
 
 		a.context.AddAssistantToolCalls(toolCalls)
+
+		// Extract conclusions from intermediate text before tool calls
+		if a.toolStateTracker != nil && len(textParts) > 0 {
+			for _, tp := range textParts {
+				a.extractConclusions(tp)
+			}
+		}
 
 		// Track read_skill usage for skill tracker
 		if a.skillTracker != nil {
@@ -919,6 +993,31 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		a.executeToolCallsConcurrent(toolCalls)
+
+			// Update tool state tracker after tool execution
+			if a.toolStateTracker != nil {
+				for _, call := range toolCalls {
+					name, _ := call["name"].(string)
+					input, _ := call["input"].(map[string]any)
+					if input == nil {
+						continue
+					}
+					switch name {
+					case "read_file":
+						if path, ok := input["path"].(string); ok {
+							a.toolStateTracker.RecordFileRead(path)
+						}
+					case "grep":
+						if pattern, ok := input["pattern"].(string); ok {
+							a.toolStateTracker.RecordSearch(pattern, true)
+						}
+					case "glob":
+						if pattern, ok := input["pattern"].(string); ok {
+							a.toolStateTracker.RecordSearch(pattern, true)
+						}
+					}
+				}
+			}
 
 		// Between-turn drain: inject sub-agent completion notifications
 		// into the conversation context (matching Claude Code's query.ts
@@ -1016,6 +1115,9 @@ func (a *AgentLoop) ForceCompact() {
 
 	// Try normal compaction first (may skip if not needed)
 	if a.context.CompactContext() {
+		if a.toolStateTracker != nil {
+			a.toolStateTracker.OnCompaction()
+		}
 		if a.config.cachedPrompt != nil {
 			a.config.cachedPrompt.MarkDirty()
 		}
@@ -1027,6 +1129,9 @@ func (a *AgentLoop) ForceCompact() {
 	a.context.TruncateHistory()
 	after := len(a.context.Entries())
 	if after < before {
+		if a.toolStateTracker != nil {
+			a.toolStateTracker.OnCompaction()
+		}
 		fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
 	} else {
 		fmt.Printf("[compact] No compaction needed (%d entries)\n", before)
@@ -1041,6 +1146,10 @@ func (a *AgentLoop) ForceCompact() {
 func (a *AgentLoop) ClearHistory() int {
 	count := a.context.Len()
 	a.context.Clear()
+	// Mark all tracked items as stale (everything is gone).
+	if a.toolStateTracker != nil {
+		a.toolStateTracker.OnCompaction()
+	}
 	// Mark system prompt dirty after clearing
 	if a.config.cachedPrompt != nil {
 		a.config.cachedPrompt.MarkDirty()
@@ -1087,6 +1196,10 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 	fmt.Printf("[partial-compact: %s] %d entries summarized, %d kept, ~%d tokens saved\n",
 		dir, result.MessagesSummarized, result.MessagesKept, result.TokensSaved)
 
+	// Mark all tracked items as stale (partial compact still removes tool results).
+	if a.toolStateTracker != nil {
+		a.toolStateTracker.OnCompaction()
+	}
 	if a.config.cachedPrompt != nil {
 		a.config.cachedPrompt.MarkDirty()
 	}
@@ -1738,6 +1851,11 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		tools.CoerceArguments(tool.InputSchema(), input)
 	}
 
+	// Remap official parameter names to internal names
+	// Official Claude Code uses file_path; our tools internally use path.
+	tools.RemapFilePath(input)
+	tools.RemapDirParam(input)
+
 	// Record tool use to transcript
 	if a.transcript != nil {
 		_ = a.transcript.WriteToolUse(toolUseID, toolName, input)
@@ -1785,7 +1903,10 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}, msg
 	}
 
-	// Read-before-edit enforcement: file must be read and unmodified
+	// Read-before-write/edit enforcement (matches Claude Code official behavior):
+	// All write operations (write_file, edit_file, multi_edit) require the file to have
+	// been read first IF the file already exists. New file creation is always allowed.
+	// If the file was read but externally modified since, the write is blocked.
 	if (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") && !checkPermissions {
 		if path, ok := input["path"].(string); ok && path != "" {
 			if staleMsg := a.registry.CheckFileStale(path); staleMsg != "" {
@@ -1797,6 +1918,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 			}
 		}
 	}
+
 
 	if checkPermissions {
 		denial := a.gate.Check(tool, input)
@@ -2175,11 +2297,18 @@ func (a *AgentLoop) tryCompaction() {
 		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder)
 		if cleared > 0 {
 			a.out( "\n[micro-compact] Cleared %d old tool results\n", cleared)
+			// Micro-compaction clears tool results; mark tracked items stale.
+			if a.toolStateTracker != nil {
+				a.toolStateTracker.OnCompaction()
+			}
 		}
 	}
 
 	if a.compactor == nil {
 		a.context.CompactContext()
+		if a.toolStateTracker != nil {
+			a.toolStateTracker.OnCompaction()
+		}
 		return
 	}
 
@@ -2229,6 +2358,12 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 		}
 	}
 
+	// Advance compaction epoch BEFORE clearing context — marks all tracked items as stale.
+	// After this point, items from the previous epoch are marked "cleared from context".
+	if a.toolStateTracker != nil {
+		a.toolStateTracker.OnCompaction()
+	}
+
 	// Format the session memory as a compact summary
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
 	summaryContent := fmt.Sprintf("%s\n\n%s", boundaryText, sessionMemoryContent)
@@ -2247,6 +2382,18 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 
 	// Phase 2: Post-compact recovery — re-inject critical context
 	recoveredPaths := a.PostCompactRecovery()
+
+	// Mark recovered files as fresh (content is back in context).
+	// Also mark ALL tracked files as fresh if no specific recovery was done
+	// (the summary now contains the distilled knowledge).
+	if a.toolStateTracker != nil {
+		for _, path := range recoveredPaths {
+			a.toolStateTracker.MarkFileFresh(path)
+		}
+		// If no files were recovered, the summary itself preserves the key knowledge.
+		// Clear conclusions that are now captured in the summary so the agent doesn't
+		// repeat the same findings from stale content.
+	}
 
 	// Phase 3: History snip — preserve recent messages verbatim
 	snipCount := a.config.PostCompactHistorySnipCount
@@ -2267,6 +2414,11 @@ func (a *AgentLoop) tryLLMCompaction() {
 	messages := a.context.BuildMessages()
 	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL)
 	if performed && summary != "" {
+		// Advance compaction epoch BEFORE clearing context — marks all tracked items as stale.
+		if a.toolStateTracker != nil {
+			a.toolStateTracker.OnCompaction()
+		}
+
 		// Inject boundary marker and summary into context
 		preTokens := a.context.EstimatedTokens()
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
@@ -2279,6 +2431,13 @@ func (a *AgentLoop) tryLLMCompaction() {
 
 		// Phase 2: Post-compact recovery — re-inject critical context
 		recoveredPaths := a.PostCompactRecovery()
+
+		// Mark recovered files as fresh (content is back in context).
+		if a.toolStateTracker != nil {
+			for _, path := range recoveredPaths {
+				a.toolStateTracker.MarkFileFresh(path)
+			}
+		}
 
 		// Phase 3: History snip — preserve recent messages verbatim
 		snipCount := a.config.PostCompactHistorySnipCount

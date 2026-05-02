@@ -12,7 +12,6 @@ type FileWriteTool struct{}
 func (*FileWriteTool) Name() string { return "write_file" }
 func (*FileWriteTool) Description() string {
 	return "This tool overwrites the entire file. For modifying existing files, ALWAYS prefer edit_file instead — it only sends the diff. " +
-		"If this is an existing file, you MUST use read_file first before overwriting. " +
 		"Only use write_file to create new files or for complete rewrites. Creates parent directories if they don't exist."
 }
 
@@ -20,23 +19,26 @@ func (*FileWriteTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{
+			"file_path": map[string]any{
 				"type":        "string",
-				"description": "Absolute or relative path to the file.",
+				"description": "The absolute path to the file to write.",
 			},
 			"content": map[string]any{
 				"type":        "string",
 				"description": "The content to write.",
 			},
 		},
-		"required": []string{"path", "content"},
+		"required": []string{"file_path", "content"},
 	}
 }
 
 func (*FileWriteTool) CheckPermissions(params map[string]any) string { return "" }
 
 func (*FileWriteTool) Execute(params map[string]any) ToolResult {
-	pathStr, _ := params["path"].(string)
+	pathStr, _ := params["file_path"].(string)
+	if pathStr == "" {
+		pathStr, _ = params["path"].(string)
+	}
 	content, _ := params["content"].(string)
 
 	const maxWriteSize = 10 * 1024 * 1024 // 10MB

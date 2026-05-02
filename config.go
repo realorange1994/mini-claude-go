@@ -58,7 +58,7 @@ type Config struct {
 	PartialCompactEnabled bool
 	cachedPrompt           *CachedSystemPrompt
 	// Sub-agent settings
-	SubAgentMaxTurns int  // max turns for sub-agent loops (default 200, matching Claude fork agent)
+	SubAgentMaxTurns int  // max turns for sub-agent loops (default 0 = no limit, matching Claude Code)
 	SubAgentEnabled  bool // enable/disable the agent tool (default true)
 	// Auto mode classifier settings
 	AutoClassifierEnabled   bool   // enable LLM classifier in auto mode (default true)
@@ -291,7 +291,7 @@ func DefaultConfig() Config {
 		ReactiveCompactThreshold:  5000,
 		PartialCompactEnabled:     true,
 		cachedPrompt: NewCachedSystemPrompt(),
-		SubAgentMaxTurns:          200,
+		SubAgentMaxTurns:          0,
 		SubAgentEnabled:           true,
 		AutoClassifierEnabled:   true,
 		AutoClassifierMaxTokens: 128,

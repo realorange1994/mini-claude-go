@@ -43,13 +43,17 @@ func (*GrepTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Language type filter. Common values: go, py, js, ts, rust, java, sh, yaml, json, md, html, css.",
 			},
+			"-i": map[string]any{
+				"type":        "boolean",
+				"description": "Case insensitive search (rg -i). Default: false.",
+			},
 			"ignore_case": map[string]any{
 				"type":        "boolean",
-				"description": "Case insensitive search (default: false).",
+				"description": "Alias for -i. Case insensitive search (default: false).",
 			},
 			"case_insensitive": map[string]any{
 				"type":        "boolean",
-				"description": "Alias for ignore_case. Case insensitive search (default: false).",
+				"description": "Alias for -i. Case insensitive search (default: false).",
 			},
 			"fixed_strings": map[string]any{
 				"type":        "boolean",
@@ -58,19 +62,39 @@ func (*GrepTool) InputSchema() map[string]any {
 			"output_mode": map[string]any{
 				"type":        "string",
 				"enum":        []string{"content", "files_with_matches", "count"},
-				"description": "Output mode: 'content' (default) shows matching lines, 'files_with_matches' shows file paths, 'count' shows per-file match counts.",
+				"description": "Output mode (default: files_with_matches): 'content' shows matching lines, 'files_with_matches' shows file paths, 'count' shows per-file match counts.",
+			},
+			"-B": map[string]any{
+				"type":        "integer",
+				"description": "Number of lines to show before each match (rg -B). Requires output_mode: content, ignored otherwise.",
+			},
+			"-A": map[string]any{
+				"type":        "integer",
+				"description": "Number of lines to show after each match (rg -A). Requires output_mode: content, ignored otherwise.",
+			},
+			"-C": map[string]any{
+				"type":        "integer",
+				"description": "Alias for context. Number of lines to show before and after each match.",
 			},
 			"context": map[string]any{
 				"type":        "integer",
-				"description": "Lines of context before and after each match (default: 0).",
+				"description": "Number of lines to show before and after each match (rg -C). Requires output_mode: content, ignored otherwise.",
 			},
 			"context_before": map[string]any{
 				"type":        "integer",
-				"description": "Lines of context before each match (rg only, default: 0). Overrides context if set.",
+				"description": "Alias for -B. Lines of context before each match (default: 0).",
 			},
 			"context_after": map[string]any{
 				"type":        "integer",
-				"description": "Lines of context after each match (rg only, default: 0). Overrides context if set.",
+				"description": "Alias for -A. Lines of context after each match (default: 0).",
+			},
+			"-n": map[string]any{
+				"type":        "boolean",
+				"description": "Show line numbers in output (rg -n). Requires output_mode: content, ignored otherwise. Defaults to true.",
+			},
+			"multiline": map[string]any{
+				"type":        "boolean",
+				"description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false.",
 			},
 			"max_depth": map[string]any{
 				"type":        "integer",
@@ -110,8 +134,13 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 	include, _ := params["glob"].(string)
 	typeFilter, _ := params["type"].(string)
 
-	// Support both ignore_case and case_insensitive
-	caseInsensitive, _ := params["ignore_case"].(bool)
+	// Support -i, ignore_case, and case_insensitive
+	caseInsensitive, _ := params["-i"].(bool)
+	if !caseInsensitive {
+		if ci, _ := params["ignore_case"].(bool); ci {
+			caseInsensitive = true
+		}
+	}
 	if !caseInsensitive {
 		if ci, _ := params["case_insensitive"].(bool); ci {
 			caseInsensitive = true
@@ -119,9 +148,15 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 	}
 	fixedStrings, _ := params["fixed_strings"].(bool)
 	countMatches, _ := params["count_matches"].(bool)
+	multiline, _ := params["multiline"].(bool)
+	showLineNumbers, _ := params["-n"].(bool)
+	// -n defaults to true, so only false if explicitly set
+	if _, hasN := params["-n"]; !hasN {
+		showLineNumbers = true
+	}
 	outputMode, _ := params["output_mode"].(string)
 	if outputMode == "" {
-		outputMode = "content"
+		outputMode = "files_with_matches"
 	}
 	headLimit := maxGrepMatches
 	if hl, ok := params["head_limit"]; ok {
@@ -161,10 +196,20 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
-	// Parse context params (combined takes priority if before/after not set)
-	ctxBefore := parseIntParam(params, "context_before")
-	ctxAfter := parseIntParam(params, "context_after")
-	ctxCombined := parseIntParam(params, "context")
+	// Parse context params (official: -C/context takes precedence over -B/-A)
+	// Support both official names (-B, -A, -C) and legacy aliases (context_before, context_after)
+	ctxBefore := parseIntParam(params, "-B")
+	if ctxBefore == 0 {
+		ctxBefore = parseIntParam(params, "context_before")
+	}
+	ctxAfter := parseIntParam(params, "-A")
+	if ctxAfter == 0 {
+		ctxAfter = parseIntParam(params, "context_after")
+	}
+	ctxCombined := parseIntParam(params, "-C")
+	if ctxCombined == 0 {
+		ctxCombined = parseIntParam(params, "context")
+	}
 	if ctxCombined > 0 {
 		if ctxBefore == 0 {
 			ctxBefore = ctxCombined
@@ -175,7 +220,7 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 	}
 
 	if _, err := exec.LookPath("rg"); err == nil {
-		return rgSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesize)
+		return rgSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, showLineNumbers, multiline, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesize)
 	}
 	return goSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, headLimit, offset, ctxCombined, countMatches, maxDepth)
 }
@@ -208,8 +253,16 @@ var typeMap = map[string][]string{
 	"css":    {".css", ".scss", ".sass"},
 }
 
-func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string) ToolResult {
-	args := []string{"--no-heading", "--line-number"}
+func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, showLineNumbers, multiline bool, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string) ToolResult {
+	args := []string{"--hidden", "--max-columns", "500"}
+
+	// Exclude VCS directories (matching official Claude Code behavior)
+	vcsDirs := []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
+	for _, dir := range vcsDirs {
+		args = append(args, "--glob", "!"+dir)
+	}
+
+	// --no-heading is not used (we use -n for line numbers)
 
 	switch outputMode {
 	case "files_with_matches":
@@ -224,11 +277,19 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	if fixedStrings {
 		args = append(args, "-F")
 	}
+	if multiline {
+		args = append(args, "-U", "--multiline-dotall")
+	}
 	if ctxBefore > 0 {
 		args = append(args, "-B", fmt.Sprintf("%d", ctxBefore))
 	}
 	if ctxAfter > 0 {
 		args = append(args, "-A", fmt.Sprintf("%d", ctxAfter))
+	}
+
+	// Show line numbers only in content mode (matching official behavior)
+	if showLineNumbers && outputMode == "content" {
+		args = append(args, "-n")
 	}
 
 	// Limit directory traversal depth
@@ -241,11 +302,7 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	}
 
 	args = append(args, "-m", fmt.Sprintf("%d", headLimit))
-	args = append(args, pattern, path)
 
-	if include != "" {
-		args = append(args, "--glob", include)
-	}
 	if typeFilter != "" {
 		if exts, ok := typeMap[strings.ToLower(typeFilter)]; ok {
 			for _, e := range exts {
@@ -258,6 +315,17 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 			args = append(args, "--type", "mytype")
 		}
 	}
+	if include != "" {
+		args = append(args, "--glob", include)
+	}
+
+	// If pattern starts with dash, use -e flag to prevent rg from interpreting it as an option
+	if strings.HasPrefix(pattern, "-") {
+		args = append(args, "-e", pattern)
+	} else {
+		args = append(args, pattern)
+	}
+	args = append(args, path)
 
 	cmd := exec.Command("rg", args...)
 	out, err := cmd.CombinedOutput()

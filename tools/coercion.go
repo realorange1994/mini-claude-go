@@ -232,7 +232,22 @@ func coerceToArray(key string, argVal any, args map[string]any, warnings *[]Coer
 	})
 }
 
-// coerceToObject handles coercion to object type.
+// RemapFilePath copies file_path to path for file tools, so internal code
+// that reads input["path"] works with the new official schema.
+// This is a no-op if file_path is absent (backward compat).
+func RemapFilePath(params map[string]any) {
+	if fp, ok := params["file_path"].(string); ok && fp != "" {
+		params["path"] = fp
+	}
+}
+
+// RemapDirParam copies directory to dir for list_dir, so internal code
+// that reads input["dir"] works with the official schema.
+func RemapDirParam(params map[string]any) {
+	if dir, ok := params["directory"].(string); ok && dir != "" {
+		params["dir"] = dir
+	}
+}
 func coerceToObject(key string, argVal any, args map[string]any, warnings *[]CoercionWarning) {
 	s, ok := argVal.(string)
 	if !ok {

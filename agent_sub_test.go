@@ -82,12 +82,12 @@ func TestBuildSubAgentSystemPromptExploreReadOnly(t *testing.T) {
 	if !strings.Contains(prompt, "CLAUDE.md and gitStatus are omitted") {
 		t.Error("Explore prompt should mention omitted CLAUDE.md/gitStatus")
 	}
-	// Should have tool guidance
-	if !strings.Contains(prompt, "glob for broad file pattern matching") {
-		t.Error("Explore prompt should contain glob guidance")
+	// Should have investigation method guidance
+	if !strings.Contains(prompt, "Hypothesis first") {
+		t.Error("Explore prompt should contain hypothesis-driven guidance")
 	}
-	if !strings.Contains(prompt, "grep for searching file contents") {
-		t.Error("Explore prompt should contain grep guidance")
+	if !strings.Contains(prompt, "Build a mental model") {
+		t.Error("Explore prompt should contain mental model guidance")
 	}
 }
 
@@ -108,8 +108,8 @@ func TestBuildSubAgentSystemPromptPlanReadOnly(t *testing.T) {
 	if !strings.Contains(prompt, "Understand Requirements") {
 		t.Error("Plan prompt should contain 'Understand Requirements' step")
 	}
-	if !strings.Contains(prompt, "Explore Thoroughly") {
-		t.Error("Plan prompt should contain 'Explore Thoroughly' step")
+	if !strings.Contains(prompt, "Explore Efficiently") {
+		t.Error("Plan prompt should contain 'Explore Efficiently' step")
 	}
 	if !strings.Contains(prompt, "Design Solution") {
 		t.Error("Plan prompt should contain 'Design Solution' step")

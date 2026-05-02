@@ -8,9 +8,7 @@ import (
 	"strings"
 )
 
-const maxFileSize = 2 * 1024 * 1024 // 2 MB
-const readFileDefaultLimit = 2000   // default lines when limit not set
-const readFileMaxChars = 15000      // max chars in output
+const maxFileSize = 256 * 1024 // 256 KB, matching Claude Code official
 
 // FileReadTool reads file contents with optional line range.
 type FileReadTool struct{}
@@ -26,9 +24,9 @@ func (*FileReadTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{
+			"file_path": map[string]any{
 				"type":        "string",
-				"description": "Absolute or relative path to the file.",
+				"description": "The absolute path to the file to read.",
 			},
 			"offset": map[string]any{
 				"type":        "integer",
@@ -39,14 +37,17 @@ func (*FileReadTool) InputSchema() map[string]any {
 				"description": "Number of lines to read (optional).",
 			},
 		},
-		"required": []string{"path"},
+		"required": []string{"file_path"},
 	}
 }
 
 func (*FileReadTool) CheckPermissions(params map[string]any) string { return "" }
 
 func (*FileReadTool) Execute(params map[string]any) ToolResult {
-	pathStr, _ := params["path"].(string)
+	pathStr, _ := params["file_path"].(string)
+	if pathStr == "" {
+		pathStr, _ = params["path"].(string)
+	}
 	fp := expandPath(pathStr)
 
 	info, err := os.Stat(fp)
@@ -60,7 +61,7 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error: not a file: %s", pathStr), IsError: true}
 	}
 	if info.Size() > maxFileSize {
-		return ToolResult{Output: fmt.Sprintf("Error: file too large (>%d bytes)", maxFileSize), IsError: true}
+		return ToolResult{Output: fmt.Sprintf("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions."), IsError: true}
 	}
 
 	data, err := os.ReadFile(fp)
@@ -92,7 +93,9 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 		offset = 1
 	}
 
-	limit := readFileDefaultLimit
+	total := len(lines)
+
+	limit := total // default: read entire file (matching Claude Code official)
 	if lim, ok := params["limit"]; ok {
 		switch v := lim.(type) {
 		case float64:
@@ -106,10 +109,9 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 	if limit <= 0 {
-		limit = readFileDefaultLimit
+		limit = total
 	}
 
-	total := len(lines)
 	if offset > total {
 		return ToolResult{
 			Output: fmt.Sprintf("Error: offset %d is beyond end of file (%d lines)", offset, total),
@@ -131,16 +133,6 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 	}
 
 	result := numbered.String()
-
-	// Truncate if too many chars
-	if len(result) > readFileMaxChars {
-		end := readFileMaxChars
-		// Adjust to safe UTF-8 boundary
-		for end > 0 && (result[end]&0xc0) == 0x80 {
-			end--
-		}
-		result = result[:end] + "\n\n[OUTPUT TRUNCATED]"
-	}
 
 	// Add pagination hint
 	if end < total {

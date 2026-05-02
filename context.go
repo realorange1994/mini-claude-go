@@ -50,6 +50,145 @@ type AttachmentContent string
 
 func (AttachmentContent) entryContent() {}
 
+// ToolStateTracker records what the agent has done across turns.
+// It is injected into the system prompt before each API call so the agent
+// knows what it has already read/searched without re-reading/re-searching.
+//
+// Compaction is the primary source of "short-term memory loss":
+// when context is compacted, tool results (file content, grep output) are removed
+// from the conversation history. The tracker must distinguish between items whose
+// content is still in context (fresh) vs. items that were cleared (stale).
+//
+// We solve this with an epoch counter: every compaction increments the epoch.
+// Items recorded with epoch == currentEpoch are fresh; items with lower epoch
+// are stale (compaction cleared them). Post-compact recovery marks re-injected
+// files as fresh by updating their epoch.
+type ToolStateTracker struct {
+	mu             sync.RWMutex
+	compactionEpoch int           // increments each time compaction runs; items with lower epoch are stale
+	readFiles      map[string]int // absolute path -> epoch when read (epoch == compactionEpoch means content is fresh)
+	searchQueries  map[string]int // pattern -> epoch when search was run
+	conclusions    []string       // key findings claimed by the agent
+}
+
+// NewToolStateTracker creates a tracker.
+func NewToolStateTracker() *ToolStateTracker {
+	return &ToolStateTracker{
+		compactionEpoch: 0,
+		readFiles:      make(map[string]int),
+		searchQueries:  make(map[string]int),
+		conclusions:    make([]string, 0),
+	}
+}
+
+// RecordFileRead marks a file as read at the current epoch.
+func (t *ToolStateTracker) RecordFileRead(path string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	abs, _ := filepath.Abs(path)
+	t.readFiles[abs] = t.compactionEpoch
+}
+
+// RecordSearch records a successful grep/glob search pattern at the current epoch.
+func (t *ToolStateTracker) RecordSearch(pattern string, hadResults bool) {
+	if !hadResults {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.searchQueries[pattern] = t.compactionEpoch
+}
+
+// RecordConclusion appends a key finding.
+func (t *ToolStateTracker) RecordConclusion(conclusion string) {
+	if conclusion == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.conclusions = append(t.conclusions, conclusion)
+}
+
+// OnCompaction is called after context compaction runs. It advances the epoch,
+// marking all previously tracked items as stale (their tool results are gone from context).
+func (t *ToolStateTracker) OnCompaction() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.compactionEpoch++
+}
+
+// MarkFileFresh updates a file's epoch to current, marking its content as fresh
+// (used after PostCompactRecovery re-injects file content into context).
+func (t *ToolStateTracker) MarkFileFresh(path string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	abs, _ := filepath.Abs(path)
+	t.readFiles[abs] = t.compactionEpoch
+}
+
+// BuildSessionStateNote returns the text to inject into the system prompt.
+// Items are split into "fresh" (content still in context) and "stale" (cleared by compaction).
+func (t *ToolStateTracker) BuildSessionStateNote() string {
+	t.mu.RLock()
+	epoch := t.compactionEpoch
+	var freshFiles, staleFiles []string
+	for f, e := range t.readFiles {
+		if e == epoch {
+			freshFiles = append(freshFiles, f)
+		} else {
+			staleFiles = append(staleFiles, f)
+		}
+	}
+	var freshSearches, staleSearches []string
+	for q, e := range t.searchQueries {
+		if e == epoch {
+			freshSearches = append(freshSearches, q)
+		} else {
+			staleSearches = append(staleSearches, q)
+		}
+	}
+	conclusions := make([]string, len(t.conclusions))
+	copy(conclusions, t.conclusions)
+	t.mu.RUnlock()
+
+	var sb strings.Builder
+	sb.WriteString("## Session State\n")
+	if len(freshFiles) > 0 {
+		sb.WriteString("Files already read — content is in context (do NOT re-read):\n")
+		for _, f := range freshFiles {
+			sb.WriteString("  - " + f + "\n")
+		}
+	}
+	if len(staleFiles) > 0 {
+		sb.WriteString("Files read before compaction — content was cleared from context:\n")
+		for _, f := range staleFiles {
+			sb.WriteString("  - " + f + " (RE-READ if needed)\n")
+		}
+	}
+	if len(freshSearches) > 0 {
+		sb.WriteString("Search patterns already run — results in context (do NOT repeat):\n")
+		for _, q := range freshSearches {
+			sb.WriteString("  - " + q + "\n")
+		}
+	}
+	if len(staleSearches) > 0 {
+		sb.WriteString("Search patterns from before compaction — results were cleared:\n")
+		for _, q := range staleSearches {
+			sb.WriteString("  - " + q + " (RE-RUN if needed)\n")
+		}
+	}
+	if len(conclusions) > 0 {
+		sb.WriteString("Key findings from this session:\n")
+		for _, c := range conclusions {
+			sb.WriteString("  - " + c + "\n")
+		}
+	}
+	if len(freshFiles) == 0 && len(staleFiles) == 0 && len(freshSearches) == 0 && len(staleSearches) == 0 && len(conclusions) == 0 {
+		sb.WriteString("(no prior state)\n")
+	}
+	return sb.String()
+}
+
 // conversationEntry represents a single entry in the conversation history.
 type conversationEntry struct {
 	role    string // "user" or "assistant" (or "system" for boundary markers)

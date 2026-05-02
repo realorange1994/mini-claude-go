@@ -22,9 +22,9 @@ func (*FileEditTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{
+			"file_path": map[string]any{
 				"type":        "string",
-				"description": "Path to the file to edit.",
+				"description": "The absolute path to the file to edit.",
 			},
 			"old_string": map[string]any{
 				"type":        "string",
@@ -39,14 +39,17 @@ func (*FileEditTool) InputSchema() map[string]any {
 				"description": "Replace all occurrences (default: false).",
 			},
 		},
-		"required": []string{"path", "old_string", "new_string"},
+		"required": []string{"file_path", "old_string", "new_string"},
 	}
 }
 
 func (*FileEditTool) CheckPermissions(params map[string]any) string { return "" }
 
 func (*FileEditTool) Execute(params map[string]any) ToolResult {
-	pathStr, _ := params["path"].(string)
+	pathStr, _ := params["file_path"].(string)
+	if pathStr == "" {
+		pathStr, _ = params["path"].(string)
+	}
 	oldStr, _ := params["old_string"].(string)
 	newStr, _ := params["new_string"].(string)
 	replaceAll, _ := params["replace_all"].(bool)
