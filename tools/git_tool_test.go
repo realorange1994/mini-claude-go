@@ -193,7 +193,14 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 			wantError: true,
 		},
 
-		// --- reflog ---
+		// --- log with duplicate --oneline in flags (should deduplicate) ---
+			{
+				name:     "log with duplicate --oneline in flags",
+				params:   map[string]interface{}{"operation": "log", "flags": []interface{}{"--oneline"}},
+				wantArgs: []string{"log", "-20", "--oneline"},
+			},
+
+			// --- reflog ---
 		{
 			name:     "reflog default",
 			params:   map[string]interface{}{"operation": "reflog"},
@@ -210,7 +217,24 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 			wantArgs: []string{"reflog", "show", "-10"},
 		},
 
-		// --- shortlog ---
+		// --- rev-list ---
+			{
+				name:     "rev-list default",
+				params:   map[string]interface{}{"operation": "rev-list"},
+				wantArgs: []string{"rev-list", "-20", "--count"},
+			},
+			{
+				name:     "rev-list with max_count",
+				params:   map[string]interface{}{"operation": "rev-list", "max_count": float64(10)},
+				wantArgs: []string{"rev-list", "-10", "--count"},
+			},
+			{
+				name:     "rev-list with duplicate --count in flags (should deduplicate)",
+				params:   map[string]interface{}{"operation": "rev-list", "max_count": float64(20), "flags": []interface{}{"--count"}},
+				wantArgs: []string{"rev-list", "-20", "--count"},
+			},
+
+			// --- shortlog ---
 		{
 			name:     "shortlog default",
 			params:   map[string]interface{}{"operation": "shortlog"},
@@ -1021,14 +1045,15 @@ func TestIsDirty(t *testing.T) {
 		}
 	})
 
-	t.Run("true with untracked files", func(t *testing.T) {
+	t.Run("false with untracked files only", func(t *testing.T) {
 		dir := createTestRepo(t)
-		// Create an untracked file
+		// Create an untracked file — untracked files should NOT make the repo dirty
+		// because git checkout/switch don't fail due to untracked files
 		if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("new\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if !IsDirty(dir) {
-			t.Error("IsDirty() = false with untracked file, want true")
+		if IsDirty(dir) {
+			t.Error("IsDirty() = true with only untracked file, want false")
 		}
 	})
 }

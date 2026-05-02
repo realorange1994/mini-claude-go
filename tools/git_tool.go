@@ -278,9 +278,13 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 
 	// Determine working directory:
 	// - For clone: use directory param (path is the clone destination, not workdir)
+	// - For blame: use directory param only; never use path as workdir (path is the file)
 	// - For other operations: use directory param if set, otherwise path param
 	var workDir string
 	if operation == "clone" {
+		workDir, _ = params["directory"].(string)
+	} else if operation == "blame" {
+		// For blame: only use explicit directory param. The 'path' param is the file to blame.
 		workDir, _ = params["directory"].(string)
 	} else {
 		if dir, _ := params["directory"].(string); dir != "" {
@@ -938,7 +942,11 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 	case "branch":
 		args = []string{"branch"}
 		if name, _ := params["branch"].(string); name != "" {
+			// Creating/deleting/renaming branch
 			args = append(args, name)
+		} else {
+			// No branch name: list all branches (local + remote)
+			args = append(args, "--all", "--no-color")
 		}
 
 	case "checkout":
@@ -1218,7 +1226,17 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 	}
 
 	if flags := getStringArray(params, "flags"); len(flags) > 0 {
-		args = append(args, flags...)
+		// Deduplicate: skip flags already present in args to avoid
+		// duplicates like "git rev-list -20 --count --count"
+		existing := make(map[string]bool, len(args))
+		for _, a := range args {
+			existing[a] = true
+		}
+		for _, f := range flags {
+			if !existing[f] {
+				args = append(args, f)
+			}
+		}
 	}
 
 	return args, nil
@@ -1736,7 +1754,10 @@ func GetCurrentCommitHash(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// IsDirty checks if the repository has any changes (unstaged, staged, or untracked files)
+// IsDirty checks if the repository has any uncommitted changes to tracked files
+// (unstaged or staged). Untracked files are NOT considered dirty — this matches
+// how git checkout/switch actually work, since they don't fail due to untracked
+// files unless there's a path conflict.
 func IsDirty(dir string) bool {
 	// Check unstaged changes
 	cmd := exec.Command("git", "-C", dir, "diff", "--quiet")
@@ -1750,13 +1771,7 @@ func IsDirty(dir string) bool {
 		return true
 	}
 
-	// Check for untracked files
-	cmd = exec.Command("git", "-C", dir, "ls-files", "--others", "--exclude-standard")
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -1810,15 +1825,11 @@ func executeGitInfo(dir string) ToolResult {
 		sb.WriteString("  Bare Repo: true\n")
 	}
 
-	// If dirty, show a summary of changes
+	// If dirty (tracked changes only), show a summary
 	if dirty {
 		status, err := GetGitStatus(root)
 		if err == nil && len(status) > 0 {
 			sb.WriteString(fmt.Sprintf("  Changes: %d file(s) modified\n", len(status)))
-		} else if err == nil {
-			// HasUncommittedChanges or IsDirty said true but porcelain is empty
-			// — may have untracked files
-			sb.WriteString("  Changes: untracked files\n")
 		}
 	}
 
