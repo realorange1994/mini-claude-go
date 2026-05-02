@@ -18,10 +18,11 @@ type GlobTool struct{}
 
 func (*GlobTool) Name() string        { return "glob" }
 func (*GlobTool) Description() string {
-	return "Fast file pattern matching tool — use it liberally rather than guessing file paths. " +
-		"ALWAYS use glob to find files by name pattern. NEVER use exec with 'find' command. " +
+	return "Fast file pattern matching tool that works with any codebase size. " +
+		"Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". " +
 		"Returns matching file paths sorted by modification time. " +
-		"Supports glob patterns like '**/*.go' or 'src/**/*.ts'."
+		"Use this tool when you need to find files by name patterns. " +
+		"When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead."
 }
 
 func (*GlobTool) InputSchema() map[string]any {

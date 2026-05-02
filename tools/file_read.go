@@ -60,6 +60,13 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 	if info.IsDir() {
 		return ToolResult{Output: fmt.Sprintf("Error: not a file: %s", pathStr), IsError: true}
 	}
+	// Reject binary file extensions (matching official Claude Code behavior)
+	// PDF, images, and SVG are handled separately in the official, but rejected here
+	// with a clear message instead of garbage content or size-limit errors
+	ext := strings.ToLower(filepath.Ext(fp))
+	if isBinaryExtension(ext) {
+		return ToolResult{Output: fmt.Sprintf("Error: binary file not supported: %s", ext), IsError: true}
+	}
 	if info.Size() > maxFileSize {
 		return ToolResult{Output: fmt.Sprintf("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions."), IsError: true}
 	}
@@ -159,4 +166,32 @@ func expandPath(p string) string {
 		p = p + string(filepath.Separator)
 	}
 	return filepath.Clean(p)
+}
+
+// isBinaryExtension checks if a file extension is a binary format that should be rejected.
+// Official Claude Code proactively rejects binary extensions to avoid reading garbage content.
+func isBinaryExtension(ext string) bool {
+	binaryExts := map[string]bool{
+		// Executables
+		".exe": true, ".dll": true, ".so": true, ".dylib": true, ".com": true,
+		// Archives
+		".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".xz": true,
+		".7z": true, ".rar": true, ".tgz": true, ".zst": true, ".lz4": true,
+		".cab": true, ".iso": true, ".img": true, ".dmg": true,
+		// Images (without image processing support)
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".bmp": true,
+		".tiff": true, ".ico": true, ".webp": true, ".svgz": true,
+		".avif": true, ".apng": true,
+		// Audio/Video
+		".mp3": true, ".mp4": true, ".wav": true, ".ogg": true, ".avi": true,
+		".mov": true, ".mkv": true, ".flac": true, ".flv": true, ".wmv": true,
+		".webm": true, ".aac": true, ".wma": true, ".m4a": true,
+		// Data/compiled
+		".pyc": true, ".pyo": true, ".o": true, ".obj": true, ".a": true,
+		".lib": true, ".class": true, ".jar": true, ".war": true,
+		".dat": true, ".bin": true, ".db": true, ".sqlite": true,
+		".pdf": true, ".docx": true, ".xlsx": true, ".pptx": true,
+		".woff": true, ".woff2": true, ".eot": true, ".ttf": true,
+	}
+	return binaryExts[ext]
 }

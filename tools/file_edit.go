@@ -89,16 +89,29 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
 	}
 
-	// Normalize CRLF
 	content := string(data)
 	hasCRLF := strings.Contains(content, "\r\n")
-	if hasCRLF {
-		content = strings.ReplaceAll(content, "\r\n", "\n")
-		oldStr = strings.ReplaceAll(oldStr, "\r\n", "\n")
-		newStr = strings.ReplaceAll(newStr, "\r\n", "\n")
+
+	// Strip trailing whitespace from new_string (except .md/.mdx) matching official
+	ext := strings.ToLower(filepath.Ext(fp))
+	if ext != ".md" && ext != ".mdx" {
+		newStr = stripTrailingWhitespace(newStr)
 	}
 
-	count := strings.Count(content, oldStr)
+	// Normalize curly quotes to straight quotes for matching (matching official Claude Code).
+	// LLMs often output curly quotes ("") but files use straight quotes ("").
+	contentNorm := normalizeQuotes(content)
+	oldStrNorm := normalizeQuotes(oldStr)
+	newStrNorm := normalizeQuotes(newStr)
+
+	// Normalize CRLF for matching
+	if hasCRLF {
+		contentNorm = strings.ReplaceAll(contentNorm, "\r\n", "\n")
+		oldStrNorm = strings.ReplaceAll(oldStrNorm, "\r\n", "\n")
+		newStrNorm = strings.ReplaceAll(newStrNorm, "\r\n", "\n")
+	}
+
+	count := strings.Count(contentNorm, oldStrNorm)
 	if count == 0 {
 		return ToolResult{Output: fmt.Sprintf("Error: old_text not found in %s. Verify the file content.", pathStr), IsError: true}
 	}
@@ -109,22 +122,100 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
-	if replaceAll {
-		content = strings.ReplaceAll(content, oldStr, newStr)
-	} else {
-		content = strings.Replace(content, oldStr, newStr, 1)
-	}
+	// Find positions in normalized content and apply replacement to original
+	contentNorm = applyReplacement(contentNorm, oldStrNorm, newStrNorm, replaceAll)
 
-	// Restore CRLF if original had it - only replace \n not preceded by \r
+	// Restore original quote style
+	contentNorm = preserveQuoteStyle(contentNorm, normalizeQuotes(content), oldStr, newStr, replaceAll)
+
+	// Restore CRLF
 	if hasCRLF {
-		content = restoreCRLF(content)
+		contentNorm = restoreCRLF(contentNorm)
 	}
 
-	if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(fp, []byte(contentNorm), 0o644); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
 
 	return ToolResult{Output: fmt.Sprintf("Successfully edited %s", fp)}
+}
+
+// applyReplacement performs string replacement on normalized content.
+func applyReplacement(content, oldStr, newStr string, replaceAll bool) string {
+	if replaceAll {
+		return strings.Replace(content, oldStr, newStr, -1)
+	}
+	return strings.Replace(content, oldStr, newStr, 1)
+}
+
+// preserveQuoteStyle restores original curly quote characters in the replacement.
+// If the matched text in the original file used curly quotes, the replacement
+// also uses curly quotes to match the surrounding context style.
+func preserveQuoteStyle(content, contentOrig, oldStr, newStr string, replaceAll bool) string {
+	// Check if the file actually contains curly quotes
+	hasCurlyDouble := strings.Contains(contentOrig, "\u201C") || strings.Contains(contentOrig, "\u201D")
+	hasCurlySingle := strings.Contains(contentOrig, "\u2018") || strings.Contains(contentOrig, "\u2019")
+	if !hasCurlyDouble && !hasCurlySingle {
+		return content
+	}
+
+	// Detect quote style used in oldStr
+	oldHasCurlyDouble := strings.Contains(oldStr, "\u201C") || strings.Contains(oldStr, "\u201D")
+	oldHasCurlySingle := strings.Contains(oldStr, "\u2018") || strings.Contains(oldStr, "\u2019")
+
+	if oldHasCurlyDouble {
+		content = curlyToStraightDouble(content)
+		content = straightToCurlyDouble(content)
+	}
+	if oldHasCurlySingle {
+		content = curlyToStraightSingle(content)
+		content = straightToCurlySingle(content)
+	}
+	return content
+}
+
+// normalizeQuotes converts curly/smart quotes to straight ASCII quotes.
+func normalizeQuotes(s string) string {
+	s = strings.ReplaceAll(s, "\u201C", "\"")  // left double curly quote
+	s = strings.ReplaceAll(s, "\u201D", "\"")  // right double curly quote
+	s = strings.ReplaceAll(s, "\u2018", "'")   // left single curly quote
+	s = strings.ReplaceAll(s, "\u2019", "'")   // right single curly quote
+	return s
+}
+
+// curlyToStraightDouble converts curly double quotes to straight double quotes.
+func curlyToStraightDouble(s string) string {
+	s = strings.ReplaceAll(s, "\u201C", "\"")
+	s = strings.ReplaceAll(s, "\u201D", "\"")
+	return s
+}
+
+// curlyToStraightSingle converts curly single quotes to straight single quotes.
+func curlyToStraightSingle(s string) string {
+	s = strings.ReplaceAll(s, "\u2018", "'")
+	s = strings.ReplaceAll(s, "\u2019", "'")
+	return s
+}
+
+// straightToCurlyDouble converts straight double quotes to curly double quotes.
+func straightToCurlyDouble(s string) string {
+	s = strings.ReplaceAll(s, "\"", "\u201C")
+	return s
+}
+
+// straightToCurlySingle converts straight single quotes to curly single quotes.
+func straightToCurlySingle(s string) string {
+	s = strings.ReplaceAll(s, "'", "\u2019")
+	return s
+}
+
+// stripTrailingWhitespace removes trailing whitespace from each line.
+func stripTrailingWhitespace(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // restoreCRLF replaces \n with \r\n only where not already preceded by \r.
