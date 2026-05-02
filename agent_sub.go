@@ -536,15 +536,6 @@ func (a *AgentLoop) SpawnSubAgent(
 		userPrompt = syncForkUserMessage
 	}
 
-	// Create a progress writer for this sync sub-agent.
-	// The writer intercepts the child's a.out() calls and writes condensed
-	// progress to the parent's output (os.Stderr for the main agent).
-	// [THINK] lines are suppressed; only tool name, count, and token usage shown.
-	progressWriter := NewSubAgentProgressWriter(description, func(line string) {
-		a.out("%s", line)
-	})
-	childLoop.agentOutput = progressWriter
-
 	go func() {
 		defer childLoop.Close()
 		defer a.activeSubAgents.Add(-1)
@@ -564,13 +555,6 @@ func (a *AgentLoop) SpawnSubAgent(
 			a.taskStore.CompleteTask(taskID, result, turnsUsed, durationMs)
 		}
 
-		// Flush progress writer with final stats
-		if progressWriter != nil {
-			progressWriter.SetToolCount(turnsUsed)
-			progressWriter.UpdateTokens(totalTokens)
-			progressWriter.Flush()
-		}
-
 		resultCh <- syncSubAgentResult{
 			result:      result,
 			turnsUsed:   turnsUsed,
@@ -580,28 +564,8 @@ func (a *AgentLoop) SpawnSubAgent(
 		}
 	}()
 
-	// Start a progress ticker that periodically updates token count while the
-	// sub-agent runs. The ticker goroutine reads from childLoop and writes to
-	// the parent's output via the progress writer's callback.
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(1500 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				if childLoop != nil {
-					progressWriter.UpdateTokens(childLoop.TotalTokens())
-				}
-			}
-		}
-	}()
-
 	// Wait for sub-agent to complete. The goroutine keeps the REPL responsive.
 	res := <-resultCh
-	close(done) // stop the progress ticker
 	return taskID, res.result, res.errText, res.totalTokens, res.turnsUsed, res.durationMs
 }
 
