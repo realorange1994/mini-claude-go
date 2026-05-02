@@ -257,10 +257,6 @@ func runInteractive(agent *AgentLoop) {
 	stdinReader := bufio.NewReader(os.Stdin)
 	go readStdin(stdinReader)
 
-	// queuedInput stores user input received while agent was running,
-	// to be processed on the next REPL iteration without showing a prompt.
-	var queuedInput string
-
 	loop:
 	for {
 		// Always restart the stdin reader goroutine at the start of each
@@ -289,77 +285,73 @@ func runInteractive(agent *AgentLoop) {
 			agent.InjectNotifications(notifications)
 		}
 
-		// If user typed input while agent was running, process it directly
-		// without showing the ">" prompt (matching Claude Code's queue behavior)
-		var userInput string
-		if queuedInput != "" {
-			userInput = queuedInput
-			queuedInput = ""
-		} else {
-			fmt.Print("\n> ")
+		fmt.Print("\n> ")
 
-			// Wait for either user input or Ctrl+C signal.
-			var line string
-			var isEOF bool
-			select {
-			case <-ctrlCh:
-				// Ctrl+C while waiting for input at the ">" prompt.
-				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
-				continue
-			case r := <-inputCh:
-				line = r.line
-				isEOF = r.err == io.EOF
-				if r.err != nil && !isEOF {
-					// Read error (not EOF) -- try to recover
-					if interactive {
-						stdinReader = bufio.NewReader(os.Stdin)
-						go readStdin(stdinReader)
-						continue
-					}
-					break loop
+		// Wait for either user input or Ctrl+C signal.
+		// On Windows, Ctrl+C produces BOTH a SIGINT and may close stdin
+		// (EOF). The select picks whichever arrives first. To correctly
+		// detect Ctrl+C-triggered EOF, we check the lastCtrlC timestamp
+		// (set atomically by the signal handler) instead of ctrlCh.
+		var line string
+		var isEOF bool
+		select {
+		case <-ctrlCh:
+			// Ctrl+C while waiting for input at the ">" prompt.
+			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
+			continue
+		case r := <-inputCh:
+			line = r.line
+			isEOF = r.err == io.EOF
+			if r.err != nil && !isEOF {
+				// Read error (not EOF) -- try to recover
+				if interactive {
+					stdinReader = bufio.NewReader(os.Stdin)
+					go readStdin(stdinReader)
+					continue
 				}
-				if isEOF && strings.TrimSpace(line) == "" {
-					// On Windows, Ctrl+C closes stdin (producing EOF)
-					// at the same time as SIGINT. The signal handler goroutine
-					// may not have processed SIGINT yet, so lastCtrlC might
-					// still be 0. Wait briefly for either the ctrlCh signal
-					// or the lastCtrlC update, then decide.
-					select {
-					case <-ctrlCh:
-						// SIGINT confirmed -- reopen stdin and continue
+				break loop
+			}
+			if isEOF && strings.TrimSpace(line) == "" {
+				// On Windows, Ctrl+C closes stdin (producing EOF)
+				// at the same time as SIGINT. The signal handler goroutine
+				// may not have processed SIGINT yet, so lastCtrlC might
+				// still be 0. Wait briefly for either the ctrlCh signal
+				// or the lastCtrlC update, then decide.
+				select {
+				case <-ctrlCh:
+					// SIGINT confirmed -- reopen stdin and continue
+					fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
+					stdinReader = bufio.NewReader(os.Stdin)
+					go readStdin(stdinReader)
+					continue
+				case <-time.After(200 * time.Millisecond):
+					// No ctrlCh signal -- check lastCtrlC one more time
+					// (handler may have run but ctrlCh was already consumed)
+					prev := lastCtrlC.Load()
+					if prev != 0 && time.Since(time.Unix(0, prev)) < 2*time.Second {
 						fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
 						stdinReader = bufio.NewReader(os.Stdin)
 						go readStdin(stdinReader)
 						continue
-					case <-time.After(200 * time.Millisecond):
-						// No ctrlCh signal -- check lastCtrlC one more time
-						// (handler may have run but ctrlCh was already consumed)
-						prev := lastCtrlC.Load()
-						if prev != 0 && time.Since(time.Unix(0, prev)) < 2*time.Second {
-							fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
-							stdinReader = bufio.NewReader(os.Stdin)
-							go readStdin(stdinReader)
-							continue
-						}
-						// True EOF (piped input closed, Ctrl+D)
-						break loop
 					}
-				}
-				// Got real input -- drain any stale Ctrl+C so it doesn't
-				// fire on the next iteration and confuse the REPL.
-				select {
-				case <-ctrlCh:
-				default:
-				}
-			}
-
-			userInput = strings.TrimSpace(line)
-			if userInput == "" {
-				if !interactive {
+					// True EOF (piped input closed, Ctrl+D)
 					break loop
 				}
-				continue
 			}
+			// Got real input -- drain any stale Ctrl+C so it doesn't
+			// fire on the next iteration and confuse the REPL.
+			select {
+			case <-ctrlCh:
+			default:
+			}
+		}
+
+		userInput := strings.TrimSpace(line)
+		if userInput == "" {
+			if !interactive {
+				break loop
+			}
+			continue
 		}
 
 		// Check for exact command match -- only treat as command if the first
@@ -463,92 +455,27 @@ func runInteractive(agent *AgentLoop) {
 				}
 			}
 		}
-		// Use RunStep for non-blocking REPL between turns.
-		// Each step executes one LLM turn so the REPL can stay responsive
-		// to Ctrl+C, sub-agent notifications, and queued input between steps.
-		agent.ResetForNewRun(userInput)
+		fmt.Println()
+		agent.SetInterrupted(false) // ensure clear before running
+		result := agent.Run(userInput)
+		agent.SetInterrupted(false) // clear after run
 
-		var finalText string
-
-	stepLoop:
-		for {
-			// Drain any sub-agent notifications that arrived between steps
-			if notifications := agent.DrainNotifications(); len(notifications) > 0 {
-				fmt.Println("\n--- Sub-agent notifications ---")
-				for _, n := range notifications {
-					fmt.Println(n)
-				}
-				fmt.Println("------------------------------")
-				agent.InjectNotifications(notifications)
-			}
-
-			// Run one agent turn in a goroutine so we stay responsive.
-			// Always send on stepCh when the goroutine finishes (both done and not-done).
-			type stepResult struct {
-				done      bool
-				finalText string
-				err       error
-			}
-			stepCh := make(chan stepResult, 1)
-			go func() {
-				done, text, err := agent.RunStep()
-				stepCh <- stepResult{done: done, finalText: text, err: err}
-			}()
-
-			// Wait for step result while staying responsive to Ctrl+C and user input
-			var stepRes stepResult
-		waitForStep:
-			for {
-				select {
-				case <-ctrlCh:
-					// Ctrl+C while step is running
-					agent.SetInterrupted(true)
-					// Wait for step to finish (non-interruptible)
-					stepRes = <-stepCh
-					agent.SetInterrupted(false)
-					// Check for double Ctrl+C
-					select {
-					case <-ctrlCh:
-						printResumeHint(agent)
-						agent.Close()
-						os.Exit(0)
-					case <-time.After(2 * time.Second):
-					}
-					// Step interrupted -- restart stdin reader and continue REPL
-					stdinReader = bufio.NewReader(os.Stdin)
-					inputCh = make(chan readResult, 1)
-					go readStdin(stdinReader)
-					break stepLoop
-				case r := <-inputCh:
-					// User typed while step was running -- queue for next iteration
-					line := strings.TrimSpace(r.line)
-					if line != "" {
-						queuedInput = line
-					}
-					// Restart stdin reader for next read
-					stdinReader = bufio.NewReader(os.Stdin)
-					inputCh = make(chan readResult, 1)
-					go readStdin(stdinReader)
-					// Keep waiting for step completion
-				case stepRes = <-stepCh:
-					// Step completed
-					break waitForStep
-				}
-			}
-
-			if stepRes.done {
-				if stepRes.err != nil && stepRes.finalText == "" {
-					fmt.Printf("\n[ERR] %v\n", stepRes.err)
-				}
-				finalText = stepRes.finalText
-				break stepLoop
-			}
-			// done=false: more turns needed. Loop continues to next step.
+		// Drain any stale Ctrl+C signal from the channel. When the user
+		// presses Ctrl+C to interrupt the agent, the signal handler sends
+		// to ctrlCh. The agent detects IsInterrupted() and returns, but the
+		// ctrlCh message is unconsumed. If we don't drain it, the next REPL
+		// loop will pick it up and print an extraneous "[WARN] Interrupting...".
+		select {
+		case <-ctrlCh:
+		default:
 		}
 
-		agent.SetInterrupted(false)
+		// In streaming mode, TerminalHandler displays output on stderr.
+		// When stdout is a terminal, skip printing to avoid duplication.
+		// When stdout is piped (not a terminal), always print so the
+		// result is available on stdout for programmatic consumption.
 		if !agent.IsStreaming() || !stdoutIsTerm {
-			fmt.Println(finalText)
+			fmt.Println(result)
 		}
 		fmt.Println()
 	}
