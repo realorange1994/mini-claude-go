@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -237,6 +239,7 @@ type subAgentResult struct {
 // SpawnSubAgent creates and runs a child AgentLoop with isolated context.
 // This is the callback wired to AgentTool.SpawnFunc.
 func (a *AgentLoop) SpawnSubAgent(
+	description string,
 	prompt string,
 	subagentType string,
 	model string,
@@ -293,19 +296,55 @@ func (a *AgentLoop) SpawnSubAgent(
 			}
 		}
 
+		// Create task in the new AgentTaskStore (with output capture)
+		var bgTask *tools.AgentTask
+		if a.agentTaskStore != nil {
+			bgTask = a.agentTaskStore.CreateWithID(taskID, description, subagentType, prompt, model)
+			bgTask.CancelFunc = asyncCancel
+		}
+
 		// Launch background goroutine with independent cancellation
 		go func() {
 			defer a.activeSubAgents.Add(-1)
 			defer asyncCancel() // ensure context is released when done
 
+			// Suppress terminal output for background agent by redirecting
+			// stdout/stderr to a pipe. A reader goroutine continuously drains
+			// the pipe to avoid blocking on buffer full.
+			oldStdout := os.Stdout
+			oldStderr := os.Stderr
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+			os.Stderr = w
+			var captured bytes.Buffer
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				io.Copy(&captured, r)
+			}()
+
 			if a.taskStore != nil {
 				a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
 			}
 
+			if bgTask != nil {
+					bgTask.SetStatus(tools.TaskRunning)
+			}
+
 			childLoop, err := a.createChildAgentLoop(childCfg, childRegistry)
 			if err != nil {
+				// Restore stdout/stderr before reporting error
+				w.Close()
+				<-done
+				r.Close()
+				os.Stdout = oldStdout
+				os.Stderr = oldStderr
+
 				if a.taskStore != nil {
 					a.taskStore.FailTask(taskID, fmt.Sprintf("failed to create: %v", err))
+				}
+				if bgTask != nil {
+					bgTask.SetStatus(tools.TaskFailed)
 				}
 				a.EnqueueAgentNotification(taskID, "failed", "", "", 0, 0)
 				return
@@ -317,6 +356,9 @@ func (a *AgentLoop) SpawnSubAgent(
 				if task := a.taskStore.GetTask(taskID); task != nil {
 					task.SetTranscriptPath(childLoop.TranscriptPath())
 				}
+			}
+			if bgTask != nil {
+				bgTask.SetTranscriptPath(childLoop.TranscriptPath())
 			}
 
 			// Wire async cancellation context into child loop
@@ -337,9 +379,27 @@ func (a *AgentLoop) SpawnSubAgent(
 
 			childResult := childLoop.Run(prompt)
 
+			// Restore stdout/stderr before reading captured output
+			w.Close()
+			<-done // wait for reader goroutine to finish
+			r.Close()
+			os.Stdout = oldStdout
+			os.Stderr = oldStderr
+
+			// Capture the pipe's output into the task's buffer
+			if bgTask != nil {
+				bgTask.WriteOutput(captured.String())
+			}
+
 			// If Run returned empty, try to recover partial results from conversation context
 			if childResult == "" {
 				childResult = childLoop.getPartialResult()
+			}
+
+			// Capture final result into the task's output buffer
+			if bgTask != nil {
+				bgTask.WriteOutput(childResult)
+					bgTask.SetToolsInfo(int(childLoop.budget.consumed.Load()), time.Since(start).Milliseconds())
 			}
 
 			turnsUsed := int(childLoop.budget.consumed.Load())
@@ -347,6 +407,9 @@ func (a *AgentLoop) SpawnSubAgent(
 
 			if a.taskStore != nil {
 				a.taskStore.CompleteTask(taskID, childResult, turnsUsed, dur)
+			}
+			if bgTask != nil {
+					bgTask.SetStatus(tools.TaskCompleted)
 			}
 			a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), turnsUsed, dur)
 		}()
@@ -791,23 +854,45 @@ func (a *AgentLoop) getPartialResult() string {
 // CancelSubAgent cancels a running sub-agent by agent ID.
 // It calls the cancel function stored in the task state and marks the task as killed.
 func (a *AgentLoop) CancelSubAgent(agentID string) {
-	if a.taskStore == nil {
+	if a.taskStore == nil && a.agentTaskStore == nil {
 		return
 	}
-	task := a.taskStore.GetTask(agentID)
-	if task == nil || task.IsTerminal() {
-		return
+
+	// Kill in the new AgentTaskStore
+	if a.agentTaskStore != nil {
+		a.agentTaskStore.Kill(agentID)
 	}
-	if task.CancelFunc != nil {
-		task.CancelFunc()
+
+	// Also kill in the legacy TaskStore for backward compatibility
+	if a.taskStore != nil {
+		task := a.taskStore.GetTask(agentID)
+		if task == nil || task.IsTerminal() {
+			return
+		}
+		if task.CancelFunc != nil {
+			task.CancelFunc()
+		}
+		a.taskStore.UpdateStatus(agentID, TaskStatusKilled)
 	}
-	a.taskStore.UpdateStatus(agentID, TaskStatusKilled)
 }
 
 // StopBackgroundTask forcibly stops a running background task (async sub-agent or bash task).
 // It kills the OS process if one is tracked, or cancels the context for async agents,
 // then marks the task as killed. Returns an error if the task is not found or not running.
 func (a *AgentLoop) StopBackgroundTask(taskID string) error {
+	// Try the new AgentTaskStore first
+	if a.agentTaskStore != nil {
+		task := a.agentTaskStore.Get(taskID)
+		if task != nil {
+			if task.IsTerminal() {
+				return fmt.Errorf("task %s is not running (status: %s)", taskID, task.Status)
+			}
+			a.agentTaskStore.Kill(taskID)
+			return nil
+		}
+	}
+
+	// Fall back to legacy TaskStore for bash background tasks
 	if a.taskStore == nil {
 		return fmt.Errorf("task store not available")
 	}

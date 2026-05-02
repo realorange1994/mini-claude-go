@@ -111,6 +111,17 @@ func (a *AgentLoop) registerBashBgTool() {
 	}
 }
 
+// registerAgentManagementTools registers the agent_list, agent_get, and agent_kill
+// tools wired to the agentTaskStore.
+func (a *AgentLoop) registerAgentManagementTools() {
+	if a.agentTaskStore == nil {
+		return
+	}
+	a.registry.Register(&tools.AgentListTool{Store: a.agentTaskStore})
+	a.registry.Register(&tools.AgentGetTool{Store: a.agentTaskStore})
+	a.registry.Register(&tools.AgentKillTool{Store: a.agentTaskStore})
+}
+
 // registerWorkTaskTools registers the TaskCreate/List/Get/Update tools
 // wired to this loop's WorkTaskStore.
 func (a *AgentLoop) registerWorkTaskTools() {
@@ -240,7 +251,8 @@ type AgentLoop struct {
 	rateLimitState  RateLimitState // rate limit headers from API responses
 	prevTurnTokens  int            // tracks token count from previous turn for reactive compact
 	activeSubAgents atomic.Int32   // count of currently running sub-agents
-	taskStore       *TaskStore     // tracks all sub-agent tasks
+	taskStore       *TaskStore     // tracks all sub-agent tasks (bash + sub-agents)
+	agentTaskStore  *tools.AgentTaskStore // tracks background agent tasks (with output capture)
 	notificationChan chan string   // buffered channel for async task notifications
 	evictionDone    chan struct{}  // signals the eviction ticker goroutine to stop
 	agentNameRegistry map[string]string // maps short agent names to task IDs
@@ -314,6 +326,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
 		taskStore:       NewTaskStore(),
+		agentTaskStore:  tools.NewAgentTaskStore(),
 		notificationChan: make(chan string, 10),
 		evictionDone:    make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
@@ -369,6 +382,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent.registerTaskStopTool()
 	agent.registerWorkTaskTools()
 	agent.registerBashBgTool()
+	agent.registerAgentManagementTools()
 
 	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
 	if tst, ok := agent.registry.Get("tool_search"); ok {
@@ -497,6 +511,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	agent.registerTaskStopTool()
 	agent.registerWorkTaskTools()
 	agent.registerBashBgTool()
+	agent.registerAgentManagementTools()
 
 	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
 	if tst, ok := agent.registry.Get("tool_search"); ok {

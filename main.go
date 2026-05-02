@@ -362,7 +362,7 @@ func runInteractive(agent *AgentLoop) {
 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
-				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact"
+				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents"
 
 			if !isKnownCmd {
 				// Not a recognized command -- treat as normal prompt
@@ -402,6 +402,7 @@ func runInteractive(agent *AgentLoop) {
 					fmt.Println("  /resume         -- Resume a previous session")
 					fmt.Println("  /tools          -- List available tools")
 					fmt.Println("  /quit           -- Exit")
+						fmt.Println("  /agents         -- Manage background agents")
 					continue
 				case "/compact":
 					agent.ForceCompact()
@@ -447,6 +448,9 @@ func runInteractive(agent *AgentLoop) {
 						// List available transcripts
 						listTranscripts()
 					}
+					continue
+				case "/agents":
+					handleAgentsCommand(agent, parts[1:])
 					continue
 				}
 			}
@@ -592,4 +596,144 @@ func loadTranscriptList() ([]transcriptEntry, error) {
 		return files[j].mod.Before(files[i].mod)
 	})
 	return files, nil
+}
+
+// handleAgentsCommand handles the /agents slash command.
+// Supports:
+//
+//	/agents          - List all agents
+//	/agents list     - Same as above
+//	/agents show <id> - Show details of a specific agent
+//	/agents stop <id> - Kill a running agent
+//	/agents help     - Show usage
+func handleAgentsCommand(agent *AgentLoop, args []string) {
+	if agent.agentTaskStore == nil {
+		fmt.Println("No agent task store available.")
+		return
+	}
+
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+
+	subcmd := strings.ToLower(args[0])
+
+	switch subcmd {
+	case "list", "":
+		tasks := agent.agentTaskStore.List()
+		if len(tasks) == 0 {
+			fmt.Println("No agents found.")
+			return
+		}
+		fmt.Println()
+		fmt.Println("Background Agents:")
+		fmt.Printf("  %-10s %-12s %-30s %-15s %s\n", "ID", "Status", "Description", "Model", "Started")
+		fmt.Println("  " + strings.Repeat("-", 80))
+		for _, t := range tasks {
+			desc := t.Description
+			if len(desc) > 28 {
+				desc = desc[:25] + "..."
+			}
+			model := t.Model
+			if model == "" {
+				model = "-"
+			}
+			fmt.Printf("  %-10s %-12s %-30s %-15s %s\n",
+				t.ID, t.Status, desc, model,
+				t.StartTime.Format("15:04:05"))
+		}
+		fmt.Printf("\n  %d agent(s) total\n", len(tasks))
+
+	case "show":
+		if len(args) < 2 {
+			fmt.Println("Usage: /agents show <id>")
+			return
+		}
+		taskID := args[1]
+		task := agent.agentTaskStore.Get(taskID)
+		if task == nil {
+			fmt.Printf("Agent %s not found.\n", taskID)
+			return
+		}
+		fmt.Printf("\nAgent: %s\n", task.ID)
+		fmt.Printf("  Status:        %s\n", task.Status)
+		fmt.Printf("  Type:          %s\n", task.Type)
+		fmt.Printf("  Description:   %s\n", task.Description)
+		fmt.Printf("  SubagentType:  %s\n", task.SubagentType)
+		fmt.Printf("  Model:         %s\n", task.Model)
+		fmt.Printf("  Prompt:        %s\n", truncateString(task.Prompt, 100))
+		fmt.Printf("  Started:       %s\n", task.StartTime.Format(time.RFC3339))
+		if !task.EndTime.IsZero() {
+			fmt.Printf("  Ended:         %s\n", task.EndTime.Format(time.RFC3339))
+			fmt.Printf("  Duration:      %s\n", task.EndTime.Sub(task.StartTime).Round(time.Second))
+		}
+		if task.ToolsUsed > 0 {
+			fmt.Printf("  Tools Used:    %d\n", task.ToolsUsed)
+		}
+		if task.DurationMs > 0 {
+			fmt.Printf("  Duration (ms): %d\n", task.DurationMs)
+		}
+		if task.TranscriptPath != "" {
+			fmt.Printf("  Transcript:    %s\n", task.TranscriptPath)
+		}
+		// Show output
+		output := task.GetOutput()
+		if output != "" {
+			lines := strings.Split(output, "\n")
+			maxLines := 50
+			if len(lines) > maxLines {
+				skipped := len(lines) - maxLines
+				fmt.Printf("\n  Output (last %d of %d lines):\n", maxLines, len(lines))
+				fmt.Printf("  ... (%d earlier lines omitted) ...\n", skipped)
+				lines = lines[len(lines)-maxLines:]
+			} else {
+				fmt.Printf("\n  Output (%d lines):\n", len(lines))
+			}
+			for _, line := range lines {
+				fmt.Println("  " + line)
+			}
+		} else {
+			fmt.Println("\n  Output: (none yet)")
+		}
+
+	case "stop":
+		if len(args) < 2 {
+			fmt.Println("Usage: /agents stop <id>")
+			return
+		}
+		taskID := args[1]
+		task := agent.agentTaskStore.Get(taskID)
+		if task == nil {
+			fmt.Printf("Agent %s not found.\n", taskID)
+			return
+		}
+		if task.IsTerminal() {
+			fmt.Printf("Agent %s is not running (status: %s)\n", taskID, task.Status)
+			return
+		}
+		if agent.agentTaskStore.Kill(taskID) {
+			fmt.Printf("Agent %s has been killed.\n", taskID)
+		} else {
+			fmt.Printf("Failed to kill agent %s.\n", taskID)
+		}
+
+	case "help":
+		fmt.Println("Agents commands:")
+		fmt.Println("  /agents           -- List all background agents")
+		fmt.Println("  /agents show <id> -- Show details and output of an agent")
+		fmt.Println("  /agents stop <id> -- Kill a running agent")
+		fmt.Println("  /agents help      -- Show this help")
+
+	default:
+		fmt.Printf("Unknown /agents subcommand: %s\n", subcmd)
+		fmt.Println("Use /agents help for usage information.")
+	}
+}
+
+// truncateString truncates a string to maxLen characters, adding "..." if truncated.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
