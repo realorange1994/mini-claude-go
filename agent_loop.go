@@ -261,6 +261,7 @@ type AgentLoop struct {
 	cancelFunc     context.CancelFunc // cancel function for async sub-agents
 	workTaskStore  *WorkTaskStore    // tracks LLM work items (TODO list)
 	agentOutput    io.Writer         // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
+	drainPendingMessagesFunc func() []string // called at turn boundaries to drain pending messages from parent task store
 }
 
 // out writes formatted output to the agent's configured output writer.
@@ -912,6 +913,30 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		a.executeToolCallsConcurrent(toolCalls)
+
+		// Between-turn drain: inject sub-agent completion notifications
+		// into the conversation context (matching Claude Code's query.ts
+		// between-turn drain pattern). This ensures the LLM sees
+		// completed sub-agent results at the next tool-round boundary.
+		if notifications := a.DrainNotifications(); len(notifications) > 0 {
+			a.InjectNotifications(notifications)
+		}
+
+		// Between-turn drain: inject pending messages from parent agent
+		// (e.g., messages sent via send_message tool). These are drained
+		// at tool-round boundaries so the sub-agent can process them
+		// without interrupting in-flight tool calls.
+		if a.drainPendingMessagesFunc != nil {
+			if pendingMsgs := a.drainPendingMessagesFunc(); len(pendingMsgs) > 0 {
+				var sb strings.Builder
+				sb.WriteString("[System: The parent agent sent the following messages while you were working]\n\n")
+				for _, msg := range pendingMsgs {
+					sb.WriteString(msg)
+					sb.WriteString("\n\n")
+				}
+				a.context.AddUserMessage(sb.String())
+			}
+		}
 
 		// Check for interrupt after tool execution
 		if a.IsInterrupted() {

@@ -9,6 +9,7 @@ import (
 // It returns (agentID, result, errorText, toolsUsed, durationMs).
 // The agentID is always generated and returned first, even for async launches.
 type AgentSpawnFunc func(
+	description string,
 	prompt string,
 	subagentType string,
 	model string,
@@ -114,12 +115,10 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	// Always disallow recursive agent spawning
 	disallowedTools = append(disallowedTools, "agent")
 
-	_ = description // logged by parent via transcript
-
 	if runInBackground {
 		// Async path: SpawnFunc launches the goroutine internally and returns the agentID
 		agentID, _, _, _, _ := t.SpawnFunc(
-			prompt, subagentType, model, true,
+			description, prompt, subagentType, model, true,
 			allowedTools, disallowedTools, inheritContext, nil,
 		)
 		return ToolResultOK(fmt.Sprintf(
@@ -133,7 +132,7 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 
 	// Sync path: block until complete
 	agentID, result, errText, toolsUsed, durationMs := t.SpawnFunc(
-		prompt, subagentType, model, false,
+		description, prompt, subagentType, model, false,
 		allowedTools, disallowedTools, inheritContext, nil,
 	)
 

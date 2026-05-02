@@ -361,3 +361,71 @@ func findSubstring(s, substr string) int {
 	}
 	return -1
 }
+
+func TestAgentTaskPendingMessages(t *testing.T) {
+	ts := NewAgentTaskStore()
+	task := ts.Create("test", "", "prompt", "")
+	ts.Start(task.ID, func() {})
+
+	// Add pending messages
+	task.AddPendingMessage("hello from parent")
+	task.AddPendingMessage("another message")
+
+	// Drain returns all messages and clears the queue
+	msgs := task.DrainPendingMessages()
+	if len(msgs) != 2 {
+		t.Errorf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0] != "hello from parent" {
+		t.Errorf("expected first message 'hello from parent', got %s", msgs[0])
+	}
+	if msgs[1] != "another message" {
+		t.Errorf("expected second message 'another message', got %s", msgs[1])
+	}
+
+	// Second drain returns empty
+	msgs2 := task.DrainPendingMessages()
+	if len(msgs2) != 0 {
+		t.Errorf("expected 0 messages after drain, got %d", len(msgs2))
+	}
+}
+
+func TestAgentTaskStoreAddPendingMessage(t *testing.T) {
+	ts := NewAgentTaskStore()
+	task := ts.Create("test", "", "", "")
+	ts.Start(task.ID, func() {})
+
+	// Add via store (checks running status)
+	if !ts.AddPendingMessage(task.ID, "msg1") {
+		t.Error("AddPendingMessage should return true for running task")
+	}
+	if !ts.AddPendingMessage(task.ID, "msg2") {
+		t.Error("AddPendingMessage should return true for running task")
+	}
+
+	// Drain via store
+	msgs := ts.DrainPendingMessages(task.ID)
+	if len(msgs) != 2 {
+		t.Errorf("expected 2 messages, got %d", len(msgs))
+	}
+}
+
+func TestAgentTaskStoreAddPendingMessageNotRunning(t *testing.T) {
+	ts := NewAgentTaskStore()
+	task := ts.Create("test", "", "", "")
+	// Task is still pending, not running
+	if ts.AddPendingMessage(task.ID, "msg1") {
+		t.Error("AddPendingMessage should return false for non-running task")
+	}
+}
+
+func TestAgentTaskStoreAddPendingMessageNonexistent(t *testing.T) {
+	ts := NewAgentTaskStore()
+	if ts.AddPendingMessage("bogus", "msg1") {
+		t.Error("AddPendingMessage should return false for nonexistent task")
+	}
+	msgs := ts.DrainPendingMessages("bogus")
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages for nonexistent task, got %d", len(msgs))
+	}
+}

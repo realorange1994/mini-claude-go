@@ -402,7 +402,7 @@ func runInteractive(agent *AgentLoop) {
 					fmt.Println("  /resume         -- Resume a previous session")
 					fmt.Println("  /tools          -- List available tools")
 					fmt.Println("  /quit           -- Exit")
-						fmt.Println("  /agents         -- Manage background agents")
+					fmt.Println("  /agents         -- Manage background agents")
 					continue
 				case "/compact":
 					agent.ForceCompact()

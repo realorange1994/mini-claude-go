@@ -33,23 +33,24 @@ func (s TaskStatus) IsTerminal() bool {
 
 // AgentTask tracks the state of a background sub-agent.
 type AgentTask struct {
-	mu             sync.Mutex
-	ID             string
-	Type           string // "local_agent"
-	Description    string
-	Status         TaskStatus
-	SubagentType   string
-	Model          string
-	Prompt         string
-	Output         strings.Builder // captured output, NOT printed to terminal
-	StartTime      time.Time
-	EndTime        time.Time
-	CancelFunc     context.CancelFunc // for kill
-	ParentID       string
-	Notified       bool
-	TranscriptPath string
-	ToolsUsed      int
-	DurationMs     int64
+	mu              sync.Mutex
+	ID              string
+	Type            string // "local_agent"
+	Description     string
+	Status          TaskStatus
+	SubagentType    string
+	Model           string
+	Prompt          string
+	Output          strings.Builder // captured output, NOT printed to terminal
+	StartTime       time.Time
+	EndTime         time.Time
+	CancelFunc      context.CancelFunc // for kill
+	ParentID        string
+	Notified        bool
+	TranscriptPath  string
+	ToolsUsed       int
+	DurationMs      int64
+	PendingMessages []string // queued by send_message, drained at turn boundaries
 }
 
 // WriteOutput appends text to the task's output buffer, enforcing a size cap.
@@ -102,6 +103,27 @@ func (t *AgentTask) GetOutput() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.Output.String()
+}
+
+// AddPendingMessage queues a message for the sub-agent to process at its next turn boundary.
+// This implements the main-agent → sub-agent messaging channel.
+func (t *AgentTask) AddPendingMessage(msg string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.PendingMessages = append(t.PendingMessages, msg)
+}
+
+// DrainPendingMessages returns and clears all pending messages for the sub-agent.
+// Called at tool-round boundaries so the sub-agent can process messages mid-turn.
+func (t *AgentTask) DrainPendingMessages() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.PendingMessages) == 0 {
+		return nil
+	}
+	msgs := t.PendingMessages
+	t.PendingMessages = nil
+	return msgs
 }
 
 // IsTerminal returns true if the task is in a terminal (non-running) state.
@@ -312,6 +334,31 @@ func (ts *AgentTaskStore) Count() int {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	return len(ts.tasks)
+}
+
+// AddPendingMessage queues a message for a specific sub-agent.
+// Returns false if the task was not found or is not running.
+func (ts *AgentTaskStore) AddPendingMessage(id string, msg string) bool {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	if task, ok := ts.tasks[id]; ok {
+		if task.Status == TaskRunning {
+			task.AddPendingMessage(msg)
+			return true
+		}
+	}
+	return false
+}
+
+// DrainPendingMessages returns and clears all pending messages for a specific sub-agent.
+// Returns nil if the task was not found.
+func (ts *AgentTaskStore) DrainPendingMessages(id string) []string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	if task, ok := ts.tasks[id]; ok {
+		return task.DrainPendingMessages()
+	}
+	return nil
 }
 
 // generateAgentTaskID creates a short hex ID (8 chars) for readability.

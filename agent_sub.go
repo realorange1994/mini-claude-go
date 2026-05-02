@@ -350,6 +350,16 @@ func (a *AgentLoop) SpawnSubAgent(
 			childLoop.cancelCtx = asyncCtx
 			childLoop.cancelFunc = asyncCancel
 
+			// Wire pending message drain: the child loop will drain pending
+			// messages from its own AgentTask at each turn boundary, enabling
+			// the parent to send messages via the send_message tool that the
+			// child processes mid-turn (matching Claude Code's drainPendingMessages).
+			if bgTask != nil {
+				childLoop.drainPendingMessagesFunc = func() []string {
+					return bgTask.DrainPendingMessages()
+				}
+			}
+
 			childLoop.context.SetSystemPrompt(childSysPrompt)
 
 			// Apply fork mode with cloned entries (filtered same as sync path)
@@ -723,6 +733,21 @@ func (a *AgentLoop) cloneContextForFork(childLoop *AgentLoop) {
 
 // SendMessageToSubAgent sends a message to a running sub-agent or returns its status.
 func (a *AgentLoop) SendMessageToSubAgent(agentID string, message string) (string, string) {
+	// Try the new AgentTaskStore first
+	if a.agentTaskStore != nil {
+		if task := a.agentTaskStore.Get(agentID); task != nil {
+			if task.IsTerminal() {
+				return fmt.Sprintf("Agent %s has completed.\nStatus: %s\nResult: %s",
+					agentID, task.Status, task.GetOutput()), ""
+			}
+			if message != "" {
+				task.AddPendingMessage(message)
+				return fmt.Sprintf("Message queued for agent %s", agentID), ""
+			}
+			return fmt.Sprintf("Agent %s is still running.\nStatus: %s", agentID, task.Status), ""
+		}
+	}
+	// Fall back to legacy TaskStore
 	if a.taskStore != nil {
 		if task := a.taskStore.GetTask(agentID); task != nil {
 			if task.IsTerminal() {
@@ -741,6 +766,14 @@ func (a *AgentLoop) SendMessageToSubAgent(agentID string, message string) (strin
 
 // GetSubAgentStatus returns the status of a sub-agent task.
 func (a *AgentLoop) GetSubAgentStatus(agentID string) string {
+	// Try the new AgentTaskStore first
+	if a.agentTaskStore != nil {
+		if task := a.agentTaskStore.Get(agentID); task != nil {
+			return fmt.Sprintf("Agent: %s\nStatus: %s\nStarted: %s\nTools used: %d",
+				task.ID, task.Status, task.StartTime.Format(time.RFC3339), task.ToolsUsed)
+		}
+	}
+	// Fall back to legacy TaskStore
 	if a.taskStore != nil {
 		if task := a.taskStore.GetTask(agentID); task != nil {
 			return fmt.Sprintf("Agent: %s\nStatus: %d\nStarted: %s\nTools used: %d",
@@ -754,6 +787,35 @@ func (a *AgentLoop) GetSubAgentStatus(agentID string) string {
 // blocking until the task completes. This is the callback wired to TaskOutputTool.
 // For bash background tasks (with OutputFile), it reads output from the disk file.
 func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.Duration) (string, string) {
+	// Try the new AgentTaskStore first
+	if a.agentTaskStore != nil {
+		if task := a.agentTaskStore.Get(agentID); task != nil {
+			if task.IsTerminal() {
+				result := fmt.Sprintf("Agent: %s\nStatus: %s\nOutput:\n%s", task.ID, task.Status, task.GetOutput())
+				if tp := task.GetTranscriptPath(); tp != "" {
+					result += fmt.Sprintf("\nTranscriptPath: %s", tp)
+				}
+				return result, ""
+			}
+			if block {
+				deadline := time.Now().Add(timeout)
+				for time.Now().Before(deadline) {
+					time.Sleep(500 * time.Millisecond)
+					if task.IsTerminal() {
+						result := fmt.Sprintf("Agent: %s\nStatus: %s\nOutput:\n%s", task.ID, task.Status, task.GetOutput())
+						if tp := task.GetTranscriptPath(); tp != "" {
+							result += fmt.Sprintf("\nTranscriptPath: %s", tp)
+						}
+						return result, ""
+					}
+				}
+				return fmt.Sprintf("Agent: %s\nStatus: %s (still running after timeout)", task.ID, task.Status), ""
+			}
+			return fmt.Sprintf("Agent: %s\nStatus: %s (still running)", task.ID, task.Status), ""
+		}
+	}
+
+	// Fall back to legacy TaskStore for bash background tasks
 	if a.taskStore == nil {
 		return "", "task store not available"
 	}
