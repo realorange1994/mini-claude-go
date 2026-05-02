@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -259,6 +260,18 @@ type AgentLoop struct {
 	cancelCtx      context.Context   // cancellable context for async sub-agents
 	cancelFunc     context.CancelFunc // cancel function for async sub-agents
 	workTaskStore  *WorkTaskStore    // tracks LLM work items (TODO list)
+	agentOutput    io.Writer         // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
+}
+
+// out writes formatted output to the agent's configured output writer.
+// For foreground agents this goes to os.Stderr; for background agents it goes to the task buffer.
+// This avoids process-level stdout/stderr redirection which would block the main REPL.
+func (a *AgentLoop) out(format string, args ...interface{}) {
+	w := a.agentOutput
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, format, args...)
 }
 
 // newHTTPClient creates an HTTP client with sensible timeouts to prevent
@@ -331,6 +344,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		evictionDone:    make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
 		workTaskStore:     NewWorkTaskStore(),
+		agentOutput:       os.Stderr,
 	}
 	// Fix gate to point to agent's config (not the local cfg copy)
 	agent.gate = NewPermissionGate(&agent.config)
@@ -698,7 +712,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 	} else if len(expanded.Warnings) > 0 {
 		// Log warnings even if blocked
 		for _, w := range expanded.Warnings {
-			fmt.Fprintf(os.Stderr, "[WARN] %s\n", w)
+			a.out( "[WARN] %s\n", w)
 		}
 	}
 
@@ -732,7 +746,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 	for a.budget.Consume() {
 		// Check for interrupt at the start of each turn
 		if a.IsInterrupted() {
-			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupted by user.\n")
+			a.out( "\n[WARN] Interrupted by user.\n")
 			a.SetInterrupted(false) // reset for next request
 			return finalText
 		}
@@ -747,7 +761,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				threshold = 5000
 			}
 			if result := CheckReactiveCompact(currentTokens, a.prevTurnTokens, threshold); result != nil {
-				fmt.Fprintf(os.Stderr, "\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
+				a.out( "\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
 					a.prevTurnTokens, currentTokens, result.TokenDelta, threshold)
 				a.tryCompaction()
 			}
@@ -778,26 +792,26 @@ func (a *AgentLoop) Run(userMessage string) string {
 			errMsg := err.Error()
 			// User interrupt -- return immediately
 			if strings.Contains(errMsg, "interrupted by user") {
-				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupted.\n")
+				a.out( "\n[WARN] Interrupted.\n")
 				return finalText
 			}
 			// Model confusion -- echoed tool syntax as text; recover by retrying
 			if strings.Contains(errMsg, "model confused") {
-				fmt.Fprintf(os.Stderr, "\n[WARN] Model confused, retrying...\n")
+				a.out( "\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
 				a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
 				continue
 			}
 			// 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
 			if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-				fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013), repairing context...\n")
+				a.out( "\n[WARN] Tool pairing error (2013), repairing context...\n")
 				a.context.ValidateToolPairing()
 				a.context.FixRoleAlternation()
 				continue
 			}
 			// Truncated tool arguments -- model cut off mid-tool-call
 			if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
-				fmt.Fprintf(os.Stderr, "\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
+				a.out( "\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
 				a.context.AddUserMessage("ERROR: Your tool call arguments was cut off due to length limits. Do NOT repeat the truncated tool call. If you need to make multiple tool calls, make them one at a time with shorter arguments.")
 				continue
 			}
@@ -805,17 +819,17 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if strings.Contains(errMsg, "stream stalled") {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
-					fmt.Fprintf(os.Stderr, "\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
+					a.out( "\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
 				if contextErrors <= 1 {
-					fmt.Fprintf(os.Stderr, "\n[WARN] Stream stalled, truncating history (phase 1/3)...\n")
+					a.out( "\n[WARN] Stream stalled, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
-					fmt.Fprintf(os.Stderr, "\n[WARN] Stream still stalled, aggressive truncation (phase 2/3)...\n")
+					a.out( "\n[WARN] Stream still stalled, aggressive truncation (phase 2/3)...\n")
 					a.context.AggressiveTruncateHistory()
 				} else {
-					fmt.Fprintf(os.Stderr, "\n[WARN] Stream still stalled, dropping to minimum (phase 3/3)...\n")
+					a.out( "\n[WARN] Stream still stalled, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
 				continue
@@ -823,18 +837,18 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if isContextLengthError(errMsg) {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
-					fmt.Fprintf(os.Stderr, "\n[ERR] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
+					a.out( "\n[ERR] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
 
 				if contextErrors <= 1 {
-					fmt.Fprintf(os.Stderr, "\n[WARN] Context length exceeded, truncating history (phase 1/3)...\n")
+					a.out( "\n[WARN] Context length exceeded, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
-					fmt.Fprintf(os.Stderr, "\n[WARN] Context still full, aggressive truncation (phase 2/3)...\n")
+					a.out( "\n[WARN] Context still full, aggressive truncation (phase 2/3)...\n")
 					a.context.AggressiveTruncateHistory()
 				} else {
-					fmt.Fprintf(os.Stderr, "\n[WARN] Context still full, dropping to minimum (phase 3/3)...\n")
+					a.out( "\n[WARN] Context still full, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
 				continue
@@ -856,10 +870,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 				// No text and no tool calls -- thinking-only response
 				consecutiveEmptyResponses++
 				if consecutiveEmptyResponses >= maxEmptyResponses {
-					fmt.Fprintf(os.Stderr, "\n[ERR] No actionable response after %d attempts, giving up\n", maxEmptyResponses)
+					a.out( "\n[ERR] No actionable response after %d attempts, giving up\n", maxEmptyResponses)
 					return fmt.Sprintf("Model returned no actionable response %d times in a row", maxEmptyResponses)
 				}
-				fmt.Fprintf(os.Stderr, "\n[WARN] No text/tool_use in response (attempt %d/%d), continuing...\n",
+				a.out( "\n[WARN] No text/tool_use in response (attempt %d/%d), continuing...\n",
 					consecutiveEmptyResponses, maxEmptyResponses)
 				// Inject hint to encourage actual output
 				a.context.AddUserMessage("Please continue and provide your response in text or use a tool.")
@@ -901,7 +915,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		// Check for interrupt after tool execution
 		if a.IsInterrupted() {
-			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupted by user.\n")
+			a.out( "\n[WARN] Interrupted by user.\n")
 			a.SetInterrupted(false)
 			return finalText
 		}
@@ -912,7 +926,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// to get a conclusive answer (like Claude Code's max_turns handling).
 	// Tools are removed in this call to force a text-only response.
 	if finalText == "" && a.budget.GraceCall() {
-		fmt.Fprintf(os.Stderr, "\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
+		a.out( "\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
 		a.context.AddUserMessage("You have reached the maximum number of tool use turns. Please provide a final summary based on the work done so far. Do NOT call any more tools.")
 		// Call WITHOUT tools to force text-only response
 		toolCallsGrace, textPartsGrace, err := a.callWithNonStreamingNoTools()
@@ -1103,7 +1117,7 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 
 		// 2013 error: tool pairing broken -- repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013), repairing context...\n")
+			a.out( "\n[WARN] Tool pairing error (2013), repairing context...\n")
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
 			// Rebuild messages from repaired entries so the fix takes effect
@@ -1174,7 +1188,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 				// Use rate limit header delay if it's reasonable (not >3x backoff)
 				delay = rlim
 			}
-			fmt.Fprintf(os.Stderr, "\n[WARN] Retrying stream (attempt %d/%d), waiting %v...\n",
+			a.out( "\n[WARN] Retrying stream (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxStreamRetries+1, delay)
 			time.Sleep(delay)
 		}
@@ -1208,7 +1222,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 		// Transient error (network, timeout, 5xx): decide retry strategy
 		if isTransientError(errMsg) {
-			fmt.Fprintf(os.Stderr, "\n[WARN] Transient error during stream: %v\n", err)
+			a.out( "\n[WARN] Transient error during stream: %v\n", err)
 			// Clear accumulated state before retry -- the API will send
 			// a completely new response with new tool IDs on reconnect,
 			// so old collected data would have mismatched IDs.
@@ -1220,24 +1234,24 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 				continue
 			case DeltasStateToolInFlight:
 				// Tool call started but incomplete -- cleared above, retry
-				fmt.Fprintf(os.Stderr, "  [!] Connection dropped mid-tool-call; reconnecting...\n")
+				a.out( "  [!] Connection dropped mid-tool-call; reconnecting...\n")
 				continue
 			case DeltasStateTextOnly:
 				// Text already streamed to user -- can't retry without duplication,
 				// but we have what was collected so far. Fall back to non-streaming
 				// for a complete fresh response (matching Hermes outer retry pattern).
-				fmt.Fprintf(os.Stderr, "  [!] Stream interrupted after text output, falling back to non-streaming...\n")
+				a.out( "  [!] Stream interrupted after text output, falling back to non-streaming...\n")
 				return a.callWithNonStreamingFallback(params)
 			}
 		}
 
 		// Non-transient error during stream -> try non-streaming fallback
-		fmt.Fprintf(os.Stderr, "\n[WARN] Stream failed (%v), falling back to non-streaming...\n", err)
+		a.out( "\n[WARN] Stream failed (%v), falling back to non-streaming...\n", err)
 		return a.callWithNonStreamingFallback(params)
 	}
 
 	// All stream retries exhausted -> try non-streaming fallback
-	fmt.Fprintf(os.Stderr, "\n[WARN] Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
+	a.out( "\n[WARN] Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
 	return a.callWithNonStreamingFallback(params)
 }
 
@@ -1254,7 +1268,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 			return err
 		}
 		if collect.IsToolUseAsText() {
-			fmt.Fprint(os.Stderr, "\n[WARN] Model confused, aborting stream...\n")
+			a.out( "\n[WARN] Model confused, aborting stream...\n")
 			cancel()
 			return fmt.Errorf("model confused: echoed tool syntax as text")
 		}
@@ -1288,7 +1302,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	a.lastDeltasState = adapter.DeltasState()
 
 	if collect.IsToolUseAsText() {
-		fmt.Fprintf(os.Stderr, "\n[WARN] Model echoed tool syntax as text -- recovering\n")
+		a.out( "\n[WARN] Model echoed tool syntax as text -- recovering\n")
 		collect.Text = ""
 	}
 
@@ -1298,7 +1312,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		for _, tc := range collect.ToolCalls {
 			names = append(names, tc.Name)
 		}
-		fmt.Fprintf(os.Stderr, "\n[WARN] Tool arguments truncated: %v\n", names)
+		a.out( "\n[WARN] Tool arguments truncated: %v\n", names)
 		return nil, nil, fmt.Errorf("tool arguments were truncated (incomplete JSON)")
 	}
 
@@ -1358,7 +1372,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := jitteredBackoff(attempt)
-			fmt.Fprintf(os.Stderr, "\n[WARN] Retrying final call (attempt %d/%d), waiting %v...\n",
+			a.out( "\n[WARN] Retrying final call (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
 			time.Sleep(delay)
 		}
@@ -1403,7 +1417,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			if rlim := a.rateLimitState.RetryDelay(); rlim > 0 && rlim < delay*3 {
 				delay = rlim
 			}
-			fmt.Fprintf(os.Stderr, "\n[WARN] Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
+			a.out( "\n[WARN] Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
 			time.Sleep(delay)
 		}
@@ -1428,7 +1442,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 		// 2013 error: tool pairing broken -- repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-			fmt.Fprintf(os.Stderr, "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
+			a.out( "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
 			// Rebuild messages from repaired entries so the fix takes effect
@@ -1447,7 +1461,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 		// Transient error: retry
 		if isTransientError(errMsg) {
-			fmt.Fprintf(os.Stderr, "\n[WARN] Transient error during non-streaming: %v\n", err)
+			a.out( "\n[WARN] Transient error during non-streaming: %v\n", err)
 			continue
 		}
 
@@ -1512,7 +1526,7 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 		if len(preview) > 120 {
 			preview = preview[:120] + "..."
 		}
-		fmt.Fprintf(os.Stderr, "\n[THINK] %s\n", preview)
+		a.out( "\n[THINK] %s\n", preview)
 	}
 
 	return toolCalls, textParts
@@ -1528,9 +1542,9 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 		inputPreview := formatToolArgs(toolName, input)
 
 		if toolName == "exec" {
-			fmt.Fprintf(os.Stderr, "  [%s]: %s\n", toolName, inputPreview)
+			a.out( "  [%s]: %s\n", toolName, inputPreview)
 		} else {
-			fmt.Fprintf(os.Stderr, "  [%s] %s\n", toolName, inputPreview)
+			a.out( "  [%s] %s\n", toolName, inputPreview)
 		}
 	}
 
@@ -1834,19 +1848,19 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	// Display timing to stderr
 	if cancelled {
-		fmt.Fprintf(os.Stderr, "  [TIMEOUT] timed out after %v\n", timeout)
+		a.out( "  [TIMEOUT] timed out after %v\n", timeout)
 	} else if result.IsError {
 		preview := limitStr(output, 150)
-		fmt.Fprintf(os.Stderr, "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
+		a.out( "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
 	} else {
 		preview := toolResultPreview(toolName, output)
 		if toolName == "exec" {
 			// For exec, show result with tool name prefix
-			fmt.Fprintf(os.Stderr, "  [+] %s: %s\n", toolName, preview)
+			a.out( "  [+] %s: %s\n", toolName, preview)
 		} else if preview == "" {
-			fmt.Fprintf(os.Stderr, "  [+] %s\n", toolName)
+			a.out( "  [+] %s\n", toolName)
 		} else {
-			fmt.Fprintf(os.Stderr, "  [+] %s: %s\n", toolName, preview)
+			a.out( "  [+] %s: %s\n", toolName, preview)
 		}
 	}
 
@@ -2047,7 +2061,7 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 
 		if filesRecovered > 0 {
-			fmt.Fprintf(os.Stderr, "[post-compact] Recovered %d files (%d chars)\n", filesRecovered, totalChars)
+			a.out( "[post-compact] Recovered %d files (%d chars)\n", filesRecovered, totalChars)
 		}
 	}
 
@@ -2087,7 +2101,7 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 
 		if skillsRecovered > 0 {
-			fmt.Fprintf(os.Stderr, "[post-compact] Recovered %d skills (%d chars)\n", skillsRecovered, totalChars)
+			a.out( "[post-compact] Recovered %d skills (%d chars)\n", skillsRecovered, totalChars)
 		}
 	}
 
@@ -2106,7 +2120,7 @@ func (a *AgentLoop) tryCompaction() {
 		}
 		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder)
 		if cleared > 0 {
-			fmt.Fprintf(os.Stderr, "\n[micro-compact] Cleared %d old tool results\n", cleared)
+			a.out( "\n[micro-compact] Cleared %d old tool results\n", cleared)
 		}
 	}
 
@@ -2165,7 +2179,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
 	summaryContent := fmt.Sprintf("%s\n\n%s", boundaryText, sessionMemoryContent)
 
-	fmt.Fprintf(os.Stderr, "\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
+	a.out( "\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
 		preTokens, EstimateTokens(summaryContent)+6)
 
 	// Inject boundary + summary into context

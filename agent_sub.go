@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -308,20 +307,6 @@ func (a *AgentLoop) SpawnSubAgent(
 			defer a.activeSubAgents.Add(-1)
 			defer asyncCancel() // ensure context is released when done
 
-			// Suppress terminal output for background agent by redirecting
-			// stdout/stderr to a pipe. A reader goroutine continuously drains
-			// the pipe to avoid blocking on buffer full.
-			oldStdout := os.Stdout
-			oldStderr := os.Stderr
-			r, w, _ := os.Pipe()
-			os.Stdout = w
-			os.Stderr = w
-			var captured bytes.Buffer
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				io.Copy(&captured, r)
-			}()
 
 			if a.taskStore != nil {
 				a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
@@ -333,13 +318,6 @@ func (a *AgentLoop) SpawnSubAgent(
 
 			childLoop, err := a.createChildAgentLoop(childCfg, childRegistry)
 			if err != nil {
-				// Restore stdout/stderr before reporting error
-				w.Close()
-				<-done
-				r.Close()
-				os.Stdout = oldStdout
-				os.Stderr = oldStderr
-
 				if a.taskStore != nil {
 					a.taskStore.FailTask(taskID, fmt.Sprintf("failed to create: %v", err))
 				}
@@ -350,6 +328,13 @@ func (a *AgentLoop) SpawnSubAgent(
 				return
 			}
 			defer childLoop.Close()
+
+			// Set agentOutput for the created child loop (override with task buffer writer)
+			if bgTask != nil {
+				childLoop.agentOutput = &taskOutputWriter{task: bgTask}
+			} else {
+				childLoop.agentOutput = io.Discard
+			}
 
 			// Store the child's transcript path in the task state
 			if a.taskStore != nil {
@@ -378,18 +363,6 @@ func (a *AgentLoop) SpawnSubAgent(
 			}
 
 			childResult := childLoop.Run(prompt)
-
-			// Restore stdout/stderr before reading captured output
-			w.Close()
-			<-done // wait for reader goroutine to finish
-			r.Close()
-			os.Stdout = oldStdout
-			os.Stderr = oldStderr
-
-			// Capture the pipe's output into the task's buffer
-			if bgTask != nil {
-				bgTask.WriteOutput(captured.String())
-			}
 
 			// If Run returned empty, try to recover partial results from conversation context
 			if childResult == "" {
@@ -978,5 +951,17 @@ func extractAgentName(description string) string {
 		}
 	}
 	return name
+}
+
+// taskOutputWriter is an io.Writer that captures output into an AgentTask's
+// buffer. Used as the agentOutput writer for background sub-agents to avoid
+// process-level os.Stdout/os.Stderr redirection (which would block the main REPL).
+type taskOutputWriter struct {
+	task *tools.AgentTask
+}
+
+func (w *taskOutputWriter) Write(p []byte) (int, error) {
+	w.task.WriteOutput(string(p))
+	return len(p), nil
 }
 
