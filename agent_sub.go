@@ -519,6 +519,11 @@ func (a *AgentLoop) buildSubAgentConfig(model string) Config {
 	// (Matching Claude Code's shouldAvoidPermissionPrompts: true for getAppState)
 	childCfg.ShouldAvoidPermissionPrompts = true
 
+	// Sub-agents use a lower max_tokens cap (8000), matching Claude Code's
+	// CAPPED_DEFAULT_MAX_TOKENS. If the output hits this ceiling, the agent
+	// automatically escalates to EscalatedMaxOutputTokens (64000).
+	childCfg.MaxOutputTokens = 8000
+
 	return childCfg
 }
 

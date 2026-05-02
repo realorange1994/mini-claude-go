@@ -69,6 +69,14 @@ type Config struct {
 	// normally trigger an interactive permission prompt to be auto-denied
 	// instead. Sub-agents set this to true so they never block on user input.
 	ShouldAvoidPermissionPrompts bool
+	// MaxOutputTokens controls the max_tokens parameter sent to the API.
+	// Default: 16384 (main agent), 8000 (sub-agents matching Claude's CAPPED_DEFAULT_MAX_TOKENS).
+	// When a response hits the max_tokens ceiling, the agent automatically
+	// escalates to EscalatedMaxOutputTokens (64000) for the next request.
+	MaxOutputTokens int
+	// EscalatedMaxOutputTokens is the fallback max_tokens used when the
+	// default cap is hit (matching Claude's ESCALATED_MAX_TOKENS = 64,000).
+	EscalatedMaxOutputTokens int
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -288,6 +296,8 @@ func DefaultConfig() Config {
 		AutoClassifierEnabled:   true,
 		AutoClassifierMaxTokens: 128,
 		AutoDenialLimit:         3,
+		MaxOutputTokens:         16384,
+		EscalatedMaxOutputTokens: 64000,
 	}
 }
 

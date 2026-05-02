@@ -254,6 +254,7 @@ type AgentLoop struct {
 	activeSubAgents atomic.Int32   // count of currently running sub-agents
 	taskStore       *TaskStore     // tracks all sub-agent tasks (bash + sub-agents)
 	agentTaskStore  *tools.AgentTaskStore // tracks background agent tasks (with output capture)
+	currentMaxTokens atomic.Int64  // effective max_tokens for API calls (escates on max_tokens hit)
 	notificationChan chan string   // buffered channel for async task notifications
 	evictionDone    chan struct{}  // signals the eviction ticker goroutine to stop
 	agentNameRegistry map[string]string // maps short agent names to task IDs
@@ -347,6 +348,8 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		workTaskStore:     NewWorkTaskStore(),
 		agentOutput:       os.Stderr,
 	}
+	// Initialize currentMaxTokens from config
+	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 	// Fix gate to point to agent's config (not the local cfg copy)
 	agent.gate = NewPermissionGate(&agent.config)
 
@@ -480,6 +483,9 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		agentNameRegistry:  make(map[string]string),
 		workTaskStore:      NewWorkTaskStore(),
 	}
+
+	// Initialize currentMaxTokens from config
+	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 
 	// Fix gate to point to agent's config
 	agent.gate = NewPermissionGate(&agent.config)
@@ -1104,7 +1110,7 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
-		MaxTokens: 16384,
+		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
 		System: []anthropic.TextBlockParam{
 			{Text: a.context.SystemPrompt()},
@@ -1189,7 +1195,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
-		MaxTokens: 16384,
+		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
 		System: []anthropic.TextBlockParam{
 			{Text: a.context.SystemPrompt()},
@@ -1344,6 +1350,13 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	// Pass finish_reason to collect for downstream access
 	if fr := adapter.FinishReason(); fr != "" {
 		collect.SetFinishReason(fr)
+		// If the model hit the max_tokens ceiling, escalate for the next request.
+		// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
+		if fr == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
+			prev := a.currentMaxTokens.Load()
+			a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
+			a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+		}
 	}
 
 	toolCalls, textParts := collect.AsParsedResponse()
@@ -1363,7 +1376,7 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	messages = NormalizeAPIMessages(messages)   // KV cache reuse
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
-		MaxTokens: 16384,
+		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
 		System: []anthropic.TextBlockParam{
 			{Text: a.context.SystemPrompt()},
@@ -1386,7 +1399,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 	messages = NormalizeAPIMessages(messages)
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
-		MaxTokens: 16384,
+		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
 		System: []anthropic.TextBlockParam{
 			{Text: a.context.SystemPrompt()},
@@ -1407,7 +1420,14 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		cancel()
 
 		if err == nil {
-			toolCalls, textParts := a.parseResponse(response)
+			toolCalls, textParts, stopReason := a.parseResponse(response)
+			// If the model hit the max_tokens ceiling, escalate for the next request.
+			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
+			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
+				prev := a.currentMaxTokens.Load()
+				a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
+				a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+			}
 			return toolCalls, textParts, nil
 		}
 
@@ -1452,7 +1472,14 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		cancel()
 
 		if err == nil {
-			toolCalls, textParts := a.parseResponse(response)
+			toolCalls, textParts, stopReason := a.parseResponse(response)
+			// If the model hit the max_tokens ceiling, escalate for the next request.
+			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
+			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
+				prev := a.currentMaxTokens.Load()
+				a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
+				a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+			}
 			return toolCalls, textParts, nil
 		}
 
@@ -1515,7 +1542,7 @@ func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
 	return toolParams
 }
 
-func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any, []string) {
+func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any, []string, string) {
 	var toolCalls []map[string]any
 	var textParts []string
 	var thinking string
@@ -1554,7 +1581,9 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 		a.out( "\n[THINK] %s\n", preview)
 	}
 
-	return toolCalls, textParts
+	// Capture stop_reason for max_tokens escalation
+	stopReason := string(response.StopReason)
+	return toolCalls, textParts, stopReason
 }
 
 func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
