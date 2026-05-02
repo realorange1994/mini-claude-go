@@ -113,6 +113,17 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 
 	count := strings.Count(contentNorm, oldStrNorm)
 	if count == 0 {
+		// Try desanitized version (matching official: reverse sanitized tokens like <fnr> -> <function_results>)
+		desanitizedOld := desanitize(oldStrNorm)
+		if desanitizedOld != oldStrNorm {
+			count = strings.Count(contentNorm, desanitizedOld)
+			if count > 0 {
+				oldStrNorm = desanitizedOld
+				newStrNorm = desanitize(newStrNorm)
+			}
+		}
+	}
+	if count == 0 {
 		return ToolResult{Output: fmt.Sprintf("Error: old_text not found in %s. Verify the file content.", pathStr), IsError: true}
 	}
 	if count > 1 && !replaceAll {
