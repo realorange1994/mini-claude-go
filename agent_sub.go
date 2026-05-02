@@ -533,8 +533,6 @@ func (a *AgentLoop) SpawnSubAgent(
 	return taskID, result, "", turnsUsed, durationMs
 }
 
-}
-
 // buildSubAgentConfig creates a Config for the child agent by copying the parent's config
 // and overriding child-specific fields.
 func (a *AgentLoop) buildSubAgentConfig(model string) Config {
