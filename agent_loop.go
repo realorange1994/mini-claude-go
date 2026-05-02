@@ -186,7 +186,7 @@ func (a *AgentLoop) registerWorkTaskTools() {
 }
 
 // EnqueueAgentNotification pushes a formatted task notification XML to the notification channel.
-func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptPath string, toolsUsed int, durationMs int64) {
+func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptPath string, totalTokens, toolsUsed int, durationMs int64) {
 	notification := fmt.Sprintf(`<task-notification>
 <agentId>%s</agentId>
 <status>%s</status>
@@ -194,13 +194,32 @@ func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptP
 <output_file></output_file>
 <transcript_path>%s</transcript_path>
 <usage><total_tokens>%d</total_tokens><tool_uses>%d</tool_uses><duration_ms>%d</duration_ms></usage>
-</task-notification>`, taskID, status, result, transcriptPath, toolsUsed, toolsUsed, durationMs)
+</task-notification>`, taskID, status, result, transcriptPath, totalTokens, toolsUsed, durationMs)
 
 	select {
 	case a.notificationChan <- notification:
 	default:
 		// Channel is full, drop the notification
 	}
+}
+
+// accumulateUsage adds the usage from a single LLM turn to the accumulated total.
+func (a *AgentLoop) accumulateUsage(usage *Usage) {
+	if usage == nil {
+		return
+	}
+	a.accumulatedUsage.InputTokens += usage.InputTokens
+	a.accumulatedUsage.OutputTokens += usage.OutputTokens
+	a.accumulatedUsage.CacheReadInputTokens += usage.CacheReadInputTokens
+	a.accumulatedUsage.CacheCreationInputTokens += usage.CacheCreationInputTokens
+}
+
+// TotalTokens returns the total token count across all turns (input + output + cache).
+func (a *AgentLoop) TotalTokens() int {
+	return a.accumulatedUsage.InputTokens +
+		a.accumulatedUsage.OutputTokens +
+		a.accumulatedUsage.CacheReadInputTokens +
+		a.accumulatedUsage.CacheCreationInputTokens
 }
 
 // DrainNotifications returns all pending notifications and clears the channel.
@@ -262,6 +281,7 @@ type AgentLoop struct {
 	workTaskStore  *WorkTaskStore    // tracks LLM work items (TODO list)
 	agentOutput    io.Writer         // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
 	drainPendingMessagesFunc func() []string // called at turn boundaries to drain pending messages from parent task store
+	accumulatedUsage Usage           // accumulates token usage across all LLM turns
 }
 
 // out writes formatted output to the agent's configured output writer.
@@ -479,6 +499,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		evictionDone:       make(chan struct{}),
 		agentNameRegistry:  make(map[string]string),
 		workTaskStore:      NewWorkTaskStore(),
+		agentOutput:        os.Stderr,
 	}
 
 	// Fix gate to point to agent's config
@@ -692,28 +713,26 @@ func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration)
 	return ctx, cancel
 }
 
-// Run processes a user message through the agent loop, returning the final text response.
-func (a *AgentLoop) Run(userMessage string) string {
-	// Clear any stale interrupted flag from previous run
+// ResetForNewRun resets agent state for a fresh user message.
+// Handles @ expansion, adds the user message to context, and resets turn budget.
+func (a *AgentLoop) ResetForNewRun(userMessage string) {
 	a.SetInterrupted(false)
-
-	// Reset the turn budget so each new conversation starts fresh
 	a.budget = NewIterationBudget(a.maxTurns)
-	a.lastDeltasState = DeltasStateNone // reset streaming state
+	a.lastDeltasState = DeltasStateNone
+	a.accumulatedUsage = Usage{}
+	a.prevTurnTokens = 0 // reset for preflight compression
 
-	// Expand @ context references (e.g., @file:main.go, @diff)
 	cwd, _ := os.Getwd()
 	contextWindow := modelContextWindow(a.config.Model)
 	if contextWindow < 1 {
 		contextWindow = 200_000
 	}
 	expanded := PreprocessContextReferences(userMessage, cwd, contextWindow)
-		if expanded.Expanded && !expanded.Blocked {
+	if expanded.Expanded && !expanded.Blocked {
 		userMessage = expanded.Message
 	} else if len(expanded.Warnings) > 0 {
-		// Log warnings even if blocked
 		for _, w := range expanded.Warnings {
-			a.out( "[WARN] %s\n", w)
+			a.out("[WARN] %s\n", w)
 		}
 	}
 
@@ -721,251 +740,199 @@ func (a *AgentLoop) Run(userMessage string) string {
 	if a.transcript != nil {
 		_ = a.transcript.WriteUser(userMessage)
 	}
-	var finalText string
+}
 
-	// Recovery state (mirrors ggbot's State machine)
-	contextErrors := 0
-	const maxContextRecovery = 3 // Phase 1: truncate, Phase 2: aggressive truncate, Phase 3: give up
+// RunStep executes one LLM turn. Returns (done, finalText, err):
+//   - done=true, finalText!="": model gave final text response (no tool calls)
+//   - done=true, finalText="": loop should exit (interrupted, budget exhausted)
+//   - done=false: more turns needed (tool calls were made)
+func (a *AgentLoop) RunStep() (done bool, finalText string, err error) {
+	// Check interrupt at turn start
+	if a.IsInterrupted() {
+		a.out("\n[WARN] Interrupted by user.\n")
+		a.SetInterrupted(false)
+		return true, "", nil
+	}
 
-	// Empty response tracking -- prevents infinite loops on thinking-only responses
-	consecutiveEmptyResponses := 0
-	const maxEmptyResponses = 3
-
-
-
-	// Preflight compression for resumed sessions
-	const preflightThreshold = 100000 // ~100k tokens
-	if a.context.EstimatedTokens() > preflightThreshold {
-		for i := 0; i < 3; i++ {
+	// Reactive compaction
+	if a.config.ReactiveCompactEnabled {
+		currentTokens := a.context.EstimatedTokens()
+		threshold := a.config.ReactiveCompactThreshold
+		if threshold <= 0 {
+			threshold = 5000
+		}
+		if result := CheckReactiveCompact(currentTokens, a.prevTurnTokens, threshold); result != nil {
+			a.out("\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
+				a.prevTurnTokens, currentTokens, result.TokenDelta, threshold)
 			a.tryCompaction()
-			if a.context.EstimatedTokens() <= preflightThreshold {
-				break
+		}
+		a.prevTurnTokens = a.context.EstimatedTokens()
+	}
+
+	// Rebuild system prompt each turn for skill discovery
+	if a.config.cachedPrompt != nil {
+		sysPrompt := a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.Model, a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
+		a.context.SetSystemPrompt(sysPrompt)
+	} else if a.config.SkillLoader != nil {
+		sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.Model, a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
+		a.context.SetSystemPrompt(sysPrompt)
+	}
+
+	// Preflight compression for resumed sessions (only on first turn of a run)
+	if a.prevTurnTokens == 0 {
+		const preflightThreshold = 100000
+		if a.context.EstimatedTokens() > preflightThreshold {
+			for i := 0; i < 3; i++ {
+				a.tryCompaction()
+				if a.context.EstimatedTokens() <= preflightThreshold {
+					break
+				}
 			}
 		}
 	}
 
-	for a.budget.Consume() {
-		// Check for interrupt at the start of each turn
-		if a.IsInterrupted() {
-			a.out( "\n[WARN] Interrupted by user.\n")
-			a.SetInterrupted(false) // reset for next request
-			return finalText
+	// Make LLM API call (streaming or non-streaming)
+	var toolCalls []map[string]any
+	var textParts []string
+	var callErr error
+
+	if a.useStream {
+		toolCalls, textParts, callErr = a.callWithRetryAndFallback()
+	} else {
+		toolCalls, textParts, callErr = a.callWithNonStreamingOnly()
+	}
+
+	if callErr != nil {
+		errMsg := callErr.Error()
+		if strings.Contains(errMsg, "interrupted by user") {
+			a.out("\n[WARN] Interrupted.\n")
+			return true, "", nil
 		}
-
-		// Reactive compaction: check for token spike before proceeding.
-		// If the token count has jumped significantly (e.g., large file read),
-		// proactively compact before the context becomes too large.
-		if a.config.ReactiveCompactEnabled {
-			currentTokens := a.context.EstimatedTokens()
-			threshold := a.config.ReactiveCompactThreshold
-			if threshold <= 0 {
-				threshold = 5000
-			}
-			if result := CheckReactiveCompact(currentTokens, a.prevTurnTokens, threshold); result != nil {
-				a.out( "\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
-					a.prevTurnTokens, currentTokens, result.TokenDelta, threshold)
-				a.tryCompaction()
-			}
-			// Update previous token count for next turn
-			a.prevTurnTokens = a.context.EstimatedTokens()
+		if strings.Contains(errMsg, "model confused") {
+			a.out("\n[WARN] Model confused, retrying...\n")
+			a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
+			return false, "", nil
 		}
-
-		// Rebuild system prompt each turn to update skill discovery
-		if a.config.cachedPrompt != nil {
-			sysPrompt := a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.Model, a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
-			a.context.SetSystemPrompt(sysPrompt)
-		} else if a.config.SkillLoader != nil {
-			sysPrompt := BuildSystemPrompt(a.registry, string(a.config.PermissionMode), "", a.config.Model, a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
-			a.context.SetSystemPrompt(sysPrompt)
+		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
+			a.out("\n[WARN] Tool pairing error (2013), repairing context...\n")
+			a.context.ValidateToolPairing()
+			a.context.FixRoleAlternation()
+			return false, "", nil
 		}
-
-		var toolCalls []map[string]any
-		var textParts []string
-		var err error
-
-		// Streaming vs non-streaming decision
-		if a.useStream {
-			toolCalls, textParts, err = a.callWithRetryAndFallback()
-		} else {
-			toolCalls, textParts, err = a.callWithNonStreamingOnly()
+		if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
+			a.out("\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
+			a.context.AddUserMessage("ERROR: Your tool call arguments was cut off due to length limits. Do NOT repeat the truncated tool call. If you need to make multiple tool calls, make them one at a time with shorter arguments.")
+			return false, "", nil
 		}
-		if err != nil {
-			errMsg := err.Error()
-			// User interrupt -- return immediately
-			if strings.Contains(errMsg, "interrupted by user") {
-				a.out( "\n[WARN] Interrupted.\n")
-				return finalText
-			}
-			// Model confusion -- echoed tool syntax as text; recover by retrying
-			if strings.Contains(errMsg, "model confused") {
-				a.out( "\n[WARN] Model confused, retrying...\n")
-				// Add a hint so the model doesn't repeat the same mistake
-				a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
-				continue
-			}
-			// 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
-			if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-				a.out( "\n[WARN] Tool pairing error (2013), repairing context...\n")
-				a.context.ValidateToolPairing()
-				a.context.FixRoleAlternation()
-				continue
-			}
-			// Truncated tool arguments -- model cut off mid-tool-call
-			if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
-				a.out( "\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
-				a.context.AddUserMessage("ERROR: Your tool call arguments was cut off due to length limits. Do NOT repeat the truncated tool call. If you need to make multiple tool calls, make them one at a time with shorter arguments.")
-				continue
-			}
-			// Stream stalled -- safety timeout fired; recover with truncation
-			if strings.Contains(errMsg, "stream stalled") {
-				contextErrors++
-				if contextErrors > maxContextRecovery {
-					a.out( "\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
-					return finalText
-				}
-				if contextErrors <= 1 {
-					a.out( "\n[WARN] Stream stalled, truncating history (phase 1/3)...\n")
-					a.context.TruncateHistory()
-				} else if contextErrors <= 2 {
-					a.out( "\n[WARN] Stream still stalled, aggressive truncation (phase 2/3)...\n")
-					a.context.AggressiveTruncateHistory()
-				} else {
-					a.out( "\n[WARN] Stream still stalled, dropping to minimum (phase 3/3)...\n")
-					a.context.MinimumHistory()
-				}
-				continue
-			}
-			if isContextLengthError(errMsg) {
-				contextErrors++
-				if contextErrors > maxContextRecovery {
-					a.out( "\n[ERR] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
-					return finalText
-				}
-
-				if contextErrors <= 1 {
-					a.out( "\n[WARN] Context length exceeded, truncating history (phase 1/3)...\n")
-					a.context.TruncateHistory()
-				} else if contextErrors <= 2 {
-					a.out( "\n[WARN] Context still full, aggressive truncation (phase 2/3)...\n")
-					a.context.AggressiveTruncateHistory()
-				} else {
-					a.out( "\n[WARN] Context still full, dropping to minimum (phase 3/3)...\n")
-					a.context.MinimumHistory()
-				}
-				continue
-			}
-			return fmt.Sprintf("API error: %v", err)
+		if strings.Contains(errMsg, "stream stalled") {
+			a.out("\n[WARN] Stream stalled, truncating history...\n")
+			a.context.TruncateHistory()
+			return false, "", nil
 		}
-
-		// Reset context error counter on successful API call
-		contextErrors = 0
-
-		if len(textParts) > 0 {
-			finalText = strings.Join(textParts, "\n")
+		if isContextLengthError(errMsg) {
+			a.out("\n[WARN] Context length exceeded, truncating history...\n")
+			a.context.TruncateHistory()
+			return false, "", nil
 		}
+		return true, "", callErr
+	}
 
-		if len(toolCalls) == 0 {
-			// No tool calls -- could be a thinking-only response (model uses extended
-			// thinking but hasn't produced text yet) or a genuine final answer.
-			if len(textParts) == 0 {
-				// No text and no tool calls -- thinking-only response
-				consecutiveEmptyResponses++
-				if consecutiveEmptyResponses >= maxEmptyResponses {
-					a.out( "\n[ERR] No actionable response after %d attempts, giving up\n", maxEmptyResponses)
-					return fmt.Sprintf("Model returned no actionable response %d times in a row", maxEmptyResponses)
-				}
-				a.out( "\n[WARN] No text/tool_use in response (attempt %d/%d), continuing...\n",
-					consecutiveEmptyResponses, maxEmptyResponses)
-				// Inject hint to encourage actual output
-				a.context.AddUserMessage("Please continue and provide your response in text or use a tool.")
-				continue
-			}
-			// Genuine final answer with text
-			consecutiveEmptyResponses = 0
-			// No tool calls -- model gave final answer.
-			// Like Claude Code's stop hooks: the loop could continue here
-			// with additional checks (token budget, quality check, etc.)
-			// but for now we simply exit.
-			a.context.AddAssistantText(finalText)
-			if a.transcript != nil {
-				_ = a.transcript.WriteAssistant(finalText, a.config.Model)
-			}
-			break
+	// Build final text
+	finalText = strings.Join(textParts, "\n")
+
+	if len(toolCalls) == 0 {
+		if finalText == "" {
+			a.out("\n[WARN] No text/tool_use in response, continuing...\n")
+			a.context.AddUserMessage("Please continue and provide your response in text or use a tool.")
+			return false, "", nil
 		}
+		// Final answer -- add to context and done
+		a.context.AddAssistantText(finalText)
+		if a.transcript != nil {
+			_ = a.transcript.WriteAssistant(finalText, a.config.Model)
+		}
+		return true, finalText, nil
+	}
 
-		// Reset empty response counter on successful tool call
-		consecutiveEmptyResponses = 0
+	// Tool calls -- add to context, execute, and continue
+	a.context.AddAssistantToolCalls(toolCalls)
 
-		a.context.AddAssistantToolCalls(toolCalls)
-
-		// Track read_skill usage for skill tracker
-		if a.skillTracker != nil {
-			for _, call := range toolCalls {
-				if name, _ := call["name"].(string); name == "read_skill" {
-					if input, ok := call["input"].(map[string]any); ok {
-						if skillName, _ := input["name"].(string); skillName != "" {
-							a.skillTracker.MarkRead(skillName)
-							a.skillTracker.MarkUsed(skillName)
-						}
+	// Track read_skill usage
+	if a.skillTracker != nil {
+		for _, call := range toolCalls {
+			if name, _ := call["name"].(string); name == "read_skill" {
+				if input, ok := call["input"].(map[string]any); ok {
+					if skillName, _ := input["name"].(string); skillName != "" {
+						a.skillTracker.MarkRead(skillName)
+						a.skillTracker.MarkUsed(skillName)
 					}
 				}
 			}
 		}
-
-		a.executeToolCallsConcurrent(toolCalls)
-
-		// Between-turn drain: inject sub-agent completion notifications
-		// into the conversation context (matching Claude Code's query.ts
-		// between-turn drain pattern). This ensures the LLM sees
-		// completed sub-agent results at the next tool-round boundary.
-		if notifications := a.DrainNotifications(); len(notifications) > 0 {
-			a.InjectNotifications(notifications)
-		}
-
-		// Between-turn drain: inject pending messages from parent agent
-		// (e.g., messages sent via send_message tool). These are drained
-		// at tool-round boundaries so the sub-agent can process them
-		// without interrupting in-flight tool calls.
-		if a.drainPendingMessagesFunc != nil {
-			if pendingMsgs := a.drainPendingMessagesFunc(); len(pendingMsgs) > 0 {
-				var sb strings.Builder
-				sb.WriteString("[System: The parent agent sent the following messages while you were working]\n\n")
-				for _, msg := range pendingMsgs {
-					sb.WriteString(msg)
-					sb.WriteString("\n\n")
-				}
-				a.context.AddUserMessage(sb.String())
-			}
-		}
-
-		// Check for interrupt after tool execution
-		if a.IsInterrupted() {
-			a.out( "\n[WARN] Interrupted by user.\n")
-			a.SetInterrupted(false)
-			return finalText
-		}
-
 	}
 
-	// If max turns reached without a final response, try one last non-streaming call
-	// to get a conclusive answer (like Claude Code's max_turns handling).
-	// Tools are removed in this call to force a text-only response.
+	a.executeToolCallsConcurrent(toolCalls)
+
+	// Between-turn: drain sub-agent notifications
+	if notifications := a.DrainNotifications(); len(notifications) > 0 {
+		a.InjectNotifications(notifications)
+	}
+
+	// Between-turn: drain pending messages from parent agent
+	if a.drainPendingMessagesFunc != nil {
+		if pendingMsgs := a.drainPendingMessagesFunc(); len(pendingMsgs) > 0 {
+			var sb strings.Builder
+			sb.WriteString("[System: The parent agent sent the following messages while you were working]\n\n")
+			for _, msg := range pendingMsgs {
+				sb.WriteString(msg)
+				sb.WriteString("\n\n")
+			}
+			a.context.AddUserMessage(sb.String())
+		}
+	}
+
+	// Check interrupt after tool execution
+	if a.IsInterrupted() {
+		a.out("\n[WARN] Interrupted by user.\n")
+		a.SetInterrupted(false)
+		return true, "", nil
+	}
+
+	return false, "", nil
+}
+
+// Run processes a user message through the agent loop, returning the final text response.
+func (a *AgentLoop) Run(userMessage string) string {
+	a.ResetForNewRun(userMessage)
+
+	var finalText string
+
+	for a.budget.Consume() {
+		done, text, err := a.RunStep()
+		if done {
+			if err != nil {
+				return fmt.Sprintf("API error: %v", err)
+			}
+			finalText = text
+			break
+		}
+	}
+
+	// Grace call if no final text and turns exhausted
 	if finalText == "" && a.budget.GraceCall() {
-		a.out( "\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
+		a.out("\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
 		a.context.AddUserMessage("You have reached the maximum number of tool use turns. Please provide a final summary based on the work done so far. Do NOT call any more tools.")
-		// Call WITHOUT tools to force text-only response
 		toolCallsGrace, textPartsGrace, err := a.callWithNonStreamingNoTools()
 		if err == nil && len(textPartsGrace) > 0 {
 			finalText = strings.Join(textPartsGrace, "\n")
 		}
-		_ = toolCallsGrace // ignore any tool calls in grace response (should be none)
+		_ = toolCallsGrace
 	}
 
 	if finalText == "" {
 		finalText = "(max turns reached without a final response)"
 	}
 
-	// Flush transcript after each turn
 	if a.transcript != nil {
 		_ = a.transcript.Flush()
 	}
@@ -1220,6 +1187,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 		toolCalls, textParts, err := a.tryStreamOnce(params, collect)
 		if err == nil {
+			a.accumulateUsage(collect.Usage)
 			return toolCalls, textParts, nil
 		}
 
@@ -1407,6 +1375,12 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		cancel()
 
 		if err == nil {
+			a.accumulateUsage(&Usage{
+				InputTokens:              int(response.Usage.InputTokens),
+				OutputTokens:             int(response.Usage.OutputTokens),
+				CacheReadInputTokens:     int(response.Usage.CacheReadInputTokens),
+				CacheCreationInputTokens: int(response.Usage.CacheCreationInputTokens),
+			})
 			toolCalls, textParts := a.parseResponse(response)
 			return toolCalls, textParts, nil
 		}
@@ -1452,6 +1426,12 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		cancel()
 
 		if err == nil {
+			a.accumulateUsage(&Usage{
+				InputTokens:              int(response.Usage.InputTokens),
+				OutputTokens:             int(response.Usage.OutputTokens),
+				CacheReadInputTokens:     int(response.Usage.CacheReadInputTokens),
+				CacheCreationInputTokens: int(response.Usage.CacheCreationInputTokens),
+			})
 			toolCalls, textParts := a.parseResponse(response)
 			return toolCalls, textParts, nil
 		}

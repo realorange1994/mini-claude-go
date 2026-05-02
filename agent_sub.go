@@ -247,7 +247,7 @@ func (a *AgentLoop) SpawnSubAgent(
 	disallowedTools []string,
 	inheritContext bool,
 	parentMessages []map[string]any,
-) (agentID string, result string, errText string, toolsUsed int, durationMs int64) {
+) (agentID string, result string, errText string, totalTokens int, toolsUsed int, durationMs int64) {
 	start := time.Now()
 
 	// Convert string subagentType to AgentType
@@ -324,7 +324,7 @@ func (a *AgentLoop) SpawnSubAgent(
 				if bgTask != nil {
 					bgTask.SetStatus(tools.TaskFailed)
 				}
-				a.EnqueueAgentNotification(taskID, "failed", "", "", 0, 0)
+				a.EnqueueAgentNotification(taskID, "failed", "", "", 0, 0, 0)
 				return
 			}
 			defer childLoop.Close()
@@ -387,6 +387,7 @@ func (a *AgentLoop) SpawnSubAgent(
 
 			turnsUsed := int(childLoop.budget.consumed.Load())
 			dur := time.Since(start).Milliseconds()
+			totalTokens := childLoop.TotalTokens()
 
 			if a.taskStore != nil {
 				a.taskStore.CompleteTask(taskID, childResult, turnsUsed, dur)
@@ -394,15 +395,28 @@ func (a *AgentLoop) SpawnSubAgent(
 			if bgTask != nil {
 					bgTask.SetStatus(tools.TaskCompleted)
 			}
-			a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), turnsUsed, dur)
+			a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), totalTokens, turnsUsed, dur)
 		}()
 
-		return taskID, fmt.Sprintf("Agent launched in background.\n\nagentId: %s\nStatus: async_launched", taskID), "", 0, time.Since(start).Milliseconds()
+		return taskID, fmt.Sprintf("Agent launched in background.\n\nagentId: %s\nStatus: async_launched", taskID), "", 0, 0, time.Since(start).Milliseconds()
 	}
 
-	// ─── Synchronous path ────────────────────────────────────────────────
+	// ─── Synchronous path (async execution with blocking wait) ─────────────
+	// Run the sub-agent in a goroutine so the REPL stays responsive,
+	// but block this tool call until the result is ready (via channel).
+	// This prevents the childLoop.Run() call from freezing the main REPL
+	// while it's waiting for API calls / tool execution to complete.
+
+	type syncSubAgentResult struct {
+		result     string
+		turnsUsed  int
+		durationMs int64
+		totalTokens int
+		errText    string
+	}
+	resultCh := make(chan syncSubAgentResult, 1)
+
 	a.activeSubAgents.Add(1)
-	defer a.activeSubAgents.Add(-1)
 
 	if a.taskStore != nil {
 		a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
@@ -410,12 +424,12 @@ func (a *AgentLoop) SpawnSubAgent(
 
 	childLoop, err := a.createChildAgentLoop(childCfg, childRegistry)
 	if err != nil {
+		a.activeSubAgents.Add(-1)
 		if a.taskStore != nil {
 			a.taskStore.FailTask(taskID, err.Error())
 		}
-		return taskID, "", fmt.Sprintf("failed to create sub-agent: %v", err), 0, time.Since(start).Milliseconds()
+		return taskID, "", fmt.Sprintf("failed to create sub-agent: %v", err), 0, 0, time.Since(start).Milliseconds()
 	}
-	defer childLoop.Close()
 
 	// Store the child's transcript path in the task state
 	if a.taskStore != nil {
@@ -430,21 +444,37 @@ func (a *AgentLoop) SpawnSubAgent(
 		a.cloneContextForFork(childLoop)
 	}
 
-	result = childLoop.Run(prompt)
+	go func() {
+		defer childLoop.Close()
+		defer a.activeSubAgents.Add(-1)
 
-	// If Run returned empty, try to recover partial results from conversation context
-	if result == "" {
-		result = childLoop.getPartialResult()
-	}
+		result = childLoop.Run(prompt)
 
-	turnsUsed := int(childLoop.budget.consumed.Load())
-	durationMs = time.Since(start).Milliseconds()
+		// If Run returned empty, try to recover partial results from conversation context
+		if result == "" {
+			result = childLoop.getPartialResult()
+		}
 
-	if a.taskStore != nil {
-		a.taskStore.CompleteTask(taskID, result, turnsUsed, durationMs)
-	}
+		turnsUsed := int(childLoop.budget.consumed.Load())
+		durationMs := time.Since(start).Milliseconds()
+		totalTokens := childLoop.TotalTokens()
 
-	return taskID, result, "", turnsUsed, durationMs
+		if a.taskStore != nil {
+			a.taskStore.CompleteTask(taskID, result, turnsUsed, durationMs)
+		}
+
+		resultCh <- syncSubAgentResult{
+			result:      result,
+			turnsUsed:   turnsUsed,
+			durationMs:  durationMs,
+			totalTokens: totalTokens,
+			errText:     "",
+		}
+	}()
+
+	// Wait for sub-agent to complete. The goroutine keeps the REPL responsive.
+	res := <-resultCh
+	return taskID, res.result, res.errText, res.totalTokens, res.turnsUsed, res.durationMs
 }
 
 // buildSubAgentConfig creates a Config for the child agent by copying the parent's config
@@ -655,6 +685,7 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry) (
 		toolTimeout:  a.toolTimeout,
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
+		agentOutput:  io.Discard, // default: discard output; background agents override with taskOutputWriter
 	}
 	child.gate = NewPermissionGate(&child.config)
 

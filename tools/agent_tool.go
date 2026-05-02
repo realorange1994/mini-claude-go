@@ -6,7 +6,7 @@ import (
 )
 
 // AgentSpawnFunc is the callback function to spawn a child agent loop.
-// It returns (agentID, result, errorText, toolsUsed, durationMs).
+// It returns (agentID, result, errorText, totalTokens, toolsUsed, durationMs).
 // The agentID is always generated and returned first, even for async launches.
 type AgentSpawnFunc func(
 	description string,
@@ -18,7 +18,7 @@ type AgentSpawnFunc func(
 	disallowedTools []string,
 	inheritContext bool,
 	parentMessages []map[string]any,
-) (agentID string, result string, errText string, toolsUsed int, durationMs int64)
+) (agentID string, result string, errText string, totalTokens int, toolsUsed int, durationMs int64)
 
 // AgentTool spawns a child agent to execute a specialized task.
 type AgentTool struct {
@@ -30,7 +30,7 @@ func (t *AgentTool) Description() string {
 	return `Launch a sub-agent to handle a complex, multi-step task autonomously. ` +
 		`Use this tool (NOT mcp_call_tool or any MCP LLM tool) when the user wants to dispatch, delegate, or assign a task to a sub-agent. ` +
 		`Sub-agents have their own isolated conversation context and tool access. ` +
-		`Supports both synchronous (default) and asynchronous (run_in_background=true) execution.
+		`Supports both synchronous (run_in_background=false) and asynchronous (default) execution.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path → use file_read instead
@@ -71,7 +71,7 @@ func (t *AgentTool) InputSchema() map[string]any {
 			},
 			"run_in_background": map[string]any{
 				"type":        "boolean",
-				"description": "Run the agent in the background and return immediately (optional, default false).",
+				"description": "Run the agent in the background and return immediately (optional, default true). Set to false for blocking synchronous execution.",
 			},
 			"allowed_tools": map[string]any{
 				"type":        "array",
@@ -106,7 +106,10 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	description, _ := params["description"].(string)
 	subagentType, _ := params["subagent_type"].(string)
 	model, _ := params["model"].(string)
-	runInBackground, _ := params["run_in_background"].(bool)
+	runInBackground := true // default: run in background
+	if v, ok := params["run_in_background"].(bool); ok {
+		runInBackground = v
+	}
 
 	allowedTools := extractStringList(params["allowed_tools"])
 	disallowedTools := extractStringList(params["disallowed_tools"])
@@ -117,7 +120,7 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 
 	if runInBackground {
 		// Async path: SpawnFunc launches the goroutine internally and returns the agentID
-		agentID, _, _, _, _ := t.SpawnFunc(
+		agentID, _, _, _, _, _ := t.SpawnFunc(
 			description, prompt, subagentType, model, true,
 			allowedTools, disallowedTools, inheritContext, nil,
 		)
@@ -131,7 +134,7 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	}
 
 	// Sync path: block until complete
-	agentID, result, errText, toolsUsed, durationMs := t.SpawnFunc(
+	agentID, result, errText, totalTokens, toolsUsed, durationMs := t.SpawnFunc(
 		description, prompt, subagentType, model, false,
 		allowedTools, disallowedTools, inheritContext, nil,
 	)
@@ -142,7 +145,7 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 
 	// Explore and plan agents return raw results without usage trailer
 	skipUsage := subagentType == "explore" || subagentType == "plan"
-	return ToolResultOK(formatAgentResult(result, agentID, subagentType, toolsUsed, durationMs, skipUsage))
+	return ToolResultOK(formatAgentResult(result, agentID, subagentType, totalTokens, toolsUsed, durationMs, skipUsage))
 }
 
 // extractStringList converts an interface{} (from JSON array) to []string.
@@ -166,7 +169,7 @@ func extractStringList(v any) []string {
 // formatAgentResult formats a sub-agent's output with usage metadata.
 // When skipUsage is true, only the result text is returned (used for explore/plan agents).
 // agentID and agentType are included in the output footer for traceability.
-func formatAgentResult(result string, agentID string, agentType string, toolsUsed int, durationMs int64, skipUsage bool) string {
+func formatAgentResult(result string, agentID string, agentType string, totalTokens int, toolsUsed int, durationMs int64, skipUsage bool) string {
 	if skipUsage {
 		return result
 	}
@@ -179,6 +182,6 @@ func formatAgentResult(result string, agentID string, agentType string, toolsUse
 	if agentType != "" {
 		sb.WriteString(fmt.Sprintf("agentType: %s\n", agentType))
 	}
-	sb.WriteString(fmt.Sprintf("<usage>tool_uses: %d\nduration_ms: %d</usage>", toolsUsed, durationMs))
+	sb.WriteString(fmt.Sprintf("<usage>total_tokens: %d\ntool_uses: %d\nduration_ms: %d</usage>", totalTokens, toolsUsed, durationMs))
 	return sb.String()
 }

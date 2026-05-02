@@ -42,8 +42,10 @@ type StreamChunk struct {
 
 // Usage holds token counts.
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
+	InputTokens              int
+	OutputTokens             int
+	CacheReadInputTokens     int
+	CacheCreationInputTokens int
 }
 
 // streamHandler is the callback signature for consuming chunks.
@@ -878,8 +880,10 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 				chunk := StreamChunk{
 					Type: ChunkTypeUsage,
 					Usage: &Usage{
-						InputTokens:  int(usage.InputTokens),
-						OutputTokens: int(usage.OutputTokens),
+						InputTokens:              int(usage.InputTokens),
+						OutputTokens:             int(usage.OutputTokens),
+						CacheReadInputTokens:     int(usage.CacheReadInputTokens),
+						CacheCreationInputTokens: int(usage.CacheCreationInputTokens),
 					},
 				}
 				_ = wrapped(chunk)
