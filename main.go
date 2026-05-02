@@ -28,9 +28,14 @@ func main() {
 	flag.Parse()
 
 	// Change working directory if --dir is specified
+	// Normalize the path: filepath.FromSlash converts forward slashes to backslashes
+	// on Windows (no-op on Unix), and filepath.Clean handles . and .. elements.
+	// This ensures --dir values like "E:/workspace/project" work on Windows,
+	// and guards against shell argument processing that may strip backslashes.
 	if *projectDir != "" {
-		if err := os.Chdir(*projectDir); err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Failed to change working directory to %s: %v\n", *projectDir, err)
+		normalizedDir := filepath.Clean(filepath.FromSlash(*projectDir))
+		if err := os.Chdir(normalizedDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Failed to change working directory to %s (original: %s): %v\n", normalizedDir, *projectDir, err)
 		}
 	}
 
