@@ -6,7 +6,8 @@ import (
 )
 
 // AgentSpawnFunc is the callback function to spawn a child agent loop.
-// It returns (agentID, result, errorText, toolsUsed, durationMs).
+// It returns (agentID, result, errText, outputFile, toolsUsed, durationMs).
+// For async launches, result/errText are empty and outputFile is the live output file path.
 // The agentID is always generated and returned first, even for async launches.
 type AgentSpawnFunc func(
 	description string,
@@ -18,7 +19,7 @@ type AgentSpawnFunc func(
 	disallowedTools []string,
 	inheritContext bool,
 	parentMessages []map[string]any,
-) (agentID string, result string, errText string, toolsUsed int, durationMs int64)
+) (agentID string, result string, errText string, outputFile string, toolsUsed int, durationMs int64)
 
 // AgentTool spawns a child agent to execute a specialized task.
 type AgentTool struct {
@@ -113,7 +114,6 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	description, _ := params["description"].(string)
 	subagentType, _ := params["subagent_type"].(string)
 	model, _ := params["model"].(string)
-	runInBackground, _ := params["run_in_background"].(bool)
 
 	allowedTools := extractStringList(params["allowed_tools"])
 	disallowedTools := extractStringList(params["disallowed_tools"])
@@ -122,38 +122,24 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	// Always disallow recursive agent spawning
 	disallowedTools = append(disallowedTools, "agent")
 
-	if runInBackground {
-		// Async path: SpawnFunc launches the goroutine internally and returns the agentID
-		agentID, _, _, _, _ := t.SpawnFunc(
-			description, prompt, subagentType, model, true,
-			allowedTools, disallowedTools, inheritContext, nil,
-		)
-		return ToolResultOK(fmt.Sprintf(
-			"Agent launched in background.\n\n"+
-				"agentId: %s\n"+
-				"Status: async_launched\n"+
-				"Description: %s\n\n"+
-				"The agent is working in the background. You will be notified automatically when it completes.\n"+
-				"Do NOT call task_output to wait for this agent — it will block your turn and prevent you from responding to the user.\n"+
-				"Do not duplicate this agent's work — avoid working with the same files or topics it is using.\n"+
-				"Briefly tell the user what you launched, then end your response. The notification will arrive in a separate turn.",
-			agentID, description,
-		))
-	}
-
-	// Sync path: block until complete
-	agentID, result, errText, toolsUsed, durationMs := t.SpawnFunc(
-		description, prompt, subagentType, model, false,
+	// Sub-agents always run in background — they must not block the main REPL.
+	// This matches Claude Code's behavior where all agent spawns are async.
+	agentID, _, _, outputFile, _, _ := t.SpawnFunc(
+		description, prompt, subagentType, model, true,
 		allowedTools, disallowedTools, inheritContext, nil,
 	)
-
-	if errText != "" {
-		return ToolResultError(errText)
-	}
-
-	// Explore and plan agents return raw results without usage trailer
-	skipUsage := subagentType == "explore" || subagentType == "plan"
-	return ToolResultOK(formatAgentResult(result, agentID, subagentType, toolsUsed, durationMs, skipUsage))
+	return ToolResultOK(fmt.Sprintf(
+		"Agent launched in background.\n\n"+
+			"agentId: %s\n"+
+			"Status: async_launched\n"+
+			"output_file: %s\n"+
+			"Description: %s\n\n"+
+			"The agent is working in the background. You will be notified automatically when it completes.\n"+
+			"Do NOT call task_output to wait for this agent — it will block your turn and prevent you from responding to the user.\n"+
+			"Do not duplicate this agent's work — avoid working with the same files or topics it is using.\n"+
+			"Briefly tell the user what you launched, then end your response. The notification will arrive in a separate turn.",
+		agentID, outputFile, description,
+	))
 }
 
 // extractStringList converts an interface{} (from JSON array) to []string.

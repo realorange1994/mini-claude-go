@@ -295,7 +295,7 @@ func (a *AgentLoop) SpawnSubAgent(
 	disallowedTools []string,
 	inheritContext bool,
 	parentMessages []map[string]any,
-) (agentID string, result string, errText string, toolsUsed int, durationMs int64) {
+) (agentID string, result string, errText string, outputFile string, toolsUsed int, durationMs int64) {
 	start := time.Now()
 
 	// Convert string subagentType to AgentType
@@ -325,212 +325,155 @@ func (a *AgentLoop) SpawnSubAgent(
 		}
 	}
 
-	if runInBackground {
-		a.activeSubAgents.Add(1)
-
-		// Capture parent context for fork mode
-		var parentEntries []conversationEntry
-		var parentSystemPrompt string
-		if inheritContext && a.context != nil {
-			a.context.mu.RLock()
-			parentEntries = make([]conversationEntry, len(a.context.entries))
-			copy(parentEntries, a.context.entries)
-			parentSystemPrompt = a.context.SystemPrompt()
-			a.context.mu.RUnlock()
-		}
-
-		// For fork mode, wrap the user's directive with the fork boilerplate.
-		forkUserMessage := ""
-		if isForkMode {
-			forkUserMessage = fmt.Sprintf("%s\n%s\n</fork_directive>", forkBoilerplate, prompt)
-		}
-
-		// Create independent cancellable context for async sub-agent
-		asyncCtx, asyncCancel := context.WithCancel(context.Background())
-
-		// Store cancel func in task state for external cancellation via CancelSubAgent
-		if a.taskStore != nil {
-			if task := a.taskStore.GetTask(taskID); task != nil {
-				task.CancelFunc = asyncCancel
-			}
-		}
-
-		// Create task in the new AgentTaskStore (with output capture)
-		var bgTask *tools.AgentTask
-		if a.agentTaskStore != nil {
-			bgTask = a.agentTaskStore.CreateWithID(taskID, description, subagentType, prompt, model)
-			bgTask.CancelFunc = asyncCancel
-		}
-
-		// Launch background goroutine with independent cancellation
-		go func() {
-			defer a.activeSubAgents.Add(-1)
-			defer asyncCancel() // ensure context is released when done
-
-
-			if a.taskStore != nil {
-				a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
-			}
-
-			if bgTask != nil {
-					bgTask.SetStatus(tools.TaskRunning)
-			}
-
-			childLoop, err := a.createChildAgentLoop(childCfg, childRegistry, agentType, parentSystemPrompt)
-			if err != nil {
-				if a.taskStore != nil {
-					a.taskStore.FailTask(taskID, fmt.Sprintf("failed to create: %v", err))
-				}
-				if bgTask != nil {
-					bgTask.SetStatus(tools.TaskFailed)
-				}
-				a.EnqueueAgentNotification(taskID, "failed", "", "", 0, 0)
-				return
-			}
-			defer childLoop.Close()
-
-			// Set agentOutput for the created child loop (override with task buffer writer)
-			if bgTask != nil {
-				childLoop.agentOutput = &taskOutputWriter{task: bgTask}
-			} else {
-				childLoop.agentOutput = io.Discard
-			}
-
-			// Store the child's transcript path in the task state
-			if a.taskStore != nil {
-				if task := a.taskStore.GetTask(taskID); task != nil {
-					task.SetTranscriptPath(childLoop.TranscriptPath())
-				}
-			}
-			if bgTask != nil {
-				bgTask.SetTranscriptPath(childLoop.TranscriptPath())
-			}
-
-			// Wire async cancellation context into child loop
-			childLoop.cancelCtx = asyncCtx
-			childLoop.cancelFunc = asyncCancel
-
-			// Wire pending message drain: the child loop will drain pending
-			// messages from its own AgentTask at each turn boundary, enabling
-			// the parent to send messages via the send_message tool that the
-			// child processes mid-turn (matching Claude Code's drainPendingMessages).
-			if bgTask != nil {
-				childLoop.drainPendingMessagesFunc = func() []string {
-					return bgTask.DrainPendingMessages()
-				}
-			}
-
-
-			// Apply fork mode with cloned entries (filtered same as sync path)
-			if isForkMode && len(parentEntries) > 0 {
-				filtered := filterEntriesForFork(parentEntries)
-				childLoop.context.mu.Lock()
-				for _, entry := range filtered {
-					childLoop.context.entries = append(childLoop.context.entries, entry)
-				}
-				childLoop.context.mu.Unlock()
-			}
-
-			// For fork mode, the user message is wrapped with fork boilerplate + directive
-			userPrompt := prompt
-			if isForkMode && forkUserMessage != "" {
-				userPrompt = forkUserMessage
-			}
-
-			childResult := childLoop.Run(userPrompt)
-
-			// If Run returned empty, try to recover partial results from conversation context
-			if childResult == "" {
-				childResult = childLoop.getPartialResult()
-			}
-
-			// Capture final result into the task's output buffer
-			if bgTask != nil {
-				bgTask.WriteOutput(childResult)
-					bgTask.SetToolsInfo(int(childLoop.budget.consumed.Load()), time.Since(start).Milliseconds())
-			}
-
-			turnsUsed := int(childLoop.budget.consumed.Load())
-			dur := time.Since(start).Milliseconds()
-
-			if a.taskStore != nil {
-				a.taskStore.CompleteTask(taskID, childResult, turnsUsed, dur)
-			}
-			if bgTask != nil {
-					bgTask.SetStatus(tools.TaskCompleted)
-			}
-			a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), turnsUsed, dur)
-		}()
-
-		return taskID, fmt.Sprintf("Agent launched in background.\n\nagentId: %s\nStatus: async_launched", taskID), "", 0, time.Since(start).Milliseconds()
-	}
-
-	// ─── Synchronous path ────────────────────────────────────────────────
 	a.activeSubAgents.Add(1)
-	defer a.activeSubAgents.Add(-1)
 
-	if a.taskStore != nil {
-		a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
-	}
-
-	// Capture parent context for sync fork mode before child creation
-	var syncParentEntries []conversationEntry
-	var syncParentSystemPrompt string
-	if isForkMode && a.context != nil {
+	// Capture parent context for fork mode
+	var parentEntries []conversationEntry
+	var parentSystemPrompt string
+	if inheritContext && a.context != nil {
 		a.context.mu.RLock()
-		syncParentEntries = make([]conversationEntry, len(a.context.entries))
-		copy(syncParentEntries, a.context.entries)
-		syncParentSystemPrompt = a.context.SystemPrompt()
+		parentEntries = make([]conversationEntry, len(a.context.entries))
+		copy(parentEntries, a.context.entries)
+		parentSystemPrompt = a.context.SystemPrompt()
 		a.context.mu.RUnlock()
 	}
 
-	childLoop, err := a.createChildAgentLoop(childCfg, childRegistry, agentType, syncParentSystemPrompt)
-	if err != nil {
-		if a.taskStore != nil {
-			a.taskStore.FailTask(taskID, err.Error())
-		}
-		return taskID, "", fmt.Sprintf("failed to create sub-agent: %v", err), 0, time.Since(start).Milliseconds()
+	// For fork mode, wrap the user's directive with the fork boilerplate.
+	forkUserMessage := ""
+	if isForkMode {
+		forkUserMessage = fmt.Sprintf("%s\n%s\n</fork_directive>", forkBoilerplate, prompt)
 	}
-	defer childLoop.Close()
 
-	// Store the child's transcript path in the task state
+	// Create independent cancellable context for async sub-agent
+	asyncCtx, asyncCancel := context.WithCancel(context.Background())
+
+	// Store cancel func in task state for external cancellation via CancelSubAgent
 	if a.taskStore != nil {
 		if task := a.taskStore.GetTask(taskID); task != nil {
-			task.SetTranscriptPath(childLoop.TranscriptPath())
+			task.CancelFunc = asyncCancel
 		}
 	}
 
-	// For fork mode, clone parent entries into child's context
-	if isForkMode && syncParentEntries != nil {
-		filtered := filterEntriesForFork(syncParentEntries)
-		childLoop.context.mu.Lock()
-		for _, entry := range filtered {
-			childLoop.context.entries = append(childLoop.context.entries, entry)
+	// Create task in the new AgentTaskStore (with output capture)
+	var bgTask *tools.AgentTask
+	var outputFilePath string
+	var outputFileHandle *os.File
+	if a.agentTaskStore != nil {
+		bgTask = a.agentTaskStore.CreateWithID(taskID, description, subagentType, prompt, model)
+		bgTask.CancelFunc = asyncCancel
+		// Create a live output file that the parent agent can Read non-blockingly
+		outputFilePath = filepath.Join(".claude", "sub-agents", taskID+"_output.txt")
+		os.MkdirAll(filepath.Dir(outputFilePath), 0755)
+		outputFileHandle, _ = os.Create(outputFilePath)
+		bgTask.OutputFile = outputFilePath
+	}
+
+	// Launch background goroutine with independent cancellation
+	go func() {
+		defer a.activeSubAgents.Add(-1)
+		defer asyncCancel() // ensure context is released when done
+
+
+		if a.taskStore != nil {
+			a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
 		}
-		childLoop.context.mu.Unlock()
-	}
 
-	// For fork mode, wrap the user's directive with fork boilerplate
-	userPrompt := prompt
-	if isForkMode {
-		userPrompt = fmt.Sprintf("%s\n%s\n</fork_directive>", forkBoilerplate, prompt)
-	}
+		if bgTask != nil {
+				bgTask.SetStatus(tools.TaskRunning)
+		}
 
-	result = childLoop.Run(userPrompt)
+		childLoop, err := a.createChildAgentLoop(childCfg, childRegistry, agentType, parentSystemPrompt)
+		if err != nil {
+			if a.taskStore != nil {
+				a.taskStore.FailTask(taskID, fmt.Sprintf("failed to create: %v", err))
+			}
+			if bgTask != nil {
+				bgTask.SetStatus(tools.TaskFailed)
+			}
+			a.EnqueueAgentNotification(taskID, "failed", "", "", "", 0, 0)
+			return
+		}
+		defer childLoop.Close()
 
-	// If Run returned empty, try to recover partial results from conversation context
-	if result == "" {
-		result = childLoop.getPartialResult()
-	}
+		// Set agentOutput for the created child loop (override with task buffer writer)
+		if bgTask != nil {
+			childLoop.agentOutput = &taskOutputWriter{task: bgTask, file: outputFileHandle}
+		} else {
+			childLoop.agentOutput = io.Discard
+		}
 
-	turnsUsed := int(childLoop.budget.consumed.Load())
-	durationMs = time.Since(start).Milliseconds()
+		// Store the child's transcript path in the task state
+		if a.taskStore != nil {
+			if task := a.taskStore.GetTask(taskID); task != nil {
+				task.SetTranscriptPath(childLoop.TranscriptPath())
+			}
+		}
+		if bgTask != nil {
+			bgTask.SetTranscriptPath(childLoop.TranscriptPath())
+		}
 
-	if a.taskStore != nil {
-		a.taskStore.CompleteTask(taskID, result, turnsUsed, durationMs)
-	}
+		// Wire async cancellation context into child loop
+		childLoop.cancelCtx = asyncCtx
+		childLoop.cancelFunc = asyncCancel
 
-	return taskID, result, "", turnsUsed, durationMs
+		// Wire pending message drain: the child loop will drain pending
+		// messages from its own AgentTask at each turn boundary, enabling
+		// the parent to send messages via the send_message tool that the
+		// child processes mid-turn (matching Claude Code's drainPendingMessages).
+		if bgTask != nil {
+			childLoop.drainPendingMessagesFunc = func() []string {
+				return bgTask.DrainPendingMessages()
+			}
+		}
+
+
+		// Apply fork mode with cloned entries (filtered same as sync path)
+		if isForkMode && len(parentEntries) > 0 {
+			filtered := filterEntriesForFork(parentEntries)
+			childLoop.context.mu.Lock()
+			for _, entry := range filtered {
+				childLoop.context.entries = append(childLoop.context.entries, entry)
+			}
+			childLoop.context.mu.Unlock()
+		}
+
+		// For fork mode, the user message is wrapped with fork boilerplate + directive
+		userPrompt := prompt
+		if isForkMode && forkUserMessage != "" {
+			userPrompt = forkUserMessage
+		}
+
+		childResult := childLoop.Run(userPrompt)
+
+		// If Run returned empty, try to recover partial results from conversation context
+		if childResult == "" {
+			childResult = childLoop.getPartialResult()
+		}
+
+		// Capture final result into the task's output buffer
+		if bgTask != nil {
+			bgTask.WriteOutput(childResult)
+				bgTask.SetToolsInfo(int(childLoop.budget.consumed.Load()), time.Since(start).Milliseconds())
+		}
+
+		turnsUsed := int(childLoop.budget.consumed.Load())
+		dur := time.Since(start).Milliseconds()
+
+		// Close the output file handle
+		if outputFileHandle != nil {
+			outputFileHandle.Close()
+		}
+
+		if a.taskStore != nil {
+			a.taskStore.CompleteTask(taskID, childResult, turnsUsed, dur)
+		}
+		if bgTask != nil {
+				bgTask.SetStatus(tools.TaskCompleted)
+		}
+		a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), outputFilePath, turnsUsed, dur)
+	}()
+
+	return taskID, fmt.Sprintf("Agent launched in background.\n\nagentId: %s\nStatus: async_launched", taskID), "", outputFilePath, 0, time.Since(start).Milliseconds()
 }
 
 // buildSubAgentConfig creates a Config for the child agent by copying the parent's config
@@ -558,6 +501,10 @@ func (a *AgentLoop) buildSubAgentConfig(model string) Config {
 
 	// Clear cached prompt so it rebuilds with child's tool set
 	childCfg.cachedPrompt = nil
+
+	// Sub-agents always run in auto mode — they should not block for user input
+	// (matching Claude Code's behavior of always using auto for child agents)
+	childCfg.PermissionMode = ModeAuto
 
 	return childCfg
 }
@@ -1125,10 +1072,16 @@ func extractAgentName(description string) string {
 // process-level os.Stdout/os.Stderr redirection (which would block the main REPL).
 type taskOutputWriter struct {
 	task *tools.AgentTask
+	file *os.File // optional live output file for parent agent to Read non-blockingly
 }
 
 func (w *taskOutputWriter) Write(p []byte) (int, error) {
-	w.task.WriteOutput(string(p))
+	if w.task != nil {
+		w.task.WriteOutput(string(p))
+	}
+	if w.file != nil {
+		w.file.Write(p)
+	}
 	return len(p), nil
 }
 

@@ -48,6 +48,7 @@ type AgentTask struct {
 	ParentID        string
 	Notified        bool
 	TranscriptPath  string
+	OutputFile     string // path to live output file (written incrementally by taskOutputWriter)
 	ToolsUsed       int
 	DurationMs      int64
 	PendingMessages []string // queued by send_message, drained at turn boundaries

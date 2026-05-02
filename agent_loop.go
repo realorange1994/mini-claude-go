@@ -186,15 +186,15 @@ func (a *AgentLoop) registerWorkTaskTools() {
 }
 
 // EnqueueAgentNotification pushes a formatted task notification XML to the notification channel.
-func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptPath string, toolsUsed int, durationMs int64) {
+func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptPath, outputFile string, toolsUsed int, durationMs int64) {
 	notification := fmt.Sprintf(`<task-notification>
 <agentId>%s</agentId>
 <status>%s</status>
 <result>%s</result>
-<output_file></output_file>
+<output_file>%s</output_file>
 <transcript_path>%s</transcript_path>
 <usage><total_tokens>%d</total_tokens><tool_uses>%d</tool_uses><duration_ms>%d</duration_ms></usage>
-</task-notification>`, taskID, status, result, transcriptPath, toolsUsed, toolsUsed, durationMs)
+</task-notification>`, taskID, status, result, outputFile, transcriptPath, toolsUsed, toolsUsed, durationMs)
 
 	select {
 	case a.notificationChan <- notification:
