@@ -98,6 +98,13 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		}
 		isDangerous := dangerousTools[tool.Name()]
 
+		if g.shouldAvoidPrompts() {
+			if isDangerous {
+				return &tools.ToolResult{Output: fmt.Sprintf("Permission denied: '%s' requires user approval (interactive prompts disabled for sub-agent).", tool.Name()), IsError: true}
+			}
+			return nil // non-dangerous tool, allow
+		}
+
 		if warning != "" {
 			// Tool returned a warning -- always ask user regardless of tool type
 			if !g.askUserWithWarning(tool.Name(), params, warning) {
@@ -148,6 +155,12 @@ func containsShellMetacharacters(s string) bool {
 	return strings.ContainsAny(s, "&|;`$(){}[]<>!#~\n\r")
 }
 
+// shouldAvoidPrompts reports whether interactive permission prompts should be
+// skipped (e.g. sub-agents that have no terminal user to ask).
+func (g *PermissionGate) shouldAvoidPrompts() bool {
+	return g.config.ShouldAvoidPermissionPrompts
+}
+
 func (g *PermissionGate) askUser(toolName string, params map[string]any) bool {
 	return g.askUserWithWarning(toolName, params, "")
 }
@@ -180,7 +193,8 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any) *
 	if !result.Allow {
 		g.denialCount++
 		// After 3 consecutive denials, fall back to interactive prompt
-		if g.denialCount >= 3 {
+		// (unless interactive prompts are disabled for sub-agents)
+		if g.denialCount >= 3 && !g.shouldAvoidPrompts() {
 			fmt.Fprintf(os.Stderr, "  [auto-classifier] %d consecutive denials, falling back to manual approval\n", g.denialCount)
 			if g.askUser(tool.Name(), params) {
 				g.denialCount = 0

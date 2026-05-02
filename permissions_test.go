@@ -125,6 +125,36 @@ func TestPermissionGateAutoModeAllowsAll(t *testing.T) {
 	}
 }
 
+func TestPermissionGateShouldAvoidPermissionPrompts(t *testing.T) {
+	// When ShouldAvoidPermissionPrompts is true and mode is ask,
+	// dangerous tools should be auto-denied without prompting the user.
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModeAsk
+	cfg.ShouldAvoidPermissionPrompts = true
+	gate := NewPermissionGate(&cfg)
+
+	dangerousTools := []string{"exec", "write_file", "edit_file", "multi_edit", "fileops"}
+	for _, toolName := range dangerousTools {
+		tool := &mockTool{name: toolName, permissions: ""}
+		result := gate.Check(tool, map[string]any{})
+		if result == nil {
+			t.Errorf("expected %s to be denied when ShouldAvoidPermissionPrompts=true", toolName)
+		} else if !result.IsError {
+			t.Errorf("expected IsError=true for %s denial, got: %v", toolName, result)
+		}
+	}
+
+	// Non-dangerous tools should still be allowed without prompting
+	safeTools := []string{"read_file", "glob", "grep", "list_dir"}
+	for _, toolName := range safeTools {
+		tool := &mockTool{name: toolName, permissions: ""}
+		result := gate.Check(tool, map[string]any{})
+		if result != nil {
+			t.Errorf("expected %s to be allowed when ShouldAvoidPermissionPrompts=true", toolName)
+		}
+	}
+}
+
 func TestPermissionGateIsSafeCommand(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowedCommands = []string{"git status", "ls", "cat"}
