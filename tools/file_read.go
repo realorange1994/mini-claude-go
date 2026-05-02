@@ -157,5 +157,10 @@ func expandPath(p string) string {
 		home, _ := os.UserHomeDir()
 		p = filepath.Join(home, p[1:])
 	}
+	// On Windows, bare drive letter like "E:" means current dir on that drive.
+	// Normalize to "E:\" to reference the drive root.
+	if len(p) == 2 && p[1] == ':' && (p[0] >= 'A' && p[0] <= 'Z' || p[0] >= 'a' && p[0] <= 'z') {
+		p = p + string(filepath.Separator)
+	}
 	return filepath.Clean(p)
 }
