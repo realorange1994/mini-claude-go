@@ -45,7 +45,14 @@ When TO use the Agent tool:
 - Full codebase-wide investigations (use Agent with a specific goal)
 - Tasks that require specialized sub-context that would benefit from fork mode (inherit parent context)
 
-The Agent tool creates autonomous sub-agents with their own context and tool access. Each sub-agent runs independently and returns results when complete.`
+The Agent tool creates autonomous sub-agents with their own context and tool access. Each sub-agent runs independently and returns results when complete.
+
+When launching a background agent (run_in_background=true):
+- The agent runs asynchronously; you will receive a notification when it completes.
+- Do NOT call task_output, Read, or Bash to check the agent's progress — this blocks your turn and defeats the purpose of background execution.
+- After launching, you know nothing about what the agent found. Never fabricate or predict agent results.
+- Instead, acknowledge the launch, end your response, and the notification will arrive in a separate turn.
+- If the user asks about a running agent before it completes, tell them it's still running — give status, not a guess.`
 }
 
 func (t *AgentTool) InputSchema() map[string]any {
@@ -125,7 +132,11 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 			"Agent launched in background.\n\n"+
 				"agentId: %s\n"+
 				"Status: async_launched\n"+
-				"Description: %s",
+				"Description: %s\n\n"+
+				"The agent is working in the background. You will be notified automatically when it completes.\n"+
+				"Do NOT call task_output to wait for this agent — it will block your turn and prevent you from responding to the user.\n"+
+				"Do not duplicate this agent's work — avoid working with the same files or topics it is using.\n"+
+				"Briefly tell the user what you launched, then end your response. The notification will arrive in a separate turn.",
 			agentID, description,
 		))
 	}

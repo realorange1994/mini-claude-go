@@ -17,7 +17,11 @@ type TaskOutputTool struct {
 func (t *TaskOutputTool) Name() string { return "task_output" }
 func (t *TaskOutputTool) Description() string {
 	return "Retrieve the output of a background sub-agent task. " +
-		"Supports blocking wait for completion with a configurable timeout."
+		"Supports blocking wait for completion with a configurable timeout. " +
+		"IMPORTANT: Do NOT use block=true for background agents (run_in_background=true) — " +
+		"you will be notified via task-notification when they complete. Calling task_output with block=true " +
+		"will block your turn and prevent you from responding to the user. " +
+		"Use block=true only when explicitly asked by the user, or for synchronous agents."
 }
 
 func (t *TaskOutputTool) InputSchema() map[string]any {
