@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -145,25 +144,24 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: "No files matched."}
 	}
 
-	// Sort by modification time (newest first) and collect metadata
+	// Sort by modification time (newest first)
 	type fileInfo struct {
 		path     string
-		size     int64
 		modified int64
 	}
 	files := make([]fileInfo, 0, len(matches))
 	for _, m := range matches {
 		info, err := os.Stat(m)
 		if err == nil {
-			files = append(files, fileInfo{m, info.Size(), info.ModTime().Unix()})
+			files = append(files, fileInfo{m, info.ModTime().Unix()})
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].modified > files[j].modified })
 
+	// Output relative paths only (matching upstream)
 	lines := make([]string, 0, len(files))
 	for _, f := range files {
-		modStr := time.Unix(f.modified, 0).Format("2006-01-02 15:04")
-		lines = append(lines, fmt.Sprintf("%s (%d bytes, modified %s)", f.path, f.size, modStr))
+		lines = append(lines, f.path)
 	}
 
 	totalMatches := len(lines)
