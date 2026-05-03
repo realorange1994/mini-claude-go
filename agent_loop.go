@@ -1262,7 +1262,13 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(attempt) * 2 * time.Second
+			delay := jitteredBackoff(attempt)
+			// On rate limit errors, prefer header-based delay over jittered backoff
+			if rlim := a.rateLimitState.RetryDelay(); rlim > 0 && rlim < delay*3 {
+				delay = rlim
+			}
+			a.out("\n[WARN] Retrying API (attempt %d/%d), waiting %v...\n",
+				attempt+1, maxRetries+1, delay)
 			time.Sleep(delay)
 		}
 
@@ -1472,6 +1478,14 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	// Record what was streamed (for retry safety)
 	a.lastDeltasState = adapter.DeltasState()
 
+	// Detect incomplete streams: if the stream produced no assistant message
+	// (e.g., proxy returned 200 with empty body), treat as a stream error.
+	// This mirrors the upstream check: "if (!partialMessage || (newMessages.length === 0 && !stopReason))"
+	if len(collect.ToolCalls) == 0 && collect.Text == "" && collect.Thinking == "" && collect.finishReason == "" {
+		return nil, nil, fmt.Errorf("stream ended without receiving any events")
+	}
+
+	// Check for tool-as-text echo and truncated arguments
 	if collect.IsToolUseAsText() {
 		a.out( "\n[WARN] Model echoed tool syntax as text -- recovering\n")
 		collect.Text = ""

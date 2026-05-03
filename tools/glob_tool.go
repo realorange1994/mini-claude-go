@@ -158,7 +158,7 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 			files = append(files, fileInfo{m, info.Size(), info.ModTime().Unix()})
 		}
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].modified < files[j].modified })
+	sort.Slice(files, func(i, j int) bool { return files[i].modified > files[j].modified })
 
 	lines := make([]string, 0, len(files))
 	for _, f := range files {

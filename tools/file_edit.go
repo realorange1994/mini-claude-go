@@ -136,8 +136,9 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 	// Find positions in normalized content and apply replacement to original
 	contentNorm = applyReplacement(contentNorm, oldStrNorm, newStrNorm, replaceAll)
 
-	// Restore original quote style
-	contentNorm = preserveQuoteStyle(contentNorm, normalizeQuotes(content), oldStr, newStr, replaceAll)
+	// Restore original quote style — pass original (pre-normalized) content
+	// so curly quotes can be detected in the actual file content
+	contentNorm = preserveQuoteStyle(contentNorm, content, oldStr, newStr, replaceAll)
 
 	// Restore CRLF
 	if hasCRLF {
