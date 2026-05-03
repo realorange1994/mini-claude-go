@@ -401,6 +401,8 @@ func (c *ConversationContext) truncateIfNeeded() {
 
 // TruncateHistory drops older messages to recover from context overflow.
 // Keeps the first entry (initial user message) and the last 10 entries.
+// Compact-boundary-aware: if compaction has occurred, preserves from the
+// boundary through recent entries instead of discarding the summary.
 func (c *ConversationContext) TruncateHistory() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -408,14 +410,13 @@ func (c *ConversationContext) TruncateHistory() {
 		return
 	}
 	keep := 10
-	first := c.entries[:1]
-	recent := c.entries[len(c.entries)-keep:]
-	c.entries = append(first, recent...)
+	c.entries = c.truncateWithBoundary(1, keep)
 	c.ValidateToolPairing()
 	c.FixRoleAlternation()
 }
 
 // AggressiveTruncateHistory drops more aggressively - keeps only first and last 5.
+// Compact-boundary-aware.
 func (c *ConversationContext) AggressiveTruncateHistory() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -428,25 +429,59 @@ func (c *ConversationContext) aggressiveTruncateHistory() {
 		return
 	}
 	keep := 5
-	first := c.entries[:1]
-	recent := c.entries[len(c.entries)-keep:]
-	c.entries = append(first, recent...)
+	c.entries = c.truncateWithBoundary(1, keep)
 	c.ValidateToolPairing()
 	c.FixRoleAlternation()
 }
 
 // MinimumHistory drops to bare minimum - only first user message and last 2 entries.
+// Compact-boundary-aware.
 func (c *ConversationContext) MinimumHistory() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.entries) <= 3 {
 		return
 	}
-	first := c.entries[:1]
-	recent := c.entries[len(c.entries)-2:]
-	c.entries = append(first, recent...)
+	c.entries = c.truncateWithBoundary(1, 2)
 	c.ValidateToolPairing()
 	c.FixRoleAlternation()
+}
+
+// truncateWithBoundary performs a naive truncation but preserves the compaction
+// boundary marker and summary if one exists. After compaction, entries look like:
+//   [0] initial-user, [1] CompactBoundary, [2] Summary, [3..n] attachments+recent
+// Naive truncation (entries[:1] + recent) would discard entries[1] and [2],
+// causing the agent to lose all compressed memory. This function finds the
+// boundary and preserves everything from the boundary onwards.
+func (c *ConversationContext) truncateWithBoundary(headKeep int, tailKeep int) []conversationEntry {
+	// Find the most recent CompactBoundaryContent
+	boundaryIdx := -1
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+
+	if boundaryIdx >= 0 {
+		// After compaction: keep from the boundary through recent entries.
+		// This preserves the boundary marker, summary, attachments, and
+		// recent messages. Don't discard the summary — it's the only memory
+		// of what happened before.
+		tailStart := len(c.entries) - tailKeep
+		if tailStart <= boundaryIdx {
+			// Recent portion overlaps with or starts before the boundary —
+			// just keep everything from boundary onwards.
+			return c.entries[boundaryIdx:]
+		}
+		// Keep from boundary through end
+		return c.entries[boundaryIdx:]
+	}
+
+	// No boundary — use naive truncation
+	first := c.entries[:headKeep]
+	recent := c.entries[len(c.entries)-tailKeep:]
+	return append(first, recent...)
 }
 
 // CompactContext performs intelligent compaction with multi-phase degradation.
