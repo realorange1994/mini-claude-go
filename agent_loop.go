@@ -2437,6 +2437,9 @@ func (a *AgentLoop) tryLLMCompaction() {
 			for _, path := range recoveredPaths {
 				a.toolStateTracker.MarkFileFresh(path)
 			}
+			if len(recoveredPaths) == 0 {
+				a.toolStateTracker.ClearConclusions()
+			}
 		}
 
 		// Phase 3: History snip — preserve recent messages verbatim

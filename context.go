@@ -126,6 +126,15 @@ func (t *ToolStateTracker) MarkFileFresh(path string) {
 	t.readFiles[abs] = t.compactionEpoch
 }
 
+// ClearConclusions removes all recorded conclusions.
+// Called after compaction when no files were recovered — the summary now captures
+// all pre-compact knowledge, so stale conclusions should not be re-stated.
+func (t *ToolStateTracker) ClearConclusions() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.conclusions = t.conclusions[:0]
+}
+
 // BuildSessionStateNote returns the text to inject into the system prompt.
 // Items are split into "fresh" (content still in context) and "stale" (cleared by compaction).
 func (t *ToolStateTracker) BuildSessionStateNote() string {
