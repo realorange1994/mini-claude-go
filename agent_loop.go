@@ -2395,9 +2395,9 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 		for _, path := range recoveredPaths {
 			a.toolStateTracker.MarkFileFresh(path)
 		}
-		// If no files were recovered, the summary itself preserves the key knowledge.
-		// Clear conclusions that are now captured in the summary so the agent doesn't
-		// repeat the same findings from stale content.
+		if len(recoveredPaths) == 0 {
+			a.toolStateTracker.ClearConclusions()
+		}
 	}
 
 	// Phase 3: History snip — preserve recent messages verbatim
