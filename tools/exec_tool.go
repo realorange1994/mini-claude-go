@@ -120,6 +120,12 @@ func (*ExecTool) CheckPermissions(params map[string]any) string {
 		return "Internal/private URL detected"
 	}
 
+	// Block commands targeting UNC paths (SMB/WebDAV) to prevent NTLM credential
+	// leakage on Windows (\\server\share can trigger SMB authentication)
+	if containsVulnerableUncPath(cmd) {
+		return "UNC path detected: commands targeting SMB/WebDAV shares are blocked"
+	}
+
 	// Check each subcommand of a compound command independently
 	subcmds := splitCompoundCommand(cmd)
 	for _, sub := range subcmds {
@@ -373,6 +379,49 @@ func containsInternalURL(cmd string) bool {
 	return false
 }
 
+// UNC path detection regexes (compiled once)
+var (
+	uncBackslashRe = regexp.MustCompile(`\\\\[^\s\\/]+(?:@(?:\d+|ssl))?(?:[\\/]|$|\s)`)
+	uncForwardRe   = regexp.MustCompile(`//[^\s\\/]+(?:@(?:\d+|ssl))?(?:[\\/]|$|\s)`)
+	uncIPv4Re      = regexp.MustCompile(`^\\\\\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}[\\/]`)
+)
+
+// containsVulnerableUncPath checks for UNC paths that could leak credentials
+// via SMB/WebDAV. This is a defense against attacks where a malicious command
+// references \\server\share paths to exfiltrate data or NTLM tokens.
+func containsVulnerableUncPath(cmd string) bool {
+	// Pattern 1: UNC paths with backslashes (\\server\share)
+	// Matches: \\server, \\server\share, \\foo.com\file
+	// Also catches WebDAV patterns: \\server@SSL@8443\, \\server@8443@SSL\
+	if uncBackslashRe.MatchString(cmd) {
+		return true
+	}
+
+	// Pattern 2: Forward-slash UNC paths (//server/share)
+	// Go regexp does not support lookbehind, so we match and then verify
+	// the match is NOT preceded by ':' (to exclude URLs like https://)
+	if loc := uncForwardRe.FindStringIndex(cmd); loc != nil {
+		start := loc[0]
+		if start == 0 || cmd[start-1] != ':' {
+			return true
+		}
+	}
+
+	// Pattern 3: DavWWWRoot marker (Windows WebDAV redirector)
+	// Example: \\server\DavWWWRoot\path
+	if strings.Contains(cmd, "DavWWWRoot") {
+		return true
+	}
+
+	// Pattern 4: IPv4 literal UNC paths
+	// \\192.168.1.1\share
+	if uncIPv4Re.MatchString(cmd) {
+		return true
+	}
+
+	return false
+}
+
 // safeVarNames lists environment variables that are safe to reference
 // in ${...} form within exec commands. Dangerous vars like PATH,
 // PYTHONPATH, GOFLAGS, NODE_OPTIONS, GIT_DIR are excluded as they can
@@ -424,54 +473,62 @@ var safeSpecialVars = regexp.MustCompile(`^\d+$|^[\?#!@*0]$`)
 // detectCommandSubstitution detects shell injection via command substitution patterns.
 // Returns a descriptive reason string if dangerous patterns are found, empty string otherwise.
 func detectCommandSubstitution(cmd string) string {
-	// Always flag $(
-	if strings.Contains(cmd, "$(") {
-		return "Command substitution $(...) detected: may execute arbitrary commands"
-	}
-
-	// Always flag backticks
-	if strings.Contains(cmd, "`") {
-		return "Backtick command substitution detected: may execute arbitrary commands"
-	}
-
-	// Always flag process substitution
-	if strings.Contains(cmd, "<(") || strings.Contains(cmd, ">(") {
-		return "Process substitution detected: may execute arbitrary commands"
-	}
-
-	// Always flag $((  (arithmetic expansion can contain command substitution)
-	if strings.Contains(cmd, "$((") || strings.Contains(cmd, "$(( ") {
-		return "Arithmetic expansion detected: may contain command substitution"
-	}
-
-	// Flag ${...} UNLESS it matches a known-safe variable
-	idx := strings.Index(cmd, "${")
-	for idx >= 0 {
-		// Find the closing }
-		end := idx + 2
-		depth := 1
-		for end < len(cmd) && depth > 0 {
-			if cmd[end] == '{' {
-				depth++
-			} else if cmd[end] == '}' {
-				depth--
-			}
-			end++
+	inSingleQuote := false
+	inDoubleQuote := false
+	escaped := false
+	for i := 0; i < len(cmd); i++ {
+		c := rune(cmd[i])
+		if escaped {
+			escaped = false
+			continue
 		}
-		if depth == 0 && end <= len(cmd) {
-			varPart := cmd[idx+2 : end-1]
-			// Check if this is a safe variable (simple name or special var)
-			if !isSafeVariable(varPart) {
-				return "Variable expansion ${...} detected: may execute arbitrary commands"
-			}
-		} else {
-			// No closing brace found, skip
-			end = idx + 2
+		if c == '\\' && !inSingleQuote {
+			escaped = true
+			continue
 		}
-		// Find next ${
-		idx = strings.Index(cmd[end:], "${")
-		if idx >= 0 {
-			idx = end + idx
+		if c == '\'' && !inDoubleQuote {
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if c == '"' && !inSingleQuote {
+			inDoubleQuote = !inDoubleQuote
+			continue
+		}
+		if inSingleQuote {
+			continue
+		}
+		// Now we're NOT inside single quotes — flag dangerous patterns
+		if c == '$' && i+1 < len(cmd) {
+			next := rune(cmd[i+1])
+			if next == '(' {
+				// Also skip $((  (arithmetic expansion)
+				if i+2 < len(cmd) && rune(cmd[i+2]) == '(' {
+					return "Arithmetic expansion detected: may contain command substitution"
+				}
+				return "Command substitution $(...) detected: may execute arbitrary commands"
+			}
+			if next == '{' {
+				// ${VAR} — check if safe
+				end := i + 2
+				for end < len(cmd) && cmd[end] != '}' {
+					end++
+				}
+				if end < len(cmd) {
+					varPart := cmd[i+2 : end]
+					if !isSafeVariable(varPart) {
+						return "Variable expansion ${...} detected: may execute arbitrary commands"
+					}
+				}
+			}
+		}
+		if c == '`' {
+			return "Backtick command substitution detected: may execute arbitrary commands"
+		}
+		if c == '<' && i+1 < len(cmd) && cmd[i+1] == '(' {
+			return "Process substitution detected: may execute arbitrary commands"
+		}
+		if c == '>' && i+1 < len(cmd) && cmd[i+1] == '(' {
+			return "Process substitution detected: may execute arbitrary commands"
 		}
 	}
 
@@ -967,6 +1024,8 @@ var safeWrapperPrefixes = []struct {
 	{"command", 0, false},
 	{"builtin", 0, false},
 	{"unbuffer", 0, false},
+	{"sudo", 0, true},     // sudo [-u user] cmd -> skip flags
+	{"doas", 0, true},     // doas [-u user] cmd -> skip flags
 }
 
 // stripSafeWrappers removes common command wrappers to expose the actual command.
