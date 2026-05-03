@@ -1510,6 +1510,10 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 			prev := a.currentMaxTokens.Load()
 			a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
 			a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+		} else if fr == "max_tokens" {
+			// Already at escalated level -- inject recovery message for next turn.
+			// Matches upstream's MAX_OUTPUT_TOKENS_RECOVERY path.
+			a.context.AddUserMessage("Output token limit reached. Resume directly -- no apology, no recap. Pick up mid-thought and break remaining work into smaller pieces.")
 		}
 	}
 
@@ -1581,6 +1585,9 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				prev := a.currentMaxTokens.Load()
 				a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
 				a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+			} else if stopReason == "max_tokens" {
+				// Already at escalated level -- inject recovery message for next turn.
+				a.context.AddUserMessage("Output token limit reached. Resume directly -- no apology, no recap. Pick up mid-thought and break remaining work into smaller pieces.")
 			}
 			return toolCalls, textParts, nil
 		}
@@ -1633,6 +1640,9 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				prev := a.currentMaxTokens.Load()
 				a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
 				a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+			} else if stopReason == "max_tokens" {
+				// Already at escalated level -- inject recovery message for next turn.
+				a.context.AddUserMessage("Output token limit reached. Resume directly -- no apology, no recap. Pick up mid-thought and break remaining work into smaller pieces.")
 			}
 			return toolCalls, textParts, nil
 		}
