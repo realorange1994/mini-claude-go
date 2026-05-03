@@ -151,6 +151,11 @@ func (*ExecTool) CheckPermissions(params map[string]any) string {
 		if pathViolation := validatePaths(inner); pathViolation != "" {
 			return pathViolation
 		}
+
+		// Validate output redirection targets to prevent writing to sensitive paths
+		if reason := validateRedirectTargets(inner); reason != "" {
+			return reason
+		}
 	}
 
 	return ""
@@ -799,6 +804,148 @@ var criticalProjectRootFiles = map[string]bool{
 
 // validatePaths checks for potentially dangerous path references in commands.
 // Returns an empty string if safe, or a descriptive reason if dangerous.
+// validateRedirectTargets extracts output redirection targets (> file, >> file) and
+// validates them against dangerous paths to prevent writing to sensitive system files.
+// Blocks: shell expansion in targets ($VAR, $(cmd), %VAR%), /dev/* (except /dev/null),
+// /etc/, /proc/, /sys/, ~/.ssh/, .claude/*, and other sensitive directories.
+func validateRedirectTargets(cmd string) string {
+	targets := extractRedirectTargets(cmd)
+	for _, target := range targets {
+		if reason := validateRedirectPath(target); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// extractRedirectTargets finds all `>` and `>>` redirect targets in a command,
+// respecting quoted strings. Returns the raw target strings.
+func extractRedirectTargets(cmd string) []string {
+	var targets []string
+	inSingleQuote := false
+	inDoubleQuote := false
+	escaped := false
+
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && !inSingleQuote {
+			escaped = true
+			continue
+		}
+		if c == '\'' && !inDoubleQuote {
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if c == '"' && !inSingleQuote {
+			inDoubleQuote = !inDoubleQuote
+			continue
+		}
+		if inSingleQuote || inDoubleQuote {
+			continue
+		}
+		// Look for > outside quotes
+		if c == '>' {
+			// Skip process substitution >(
+			if i+1 < len(cmd) && cmd[i+1] == '(' {
+				continue
+			}
+			// Find the start of the target (skip optional second > and whitespace)
+			j := i + 1
+			if j < len(cmd) && cmd[j] == '>' {
+				j++
+			}
+			// Skip whitespace
+			for j < len(cmd) && (cmd[j] == ' ' || cmd[j] == '\t') {
+				j++
+			}
+			// Extract the target token (until next whitespace or shell operator)
+			start := j
+			for j < len(cmd) {
+				ch := cmd[j]
+				if ch == ' ' || ch == '\t' || ch == ';' || ch == '&' || ch == '|' || ch == '>' || ch == '<' {
+					break
+				}
+				j++
+			}
+			if j > start {
+				targets = append(targets, cmd[start:j])
+			}
+		}
+	}
+
+	return targets
+}
+
+// validateRedirectPath checks if a redirect target path is dangerous.
+func validateRedirectPath(target string) string {
+	// Block shell expansion: $VAR, ${VAR}, $(cmd), %VAR%, =cmd
+	if strings.ContainsAny(target, "$%") {
+		return "Output redirection to shell-expanded paths is blocked"
+	}
+	if strings.Contains(target, "(") || strings.Contains(target, "`") {
+		return "Output redirection to process substitutions is blocked"
+	}
+
+	// Strip surrounding quotes for path validation
+	trimmed := target
+	if (strings.HasPrefix(trimmed, "'") && strings.HasSuffix(trimmed, "'")) ||
+		(strings.HasPrefix(trimmed, "\"") && strings.HasSuffix(trimmed, "\"")) {
+		trimmed = trimmed[1 : len(trimmed)-1]
+	}
+	if trimmed == "" {
+		return ""
+	}
+
+	normalized := strings.ReplaceAll(trimmed, `\`, "/")
+
+	// /dev/* is allowed only for /dev/null
+	if strings.HasPrefix(normalized, "/dev/") && normalized != "/dev/null" {
+		return "Output redirection to /dev/* is blocked (except /dev/null)"
+	}
+
+	// Block system directories
+	if strings.HasPrefix(normalized, "/proc/") || strings.HasPrefix(normalized, "/sys/") {
+		return "Output redirection to /proc/ or /sys/ is blocked"
+	}
+	if strings.HasPrefix(normalized, "/etc/") || normalized == "/etc" {
+		return "Output redirection to /etc/ is blocked"
+	}
+	if strings.HasPrefix(normalized, "/usr/") || normalized == "/usr" {
+		return "Output redirection to /usr/ is blocked"
+	}
+	if strings.HasPrefix(normalized, "/bin/") || normalized == "/bin" ||
+		strings.HasPrefix(normalized, "/sbin/") || normalized == "/sbin" {
+		return "Output redirection to system bin directories is blocked"
+	}
+	if strings.HasPrefix(normalized, "/boot/") || normalized == "/boot" {
+		return "Output redirection to /boot/ is blocked"
+	}
+	if strings.HasPrefix(normalized, "/var/") || normalized == "/var" {
+		return "Output redirection to /var/ is blocked"
+	}
+
+	// Block ~/.ssh/* (authorized_keys etc.)
+	if strings.HasPrefix(normalized, "~/.ssh") || strings.HasPrefix(normalized, "$HOME/.ssh") {
+		return "Output redirection to ~/.ssh/ is blocked"
+	}
+
+	// Block project config/settings files
+	claudeFiles := []string{".claude/", ".env", ".env.local", "settings.json"}
+	for _, pattern := range claudeFiles {
+		if strings.HasPrefix(normalized, pattern) || strings.HasSuffix(normalized, pattern) ||
+			normalized == pattern {
+			return "Output redirection to project config files is blocked"
+		}
+	}
+
+	return ""
+}
+
+// validatePaths checks file paths in deletion commands against dangerous path list.
 func validatePaths(cmd string) string {
 	fields := strings.Fields(cmd)
 	if len(fields) == 0 {
