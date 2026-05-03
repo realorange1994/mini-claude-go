@@ -920,6 +920,41 @@ func defaultCompactableTools() map[string]bool {
 	}
 }
 
+// messageRoundParam represents an API round built from MessageParam structs.
+type messageRoundParam struct {
+	role  string // "system", "user", or "assistant" (of first msg)
+	msgs  []anthropic.MessageParam
+}
+
+// groupMessageParamsByRound groups []anthropic.MessageParam into API rounds.
+// Same structure as groupMessagesByRound but operates on MessageParam types.
+func groupMessageParamsByRound(messages []anthropic.MessageParam) []messageRoundParam {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	var rounds []messageRoundParam
+	var current messageRoundParam
+	firstMsg := true
+
+	for _, msg := range messages {
+		role := string(msg.Role)
+		if role == "user" || firstMsg {
+			if len(current.msgs) > 0 {
+				rounds = append(rounds, current)
+			}
+			current = messageRoundParam{role: role, msgs: []anthropic.MessageParam{msg}}
+			firstMsg = false
+		} else {
+			current.msgs = append(current.msgs, msg)
+		}
+	}
+	if len(current.msgs) > 0 {
+		rounds = append(rounds, current)
+	}
+	return rounds
+}
+
 // ─── LLM-Driven Compaction ───────────────────────────────────────────────────
 
 // CompactTrigger indicates what triggered a compaction.
@@ -1157,16 +1192,125 @@ func (c *Compactor) Compact(
 
 // compactConversationLLM calls the LLM API to generate a conversation summary.
 // Supports iterative summary updates when a previous summary exists.
+// Includes a PTL (prompt-too-long) retry loop: if the compact API call itself
+// exceeds the context limit, progressively drop oldest API-round groups and
+// retry, up to MAX_PTL_RETRIES times.
+const MAX_PTL_RETRIES = 3
+
 func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string) (*CompactionResultLLM, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages to compact")
 	}
 
+	// PTL retry loop: try compaction, and if the API itself rejects due to
+	// prompt-too-long, progressively drop the oldest rounds and retry.
+	var lastErr error
+	for attempt := 0; attempt <= MAX_PTL_RETRIES; attempt++ {
+		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary)
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+		errMsg := err.Error()
+
+		if !isContextLengthError(errMsg) {
+			// Non-PTL error (auth, timeout, etc.) — bail out
+			return nil, err
+		}
+
+		// Prompt-too-long: try to drop oldest rounds
+		actual, maxTokens, hasGap := parsePromptTooLongTokenGap(errMsg)
+		var dropFraction float64
+		if hasGap && actual > 0 {
+			// Drop just enough rounds to cover the token gap
+			needed := actual - maxTokens
+			total := estimateMessageParamsTokens(messages)
+			if total > 0 {
+				dropFraction = float64(needed) / float64(total)
+				if dropFraction < 0.20 {
+					dropFraction = 0.20 // minimum 20% to make progress
+				}
+			}
+		} else {
+			// Gap unparseable: drop 20% fallback
+			dropFraction = 0.20
+		}
+
+		// Count drops for this attempt
+		dropCount := int(float64(len(messages)) * dropFraction)
+		if dropCount < 1 {
+			dropCount = 1
+		}
+		if dropCount > len(messages)/2 {
+			dropCount = len(messages) / 2 // never drop more than half
+		}
+
+		// Group messages by rounds and drop the oldest
+		rounds := groupMessageParamsByRound(messages)
+		if len(rounds) <= 3 {
+			// Too few rounds to drop — give up
+			break
+		}
+
+		// Find how many rounds to drop (skip system message at round 0)
+		dropRounds := 0
+		droppedMsgs := 0
+		for i := range rounds {
+			if i == 0 && len(rounds) > 1 && rounds[0].role == "system" {
+				continue // skip system message round
+			}
+			dropRounds++
+			droppedMsgs += len(rounds[i].msgs)
+			if droppedMsgs >= dropCount {
+				break
+			}
+		}
+		if dropRounds == 0 {
+			dropRounds = 1
+		}
+
+		// Calculate actual drop offset (skip system round if present)
+		startIdx := 0
+		if len(rounds) > 1 && rounds[0].role == "system" {
+			startIdx = 1
+			// Ensure we don't drop all non-system rounds
+			if dropRounds >= len(rounds)-2 {
+				dropRounds = len(rounds) - 2
+			}
+		}
+		if dropRounds <= 0 || startIdx+dropRounds >= len(rounds)-1 {
+			break
+		}
+
+		// Build flattened message list without dropped rounds
+		var kept []anthropic.MessageParam
+		for i, r := range rounds {
+			if i >= startIdx && i < startIdx+dropRounds {
+				continue // dropped
+			}
+			kept = append(kept, r.msgs...)
+		}
+		if len(kept) < 2 {
+			break // not enough messages left
+		}
+
+		messages = kept
+	}
+
+	return nil, fmt.Errorf("compact API error: prompt too long after %d retries, %w", MAX_PTL_RETRIES, lastErr)
+}
+
+// doCompactLLMCall performs a single attempt at the LLM compaction API call.
+func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string) (*CompactionResultLLM, error) {
 	preTokens := estimateMessageParamsTokens(messages)
 
 	// Apply 3-pass pre-pruning before sending to LLM
 	tailBudget := preTokens / 4 // 25% of current tokens as tail budget
 	pruned := pruneToolResults(messages, tailBudget)
+
+	// Strip base64 image data and image URLs to save tokens during compaction
+	pruned = stripImages(pruned)
 
 	// Redact sensitive information
 	for i := range pruned {
@@ -2034,6 +2178,49 @@ func redactSensitiveText(text string) string {
 	for _, p := range redactPatterns {
 		result = p.quotedRe.ReplaceAllString(result, `$1: "[REDACTED]"`)
 		result = p.unquotedRe.ReplaceAllString(result, `$1: [REDACTED]`)
+	}
+	return result
+}
+
+// stripImages removes base64-encoded image data and image URLs from messages
+// before sending to the compaction LLM, saving tokens for irrelevant image content.
+func stripImages(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	// Pre-compile regexes for base64 images and image URLs
+	base64Re := regexp.MustCompile(`data:image/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]{10,}`)
+	urlRe := regexp.MustCompile(`https?://\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|tiff)\b`)
+
+	const placeholder = "[image content stripped]"
+
+	result := make([]anthropic.MessageParam, 0, len(messages))
+	for _, msg := range messages {
+		mutMsg := msg // copy
+		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+		for _, block := range msg.Content {
+			mutBlock := block
+			if mutBlock.OfText != nil {
+				text := mutBlock.OfText.Text
+				text = base64Re.ReplaceAllString(text, placeholder)
+				text = urlRe.ReplaceAllString(text, placeholder)
+				mutBlock.OfText.Text = text
+			}
+			if mutBlock.OfToolResult != nil {
+				newToolContent := make([]anthropic.ToolResultBlockParamContentUnion, 0, len(mutBlock.OfToolResult.Content))
+				for _, tc := range mutBlock.OfToolResult.Content {
+					mutTc := tc
+					if mutTc.OfText != nil {
+						text := mutTc.OfText.Text
+						text = base64Re.ReplaceAllString(text, placeholder)
+						text = urlRe.ReplaceAllString(text, placeholder)
+						mutTc.OfText.Text = text
+					}
+					newToolContent = append(newToolContent, mutTc)
+				}
+				mutBlock.OfToolResult.Content = newToolContent
+			}
+			newContent = append(newContent, mutBlock)
+		}
+		mutMsg.Content = newContent
+		result = append(result, mutMsg)
 	}
 	return result
 }

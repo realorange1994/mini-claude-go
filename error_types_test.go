@@ -469,5 +469,44 @@ func TestBackwardCompatibilityWrappers(t *testing.T) {
 	}
 }
 
+func TestParsePromptTooLongTokenGap(t *testing.T) {
+	tests := []struct {
+		err    string
+		actual int
+		max    int
+		found  bool
+	}{
+		// Standard format from Anthropic API
+		{"prompt is too long: 137500 tokens > 135000 maximum", 137500, 135000, true},
+		// Without "maximum" suffix
+		{"137500 tokens > 135000", 137500, 135000, true},
+		// Singular "token"
+		{"1 token > 0", 1, 0, false}, // max=0 → found=false
+		// No match
+		{"context_length_exceeded", 0, 0, false},
+		// Empty string
+		{"", 0, 0, false},
+		// With extra whitespace
+		{"prompt is too long: 200000  tokens  >  180000 max", 200000, 180000, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.err, func(t *testing.T) {
+			actual, max, found := parsePromptTooLongTokenGap(tt.err)
+			if found != tt.found {
+				t.Errorf("found = %v, want %v", found, tt.found)
+			}
+			if found {
+				if actual != tt.actual {
+					t.Errorf("actual = %d, want %d", actual, tt.actual)
+				}
+				if max != tt.max {
+					t.Errorf("max = %d, want %d", max, tt.max)
+				}
+			}
+		})
+	}
+}
+
 // Suppress unused import warning for time
 var _ time.Duration

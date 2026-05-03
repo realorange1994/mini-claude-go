@@ -87,6 +87,17 @@ func (a *AgentLoop) registerSendMessageTool() {
 	a.registry.Register(sendMsgTool)
 }
 
+// registerTodoWriteTool registers the TodoWriteTool with this loop's todo list.
+func (a *AgentLoop) registerTodoWriteTool() {
+	todoTool := &tools.TodoWriteTool{TodoList: a.todoList}
+	a.registry.Register(todoTool)
+}
+
+// registerAskUserQuestionTool registers the AskUserQuestion tool.
+func (a *AgentLoop) registerAskUserQuestionTool() {
+	a.registry.Register(&tools.AskUserQuestionTool{})
+}
+
 // registerTaskOutputTool registers the TaskOutputTool with this loop's callback.
 func (a *AgentLoop) registerTaskOutputTool() {
 	taskOutputTool := &tools.TaskOutputTool{
@@ -265,6 +276,7 @@ type AgentLoop struct {
 	agentOutput    io.Writer         // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
 	drainPendingMessagesFunc func() []string // called at turn boundaries to drain pending messages from parent task store
 	toolStateTracker         *ToolStateTracker // tracks tool state for injection into system prompt
+	todoList                 *tools.TodoList    // structured task list for TodoWrite tool
 }
 
 // out writes formatted output to the agent's configured output writer.
@@ -350,6 +362,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		workTaskStore:     NewWorkTaskStore(),
 		agentOutput:       os.Stderr,
 		toolStateTracker:  NewToolStateTracker(),
+		todoList:          tools.NewTodoList(),
 	}
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
@@ -396,14 +409,22 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		ctx.SetSystemPrompt(sysPrompt)
 	}
 
+	// Inject todo reminder into system prompt
+	if reminder := agent.todoList.BuildReminder(); reminder != "" {
+		currentPrompt := ctx.SystemPrompt()
+		ctx.SetSystemPrompt(currentPrompt + "\n\n" + reminder + "\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.")
+	}
+
 	// Register the sub-agent tool (wires AgentTool.SpawnFunc to this loop's SpawnSubAgent)
 	agent.registerAgentTool()
 	agent.registerSendMessageTool()
+	agent.registerTodoWriteTool()
 	agent.registerTaskOutputTool()
 	agent.registerTaskStopTool()
 	agent.registerWorkTaskTools()
 	agent.registerBashBgTool()
 	agent.registerAgentManagementTools()
+	agent.registerAskUserQuestionTool()
 
 	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
 	if tst, ok := agent.registry.Get("tool_search"); ok {
@@ -485,6 +506,9 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		evictionDone:       make(chan struct{}),
 		agentNameRegistry:  make(map[string]string),
 		workTaskStore:      NewWorkTaskStore(),
+		agentOutput:     os.Stderr,
+		toolStateTracker: NewToolStateTracker(),
+		todoList:         tools.NewTodoList(),
 	}
 
 	// Initialize currentMaxTokens from config
@@ -531,11 +555,13 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	// Register the sub-agent tools
 	agent.registerAgentTool()
 	agent.registerSendMessageTool()
+	agent.registerTodoWriteTool()
 	agent.registerTaskOutputTool()
 	agent.registerTaskStopTool()
 	agent.registerWorkTaskTools()
 	agent.registerBashBgTool()
 	agent.registerAgentManagementTools()
+	agent.registerAskUserQuestionTool()
 
 	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
 	if tst, ok := agent.registry.Get("tool_search"); ok {
@@ -880,6 +906,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				continue
 			}
 			// Stream stalled -- safety timeout fired; recover with truncation
+			// Error withholding: suppress user-visible warnings until recovery exhausted
 			if strings.Contains(errMsg, "stream stalled") {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
@@ -890,13 +917,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 					a.toolStateTracker.OnCompaction()
 				}
 				if contextErrors <= 1 {
-					a.out( "\n[WARN] Stream stalled, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
-					a.out( "\n[WARN] Stream still stalled, aggressive truncation (phase 2/3)...\n")
 					a.context.AggressiveTruncateHistory()
 				} else {
-					a.out( "\n[WARN] Stream still stalled, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
 				continue
@@ -912,13 +936,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 					a.toolStateTracker.OnCompaction()
 				}
 				if contextErrors <= 1 {
-					a.out( "\n[WARN] Context length exceeded, truncating history (phase 1/3)...\n")
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
-					a.out( "\n[WARN] Context still full, aggressive truncation (phase 2/3)...\n")
 					a.context.AggressiveTruncateHistory()
 				} else {
-					a.out( "\n[WARN] Context still full, dropping to minimum (phase 3/3)...\n")
 					a.context.MinimumHistory()
 				}
 				continue
@@ -1208,8 +1229,12 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	toolParams := a.buildToolParams()
 
-	// Try LLM compaction before sending to API
-	a.tryCompaction()
+	// Try LLM compaction before sending to API -- but skip when reactive
+	// compact is enabled to avoid racing (mutual exclusion). Reactive
+	// compact will handle compaction when token spikes or PTL errors occur.
+	if !a.config.ReactiveCompactEnabled {
+		a.tryCompaction()
+	}
 
 	// Validate and fix internal entries BEFORE building API messages.
 	// Previously this was done AFTER BuildMessages(), so the fixes
@@ -1298,7 +1323,9 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 	const maxStreamRetries = 9 // 1 attempt + 9 retries = 10 total
 
 	toolParams := a.buildToolParams()
-	a.tryCompaction()
+	if !a.config.ReactiveCompactEnabled {
+		a.tryCompaction()
+	}
 	// Validate and fix internal entries BEFORE building API messages.
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -457,4 +458,23 @@ func isContextLengthError(errMsg string) bool {
 // isErrorNonRetryable returns true for errors that should not be retried.
 func isErrorNonRetryable(errMsg string) bool {
 	return !classifyError(errMsg, 0, 0).Retryable
+}
+
+// parsePromptTooLongTokenGap extracts the actual and max token counts from a
+// prompt-too-long error message. The upstream API returns messages like:
+//   "prompt is too long: 137500 tokens > 135000 maximum"
+// Returns (actualTokens, maxTokens, found). If not parseable, found=false.
+func parsePromptTooLongTokenGap(errMsg string) (actual int, max int, found bool) {
+	// Match patterns like "137500 tokens > 135000 maximum" or
+	// "prompt is too long: 137500 tokens > 135000"
+	re := regexp.MustCompile(`(\d+)\s*tokens?\s*>\s*(\d+)`)
+	matches := re.FindStringSubmatch(errMsg)
+	if len(matches) >= 3 {
+		actual, _ = strconv.Atoi(matches[1])
+		max, _ = strconv.Atoi(matches[2])
+		if actual > 0 && max > 0 {
+			return actual, max, true
+		}
+	}
+	return 0, 0, false
 }
