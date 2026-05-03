@@ -323,13 +323,13 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 			result.WriteString("(no output)")
 		}
 
-		// Truncate if too large
+		// Truncate if too large (matching official: default 30k, prefix-only with line count)
 		output := result.String()
-		const maxOutput = 50000
+		const maxOutput = 30000
 		if len(output) > maxOutput {
-			half := maxOutput / 2
-			truncated := len(output) - maxOutput
-			output = output[:half] + fmt.Sprintf("\n\n... (%d chars truncated) ...\n\n", truncated) + output[len(output)-half:]
+			truncatedPart := output[:maxOutput]
+			remainingLines := strings.Count(output, "\n") - strings.Count(truncatedPart, "\n")
+			output = fmt.Sprintf("%s\n\n... [%d lines truncated] ...", truncatedPart, remainingLines)
 		}
 
 		return ToolResult{Output: output, IsError: err != nil && !isExitError(err)}
