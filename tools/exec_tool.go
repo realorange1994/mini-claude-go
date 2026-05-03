@@ -332,7 +332,7 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 			output = fmt.Sprintf("%s\n\n... [%d lines truncated] ...", truncatedPart, remainingLines)
 		}
 
-		return ToolResult{Output: output, IsError: err != nil && !isExitError(err)}
+		return ToolResult{Output: output, IsError: err != nil}
 	}
 }
 
