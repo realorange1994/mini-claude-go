@@ -128,6 +128,27 @@ func (*ExecTool) CheckPermissions(params map[string]any) string {
 
 	// Check each subcommand of a compound command independently
 	subcmds := splitCompoundCommand(cmd)
+	hasCd := false
+	for _, sub := range subcmds {
+		sub = strings.TrimSpace(sub)
+		if sub == "" {
+			continue
+		}
+		// Track if any subcommand contains cd (extract first word for base check)
+		firstWord := strings.Fields(sub)[0]
+		base := filepath.Base(firstWord)
+		if base == "cd" || base == "pushd" || base == "popd" {
+			hasCd = true
+		}
+	}
+	// If the compound command contains cd, be more restrictive on redirects
+	// (path resolution would be relative to the changed directory)
+	if hasCd {
+		if reason := validateRedirectTargets(cmd); reason != "" {
+			return reason
+		}
+	}
+
 	for _, sub := range subcmds {
 		sub = strings.TrimSpace(sub)
 		if sub == "" {
