@@ -295,6 +295,7 @@ func (a *AgentLoop) SpawnSubAgent(
 	allowedTools []string,
 	disallowedTools []string,
 	inheritContext bool,
+	maxTurns int,
 	parentMessages []map[string]any,
 ) (agentID string, result string, errText string, outputFile string, toolsUsed int, durationMs int64) {
 	start := time.Now()
@@ -310,7 +311,7 @@ func (a *AgentLoop) SpawnSubAgent(
 	}
 
 	// Build child config and registry
-	childCfg := a.buildSubAgentConfig(model)
+	childCfg := a.buildSubAgentConfig(model, maxTurns)
 	childRegistry := a.buildSubAgentRegistry(agentType, allowedTools, disallowedTools, runInBackground)
 
 	// Create task in task store with compact hex ID
@@ -479,7 +480,7 @@ func (a *AgentLoop) SpawnSubAgent(
 
 // buildSubAgentConfig creates a Config for the child agent by copying the parent's config
 // and overriding child-specific fields.
-func (a *AgentLoop) buildSubAgentConfig(model string) Config {
+func (a *AgentLoop) buildSubAgentConfig(model string, maxTurns int) Config {
 	childCfg := a.config // copy by value
 
 	// Override model if specified
@@ -487,12 +488,14 @@ func (a *AgentLoop) buildSubAgentConfig(model string) Config {
 		childCfg.Model = model
 	}
 
-	// Limit child agent turns only if explicitly configured.
-	// Matching Claude Code: General/Explore/Plan/Verify agents have no max turns limit.
-	if childCfg.SubAgentMaxTurns > 0 {
+	// Set max turns for the child agent.
+	// Priority: explicit maxTurns from tool call > SubAgentMaxTurns config > default ceiling.
+	if maxTurns > 0 {
+		childCfg.MaxTurns = maxTurns
+	} else if childCfg.SubAgentMaxTurns > 0 {
 		childCfg.MaxTurns = childCfg.SubAgentMaxTurns
 	} else {
-		childCfg.MaxTurns = 0 // no limit; sub-agents stop naturally when done
+		childCfg.MaxTurns = 200 // safety ceiling: prevents runaway agents
 	}
 
 	// Disable session memory for sub-agents (they don't need to persist notes)

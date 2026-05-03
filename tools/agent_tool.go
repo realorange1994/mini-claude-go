@@ -18,6 +18,7 @@ type AgentSpawnFunc func(
 	allowedTools []string,
 	disallowedTools []string,
 	inheritContext bool,
+	maxTurns int,
 	parentMessages []map[string]any,
 ) (agentID string, result string, errText string, outputFile string, toolsUsed int, durationMs int64)
 
@@ -96,6 +97,10 @@ func (t *AgentTool) InputSchema() map[string]any {
 				"type":        "boolean",
 				"description": "Fork mode: inherit the parent's conversation history (optional, default false). When true, the sub-agent sees the parent's full conversation context.",
 			},
+			"max_turns": map[string]any{
+				"type":        "integer",
+				"description": "Maximum number of turns the sub-agent can execute before being forcibly stopped (optional, default 200). A turn is one user/assistant exchange. Set a reasonable limit to prevent runaway agents.",
+			},
 		},
 	}
 }
@@ -120,6 +125,12 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	disallowedTools := extractStringList(params["disallowed_tools"])
 	inheritContext, _ := params["inherit_context"].(bool)
 
+	// Extract max_turns — default to 200 for safety ceiling.
+	maxTurns, ok := params["max_turns"].(float64)
+	if !ok || maxTurns <= 0 {
+		maxTurns = 200 // safety ceiling: prevents runaway agents
+	}
+
 	// Always disallow recursive agent spawning
 	disallowedTools = append(disallowedTools, "agent")
 
@@ -127,7 +138,7 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	// This matches Claude Code's behavior where all agent spawns are async.
 	agentID, _, _, outputFile, _, _ := t.SpawnFunc(
 		description, prompt, subagentType, model, true,
-		allowedTools, disallowedTools, inheritContext, nil,
+		allowedTools, disallowedTools, inheritContext, int(maxTurns), nil,
 	)
 	return ToolResultOK(fmt.Sprintf(
 		"Agent launched in background.\n\n"+
