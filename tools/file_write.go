@@ -47,6 +47,12 @@ func (*FileWriteTool) Execute(params map[string]any) ToolResult {
 	}
 
 	fp := expandPath(pathStr)
+
+	// SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
 	dir := filepath.Dir(fp)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error creating directory: %v", err), IsError: true}

@@ -83,6 +83,13 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: "Error: path is required", IsError: true}
 	}
 
+	fp := expandPath(pathStr)
+
+	// SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
 	editsRaw, ok := params["edits"]
 	if !ok {
 		return ToolResult{Output: "Error: edits is required", IsError: true}
@@ -115,7 +122,6 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 		edits = append(edits, edit{old: oldStr, new: newStr, replaceAll: replaceAll})
 	}
 
-	fp := expandPath(pathStr)
 	// 1 GiB file size guard (matching official Claude Code behavior)
 	// Stat first to avoid loading huge files into memory
 	const maxEditSize = 1 << 30 // 1 GiB

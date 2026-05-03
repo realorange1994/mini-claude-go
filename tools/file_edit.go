@@ -57,6 +57,11 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 
 	fp := expandPath(pathStr)
 
+	// SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
 	// Check for identical old/new strings (matching official behavior)
 	if oldStr == newStr {
 		return ToolResult{Output: fmt.Sprintf("Error: old_string and new_string must be different"), IsError: true}

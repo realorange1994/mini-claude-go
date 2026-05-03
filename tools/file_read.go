@@ -50,6 +50,13 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 	}
 	fp := expandPath(pathStr)
 
+	// SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
+	// UNC paths like \\server\share\ would trigger SMB authentication, potentially leaking
+	// credentials to an untrusted network server.
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
 	info, err := os.Stat(fp)
 	if os.IsNotExist(err) {
 		return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", pathStr), IsError: true}
@@ -227,4 +234,13 @@ func isDeviceFile(path string) bool {
 	}
 
 	return false
+}
+
+// isUncPath checks if a path is a UNC network path (\\server\share or //server/share).
+// Accessing UNC paths triggers SMB authentication, potentially leaking NTLM credentials
+// to an untrusted network server. Matches official Claude Code behavior.
+func isUncPath(path string) bool {
+	// Normalize backslashes to forward slashes for consistent prefix checking
+	normalized := strings.ReplaceAll(path, "\\", "/")
+	return strings.HasPrefix(normalized, "//") || strings.HasPrefix(normalized, "\\\\")
 }
