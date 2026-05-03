@@ -116,6 +116,12 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 	}
 
 	fp := expandPath(pathStr)
+	// 1 GiB file size guard (matching official Claude Code behavior)
+	// Stat first to avoid loading huge files into memory
+	const maxEditSize = 1 << 30 // 1 GiB
+	if info, err := os.Stat(fp); err == nil && info.Size() > maxEditSize {
+		return ToolResult{Output: fmt.Sprintf("Error: file too large (%d bytes, max %d bytes). Use offset/limit to read portions.", info.Size(), maxEditSize), IsError: true}
+	}
 	data, err := os.ReadFile(fp)
 	if os.IsNotExist(err) {
 		return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", fp), IsError: true}

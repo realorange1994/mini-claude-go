@@ -81,19 +81,17 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Successfully created %s", fp)}
 	}
 
+	const maxEditSize = 1 << 30 // 1 GiB
+	if info, err := os.Stat(fp); err == nil && info.Size() > maxEditSize {
+		return ToolResult{Output: fmt.Sprintf("Error: file too large (%d bytes, max %d bytes). Use offset/limit to read portions.", info.Size(), maxEditSize), IsError: true}
+	}
+
 	data, err := os.ReadFile(fp)
 	if os.IsNotExist(err) {
 		return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", pathStr), IsError: true}
 	}
 	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
-	}
-
-	// 1 GiB file size guard (matching official Claude Code behavior):
-	// Prevents OOM from loading huge files into memory for string replacement.
-	const maxEditSize = 1 << 30 // 1 GiB
-	if len(data) > maxEditSize {
-		return ToolResult{Output: fmt.Sprintf("Error: file too large (%d bytes, max %d bytes). Use offset/limit to read portions.", len(data), maxEditSize), IsError: true}
 	}
 
 	content := string(data)
