@@ -373,23 +373,49 @@ func containsInternalURL(cmd string) bool {
 	return false
 }
 
-// safeVarPattern matches known-safe environment variable expansions in ${...} form.
-// These are common environment variables that do not execute arbitrary code.
+// safeVarNames lists environment variables that are safe to reference
+// in ${...} form within exec commands. Dangerous vars like PATH,
+// PYTHONPATH, GOFLAGS, NODE_OPTIONS, GIT_DIR are excluded as they can
+// redirect code execution, import arbitrary modules, or bypass security.
+// This list is conservative and matches upstream's SAFE_ENV_VARS principles.
 var safeVarNames = map[string]bool{
-	// Common environment variables
-	"HOME": true, "PATH": true, "USER": true, "PWD": true, "SHELL": true,
-	"TERM": true, "EDITOR": true, "VISUAL": true, "LANG": true, "LC_ALL": true,
-	"GOPATH": true, "GOROOT": true, "JAVA_HOME": true, "NODE_PATH": true,
-	"PYTHONPATH": true, "VIRTUAL_ENV": true, "CONDA_PREFIX": true,
-	"CARGO_HOME": true, "RUSTUP_HOME": true, "GOPROXY": true, "GOFLAGS": true,
-	"GOOS": true, "GOARCH": true,
-	// Git environment variables
-	"GIT_DIR": true, "GIT_WORK_TREE": true,
-	"GIT_AUTHOR_NAME": true, "GIT_AUTHOR_EMAIL": true,
-	"GIT_COMMITTER_NAME": true, "GIT_COMMITTER_EMAIL": true,
-	// CI environment variables
-	"CI": true, "GITHUB_ACTIONS": true, "TRAVIS": true,
-	"CIRCLECI": true, "JENKINS_URL": true,
+	// Go - build/runtime settings only (matches upstream SAFE_ENV_VARS)
+	"GOOS": true, "GOARCH": true, "GOEXPERIMENT": true,
+	"GO111MODULE": true, "CGO_ENABLED": true,
+	// Rust - logging/debugging only
+	"RUST_BACKTRACE": true, "RUST_LOG": true,
+	// Node - environment name only (NOT NODE_OPTIONS)
+	"NODE_ENV": true, "NPM_CONFIG_REGISTRY": true,
+	// Python - behavior flags only (NOT PYTHONPATH)
+	"PYTHONIOENCODING": true, "PYTHONDONTWRITEBYTECODE": true,
+	// Pytest - test configuration
+	"PYTEST_DISABLE_PLUGIN_AUTOLOAD": true, "PYTEST_DEBUG": true,
+	// API keys
+	"ANTHROPIC_API_KEY": true,
+	// Locale and terminal
+	"LANG": true, "LC_ALL": true, "LC_CTYPE": true, "LC_TIME": true,
+	"CHARSET": true, "TERM": true, "COLORTERM": true,
+	"NO_COLOR": true, "FORCE_COLOR": true, "TZ": true,
+	// Color configuration
+	"LS_COLORS": true, "LSCOLORS": true,
+	"GREP_COLOR": true, "GREP_COLORS": true, "GCC_COLORS": true,
+	// Display formatting
+	"TIME_STYLE": true, "BLOCK_SIZE": true, "BLOCKSIZE": true,
+	// Home/identity
+	"HOME": true, "USER": true, "LOGNAME": true, "PWD": true, "SHELL": true,
+	// Temp directories (needed for many tools)
+	"TMPDIR": true, "TEMP": true, "TMP": true,
+	// Display for GUI apps
+	"DISPLAY": true, "WAYLAND_DISPLAY": true,
+	// Proxy (commonly needed in corporate environments)
+	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
+	"http_proxy": true, "https_proxy": true, "no_proxy": true,
+	// CI
+	"CI": true, "GITHUB_ACTIONS": true,
+	// Windows
+	"SYSTEMROOT": true, "PROGRAMFILES": true, "PROGRAMFILES(X86)": true,
+	"APPDATA": true, "LOCALAPPDATA": true,
+	"HOMEDRIVE": true, "HOMEPATH": true,
 }
 
 // safeSpecialVars matches special shell variables (positional, special)

@@ -232,12 +232,9 @@ func TestDetectCommandSubstitution(t *testing.T) {
 	// Should be allowed: safe variable expansions
 	allowed := []string{
 		"echo $HOME",
-		"ls $PATH",
 		"echo ${HOME}",
-		"echo ${PATH}",
 		"echo $USER",
 		"cd $PWD",
-		"git commit -m ${GIT_AUTHOR_NAME}",
 		"echo $CI",
 		"echo $?",
 		"echo $$",
@@ -248,8 +245,6 @@ func TestDetectCommandSubstitution(t *testing.T) {
 		"echo $@",
 		"echo $*",
 		"echo ${HOME:-/default}",
-		"echo ${PATH:+alternate}",
-		"make -e GOPATH=$GOPATH",
 		"env FOO=bar ./script.sh",
 	}
 	for _, cmd := range allowed {
@@ -265,6 +260,9 @@ func TestDetectCommandSubstitution(t *testing.T) {
 		"echo ${!VAR}",
 		"echo ${BASH_VERSION}",
 		"echo ${DANGER_VAR}",
+		"echo ${PATH}",
+		"echo ${GOPATH}",
+		"git commit -m ${GIT_AUTHOR_NAME}",
 	}
 	for _, cmd := range dangerous {
 		reason := detectCommandSubstitution(cmd)

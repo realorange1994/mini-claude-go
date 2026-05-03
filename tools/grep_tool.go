@@ -167,8 +167,13 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 			headLimit = v
 		}
 	}
-	if headLimit <= 0 {
+	if headLimit < 0 {
 		headLimit = maxGrepMatches
+	}
+	// Upstream: head_limit=0 means unlimited (escape hatch)
+	// For ripgrep: -m 0 means unlimited; for native: use MaxInt
+	if headLimit == 0 {
+		headLimit = 1<<31 - 1
 	}
 
 	// Parse max_depth
