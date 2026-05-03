@@ -60,6 +60,11 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 	if info.IsDir() {
 		return ToolResult{Output: fmt.Sprintf("Error: not a file: %s", pathStr), IsError: true}
 	}
+	// Block device files that would block indefinitely or produce infinite output
+	// (matching official Claude Code behavior)
+	if isDeviceFile(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: cannot read device file: %s", pathStr), IsError: true}
+	}
 	// Reject binary file extensions (matching official Claude Code behavior)
 	// PDF, images, and SVG are handled separately in the official, but rejected here
 	// with a clear message instead of garbage content or size-limit errors
@@ -194,4 +199,32 @@ func isBinaryExtension(ext string) bool {
 		".woff": true, ".woff2": true, ".eot": true, ".ttf": true,
 	}
 	return binaryExts[ext]
+}
+
+// isDeviceFile checks if a path is a special device file that should be blocked from reading.
+// These files would block indefinitely (/dev/zero, /dev/stdin) or produce infinite output.
+// Matches official Claude Code behavior.
+func isDeviceFile(path string) bool {
+	// Normalize to forward slashes and lowercase for comparison
+	normalized := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+
+	// Check for Unix device files
+	devicePaths := []string{
+		"/dev/zero", "/dev/random", "/dev/urandom", "/dev/full",
+		"/dev/stdin", "/dev/tty", "/dev/console",
+		"/dev/stdout", "/dev/stderr",
+		"/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
+	}
+	for _, dp := range devicePaths {
+		if normalized == dp || strings.HasSuffix(normalized, dp) {
+			return true
+		}
+	}
+
+	// Check for /proc/self/fd/ and /proc/<pid>/fd/ patterns
+	if strings.Contains(normalized, "/proc/") && strings.Contains(normalized, "/fd/") {
+		return true
+	}
+
+	return false
 }
