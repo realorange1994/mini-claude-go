@@ -152,7 +152,7 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 	var numbered strings.Builder
 	for i, line := range selected {
 		lineNum := offset + i
-		numbered.WriteString(fmt.Sprintf("%d| %s\n", lineNum, line))
+		numbered.WriteString(fmt.Sprintf("%d\t%s\n", lineNum, line))
 	}
 
 	result := numbered.String()
