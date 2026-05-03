@@ -93,6 +93,11 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
+	// SECURITY: Skip filesystem operations for UNC paths to prevent NTLM credential leaks.
+	if isUncPath(dir) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", dirStr), IsError: true}
+	}
+
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
 		return ToolResult{Output: fmt.Sprintf("Error: directory not found: %s", dir), IsError: true}
