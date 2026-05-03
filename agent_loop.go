@@ -2000,12 +2000,6 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 				IsError: true,
 			}
 		}
-	case <-time.After(timeout):
-		cancelled = true
-		result = tools.ToolResult{
-			Output:  fmt.Sprintf("Error: %s timed out after %v", toolName, timeout),
-			IsError: true,
-		}
 	}
 	elapsed := time.Since(start)
 
