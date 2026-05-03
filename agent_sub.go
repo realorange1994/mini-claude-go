@@ -478,15 +478,60 @@ func (a *AgentLoop) SpawnSubAgent(
 	return taskID, fmt.Sprintf("Agent launched in background.\n\nagentId: %s\nStatus: async_launched", taskID), "", outputFilePath, 0, time.Since(start).Milliseconds()
 }
 
+// resolveModelAlias resolves a model input string to a concrete model ID.
+// - Empty string: inherit parent's model (return parentModel as-is).
+// - "inherit": same as empty.
+// - Aliases "sonnet"/"opus"/"haiku": resolved via env vars or parent model tier matching.
+//   When an alias matches the parent's tier, the parent's exact model string is used.
+//   Otherwise resolved via ANTHROPIC_DEFAULT_SONNET_MODEL/OPUS_MODEL/HAIKU_MODEL env vars,
+//   with hardcoded defaults as fallback.
+// - Other strings: used verbatim (assumed to be a full model ID).
+func resolveModelAlias(modelInput string, parentModel string) string {
+	if modelInput == "" || strings.ToLower(modelInput) == "inherit" {
+		return parentModel
+	}
+
+	alias := strings.ToLower(modelInput)
+	switch alias {
+	case "sonnet", "opus", "haiku":
+		// If the alias matches the parent's tier, inherit the parent's exact model.
+		// This prevents surprising downgrades (e.g., a user on opus 4.6 spawning
+		// a subagent with model:"opus" should get opus 4.6, not a different default).
+		if strings.Contains(strings.ToLower(parentModel), alias) {
+			return parentModel
+		}
+		// Resolve via environment variable or fall back to a reasonable default.
+		var envKey, fallback string
+		switch alias {
+		case "sonnet":
+			envKey = "ANTHROPIC_DEFAULT_SONNET_MODEL"
+			fallback = "claude-sonnet-4-20250514"
+		case "opus":
+			envKey = "ANTHROPIC_DEFAULT_OPUS_MODEL"
+			fallback = "claude-opus-4-20250514"
+		case "haiku":
+			envKey = "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+			fallback = "claude-haiku-4-20250514"
+		}
+		if resolved := os.Getenv(envKey); resolved != "" {
+			return resolved
+		}
+		return fallback
+	}
+
+	return modelInput // verbatim (full model ID or other alias)
+}
+
 // buildSubAgentConfig creates a Config for the child agent by copying the parent's config
 // and overriding child-specific fields.
 func (a *AgentLoop) buildSubAgentConfig(model string, maxTurns int) Config {
 	childCfg := a.config // copy by value
 
-	// Override model if specified
-	if model != "" {
-		childCfg.Model = model
-	}
+	// Resolve model override: alias strings like "sonnet"/"opus"/"haiku" are resolved
+	// to actual model IDs using environment variables or parent model tier matching.
+	// An empty string means "inherit parent's model" (handled by the copy above).
+	resolvedModel := resolveModelAlias(model, childCfg.Model)
+	childCfg.Model = resolvedModel
 
 	// Set max turns for the child agent.
 	// Priority: explicit maxTurns from tool call > SubAgentMaxTurns config > default ceiling.
