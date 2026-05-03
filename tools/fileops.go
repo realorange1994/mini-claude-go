@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // FileOpsTool provides file operations (mkdir, rm, mv, cp, chmod, ln).
@@ -107,6 +108,13 @@ func opRemove(path string) ToolResult {
 }
 
 func opRemoveAll(path string) ToolResult {
+	// Protect system directories (matching Rust's safety guards)
+	normalized := strings.ReplaceAll(path, "\\", "/")
+	if normalized == "/" || normalized == "." || normalized == "./" || normalized == ".\\" ||
+		strings.HasSuffix(normalized, "/.git") || strings.HasSuffix(normalized, "\\.git") ||
+		strings.HasSuffix(normalized, "/~") || strings.HasSuffix(normalized, "\\~") {
+		return ToolResult{Output: "Error: cannot remove protected path (root, .git, or home directory)", IsError: true}
+	}
 	if err := os.RemoveAll(path); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error removing recursively: %v", err), IsError: true}
 	}
