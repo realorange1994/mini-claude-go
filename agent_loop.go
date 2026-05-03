@@ -2297,10 +2297,15 @@ func (a *AgentLoop) tryCompaction() {
 		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder)
 		if cleared > 0 {
 			a.out( "\n[micro-compact] Cleared %d old tool results\n", cleared)
-			// Micro-compaction clears tool results; mark tracked items stale.
-			if a.toolStateTracker != nil {
-				a.toolStateTracker.OnCompaction()
-			}
+			// NOTE: do NOT call toolStateTracker.OnCompaction() here.
+			// Micro-compact clears OLD tool results (beyond keepRecent threshold) by
+			// replacing their text with placeholders. This is lightweight text replacement,
+			// not a structural context compaction. The files and searches themselves
+			// remain relevant — only the detailed output is trimmed. Incrementing the
+			// epoch here would incorrectly mark all files and searches as stale, causing
+			// the Session State note to say "RE-READ if needed" for files whose
+			// content is still in context. The epoch advances only during real compaction
+			// (where context is structurally reduced and the summary may miss details).
 		}
 	}
 
