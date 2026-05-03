@@ -219,16 +219,83 @@ func curlyToStraightSingle(s string) string {
 	return s
 }
 
-// straightToCurlyDouble converts straight double quotes to curly double quotes.
+// straightToCurlyDouble converts straight double quotes to curly double quotes,
+// using context (preceding character) to distinguish opening vs closing.
 func straightToCurlyDouble(s string) string {
-	s = strings.ReplaceAll(s, "\"", "\u201C")
-	return s
+	var sb strings.Builder
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '"' {
+			// Determine if this is an opening or closing quote based on preceding character
+			if i == 0 || isOpeningDoubleQuoteContext(runes[i-1]) {
+				sb.WriteRune('\u201C') // opening double curly quote
+			} else {
+				sb.WriteRune('\u201D') // closing double curly quote
+			}
+		} else {
+			sb.WriteRune(runes[i])
+		}
+	}
+	return sb.String()
 }
 
-// straightToCurlySingle converts straight single quotes to curly single quotes.
+// isOpeningDoubleQuoteContext returns true if the preceding character indicates
+// this quote should be an opening curly quote.
+func isOpeningDoubleQuoteContext(prev rune) bool {
+	return prev == '(' || prev == '[' || prev == '{' ||
+		prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' ||
+		prev == ':' || prev == ',' || prev == ';' ||
+		prev == '=' || prev == '+' || prev == '-' || prev == '*' ||
+		prev == '/' || prev == '\\' || prev == '|' || prev == '&' ||
+		prev == '<' || prev == '>' ||
+		prev == '!' || prev == '?' || prev == '.' ||
+		prev == '#' || prev == '@' || prev == '^' || prev == '%' ||
+		prev == '~' || prev == '\u201C' || prev == '\u2018'
+}
+
+// straightToCurlySingle converts straight single quotes to curly single quotes,
+// using context to distinguish opening (apostrophe) vs closing.
 func straightToCurlySingle(s string) string {
-	s = strings.ReplaceAll(s, "'", "\u2019")
-	return s
+	var sb strings.Builder
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '\'' {
+			// Check for contraction: letter-'letter pattern (don't, can't, it's, etc.)
+			// These use RIGHT curly (closing) apostrophe
+			if i > 0 && i < len(runes)-1 {
+				prev := runes[i-1]
+				next := runes[i+1]
+				if isLetter(prev) && isLetter(next) {
+					sb.WriteRune('\u2019') // right single curly (apostrophe)
+					continue
+				}
+			}
+			// Opening apostrophe: preceded by whitespace, paren, etc.
+			if i == 0 || isOpeningSingleQuoteContext(runes[i-1]) {
+				sb.WriteRune('\u2018') // left single curly quote
+			} else {
+				sb.WriteRune('\u2019') // right single curly quote
+			}
+		} else {
+			sb.WriteRune(runes[i])
+		}
+	}
+	return sb.String()
+}
+
+func isLetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
+
+// isOpeningSingleQuoteContext returns true if the preceding character indicates
+// this quote should be an opening curly single quote.
+func isOpeningSingleQuoteContext(prev rune) bool {
+	return prev == '(' || prev == '[' || prev == '{' ||
+		prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' ||
+		prev == ':' || prev == ',' || prev == ';' ||
+		prev == '<' ||
+		prev == '!' || prev == '?' || prev == '"' ||
+		prev == '\u201C' || prev == '\u201D' || prev == '\u2018'
 }
 
 // stripTrailingWhitespace removes trailing whitespace from each line.
