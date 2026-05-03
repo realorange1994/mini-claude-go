@@ -947,20 +947,7 @@ func (t CompactTrigger) String() string {
 // compaction prompts
 const compactSystemPrompt = "You are a helpful AI assistant tasked with summarizing conversations."
 
-const compactUserPrompt = `Summarize the following conversation history. Your summary should:
 
-1. Capture the user's main request and goals
-2. Note key decisions made and discoveries found
-3. List files that were read, modified, or created
-4. Describe the current state of work and what remains
-5. Be concise but complete -- the next AI should be able to continue seamlessly
-
-Do NOT include:
-- Individual tool call details or raw outputs
-- Intermediate exploration steps
-- Redundant or outdated information
-
-Write the summary as a coherent narrative that preserves enough context for the conversation to continue productively.`
 
 // ContextWindowTracker tracks token usage against model-specific context windows.
 type ContextWindowTracker struct {
@@ -1583,7 +1570,7 @@ Then, write your summary inside <summary> tags with these REQUIRED fields:
 
 1. Primary Request and Intent: What the user asked for and their goals
 2. Key Technical Concepts: Important concepts, patterns, or technologies discussed
-3. Files and Code Sections: Files read/modified with key details (paths, line numbers, function names)
+3. Files and Code Sections: Files read/modified with key details (paths, line numbers, function names). Include full code snippets where applicable (function signatures, file edits, important logic). Use code blocks for snippets.
 4. Errors and Fixes: Any errors encountered and how they were resolved
 5. Problem Solving: What approaches were tried, what worked, what didn't
 6. All User Messages: List every user message (paraphrased if long)
@@ -1628,6 +1615,7 @@ Below is the previous summary followed by new conversation messages. Update the 
 - Adding new files, errors, or decisions that appeared in the new messages
 - Removing information that is no longer relevant
 - Preserving all user messages (add new ones, keep existing ones)
+- Preserving code snippets, function signatures, and file edits from the previous summary (do NOT summarize them away -- keep them verbatim)
 
 Previous Summary:
 {previous_summary}
