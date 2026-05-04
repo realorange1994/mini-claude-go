@@ -310,7 +310,7 @@ func DefaultRegistry() *tools.Registry {
 	r.Register(tools.NewFileEditTool(r))
 	r.Register(&tools.GlobTool{})
 	r.Register(&tools.GrepTool{})
-	r.Register(&tools.MultiEditTool{})
+	r.Register(tools.NewMultiEditTool(r))
 	r.Register(&tools.ListDirTool{})
 	r.Register(&tools.ExaSearchTool{})
 	r.Register(&tools.WebSearchTool{})

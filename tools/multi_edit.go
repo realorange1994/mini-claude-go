@@ -32,7 +32,13 @@ var DESANITIZATIONS = map[string]string{
 
 // MultiEditTool applies multiple search/replace edits atomically.
 // If any old_string is not found, the entire operation is aborted.
-type MultiEditTool struct{}
+type MultiEditTool struct {
+	registry *Registry
+}
+
+func NewMultiEditTool(registry *Registry) *MultiEditTool {
+	return &MultiEditTool{registry: registry}
+}
 
 func (*MultiEditTool) Name() string        { return "multi_edit" }
 func (*MultiEditTool) Description() string { return "Apply multiple search/replace edits to a file atomically. If any edit fails, all are rolled back. You must read the file first with read_file before editing. Accepts a list of {old_string, new_string} pairs." }
@@ -74,7 +80,7 @@ func (*MultiEditTool) InputSchema() map[string]any {
 
 func (*MultiEditTool) CheckPermissions(params map[string]any) string { return "" }
 
-func (*MultiEditTool) Execute(params map[string]any) ToolResult {
+func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		pathStr, _ = params["path"].(string)
@@ -88,6 +94,13 @@ func (*MultiEditTool) Execute(params map[string]any) ToolResult {
 	// SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
 	if isUncPath(fp) {
 		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	// Read-before-write validation and concurrent modification detection.
+	if m.registry != nil {
+		if staleMsg := m.registry.CheckFileStale(fp); staleMsg != "" {
+			return ToolResult{Output: staleMsg, IsError: true}
+		}
 	}
 
 	editsRaw, ok := params["edits"]
