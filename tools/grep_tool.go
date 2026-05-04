@@ -242,6 +242,35 @@ func parseIntParam(params map[string]any, key string) int {
 	return 0
 }
 
+// splitGlobPatterns splits a glob string on commas and whitespace,
+// respecting brace groups. E.g. "*.ts, *.js" -> ["*.ts", "*.js"].
+func splitGlobPatterns(glob string) []string {
+	var parts []string
+	var current strings.Builder
+	inBrace := false
+	for _, c := range glob {
+		switch c {
+		case '{':
+			inBrace = true
+			current.WriteRune(c)
+		case '}':
+			inBrace = false
+			current.WriteRune(c)
+		case ',', ' ':
+			if !inBrace && current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(c)
+		}
+	}
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+	return parts
+}
+
 var typeMap = map[string][]string{
 	"py":     {".py", ".pyi"},
 	"python": {".py", ".pyi"},
@@ -306,8 +335,10 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 		args = append(args, "--max-filesize", maxFilesize)
 	}
 
-	args = append(args, "-m", fmt.Sprintf("%d", headLimit))
-
+	// Don't pass -m to rg. Upstream retrieves all results and applies
+	// offset+head_limit in the TypeScript layer. Passing -m breaks
+	// pagination because rg returns headLimit results but then offset
+	// slices off the front, returning fewer than expected.
 	if typeFilter != "" {
 		if exts, ok := typeMap[strings.ToLower(typeFilter)]; ok {
 			for _, e := range exts {
@@ -321,7 +352,11 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 		}
 	}
 	if include != "" {
-		args = append(args, "--glob", include)
+		// Split glob on commas and spaces (matching upstream behavior)
+		// E.g. "*.ts, *.js" becomes --glob *.ts --glob *.js
+		for _, g := range splitGlobPatterns(include) {
+			args = append(args, "--glob", strings.TrimSpace(g))
+		}
 	}
 
 	// If pattern starts with dash, use -e flag to prevent rg from interpreting it as an option
@@ -352,7 +387,8 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	if offset > 0 && offset < len(lines) {
 		lines = lines[offset:]
 	}
-	if len(lines) > headLimit {
+	// Apply head_limit if set (0 means unlimited)
+	if headLimit > 0 && len(lines) > headLimit {
 		lines = lines[:headLimit]
 		lines = append(lines, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
 	}
@@ -361,11 +397,11 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 
 func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, headLimit, offset, ctxLines int, countMatches bool, maxDepth int) ToolResult {
 	searchPattern := pattern
-	if caseInsensitive {
-		searchPattern = "(?i)" + searchPattern
-	}
 	if fixedStrings {
 		searchPattern = regexp.QuoteMeta(searchPattern)
+	}
+	if caseInsensitive {
+		searchPattern = "(?i)" + searchPattern
 	}
 
 	re, err := regexp.Compile(searchPattern)
