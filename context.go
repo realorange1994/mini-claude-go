@@ -1078,28 +1078,55 @@ func (c *ConversationContext) FixRoleAlternation() {
 		if len(merged) > 0 {
 			last := &merged[len(merged)-1]
 			if last.role == entry.role {
-				// Merge same-role consecutive messages
+				// Merge same-role consecutive messages.
+				// For user-role: also merge compact-generated types (SummaryContent,
+				// AttachmentContent) with TextContent to avoid multiple consecutive
+				// user-role messages, which the Anthropic API rejects as error 2013.
+				// Note: ToolResultContent is NOT merged with TextContent - doing so
+				// would destroy the tool_use/tool_result pairing.
+				merged := false
 				switch a := last.content.(type) {
 				case TextContent:
 					if b, ok := entry.content.(TextContent); ok {
-						last.content = TextContent(string(a) + "\n\n" + string(b))
-						continue
+						last.content = TextContent(string(a) + "\n" + string(b))
+						merged = true
+					} else if entry.role == "user" {
+						switch entry.content.(type) {
+						case SummaryContent, AttachmentContent:
+							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
+							merged = true
+						}
+					}
+				case SummaryContent:
+					if entry.role == "user" {
+						switch entry.content.(type) {
+						case SummaryContent, TextContent, AttachmentContent:
+							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
+							merged = true
+						}
+					}
+				case AttachmentContent:
+					if entry.role == "user" {
+						switch entry.content.(type) {
+						case SummaryContent, TextContent, AttachmentContent:
+							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
+							merged = true
+						}
 					}
 				case ToolUseContent:
 					if b, ok := entry.content.(ToolUseContent); ok {
 						last.content = append(a, b...)
-						continue
+						merged = true
 					}
 				case ToolResultContent:
 					if b, ok := entry.content.(ToolResultContent); ok {
 						last.content = append(a, b...)
-						continue
+						merged = true
 					}
 				}
-				// Type mismatch - keep entries separate instead of converting.
-				// CRITICAL: Never convert ToolResultContent to TextContent.
-				// Doing so destroys the tool_use/tool_result pairing, causing 2013.
-				// Just fall through to append entry at line 887.
+				if merged {
+					continue
+				}
 		}
 	}
 	merged = append(merged, entry)
