@@ -211,7 +211,9 @@ func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptP
 	select {
 	case a.notificationChan <- notification:
 	default:
-		// Channel is full, drop the notification
+		// Channel is full — log instead of silently dropping.
+		// With 64 slots this should only happen with many concurrent sub-agents.
+		a.out("[warning] notification channel full, dropping: %s\n", taskID)
 	}
 }
 
@@ -356,7 +358,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		budget:       NewIterationBudget(maxTurns),
 		taskStore:       NewTaskStore(),
 		agentTaskStore:  tools.NewAgentTaskStore(),
-		notificationChan: make(chan string, 10),
+		notificationChan: make(chan string, 64),
 		evictionDone:    make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
 		workTaskStore:     NewWorkTaskStore(),
