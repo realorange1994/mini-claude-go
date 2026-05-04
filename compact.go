@@ -1436,7 +1436,15 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 	summaryText = extractSummaryFromCompactOutput(summaryText)
 
 	boundaryText := fmt.Sprintf("[Previous conversation summary (%d tokens compressed)]", preTokens)
-	summaryContent := fmt.Sprintf("%s\n\n%s", boundaryText, summaryText)
+	// Match upstream's getCompactUserSummaryMessage: wrap the summary with
+	// session continuation header and a "continue without asking questions"
+	// instruction to prevent the model from re-executing historical tasks.
+	summaryContent := fmt.Sprintf(
+		"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n"+
+			"%s\n\n%s\n\n"+
+			"Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
+		boundaryText, summaryText,
+	)
 
 	postTokens := EstimateTokens(boundaryText) + EstimateTokens(summaryText) + 6 // role overhead
 
@@ -2006,7 +2014,11 @@ func (c *ConversationContext) PartialCompact(
 	// Insert summary as user message
 	newEntries = append(newEntries, conversationEntry{
 		role:    "user",
-		content: SummaryContent(fmt.Sprintf("[partial-compact: %s, %d tokens compressed]\n\n%s", direction, tokensBefore, summaryText)),
+		content: SummaryContent(fmt.Sprintf(
+			"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n"+
+				"[partial-compact: %s, %d tokens compressed]\n\n%s\n\n"+
+				"Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
+			direction, tokensBefore, summaryText)),
 	})
 
 	// Append kept entries

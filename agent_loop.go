@@ -2448,7 +2448,13 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 
 	// Format the session memory as a compact summary
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
-	summaryContent := fmt.Sprintf("%s\n\n%s", boundaryText, sessionMemoryContent)
+	// Match upstream's continuation instruction to prevent re-execution of historical tasks
+	summaryContent := fmt.Sprintf(
+		"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n"+
+			"%s\n\n%s\n\n"+
+			"Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
+		boundaryText, sessionMemoryContent,
+	)
 
 	a.out( "\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
 		preTokens, EstimateTokens(summaryContent)+6)
