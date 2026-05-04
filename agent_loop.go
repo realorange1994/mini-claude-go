@@ -1139,6 +1139,7 @@ func (a *AgentLoop) ForceCompact() {
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
 		}
+		a.InjectRunningAgentStatus()
 		if a.config.cachedPrompt != nil {
 			a.config.cachedPrompt.MarkDirty()
 		}
@@ -1153,6 +1154,7 @@ func (a *AgentLoop) ForceCompact() {
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
 		}
+		a.InjectRunningAgentStatus()
 		fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
 	} else {
 		fmt.Printf("[compact] No compaction needed (%d entries)\n", before)
@@ -2341,6 +2343,23 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 	return recoveredPaths
 }
 
+// InjectRunningAgentStatus adds attachments for sub-agents that are still
+// running in the background. This prevents the model from spawning duplicate
+// agents after compaction. Matches upstream's createAsyncAgentAttachmentsIfNeeded.
+func (a *AgentLoop) InjectRunningAgentStatus() {
+	if a.agentTaskStore == nil {
+		return
+	}
+	tasks := a.agentTaskStore.ListByStatus(tools.TaskRunning)
+	for _, task := range tasks {
+		statusLine := fmt.Sprintf(
+			"[task_status] taskId: %s, type: local_agent, description: %s, status: running\nThis agent is still running in the background. Do NOT spawn a duplicate agent for this task.",
+			task.ID, task.Description,
+		)
+		a.context.AddAttachment(statusLine)
+	}
+}
+
 // tryCompaction attempts LLM-driven compaction, falling back to truncation.
 // When session memory exists and has content, uses SM-compact (免 API 压缩)
 // to skip the LLM call and use session memory as the summary directly.
@@ -2371,6 +2390,7 @@ func (a *AgentLoop) tryCompaction() {
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
 		}
+		a.InjectRunningAgentStatus()
 		return
 	}
 
@@ -2445,6 +2465,9 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	// Phase 2: Post-compact recovery — re-inject critical context
 	recoveredPaths := a.PostCompactRecovery()
 
+	// Phase 2b: Inject running agent status so model doesn't spawn duplicates
+	a.InjectRunningAgentStatus()
+
 	// Mark recovered files as fresh (content is back in context).
 	// Also mark ALL tracked files as fresh if no specific recovery was done
 	// (the summary now contains the distilled knowledge).
@@ -2493,6 +2516,9 @@ func (a *AgentLoop) tryLLMCompaction() {
 
 		// Phase 2: Post-compact recovery — re-inject critical context
 		recoveredPaths := a.PostCompactRecovery()
+
+		// Phase 2b: Inject running agent status so model doesn't spawn duplicates
+		a.InjectRunningAgentStatus()
 
 		// Mark recovered files as fresh (content is back in context).
 		if a.toolStateTracker != nil {
