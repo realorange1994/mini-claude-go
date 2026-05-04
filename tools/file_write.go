@@ -7,12 +7,20 @@ import (
 )
 
 // FileWriteTool writes content to a file, creating parent directories as needed.
-type FileWriteTool struct{}
+// It enforces read-before-write validation and concurrent modification detection.
+type FileWriteTool struct {
+	registry *Registry // nil if tracker is not available
+}
+
+func NewFileWriteTool(registry *Registry) *FileWriteTool {
+	return &FileWriteTool{registry: registry}
+}
 
 func (*FileWriteTool) Name() string { return "write_file" }
 func (*FileWriteTool) Description() string {
 	return "This tool overwrites the entire file. For modifying existing files, ALWAYS prefer edit_file instead — it only sends the diff. " +
-		"Only use write_file to create new files or for complete rewrites. Creates parent directories if they don't exist."
+		"Only use write_file to create new files or for complete rewrites. Creates parent directories if they don't exist. " +
+		"Requires reading the file first (if it exists) to detect concurrent modifications."
 }
 
 func (*FileWriteTool) InputSchema() map[string]any {
@@ -34,7 +42,7 @@ func (*FileWriteTool) InputSchema() map[string]any {
 
 func (*FileWriteTool) CheckPermissions(params map[string]any) string { return "" }
 
-func (*FileWriteTool) Execute(params map[string]any) ToolResult {
+func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		pathStr, _ = params["path"].(string)
@@ -51,6 +59,13 @@ func (*FileWriteTool) Execute(params map[string]any) ToolResult {
 	// SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
 	if isUncPath(fp) {
 		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	// Read-before-write validation and concurrent modification detection.
+	if w.registry != nil {
+		if staleMsg := w.registry.CheckFileStale(fp); staleMsg != "" {
+			return ToolResult{Output: staleMsg, IsError: true}
+		}
 	}
 
 	dir := filepath.Dir(fp)

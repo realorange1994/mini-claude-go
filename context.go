@@ -50,6 +50,11 @@ type AttachmentContent string
 
 func (AttachmentContent) entryContent() {}
 
+type fileState struct {
+	epoch int
+	mtime int64 // mtimeMs when read
+}
+
 // ToolStateTracker records what the agent has done across turns.
 // It is injected into the system prompt before each API call so the agent
 // knows what it has already read/searched without re-reading/re-searching.
@@ -66,7 +71,7 @@ func (AttachmentContent) entryContent() {}
 type ToolStateTracker struct {
 	mu             sync.RWMutex
 	compactionEpoch int           // increments each time compaction runs; items with lower epoch are stale
-	readFiles      map[string]int // absolute path -> epoch when read (epoch == compactionEpoch means content is fresh)
+	readFiles      map[string]fileState // absolute path -> (epoch, mtimeMs) when read
 	searchQueries  map[string]int // pattern -> epoch when search was run
 	conclusions    []string       // key findings claimed by the agent
 }
@@ -75,18 +80,47 @@ type ToolStateTracker struct {
 func NewToolStateTracker() *ToolStateTracker {
 	return &ToolStateTracker{
 		compactionEpoch: 0,
-		readFiles:      make(map[string]int),
+		readFiles:      make(map[string]fileState),
 		searchQueries:  make(map[string]int),
 		conclusions:    make([]string, 0),
 	}
 }
 
-// RecordFileRead marks a file as read at the current epoch.
+// RecordFileRead marks a file as read at the current epoch, recording the mtime.
 func (t *ToolStateTracker) RecordFileRead(path string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	abs, _ := filepath.Abs(path)
-	t.readFiles[abs] = t.compactionEpoch
+	var mtimeMs int64
+	if info, err := os.Stat(abs); err == nil {
+		mtimeMs = info.ModTime().UnixMilli()
+	}
+	t.readFiles[abs] = fileState{epoch: t.compactionEpoch, mtime: mtimeMs}
+}
+
+// FileWasRead returns true if the file has been read in the current epoch.
+func (t *ToolStateTracker) FileWasRead(path string) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	abs, _ := filepath.Abs(path)
+	state, ok := t.readFiles[abs]
+	return ok && state.epoch == t.compactionEpoch
+}
+
+// FileUnmodified returns true if the file's mtime matches the recorded mtime.
+// Returns false if the file was never read or if it has been modified since read.
+func (t *ToolStateTracker) FileUnmodified(path string) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	abs, _ := filepath.Abs(path)
+	state, ok := t.readFiles[abs]
+	if !ok {
+		return false // never read — treat as unmodified (no staleness check needed)
+	}
+	if info, err := os.Stat(abs); err == nil {
+		return info.ModTime().UnixMilli() == state.mtime
+	}
+	return true // can't stat — assume unmodified
 }
 
 // RecordSearch records a successful grep/glob search pattern at the current epoch.
@@ -123,7 +157,11 @@ func (t *ToolStateTracker) MarkFileFresh(path string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	abs, _ := filepath.Abs(path)
-	t.readFiles[abs] = t.compactionEpoch
+	var mtimeMs int64
+	if info, err := os.Stat(abs); err == nil {
+		mtimeMs = info.ModTime().UnixMilli()
+	}
+	t.readFiles[abs] = fileState{epoch: t.compactionEpoch, mtime: mtimeMs}
 }
 
 // ClearConclusions removes all recorded conclusions.
@@ -141,8 +179,8 @@ func (t *ToolStateTracker) BuildSessionStateNote() string {
 	t.mu.RLock()
 	epoch := t.compactionEpoch
 	var freshFiles, staleFiles []string
-	for f, e := range t.readFiles {
-		if e == epoch {
+	for f, state := range t.readFiles {
+		if state.epoch == epoch {
 			freshFiles = append(freshFiles, f)
 		} else {
 			staleFiles = append(staleFiles, f)

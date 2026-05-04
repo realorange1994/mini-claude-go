@@ -8,7 +8,13 @@ import (
 )
 
 // FileEditTool edits a file by replacing an exact string with a new string.
-type FileEditTool struct{}
+type FileEditTool struct {
+	registry *Registry // may be nil if tracker is not available
+}
+
+func NewFileEditTool(registry *Registry) *FileEditTool {
+	return &FileEditTool{registry: registry}
+}
 
 func (*FileEditTool) Name() string { return "edit_file" }
 func (*FileEditTool) Description() string {
@@ -46,7 +52,7 @@ func (*FileEditTool) InputSchema() map[string]any {
 
 func (*FileEditTool) CheckPermissions(params map[string]any) string { return "" }
 
-func (*FileEditTool) Execute(params map[string]any) ToolResult {
+func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		pathStr, _ = params["path"].(string)
@@ -60,6 +66,13 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 	// SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
 	if isUncPath(fp) {
 		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	// Read-before-write validation and concurrent modification detection.
+	if e.registry != nil {
+		if staleMsg := e.registry.CheckFileStale(fp); staleMsg != "" {
+			return ToolResult{Output: staleMsg, IsError: true}
+		}
 	}
 
 	// Check for identical old/new strings (matching official behavior)

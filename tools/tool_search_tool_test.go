@@ -49,7 +49,7 @@ func TestToolSearchSelectNotFound(t *testing.T) {
 func TestToolSearchKeywordForm(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&FileReadTool{})
-	registry.Register(&FileWriteTool{})
+	registry.Register(NewFileWriteTool(nil))
 	registry.Register(&GlobTool{})
 	registry.Register(&ToolSearchTool{Registry: registry})
 
@@ -69,7 +69,7 @@ func TestToolSearchKeywordForm(t *testing.T) {
 func TestToolSearchPrefixForm(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&FileReadTool{})
-	registry.Register(&FileWriteTool{})
+	registry.Register(NewFileWriteTool(nil))
 	registry.Register(&GlobTool{})
 	registry.Register(&ToolSearchTool{Registry: registry})
 
@@ -113,7 +113,7 @@ func TestToolSearchMaxResults(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&ExecTool{})
 	registry.Register(&FileReadTool{})
-	registry.Register(&FileWriteTool{})
+	registry.Register(NewFileWriteTool(nil))
 	registry.Register(&GlobTool{})
 	registry.Register(&GrepTool{})
 	registry.Register(&ToolSearchTool{Registry: registry})
