@@ -161,12 +161,17 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 			files = append(files, fileInfo{m, info.ModTime().Unix()})
 		}
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].modified > files[j].modified })
+	sort.Slice(files, func(i, j int) bool { return files[i].modified < files[j].modified })
 
 	// Output relative paths only (matching upstream)
+	cwd, _ := os.Getwd()
 	lines := make([]string, 0, len(files))
 	for _, f := range files {
-		lines = append(lines, f.path)
+		if rel, err := filepath.Rel(cwd, f.path); err == nil {
+			lines = append(lines, rel)
+		} else {
+			lines = append(lines, f.path)
+		}
 	}
 
 	totalMatches := len(lines)
