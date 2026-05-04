@@ -177,9 +177,8 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 		contentNorm = applyReplacement(contentNorm, oldStrNorm, newStrNorm, replaceAll)
 	}
 
-	// Restore original quote style — pass original (pre-normalized) content
-	// so curly quotes can be detected in the actual file content
-	contentNorm = preserveQuoteStyle(contentNorm, content, oldStr, newStr, replaceAll)
+	// Restore original quote style
+	contentNorm = preserveQuoteStyle(contentNorm, oldStr, newStr, oldStrNorm, newStrNorm, replaceAll)
 
 	// Restore CRLF
 	if hasCRLF {
@@ -202,29 +201,40 @@ func applyReplacement(content, oldStr, newStr string, replaceAll bool) string {
 }
 
 // preserveQuoteStyle restores original curly quote characters in the replacement.
-// If the matched text in the original file used curly quotes, the replacement
-// also uses curly quotes to match the surrounding context style.
-func preserveQuoteStyle(content, contentOrig, oldStr, newStr string, replaceAll bool) string {
-	// Check if the file actually contains curly quotes
-	hasCurlyDouble := strings.Contains(contentOrig, "\u201C") || strings.Contains(contentOrig, "\u201D")
-	hasCurlySingle := strings.Contains(contentOrig, "\u2018") || strings.Contains(contentOrig, "\u2019")
-	if !hasCurlyDouble && !hasCurlySingle {
-		return content
+// Matching upstream's logic:
+// 1. If oldStr === actualOldStr (no normalization happened), return newStr as-is.
+// 2. If normalization happened, check if the ACTUAL matched text in the file
+//    had curly quotes. If so, apply the same curly quote style to newStr.
+func preserveQuoteStyle(content, oldStr, newStr, oldStrNorm, newStrNorm string, replaceAll bool) string {
+	// If no normalization was needed, oldStr === oldStrNorm, return as-is
+	if oldStr == oldStrNorm {
+		return newStr
 	}
 
-	// Detect quote style used in oldStr
-	oldHasCurlyDouble := strings.Contains(oldStr, "\u201C") || strings.Contains(oldStr, "\u201D")
-	oldHasCurlySingle := strings.Contains(oldStr, "\u2018") || strings.Contains(oldStr, "\u2019")
+	// Find the position in the normalized content where the match occurred
+	idx := strings.Index(content, oldStrNorm)
+	if idx < 0 {
+		return newStr
+	}
 
-	if oldHasCurlyDouble {
-		content = curlyToStraightDouble(content)
-		content = straightToCurlyDouble(content)
+	// Extract the actual matched text from the normalized content
+	actualMatched := content[idx : idx+len(oldStrNorm)]
+
+	// Check if the actual matched text in the file has curly quotes
+	hasCurlyDouble := strings.Contains(actualMatched, "\u201C") || strings.Contains(actualMatched, "\u201D")
+	hasCurlySingle := strings.Contains(actualMatched, "\u2018") || strings.Contains(actualMatched, "\u2019")
+
+	// Apply curly quote style to the new string
+	result := newStr
+	if hasCurlyDouble {
+		result = curlyToStraightDouble(result)
+		result = straightToCurlyDouble(result)
 	}
-	if oldHasCurlySingle {
-		content = curlyToStraightSingle(content)
-		content = straightToCurlySingle(content)
+	if hasCurlySingle {
+		result = curlyToStraightSingle(result)
+		result = straightToCurlySingle(result)
 	}
-	return content
+	return result
 }
 
 // normalizeQuotes converts curly/smart quotes to straight ASCII quotes.
