@@ -2489,7 +2489,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	// Phase 3: History snip — preserve recent messages verbatim
 	snipCount := a.config.PostCompactHistorySnipCount
 	if snipCount <= 0 {
-		snipCount = 3
+		snipCount = 8 // Was 3. 3 entries loses too much context (tool calls need 2 messages each).
 	}
 	a.context.AddHistorySnip(snipCount, recoveredPaths)
 
