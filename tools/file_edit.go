@@ -74,7 +74,11 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 			exists = false
 		}
 		if exists {
-			return ToolResult{Output: "Error: cannot create new file - file already exists with content", IsError: true}
+			// Allow writing to an existing empty file (matching upstream behavior)
+			existingData, readErr := os.ReadFile(fp)
+			if readErr != nil || strings.TrimSpace(string(existingData)) != "" {
+				return ToolResult{Output: "Error: cannot create new file - file already exists with content", IsError: true}
+			}
 		}
 		dir := filepath.Dir(fp)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -144,7 +148,21 @@ func (*FileEditTool) Execute(params map[string]any) ToolResult {
 	}
 
 	// Find positions in normalized content and apply replacement to original
-	contentNorm = applyReplacement(contentNorm, oldStrNorm, newStrNorm, replaceAll)
+	if newStrNorm == "" && !strings.HasSuffix(oldStrNorm, "\n") {
+		// When deleting a line (newStr is empty), also strip a trailing \n
+		// that follows the oldString in the file (matching upstream).
+		// E.g. deleting "  let x = 1;" from "  let x = 1;\n" should remove the orphan \n too.
+		oldWithLF := oldStrNorm + "\n"
+		if replaceAll {
+			contentNorm = strings.ReplaceAll(contentNorm, oldWithLF, newStrNorm)
+		} else if idx := strings.Index(contentNorm, oldWithLF); idx >= 0 {
+			contentNorm = contentNorm[:idx] + newStrNorm + contentNorm[idx+len(oldWithLF):]
+		} else {
+			contentNorm = strings.Replace(contentNorm, oldStrNorm, newStrNorm, 1)
+		}
+	} else {
+		contentNorm = applyReplacement(contentNorm, oldStrNorm, newStrNorm, replaceAll)
+	}
 
 	// Restore original quote style — pass original (pre-normalized) content
 	// so curly quotes can be detected in the actual file content
