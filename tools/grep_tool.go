@@ -474,7 +474,7 @@ func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	case "files_with_matches":
 		return goSearchFilesOnly(re, files, headLimit, offset, filesSearched)
 	case "count":
-		return goSearchCount(re, files, filesSearched)
+		return goSearchCount(re, files, headLimit, offset, filesSearched)
 	default:
 		return goSearchContent(re, files, headLimit, offset, ctxLines, countMatches, filesSearched)
 	}
@@ -589,7 +589,7 @@ func goSearchFilesOnly(re *regexp.Regexp, files []string, headLimit, offset int,
 	return ToolResult{Output: strings.Join(found, "\n") + fmt.Sprintf("\n(Searched %d files, %d matches)", filesSearched, len(found))}
 }
 
-func goSearchCount(re *regexp.Regexp, files []string, filesSearched int) ToolResult {
+func goSearchCount(re *regexp.Regexp, files []string, headLimit, offset int, filesSearched int) ToolResult {
 	var lines []string
 	totalMatches := 0
 	for _, fp := range files {
@@ -611,6 +611,15 @@ func goSearchCount(re *regexp.Regexp, files []string, filesSearched int) ToolRes
 	}
 	if len(lines) == 0 {
 		return ToolResult{Output: fmt.Sprintf("No matches found. (Searched %d files)", filesSearched)}
+	}
+
+	// Apply offset and head_limit (matching upstream behavior)
+	if offset > 0 && offset < len(lines) {
+		lines = lines[offset:]
+	}
+	if headLimit > 0 && len(lines) > headLimit {
+		lines = lines[:headLimit]
+		lines = append(lines, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
 	}
 	return ToolResult{Output: strings.Join(lines, "\n") + fmt.Sprintf("\n(Searched %d files, %d matching lines)", filesSearched, totalMatches)}
 }
