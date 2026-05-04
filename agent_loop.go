@@ -2486,12 +2486,15 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 		}
 	}
 
-	// Phase 3: History snip — preserve recent messages verbatim
-	snipCount := a.config.PostCompactHistorySnipCount
-	if snipCount <= 0 {
-		snipCount = 8 // Was 3. 3 entries loses too much context (tool calls need 2 messages each).
+	// Phase 3: Keep recent messages — preserve actual message objects with tool structure intact.
+	// KeepRecentMessages keeps the original ToolUseContent/ToolResultContent blocks, not
+	// text conversions. Also adjusts backwards to preserve tool_use/tool_result pairing.
+	// This matches upstream's messagesToKeep mechanism.
+	keepCount := a.config.PostCompactHistorySnipCount
+	if keepCount <= 0 {
+		keepCount = 8
 	}
-	a.context.AddHistorySnip(snipCount, recoveredPaths)
+	a.context.KeepRecentMessages(keepCount)
 
 	// Calculate real post-compact token count for cooldown
 	actualMessages := a.context.BuildMessages()

@@ -829,6 +829,145 @@ func (c *ConversationContext) AddHistorySnip(count int, skipPaths []string) {
 	}
 }
 
+// KeepRecentMessages preserves the most recent conversation entries verbatim
+// after compaction, keeping their original structure (including ToolUseContent
+// and ToolResultContent). This matches upstream's messagesToKeep mechanism
+// (sessionMemoryCompact.ts calculateMessagesToKeepIndex + adjustIndexToPreserveAPIInvariants).
+//
+// Unlike AddHistorySnip which converts entries to plain text (losing tool structure),
+// this method keeps entries as-is so the model can see actual tool_use/tool_result pairs,
+// preventing re-execution of commands it already ran.
+//
+// The method also adjusts the kept range backwards to include any assistant messages
+// whose tool_use blocks are referenced by tool_results in the kept range, ensuring
+// tool_use/tool_result pairing is never broken (matching upstream's
+// adjustIndexToPreserveAPIInvariants).
+func (c *ConversationContext) KeepRecentMessages(count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if count <= 0 {
+		count = 8 // default: ~4 tool pairs (~2 turns)
+	}
+
+	// Find the most recent CompactBoundaryContent
+	boundaryIdx := -1
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+	if boundaryIdx < 0 {
+		return
+	}
+
+	// Collect up to 'count' entries BEFORE the boundary (pre-compact messages)
+	// Walk backwards from the boundary, collecting non-meta entries.
+	var keptEntries []conversationEntry
+	for i := boundaryIdx - 1; i >= 0 && len(keptEntries) < count; i-- {
+		entry := c.entries[i]
+		switch entry.content.(type) {
+		case CompactBoundaryContent, SummaryContent, AttachmentContent:
+			continue // skip meta entries from previous compactions
+		default:
+			keptEntries = append([]conversationEntry{entry}, keptEntries...)
+		}
+	}
+
+	if len(keptEntries) == 0 {
+		return
+	}
+
+	// Adjust backwards to preserve tool_use/tool_result pairing.
+	// If any kept entry contains ToolResultContent, collect its tool_use_ids,
+	// then walk further backwards to find the assistant messages with matching
+	// ToolUseContent blocks. This prevents orphaned tool_results that would
+	// cause API error 2013.
+	keptEntries = adjustForToolPairing(c.entries[:boundaryIdx], keptEntries)
+
+	// Append the kept entries after the boundary+summary as preserved messages
+	c.entries = append(c.entries, keptEntries...)
+}
+
+// adjustForToolPairing walks backwards from the kept range to include assistant
+// messages whose tool_use blocks are referenced by tool_results in the kept range.
+// This matches upstream's adjustIndexToPreserveAPIInvariants.
+func adjustForToolPairing(preBoundary []conversationEntry, kept []conversationEntry) []conversationEntry {
+	// Collect all tool_use_ids from ToolResultContent in the kept range
+	var neededToolUseIDs []string
+	for _, entry := range kept {
+		if results, ok := entry.content.(ToolResultContent); ok {
+			for _, r := range results {
+				if r.ToolUseID != "" {
+					neededToolUseIDs = append(neededToolUseIDs, r.ToolUseID)
+				}
+			}
+		}
+	}
+
+	if len(neededToolUseIDs) == 0 {
+		return kept
+	}
+
+	// Check which tool_use_ids are already present in the kept range
+	alreadyPresent := make(map[string]bool)
+	for _, entry := range kept {
+		if blocks, ok := entry.content.(ToolUseContent); ok {
+			for _, b := range blocks {
+				if b.OfToolUse != nil && b.OfToolUse.ID != "" {
+					alreadyPresent[b.OfToolUse.ID] = true
+				}
+			}
+		}
+	}
+
+	// Only need to find tool_uses that are NOT already in the kept range
+	var missingIDs []string
+	for _, id := range neededToolUseIDs {
+		if !alreadyPresent[id] {
+			missingIDs = append(missingIDs, id)
+		}
+	}
+
+	if len(missingIDs) == 0 {
+		return kept
+	}
+
+	// Walk backwards through pre-boundary entries to find assistant messages
+	// containing the missing tool_use blocks
+	missingSet := make(map[string]bool, len(missingIDs))
+	for _, id := range missingIDs {
+		missingSet[id] = true
+	}
+
+	var additionalEntries []conversationEntry
+	for i := len(preBoundary) - 1; i >= 0 && len(missingSet) > 0; i-- {
+		entry := preBoundary[i]
+		if entry.role != "assistant" {
+			continue
+		}
+		if blocks, ok := entry.content.(ToolUseContent); ok {
+			hasMatch := false
+			for _, b := range blocks {
+				if b.OfToolUse != nil && missingSet[b.OfToolUse.ID] {
+					missingSet[b.OfToolUse.ID] = false // mark as found
+					hasMatch = true
+				}
+			}
+			if hasMatch {
+				additionalEntries = append([]conversationEntry{entry}, additionalEntries...)
+			}
+		}
+	}
+
+	// Prepend additional entries to the kept range
+	if len(additionalEntries) > 0 {
+		return append(additionalEntries, kept...)
+	}
+	return kept
+}
+
 // compactableToolNames is the set of tool names whose results should be cleared
 // during micro-compaction. These are read/search/web/write tools where the raw
 // output is large and not needed for context after the turn passes.
