@@ -1528,8 +1528,17 @@ func (a *AgentLoop) callWithNonStreamingOnly() ([]map[string]any, []string, erro
 }
 
 // buildMessageParams constructs the API request params from current context.
+// Mirrors the validation done in callWithRetryAndFallback (streaming path).
 func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	toolParams := a.buildToolParams()
+	if !a.config.ReactiveCompactEnabled {
+		a.tryCompaction()
+	}
+	// Validate and fix internal entries BEFORE building API messages.
+	// Without this, consecutive user-role entries from compaction
+	// (Summary + Attachments + Snips) cause API error 2013.
+	a.context.ValidateToolPairing()
+	a.context.FixRoleAlternation()
 	messages := a.context.BuildMessages()
 	messages = NormalizeAPIMessages(messages)   // KV cache reuse
 	params := anthropic.MessageNewParams{
@@ -1552,7 +1561,10 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, error) {
 	const maxRetries = 3 // shorter retry budget for grace call
 
-	// Build messages WITHOUT tools
+	// Build messages WITHOUT tools, but still validate before sending.
+	// Skip compaction here (grace call should not trigger new compaction).
+	a.context.ValidateToolPairing()
+	a.context.FixRoleAlternation()
 	messages := a.context.BuildMessages()
 	messages = NormalizeAPIMessages(messages)
 	params := anthropic.MessageNewParams{
