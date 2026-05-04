@@ -804,6 +804,10 @@ var dangerousWindowsPaths = []string{
 	`C:\WINDOWS`, `C:\PROGRAM FILES`, `C:\PROGRAMDATA`,
 }
 
+// windowsDriveChildRe matches any direct child of a Windows drive root
+// (C:\X or D:\foo) to catch all drive root children, not just hardcoded paths.
+var windowsDriveChildRe = regexp.MustCompile(`(?i)^[a-z]:\\[^\\/]+`)
+
 // criticalProjectFiles are files/directories that are always dangerous to delete in a project.
 var criticalProjectFiles = map[string]bool{
 	".git":       true,
@@ -1043,6 +1047,10 @@ func isDangerousDeletionPath(path string) string {
 	if strings.HasPrefix(path, "$HOME/") || strings.HasPrefix(path, `$HOME\`) {
 		return "Dangerous deletion path detected: home directory"
 	}
+	// Block tilde variants: ~user, ~+, ~-, ~N (bash tilde expansion)
+	if strings.HasPrefix(path, "~") {
+		return "Dangerous deletion path detected: tilde expansion variant"
+	}
 
 	// Block dangerous Unix root-level directories
 	for dir := range dangerousUnixPaths {
@@ -1063,6 +1071,16 @@ func isDangerousDeletionPath(path string) string {
 		if pathUpper == winUpper || strings.HasPrefix(pathUpper, winUpper+`\`) || strings.HasPrefix(pathUpper, winUpper+`/`) {
 			return "Dangerous deletion path detected: " + winPath
 		}
+	}
+	// Block ANY Windows drive root child (C:\X, D:\X, etc.)
+	// Upstream blocks all direct children of drive roots, not just known paths
+	if re := windowsDriveChildRe.FindStringSubmatch(path); len(re) > 0 {
+		return "Dangerous deletion path detected: Windows drive root child " + re[0]
+	}
+
+	// Block bare wildcard deletion
+	if normalized == "*" || normalized == "*/*" || normalized == `*\*` {
+		return "Dangerous deletion path detected: bare wildcard"
 	}
 
 	// Block glob patterns that would delete everything in a directory
