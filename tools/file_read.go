@@ -135,10 +135,14 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 		limit = total
 	}
 
+	if total == 0 {
+		return ToolResult{
+			Output: fmt.Sprintf("<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>"),
+		}
+	}
 	if offset > total {
 		return ToolResult{
-			Output: fmt.Sprintf("Error: offset %d is beyond end of file (%d lines)", offset, total),
-			IsError: true,
+			Output: fmt.Sprintf("<system-reminder>Warning: the file exists but is shorter than the provided offset (%d). The file has %d lines.</system-reminder>", offset, total),
 		}
 	}
 
