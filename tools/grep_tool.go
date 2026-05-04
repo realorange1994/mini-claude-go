@@ -499,8 +499,7 @@ func goSearchContent(re *regexp.Regexp, files []string, headLimit, offset, ctxLi
 		}
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			loc := re.FindStringIndex(trimmed)
+			loc := re.FindStringIndex(line)
 			if loc == nil {
 				continue
 			}
@@ -511,7 +510,7 @@ func goSearchContent(re *regexp.Regexp, files []string, headLimit, offset, ctxLi
 			}
 			relPath, _ := filepath.Rel(".", fp)
 			if countMatches {
-				count := len(re.FindAllStringIndex(trimmed, -1))
+				count := len(re.FindAllStringIndex(line, -1))
 				if ctxLines > 0 {
 					start := max(0, i-ctxLines)
 					end := min(len(lines)-1, i+ctxLines)
@@ -520,11 +519,11 @@ func goSearchContent(re *regexp.Regexp, files []string, headLimit, offset, ctxLi
 						if j == i {
 							prefix = ">>> "
 						}
-						matches = append(matches, fmt.Sprintf("%s:%d: %s%s", relPath, j+1, prefix, truncateLine(strings.TrimSpace(lines[j]))))
+						matches = append(matches, fmt.Sprintf("%s:%d: %s%s", relPath, j+1, prefix, truncateLine(lines[j])))
 					}
 					matches = append(matches, fmt.Sprintf("  [%d match(es) on this line]", count))
 				} else {
-					matches = append(matches, fmt.Sprintf("%s:%d:[%d] %s", relPath, i+1, count, truncateLine(trimmed)))
+					matches = append(matches, fmt.Sprintf("%s:%d:[%d] %s", relPath, i+1, count, truncateLine(line)))
 				}
 			} else {
 				if ctxLines > 0 {
@@ -535,10 +534,10 @@ func goSearchContent(re *regexp.Regexp, files []string, headLimit, offset, ctxLi
 						if j == i {
 							prefix = ">>> "
 						}
-						matches = append(matches, fmt.Sprintf("%s:%d: %s%s", relPath, j+1, prefix, truncateLine(strings.TrimSpace(lines[j]))))
+						matches = append(matches, fmt.Sprintf("%s:%d: %s%s", relPath, j+1, prefix, truncateLine(lines[j])))
 					}
 				} else {
-					matches = append(matches, fmt.Sprintf("%s:%d:%s", relPath, i+1, truncateLine(trimmed)))
+					matches = append(matches, fmt.Sprintf("%s:%d:%s", relPath, i+1, truncateLine(line)))
 				}
 			}
 			if len(matches) >= headLimit {
