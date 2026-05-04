@@ -282,6 +282,10 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 	cmd.Dir = wd
 	cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
 
+	// Set up process group on Unix so we can kill the entire tree on timeout
+	// (matching upstream's tree-kill behavior). No-op on Windows.
+	setupProcessGroup(cmd)
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
@@ -317,6 +321,10 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 	select {
 	case <-ctx.Done():
 		if cmd.Process != nil {
+			// Kill the entire process group (matching upstream's tree-kill)
+			// On Unix, sends SIGKILL to the process group via negative PID.
+			// On Windows, just kills the process (no process groups).
+			killProcessGroup(cmd.Process.Pid)
 			cmd.Process.Kill()
 		}
 		<-errCh

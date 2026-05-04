@@ -17,3 +17,17 @@ func getSignalExitCode(exitErr *exec.ExitError) int {
 	}
 	return -1
 }
+
+// setupProcessGroup sets the child process to run in its own process group
+// so that killing the group on timeout also kills all subprocesses (tree-kill).
+func setupProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+}
+
+// killProcessGroup kills the entire process group (tree-kill).
+// On Unix, sending SIGKILL to -pid kills the process group.
+func killProcessGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+}

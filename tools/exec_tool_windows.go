@@ -9,3 +9,11 @@ import "os/exec"
 func getSignalExitCode(_ *exec.ExitError) int {
 	return -1
 }
+
+// setupProcessGroup is a no-op on Windows.
+// Windows does not support Unix-style process groups in the same way.
+func setupProcessGroup(_ *exec.Cmd) {}
+
+// killProcessGroup is a no-op on Windows.
+// Windows process termination via Process.Kill() already terminates the process tree.
+func killProcessGroup(_ int) {}
