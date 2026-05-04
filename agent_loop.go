@@ -1210,7 +1210,7 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 		pivotIndex = len(entries) - 1
 	}
 
-	result, err := a.context.PartialCompact(dir, pivotIndex, 3)
+	result, err := a.context.PartialCompact(dir, pivotIndex, a.TranscriptPath(), 3)
 	if err != nil {
 		fmt.Printf("[partial-compact] Error: %v\n", err)
 		return
@@ -2448,13 +2448,13 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 
 	// Format the session memory as a compact summary
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
-	// Match upstream's continuation instruction to prevent re-execution of historical tasks
-	summaryContent := fmt.Sprintf(
-		"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n"+
-			"%s\n\n%s\n\n"+
-			"Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
-		boundaryText, sessionMemoryContent,
-	)
+	// Match upstream's getCompactUserSummaryMessage: add transcript path for
+	// detail recovery, recentMessagesPreserved notice, and continuation instruction.
+	summaryContent := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + boundaryText + "\n\n" + sessionMemoryContent
+	if tp := a.TranscriptPath(); tp != "" {
+		summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
+	}
+	summaryContent += "\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
 
 	a.out( "\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
 		preTokens, EstimateTokens(summaryContent)+6)
@@ -2503,7 +2503,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 // Returns true if compaction was performed.
 func (a *AgentLoop) tryLLMCompaction() {
 	messages := a.context.BuildMessages()
-	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL)
+	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL, a.TranscriptPath())
 	if performed && summary != "" {
 		// Advance compaction epoch BEFORE clearing context — marks all tracked items as stale.
 		if a.toolStateTracker != nil {

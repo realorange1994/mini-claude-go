@@ -1176,7 +1176,7 @@ func (c *Compactor) Compact(
 	model string,
 	apiKey string,
 	baseURL string,
-) (summary string, performed bool) {
+	transcriptPath string) (summary string, performed bool) {
 	c.mu.Lock()
 	if c.disabled {
 		c.mu.Unlock()
@@ -1204,7 +1204,7 @@ func (c *Compactor) Compact(
 	}
 	c.mu.Unlock()
 
-	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary)
+	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary, transcriptPath)
 	if err != nil {
 		c.mu.Lock()
 		c.llmCompactFailedCount++
@@ -1246,7 +1246,7 @@ func (c *Compactor) Compact(
 // retry, up to MAX_PTL_RETRIES times.
 const MAX_PTL_RETRIES = 3
 
-func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string) (*CompactionResultLLM, error) {
+func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, transcriptPath string) (*CompactionResultLLM, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages to compact")
 	}
@@ -1255,7 +1255,7 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 	// prompt-too-long, progressively drop the oldest rounds and retry.
 	var lastErr error
 	for attempt := 0; attempt <= MAX_PTL_RETRIES; attempt++ {
-		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary)
+		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, transcriptPath)
 		if err == nil {
 			return result, nil
 		}
@@ -1351,7 +1351,7 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 }
 
 // doCompactLLMCall performs a single attempt at the LLM compaction API call.
-func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string) (*CompactionResultLLM, error) {
+func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, transcriptPath string) (*CompactionResultLLM, error) {
 	preTokens := estimateMessageParamsTokens(messages)
 
 	// Apply 3-pass pre-pruning before sending to LLM
@@ -1437,14 +1437,13 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 
 	boundaryText := fmt.Sprintf("[Previous conversation summary (%d tokens compressed)]", preTokens)
 	// Match upstream's getCompactUserSummaryMessage: wrap the summary with
-	// session continuation header and a "continue without asking questions"
-	// instruction to prevent the model from re-executing historical tasks.
-	summaryContent := fmt.Sprintf(
-		"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n"+
-			"%s\n\n%s\n\n"+
-			"Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
-		boundaryText, summaryText,
-	)
+	// session continuation header, transcript path for detail recovery, and
+	// recentMessagesPreserved notice to prevent re-executing historical tasks.
+	summaryContent := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + boundaryText + "\n\n" + summaryText
+	if transcriptPath != "" {
+		summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", transcriptPath)
+	}
+	summaryContent += "\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
 
 	postTokens := EstimateTokens(boundaryText) + EstimateTokens(summaryText) + 6 // role overhead
 
@@ -1928,6 +1927,7 @@ type PartialCompactResult struct {
 func (c *ConversationContext) PartialCompact(
 	direction PartialCompactDirection,
 	pivotIndex int,
+	transcriptPath string,
 	keepTail int, // for "from" direction: number of recent entries to always keep
 ) (*PartialCompactResult, error) {
 	c.mu.Lock()
@@ -2014,11 +2014,14 @@ func (c *ConversationContext) PartialCompact(
 	// Insert summary as user message
 	newEntries = append(newEntries, conversationEntry{
 		role:    "user",
-		content: SummaryContent(fmt.Sprintf(
-			"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n"+
-				"[partial-compact: %s, %d tokens compressed]\n\n%s\n\n"+
-				"Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
-			direction, tokensBefore, summaryText)),
+		content: SummaryContent(func() string {
+			s := fmt.Sprintf("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n[partial-compact: %s, %d tokens compressed]\n\n%s", direction, tokensBefore, summaryText)
+			if transcriptPath != "" {
+				s += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", transcriptPath)
+			}
+			s += "\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+			return s
+		}()),
 	})
 
 	// Append kept entries
