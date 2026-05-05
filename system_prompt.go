@@ -190,7 +190,12 @@ const systemPromptTemplateDynamic = `
 %s
 %s
 %s
-%s`
+%s
+
+## Context Management
+When working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later.
+
+Old tool results will be automatically cleared from context to free up space. The %d most recent results are always kept.`
 
 var modeDescriptions = map[string]string{
 	"ask":  "In ASK mode, potentially dangerous operations will require user confirmation.",
@@ -330,7 +335,7 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, gitCtx, toolList)
 
 	// Build dynamic part (permission mode, project instructions, memory, skills)
-	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection)
+	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection, 5)
 
 	// Combine with boundary
 	return staticPart + "\n" + SYSTEM_PROMPT_STATIC_BOUNDARY + "\n" + dynamicPart
@@ -581,7 +586,7 @@ func buildDynamicPart(permissionMode, projectDir string, skillLoader *skills.Loa
 		}
 	}
 
-	return fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection)
+	return fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection, 5)
 }
 
 // fnvHash computes a fast FNV-1a hash of a string for content-addressable caching.
