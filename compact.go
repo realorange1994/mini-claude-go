@@ -1442,9 +1442,15 @@ func pruneToolResults(messages []anthropic.MessageParam, tailBudget int) []anthr
 	// Pass 1: Deduplicate tool results
 	result = dedupToolResults(result)
 
-	// Pass 2: Summarize old tool results
-	index := buildToolCallIndex(result)
-	result = summarizeOldToolResults(result, index, tailBudget)
+	// Pass 2: REMOVED summarizeOldToolResults — it replaced tool result content
+	// with one-line summaries before the LLM compaction call, meaning the LLM
+	// never saw the full content and couldn't generate an accurate summary.
+	// This was the root cause of "micro-compact memory loss" where tool results
+	// were permanently lost. Upstream avoids this by using cache_edits to delete
+	// tool results server-side without modifying local messages, and uses a system
+	// prompt section ("summarize_tool_results") instructing the model to write down
+	// important information before results are cleared.
+	// NOTE: dedupToolResults is still useful for removing exact duplicates.
 
 	// Pass 3: Truncate large tool_call arguments
 	result = truncateLargeToolArgs(result, 2000) // 2000 char limit per arg
