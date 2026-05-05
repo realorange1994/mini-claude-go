@@ -262,6 +262,12 @@ func (r *Registry) CheckFileStale(path string) string {
 		return "Error: file has not been read yet. Read it first with read_file before editing."
 	}
 
+	// Partial-view check: if the file was only partially read (with
+	// offset/limit), the model must do a fresh full read before editing.
+	if storedInfo.readOffset != -1 && (storedInfo.readOffset != 1 || storedInfo.readLimit != -1) {
+		return "Error: file was only partially read. You must do a fresh full read (without offset/limit) before editing."
+	}
+
 	info, err := os.Stat(fp)
 	if err != nil {
 		if os.IsNotExist(err) {
