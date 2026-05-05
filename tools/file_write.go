@@ -81,7 +81,7 @@ func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	}
 	// Update registry so subsequent writes are allowed without re-reading
 	if w.registry != nil {
-		w.registry.MarkFileRead(fp)
+		w.registry.MarkFileReadWithContent(fp, content)
 	}
 	return ToolResult{Output: fmt.Sprintf("Wrote %d chars to %s", len(content), fp)}
 }

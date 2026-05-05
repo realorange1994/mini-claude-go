@@ -169,6 +169,7 @@ type fileReadInfo struct {
 	readTime   time.Time // when the file was read
 	readOffset int       // offset used when reading (-1 if from edit/write, not a read_file call)
 	readLimit  int       // limit used when reading (-1 if from edit/write, not a read_file call)
+	content    string    // file content at read time (for content-based staleness fallback)
 }
 
 // Registry collects tool instances and provides lookup + API schema generation.
@@ -208,21 +209,27 @@ func (r *Registry) AllTools() []Tool {
 
 // MarkFileRead records that a file has been read by read_file, storing its current mtime.
 func (r *Registry) MarkFileRead(path string) {
-	r.MarkFileReadWithParams(path, -1, -1) // offset=-1 means not from read_file (edit/write)
+	r.MarkFileReadWithParams(path, -1, -1, "") // offset=-1 means not from read_file (edit/write)
+}
+
+// MarkFileReadWithContent records a file read with content for staleness fallback.
+// Used by edit/write operations that know the post-write content.
+func (r *Registry) MarkFileReadWithContent(path string, content string) {
+	r.MarkFileReadWithParams(path, -1, -1, content)
 }
 
 // MarkFileReadWithParams records that a file has been read, storing offset/limit
-// for dedup detection (file_unchanged stub). Use offset=-1, limit=-1 for
-// edit/write operations that update the registry without a real read range.
-func (r *Registry) MarkFileReadWithParams(path string, offset, limit int) {
+// and content for dedup detection and content-based staleness fallback.
+// Use offset=-1, limit=-1 for edit/write operations.
+func (r *Registry) MarkFileReadWithParams(path string, offset, limit int, content string) {
 	// Expand before normalizing so that ~/foo and /home/user/foo map to the same key.
 	expanded := expandPath(path)
 	normalized := normalizeFilePath(expanded)
 	r.mu.Lock()
 	if info, err := os.Stat(expanded); err == nil {
-		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now(), readOffset: offset, readLimit: limit}
+		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now(), readOffset: offset, readLimit: limit, content: content}
 	} else {
-		r.filesRead[normalized] = fileReadInfo{readTime: time.Now(), readOffset: offset, readLimit: limit} // new file, no mtime yet
+		r.filesRead[normalized] = fileReadInfo{readTime: time.Now(), readOffset: offset, readLimit: limit, content: content} // new file, no mtime yet
 	}
 	r.mu.Unlock()
 }
@@ -279,6 +286,19 @@ func (r *Registry) CheckFileStale(path string) string {
 	// File hasn't been modified since we read it
 	if info.ModTime() == storedInfo.mtime {
 		return ""
+	}
+
+	// Timestamp changed. On Windows, timestamps can change without content changes
+	// (cloud sync, antivirus, etc.). For full reads (offset=-1, limit=-1) where
+	// we have the stored content, compare content as a fallback to avoid false positives.
+	isFullRead := storedInfo.readOffset == -1 && storedInfo.readLimit == -1
+	if isFullRead && storedInfo.content != "" {
+		if currentContent, err := os.ReadFile(fp); err == nil {
+			if string(currentContent) == storedInfo.content {
+				// Content unchanged despite timestamp change — safe to proceed
+				return ""
+			}
+		}
 	}
 
 	return "Error: file has been modified since read, either by the user or by a linter. Read it again before attempting to write it."

@@ -200,8 +200,14 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 	}
 
 	// Mark file as read in registry so write/edit checks pass
+	// Store full content for content-based staleness fallback (matching upstream).
+	// Only store content for full-file reads (when end >= total).
 	if t.registry != nil {
-		t.registry.MarkFileReadWithParams(fp, offset, limit)
+		readContent := ""
+		if end >= total {
+			readContent = content
+		}
+		t.registry.MarkFileReadWithParams(fp, offset, limit, readContent)
 	}
 
 	return ToolResult{Output: strings.TrimRight(result, "\n")}

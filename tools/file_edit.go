@@ -105,7 +105,7 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 		}
 		// Update registry so subsequent writes are allowed without re-reading
 		if e.registry != nil {
-			e.registry.MarkFileRead(fp)
+			e.registry.MarkFileReadWithContent(fp, newStr)
 		}
 		return ToolResult{Output: fmt.Sprintf("Successfully created %s", fp)}
 	}
@@ -113,6 +113,12 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 	const maxEditSize = 1 << 30 // 1 GiB
 	if info, err := os.Stat(fp); err == nil && info.Size() > maxEditSize {
 		return ToolResult{Output: fmt.Sprintf("Error: file too large (%d bytes, max %d bytes). Use offset/limit to read portions.", info.Size(), maxEditSize), IsError: true}
+	}
+
+	// Reject .ipynb files — they must be edited via notebook tool, not raw file edit.
+	// Matching upstream behavior: file_edit cannot reliably edit JSON-based notebook format.
+	if strings.HasSuffix(strings.ToLower(fp), ".ipynb") {
+		return ToolResult{Output: "Error: file is a Jupyter Notebook (.ipynb). Jupyter notebooks cannot be edited with the edit_file tool — use the notebook tool instead.", IsError: true}
 	}
 
 	data, err := os.ReadFile(fp)
@@ -197,7 +203,7 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 	}
 	// Update registry so subsequent writes are allowed without re-reading
 	if e.registry != nil {
-		e.registry.MarkFileRead(fp)
+		e.registry.MarkFileReadWithContent(fp, contentNorm)
 	}
 
 	return ToolResult{Output: fmt.Sprintf("Successfully edited %s", fp)}
