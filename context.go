@@ -999,10 +999,14 @@ var compactableToolNames = map[string]bool{
 // Returns the number of tool result entries that were cleared.
 // ToolUseID is preserved in cleared results to maintain pairing validity.
 //
-// Two improvements over the original:
+// Improvements:
 //  1. Dedup: skips tool results already cleared to the placeholder string.
 //  2. Whitelist: only clears results from compactable tools (read/exec/edit/grep/glob/web/write).
-func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder string) int {
+//  3. Size threshold: only clears results whose text content >= minCharCount chars.
+//     This preserves small useful results (error messages, short outputs) while still
+//     freeing context from large file reads and command outputs. Matches upstream's
+//     approach of only clearing results that actually save significant tokens.
+func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder string, minCharCount int) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if keepRecent <= 0 {
@@ -1010,6 +1014,9 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 	}
 	if placeholder == "" {
 		placeholder = "[Old tool result content cleared]"
+	}
+	if minCharCount <= 0 {
+		minCharCount = 2000 // default: only clear results >= 2000 chars
 	}
 
 	// Pass 1: Build tool_use_id -> tool_name mapping from ToolUseContent entries.
@@ -1040,7 +1047,7 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 			continue
 		}
 
-		// Check each block: is it already cleared? is it a compactable tool?
+		// Check each block: is it already cleared? is it a compactable tool? is it large enough?
 		allCleared := true
 		hasCompactable := false
 		for _, r := range results {
@@ -1056,9 +1063,21 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 				allCleared = false
 			}
 
-			// Check if this tool is compactable
+			// Check if this tool is compactable AND its content is large enough to justify clearing.
+			// Small tool results (< minCharCount) are preserved to prevent amnesia — they
+			// often contain error messages, short status outputs, or key identifiers that
+			// the model needs later. Only large outputs (file contents, command stdout)
+			// benefit from clearing.
 			if toolName, ok := toolNameMap[r.ToolUseID]; ok && compactableToolNames[toolName] {
-				hasCompactable = true
+				totalChars := 0
+				for _, c := range r.Content {
+					if c.OfText != nil {
+						totalChars += len(c.OfText.Text)
+					}
+				}
+				if totalChars >= minCharCount {
+					hasCompactable = true
+				}
 			}
 		}
 
@@ -1067,17 +1086,29 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 			continue
 		}
 
-		// Clear only compactable tool results; leave others untouched
+		// Clear only compactable tool results that are large enough; leave others untouched
 		var clearedResults []anthropic.ToolResultBlockParam
 		for _, r := range results {
 			if toolName, ok := toolNameMap[r.ToolUseID]; ok && compactableToolNames[toolName] {
-				clearedResults = append(clearedResults, anthropic.ToolResultBlockParam{
-					ToolUseID: r.ToolUseID,
-					Content: []anthropic.ToolResultBlockParamContentUnion{
-						{OfText: &anthropic.TextBlockParam{Text: placeholder}},
-					},
-					IsError: r.IsError,
-				})
+				// Check size threshold: preserve small results to prevent amnesia
+				totalChars := 0
+				for _, c := range r.Content {
+					if c.OfText != nil {
+						totalChars += len(c.OfText.Text)
+					}
+				}
+				if totalChars >= minCharCount {
+					clearedResults = append(clearedResults, anthropic.ToolResultBlockParam{
+						ToolUseID: r.ToolUseID,
+						Content: []anthropic.ToolResultBlockParamContentUnion{
+							{OfText: &anthropic.TextBlockParam{Text: placeholder}},
+						},
+						IsError: r.IsError,
+					})
+				} else {
+					// Too small to justify clearing — preserve the result
+					clearedResults = append(clearedResults, r)
+				}
 			} else {
 				// Not a compactable tool — keep the original result
 				clearedResults = append(clearedResults, r)

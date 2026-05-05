@@ -40,9 +40,10 @@ type Config struct {
 	AutoCompactThreshold   float64
 	AutoCompactBuffer      int
 	MaxCompactOutputTokens int
-	MicroCompactEnabled    bool
-	MicroCompactKeepRecent int
-	MicroCompactPlaceholder string
+	MicroCompactEnabled         bool
+	MicroCompactKeepRecent     int
+	MicroCompactPlaceholder    string
+	MicroCompactMinCharCount  int // minimum chars in a tool result to consider clearing; preserves small results
 	PostCompactRecoverFiles    bool
 	PostCompactMaxFiles        int
 	PostCompactMaxFileChars    int
@@ -278,9 +279,10 @@ func DefaultConfig() Config {
 		AutoCompactThreshold:   0.75,
 		AutoCompactBuffer:      13000,
 		MaxCompactOutputTokens: 8192,
-		MicroCompactEnabled:    true,
-		MicroCompactKeepRecent: 5,
-		MicroCompactPlaceholder: "[Old tool result content cleared]",
+		MicroCompactEnabled:         true,
+		MicroCompactKeepRecent:     5,
+		MicroCompactPlaceholder:    "[Old tool result content cleared]",
+		MicroCompactMinCharCount:  2000, // only clear results >= 2000 chars; preserve small useful results
 		PostCompactRecoverFiles:       true,
 		PostCompactMaxFiles:           5,
 		PostCompactMaxFileChars:       50000,

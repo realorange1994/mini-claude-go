@@ -2876,7 +2876,7 @@ func (a *AgentLoop) tryCompaction() {
 		if keepRecent <= 0 {
 			keepRecent = 5
 		}
-		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder)
+		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
 		if cleared > 0 {
 			a.out( "\n[micro-compact] Cleared %d old tool results\n", cleared)
 			// NOTE: do NOT call toolStateTracker.OnCompaction() here.

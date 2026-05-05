@@ -554,8 +554,8 @@ func TestMicroCompactEntries(t *testing.T) {
 		t.Errorf("expected at least 20 entries, got %d", ctx.Len())
 	}
 
-	// Run micro-compact with keepRecent=5
-	cleared := ctx.MicroCompactEntries(5, "[cleared]")
+	// Run micro-compact with keepRecent=5, minCharCount=1 (clear everything beyond recent)
+	cleared := ctx.MicroCompactEntries(5, "[cleared]", 1)
 	if cleared != 5 {
 		t.Errorf("expected 5 entries cleared, got %d", cleared)
 	}
@@ -596,21 +596,25 @@ func TestMicroCompactEntriesKeepAll(t *testing.T) {
 	cfg := DefaultConfig()
 	ctx := NewConversationContext(cfg)
 
-	// Add only 3 tool results
+	// Add only 3 tool results (each with toolcall + toolresult)
 	for i := 0; i < 3; i++ {
+		toolCalls := []map[string]any{
+			{"id": fmt.Sprintf("tool_%d", i), "name": "read_file", "input": map[string]any{"path": fmt.Sprintf("file_%d.go", i)}},
+		}
+		ctx.AddAssistantToolCalls(toolCalls)
 		results := []anthropic.ToolResultBlockParam{
 			{
 				ToolUseID: fmt.Sprintf("tool_%d", i),
 				Content: []anthropic.ToolResultBlockParamContentUnion{
-					{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("output_%d", i)}},
+					{OfText: &anthropic.TextBlockParam{Text: strings.Repeat("x", 3000)}},
 				},
 			},
 		}
 		ctx.AddToolResults(results)
 	}
 
-	// With keepRecent=5, nothing should be cleared
-	cleared := ctx.MicroCompactEntries(5, "[cleared]")
+	// With keepRecent=5, nothing should be cleared (3 tool results < 5)
+	cleared := ctx.MicroCompactEntries(5, "[cleared]", 1)
 	if cleared != 0 {
 		t.Errorf("expected 0 entries cleared (all recent), got %d", cleared)
 	}
@@ -635,19 +639,86 @@ func TestMicroCompactEntriesDefaultValues(t *testing.T) {
 			{
 				ToolUseID: fmt.Sprintf("tool_%d", i),
 				Content: []anthropic.ToolResultBlockParamContentUnion{
-					{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("output_%d", i)}},
+					{OfText: &anthropic.TextBlockParam{Text: strings.Repeat("x", 3000)}},
 				},
 			},
 		}
 		ctx.AddToolResults(results)
 	}
 
-	// Call with keepRecent=0 (should default to 5)
-	cleared := ctx.MicroCompactEntries(0, "")
+	// Call with keepRecent=0 (should default to 5), minCharCount=1
+	cleared := ctx.MicroCompactEntries(0, "", 1)
 	if cleared != 3 {
 		t.Errorf("expected 3 entries cleared (8-5), got %d", cleared)
 	}
 }
+
+
+func TestMicroCompactMinCharCount(t *testing.T) {
+	ctx := NewConversationContext(DefaultConfig())
+
+	// Add a user message first
+	ctx.AddUserMessage("checking")
+
+	// Add a small tool call + small result (below minCharCount, should NOT be cleared)
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "tool_small", "name": "read_file", "input": map[string]any{"path": "a.txt"}},
+	})
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "tool_small", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "short output"}},
+		}},
+	})
+
+	// Add a large tool call + large result (above minCharCount, should be cleared if beyond keepRecent)
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "tool_large", "name": "read_file", "input": map[string]any{"path": "b.txt"}},
+	})
+	largeResult := strings.Repeat("x", 500)
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "tool_large", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: largeResult}},
+		}},
+	})
+
+	// Add a recent tool call + result (protected by keepRecent)
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "tool_recent", "name": "read_file", "input": map[string]any{"path": "c.txt"}},
+	})
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "tool_recent", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "recent"}},
+		}},
+	})
+
+	// With keepRecent=1, minCharCount=100: large result is old and large enough → cleared,
+	// small result is old but too small → preserved, recent result is within keepRecent → preserved
+	cleared := ctx.MicroCompactEntries(1, "[cleared]", 100)
+	if cleared != 1 {
+		t.Errorf("expected 1 entry cleared (large only), got %d", cleared)
+	}
+
+	// Verify small result is still intact
+	entries := ctx.Entries()
+	foundSmall := false
+	for _, e := range entries {
+		if results, ok := e.content.(ToolResultContent); ok {
+			for _, r := range results {
+				if r.ToolUseID == "tool_small" {
+					for _, c := range r.Content {
+						if c.OfText != nil && c.OfText.Text == "short output" {
+							foundSmall = true
+						}
+					}
+				}
+			}
+		}
+	}
+	if !foundSmall {
+		t.Error("small tool result was incorrectly cleared")
+	}
+}
+
 
 func TestAttachmentContentType(t *testing.T) {
 	cfg := DefaultConfig()
