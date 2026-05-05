@@ -204,9 +204,11 @@ func (r *Registry) AllTools() []Tool {
 
 // MarkFileRead records that a file has been read by read_file, storing its current mtime.
 func (r *Registry) MarkFileRead(path string) {
-	normalized := normalizeFilePath(path)
+	// Expand before normalizing so that ~/foo and /home/user/foo map to the same key.
+	expanded := expandPath(path)
+	normalized := normalizeFilePath(expanded)
 	r.mu.Lock()
-	if info, err := os.Stat(expandPath(path)); err == nil {
+	if info, err := os.Stat(expanded); err == nil {
 		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now()}
 	} else {
 		r.filesRead[normalized] = fileReadInfo{readTime: time.Now()} // new file, no mtime yet
@@ -217,7 +219,7 @@ func (r *Registry) MarkFileRead(path string) {
 // HasFileBeenRead checks if a file has been read by read_file.
 func (r *Registry) HasFileBeenRead(path string) bool {
 	r.mu.RLock()
-	_, ok := r.filesRead[normalizeFilePath(path)]
+	_, ok := r.filesRead[normalizeFilePath(expandPath(path))]
 	r.mu.RUnlock()
 	return ok
 }
@@ -232,7 +234,7 @@ func (r *Registry) CheckFileStale(path string) string {
 		return ""
 	}
 
-	normalized := normalizeFilePath(path)
+	normalized := normalizeFilePath(fp)
 	r.mu.RLock()
 	storedInfo, wasRead := r.filesRead[normalized]
 	r.mu.RUnlock()
