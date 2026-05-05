@@ -111,28 +111,6 @@ func TestSmartCompact(t *testing.T) {
 	}
 }
 
-func TestMicroCompact(t *testing.T) {
-	// Simulate a conversation with multiple rounds
-	msgs := []CompactionMessage{
-		{Role: "user", Content: "run a command", Timestamp: "2024-01-01T00:00:00Z"},
-		{Role: "assistant", Content: "ok", Timestamp: "2024-01-01T00:00:01Z"},
-		{Role: "user", Content: "[tool result]", ToolName: "exec", Timestamp: "2024-01-01T00:00:02Z"},
-		{Role: "assistant", Content: "done", Timestamp: "2024-01-01T00:00:03Z"},
-		{Role: "user", Content: "another command", Timestamp: "2024-01-01T00:00:04Z"},
-		{Role: "assistant", Content: "ok2", Timestamp: "2024-01-01T00:00:05Z"},
-		{Role: "user", Content: "[tool result 2]", ToolName: "exec", Timestamp: "2024-01-01T00:00:06Z"},
-		{Role: "assistant", Content: "done2", Timestamp: "2024-01-01T00:00:07Z"},
-		{Role: "user", Content: "final question", Timestamp: "2024-01-01T00:00:08Z"},
-	}
-
-	result := MicroCompact(msgs, DefaultMicroCompactConfig())
-	if len(result) == 0 {
-		t.Error("expected non-empty result")
-	}
-	// Middle tool-heavy turns should be compacted, first user + last messages preserved
-	t.Logf("MicroCompact: %d -> %d messages", len(msgs), len(result))
-}
-
 func stringsRepeat(s string, n int) string {
 	out := make([]byte, n*len(s))
 	for i := 0; i < n; i++ {

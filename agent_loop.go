@@ -1228,6 +1228,31 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 	if a.config.cachedPrompt != nil {
 		a.config.cachedPrompt.MarkDirty()
 	}
+
+	// Post-compact recovery: re-inject critical context after partial compact.
+	// Partial compact removes messages and adds a boundary, so recent files may be lost.
+	recoveredPaths := a.PostCompactRecovery()
+	if a.toolStateTracker != nil {
+		for _, path := range recoveredPaths {
+			a.toolStateTracker.MarkFileFresh(path)
+		}
+		if len(recoveredPaths) == 0 {
+			a.toolStateTracker.ClearConclusions()
+		}
+	}
+
+	// Inject running agent status so model doesn't spawn duplicates
+	a.InjectRunningAgentStatus()
+
+	// Keep recent messages — preserve actual message objects with tool structure intact.
+	// This matches the LLM-compact and SM-compact paths.
+	keepCount := a.config.PostCompactHistorySnipCount
+	if keepCount <= 0 {
+		keepCount = 8
+	}
+	a.context.KeepRecentMessages(keepCount)
+	a.context.ValidateToolPairing()
+	a.context.FixRoleAlternation()
 }
 
 func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
