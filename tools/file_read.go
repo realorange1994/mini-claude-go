@@ -92,14 +92,15 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 	if isBinaryExtension(ext) {
 		return ToolResult{Output: fmt.Sprintf("Error: binary file not supported: %s", ext), IsError: true}
 	}
-	if info.Size() > maxFileSize {
-		return ToolResult{Output: fmt.Sprintf("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions."), IsError: true}
-	}
 
-	// Parse offset/limit early (needed for dedup check and final registry update).
-	// offset: line number to start at (1-indexed)
+	// Parse offset/limit early so we can skip the size check for partial reads.
+	// If the user specified offset and/or limit, they are reading a portion — allow it
+	// even for large files (matching upstream behavior).
+	hasExplicitOffset := false
+	hasExplicitLimit := false
 	offset := 1
 	if o, ok := params["offset"]; ok {
+		hasExplicitOffset = true
 		switch v := o.(type) {
 		case float64:
 			offset = int(v)
@@ -118,6 +119,7 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 	// limit: number of lines. -1 sentinel means "read entire file" (will be resolved after reading).
 	limit := -1
 	if lim, ok := params["limit"]; ok {
+		hasExplicitLimit = true
 		switch v := lim.(type) {
 		case float64:
 			limit = int(v)
@@ -130,6 +132,13 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
+	isPartialRequest := hasExplicitOffset || hasExplicitLimit
+
+	// Only enforce file size limit for full-file reads.
+	// Partial reads (with offset/limit) are allowed for large files.
+	if !isPartialRequest && info.Size() > maxFileSize {
+		return ToolResult{Output: fmt.Sprintf("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions."), IsError: true}
+	}
 	// Dedup: if we've already read this exact range and the file hasn't
 	// changed on disk, return a stub instead of re-sending the full content.
 	// Only dedup entries from a prior read (not edit/write entries).
