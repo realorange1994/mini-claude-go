@@ -2248,6 +2248,113 @@ func getStringSlice(schema map[string]any, key string) []string {
 	return nil
 }
 
+// fileUnchangedStub is the prefix of the "file unchanged" dedup stub returned by read_file
+// when the file hasn't changed since the last read. Matches the text in file_read.go.
+const fileUnchangedStub = "File unchanged since last read."
+
+// shouldExcludeFromPostCompactRestore returns true if the file should NOT be
+// re-injected after compaction. Excludes CLAUDE.md (already in system prompt)
+// and plan files (.claude/plan/*.md). Matches upstream's shouldExcludeFromPostCompactRestore.
+func shouldExcludeFromPostCompactRestore(filename string, projectDir string) bool {
+	normalized := filepath.Clean(filename)
+	normalized = strings.ReplaceAll(normalized, "\\", "/")
+
+	// Exclude CLAUDE.md — already loaded into system prompt
+	base := filepath.Base(normalized)
+	if strings.EqualFold(base, "CLAUDE.md") {
+		return true
+	}
+
+	// Exclude plan files if .claude directory exists
+	claudeDir := filepath.Join(projectDir, ".claude")
+	if info, err := os.Stat(claudeDir); err == nil && info.IsDir() {
+		planPath := filepath.Join(claudeDir, "plan")
+		if info, err := os.Stat(planPath); err == nil && info.IsDir() {
+			// Check if file is under .claude/plan/
+			normalized = strings.ReplaceAll(normalized, "\\", "/")
+			planPathNorm := strings.ReplaceAll(filepath.ToSlash(planPath), "\\", "/")
+			if strings.HasPrefix(normalized, planPathNorm) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// collectReadToolFilePaths walks the preserved message entries (those after the most
+// recent CompactBoundaryContent) and collects file paths from read_file tool_use blocks.
+// Files whose tool_result is a file_unchanged stub are excluded — the stub points at
+// an earlier full read that may have been compacted away, so we want the recovery
+// to re-inject the real content. Matches upstream's collectReadToolFilePaths.
+func collectReadToolFilePaths(ctx *ConversationContext) map[string]bool {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+
+	// Find entries after the most recent CompactBoundaryContent
+	boundaryIdx := -1
+	for i := len(ctx.entries) - 1; i >= 0; i-- {
+		if _, ok := ctx.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+	if boundaryIdx < 0 {
+		return nil
+	}
+
+	preserved := ctx.entries[boundaryIdx+1:]
+
+	// Step 1: collect tool_use_ids whose tool_result is a file_unchanged stub
+	stubToolUseIDs := make(map[string]bool)
+	for _, entry := range preserved {
+		if entry.role != "user" {
+			continue
+		}
+		results, ok := entry.content.(ToolResultContent)
+		if !ok {
+			continue
+		}
+		for _, r := range results {
+			for _, c := range r.Content {
+				if c.OfText == nil {
+					continue
+				}
+				if strings.HasPrefix(c.OfText.Text, fileUnchangedStub) {
+					stubToolUseIDs[r.ToolUseID] = true
+				}
+			}
+		}
+	}
+
+	// Step 2: collect file paths from read_file tool_use blocks, skipping stubs
+	paths := make(map[string]bool)
+	for _, entry := range preserved {
+		if entry.role != "assistant" {
+			continue
+		}
+		blocks, ok := entry.content.(ToolUseContent)
+		if !ok {
+			continue
+		}
+		for _, b := range blocks {
+			if b.OfToolUse == nil || b.OfToolUse.Name != "read_file" {
+				continue
+			}
+			if stubToolUseIDs[b.OfToolUse.ID] {
+				continue
+			}
+			if m, ok := b.OfToolUse.Input.(map[string]any); ok {
+				if fp, ok := m["file_path"].(string); ok && fp != "" {
+					paths[fp] = true
+				}
+			}
+		}
+	}
+
+	return paths
+}
+
 // PostCompactRecovery re-injects critical context after compaction.
 // This prevents the model from losing awareness of files it was working on
 // and skills it was using, reducing wasted turns re-reading them.
@@ -2270,18 +2377,33 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 			maxFileChars = 50000
 		}
 
-		paths := a.registry.GetRecentlyReadFiles(maxFiles)
-		totalChars := 0
-		filesRecovered := 0
+	// Collect file paths already visible in preserved messages (after boundary).
+	// These are files whose read results survived compaction, so re-injecting
+	// them would be redundant. Matches upstream's collectReadToolFilePaths.
+	preservedReadPaths := collectReadToolFilePaths(a.context)
 
-		for _, path := range paths {
-			// Expand the normalized path back to a real path
-			realPath := path
-			if !filepath.IsAbs(realPath) {
-				realPath = filepath.Join(a.config.ProjectDir, realPath)
-			}
+	paths := a.registry.GetRecentlyReadFiles(maxFiles)
+	totalChars := 0
+	filesRecovered := 0
 
-			data, err := os.ReadFile(realPath)
+	for _, path := range paths {
+		// Expand the normalized path back to a real path
+		realPath := path
+		if !filepath.IsAbs(realPath) {
+			realPath = filepath.Join(a.config.ProjectDir, realPath)
+		}
+
+		// Skip plan files and memory files (CLAUDE.md, etc.)
+		if shouldExcludeFromPostCompactRestore(realPath, a.config.ProjectDir) {
+			continue
+		}
+
+		// Skip files already visible in the preserved message tail
+		if preservedReadPaths != nil && preservedReadPaths[realPath] {
+			continue
+		}
+
+		data, err := os.ReadFile(realPath)
 			if err != nil {
 				continue // file may have been deleted
 			}

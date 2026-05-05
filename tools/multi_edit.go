@@ -220,6 +220,11 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
 
+	// Mark file as read so subsequent edit/write checks still work
+	if m.registry != nil {
+		m.registry.MarkFileRead(fp)
+	}
+
 	return ToolResult{Output: fmt.Sprintf("Applied %d edits to %s", len(edits), fp)}
 }
 
