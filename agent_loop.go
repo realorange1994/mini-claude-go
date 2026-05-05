@@ -950,6 +950,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				if a.toolStateTracker != nil {
 					a.toolStateTracker.OnCompaction()
 				}
+				preTokens := a.context.EstimatedTokens()
 				if contextErrors <= 1 {
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
@@ -957,6 +958,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				} else {
 					a.context.MinimumHistory()
 				}
+				a.injectTruncationContinuation(preTokens)
 				continue
 			}
 			if isContextLengthError(errMsg) {
@@ -969,6 +971,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				if a.toolStateTracker != nil {
 					a.toolStateTracker.OnCompaction()
 				}
+				preTokens := a.context.EstimatedTokens()
 				if contextErrors <= 1 {
 					a.context.TruncateHistory()
 				} else if contextErrors <= 2 {
@@ -976,6 +979,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				} else {
 					a.context.MinimumHistory()
 				}
+				a.injectTruncationContinuation(preTokens)
 				continue
 			}
 			return fmt.Sprintf("API error: %v", err)
@@ -1208,6 +1212,13 @@ func (a *AgentLoop) ForceCompact() {
 	a.context.TruncateHistory()
 	after := len(a.context.Entries())
 	if after < before {
+		// Inject boundary + continuation so the model knows to resume, not re-execute.
+		// Without this, the model sees truncated history with no directive and
+		// often re-executes already-completed work.
+		preTokens := a.context.EstimatedTokens()
+		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
+		summaryContent := a.buildCompactSummaryMessage(preTokens)
+		a.context.AddSummary(summaryContent)
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
 		}
@@ -2778,6 +2789,19 @@ func (a *AgentLoop) buildCompactSummaryMessage(preTokens int) string {
 	sb.WriteString("Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.")
 
 	return sb.String()
+}
+
+// injectTruncationContinuation adds a CompactBoundary + summary after truncation-based
+// recovery. Without this, the model receives truncated context with no directive to
+// continue, causing it to re-execute old instructions or ask what to do.
+// This matches the boundary+summary pattern used by the LLM compact path.
+func (a *AgentLoop) injectTruncationContinuation(preTokens int) {
+	if a.context == nil {
+		return
+	}
+	a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
+	summaryContent := a.buildCompactSummaryMessage(preTokens)
+	a.context.AddSummary(summaryContent)
 }
 
 // extractRecentToolCallsForSummary returns a list of recent tool call descriptions
