@@ -117,7 +117,9 @@ func (t *TodoWriteTool) Name() string { return "TodoWrite" }
 func (t *TodoWriteTool) Description() string {
 	return "Update your task list. Use this to track multi-step work. " +
 		"Create tasks when starting non-trivial work, update status as you progress, " +
-		"mark completed when done. The list is shown in the system prompt as a reminder. " +
+		"mark completed when done. Mark each task as completed as soon as you are done " +
+		"with the task. Do not batch up multiple tasks before marking them as completed. " +
+		"The list is shown in the system prompt as a reminder. " +
 		"Call this tool with the full updated list — it replaces the previous list."
 }
 

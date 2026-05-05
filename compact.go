@@ -1016,7 +1016,9 @@ func estimateMessageParamsTokens(messages []anthropic.MessageParam) int {
 			}
 		}
 	}
-	return total
+	// Apply 4/3 padding factor (matching upstream's Math.ceil(totalTokens * 4/3))
+	// to be conservative — prevents prompt-too-long errors near the boundary.
+	return int(math.Ceil(float64(total) * 4.0 / 3.0))
 }
 
 // CompactionResultLLM holds the result of LLM-driven compaction.
