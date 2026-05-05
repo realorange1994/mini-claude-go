@@ -504,7 +504,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		maxTurns:         maxTurns,
 		budget:           NewIterationBudget(maxTurns),
 		taskStore:          NewTaskStore(),
-		notificationChan:   make(chan string, 10),
+		notificationChan:   make(chan string, 64),
 		evictionDone:       make(chan struct{}),
 		agentNameRegistry:  make(map[string]string),
 		workTaskStore:      NewWorkTaskStore(),
@@ -2541,12 +2541,15 @@ func (a *AgentLoop) tryLLMCompaction() {
 			}
 		}
 
-		// Phase 3: History snip — preserve recent messages verbatim
-		snipCount := a.config.PostCompactHistorySnipCount
-		if snipCount <= 0 {
-			snipCount = 3
+		// Phase 3: Keep recent messages — preserve actual message objects with tool structure intact.
+		// KeepRecentMessages keeps the original ToolUseContent/ToolResultContent blocks, not
+		// text conversions. Also adjusts backwards to preserve tool_use/tool_result pairing.
+		// This matches upstream's messagesToKeep mechanism.
+		keepCount := a.config.PostCompactHistorySnipCount
+		if keepCount <= 0 {
+			keepCount = 8
 		}
-		a.context.AddHistorySnip(snipCount, recoveredPaths)
+		a.context.KeepRecentMessages(keepCount)
 
 		// Rebuild messages from the actual context (summary + attachments + any tail entries)
 		// and calculate the real post-compact token count for cooldown.
