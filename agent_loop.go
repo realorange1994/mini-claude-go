@@ -499,7 +499,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		skillTracker:     cfg.SkillTracker,
 		compactor:        NewCompactor(),
 		useStream:        useStream,
-		maxToolChars:     8192,
+		maxToolChars:     50000,
 		toolTimeout:      600 * time.Second,
 		maxTurns:         maxTurns,
 		budget:           NewIterationBudget(maxTurns),
