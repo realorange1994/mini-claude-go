@@ -89,6 +89,7 @@ Do NOT use the Bash tool to run commands when a relevant dedicated tool is provi
 - To create files use file_write instead of cat with heredoc or echo redirection
 - To search for files use glob instead of find or ls
 - To search the content of files, use grep instead of grep or rg
+- Use the TodoWrite tool to track multi-step work. Break down tasks, update progress as you go, and mark items completed when done. The task list is injected into your system prompt as a reminder every turn.
 - Reserve using the exec tool exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the exec tool for these if it is absolutely necessary.
 
 Tool selection decision tree — follow in order, stop at the first match:
@@ -329,6 +330,7 @@ func buildToolList(registry *tools.Registry) string {
 		"exec":      "(for shell commands, package installs, git operations)",
 		"file_edit": "(MUST read file first)",
 		"file_write": "(overwrites entire file)",
+		"TodoWrite": "(track multi-step tasks, update as you progress)",
 	}
 
 	var sb strings.Builder

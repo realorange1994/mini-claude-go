@@ -870,6 +870,24 @@ func (a *AgentLoop) Run(userMessage string) string {
 				a.context.SetSystemPrompt(currentPrompt + "\n\n" + sessionState)
 			}
 
+			// Inject todo reminder into system prompt every turn (if tasks exist).
+			// This ensures the model sees its task list and stays on track.
+			if reminder := a.todoList.BuildReminder(); reminder != "" {
+				currentPrompt := a.context.SystemPrompt()
+				a.context.SetSystemPrompt(currentPrompt + "\n\n" + reminder + "\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.")
+			}
+
+			// Periodic TodoWrite idle reminder: if model hasn't used TodoWrite
+			// for 10+ turns, inject a nudge to create/update task list.
+			if a.todoList.IncrementTurn() {
+				if a.todoList.BuildReminder() == "" {
+					// No tasks exist and model is idle — nudge to use TodoWrite
+					idleMsg := a.todoList.BuildIdleReminder()
+					currentPrompt := a.context.SystemPrompt()
+					a.context.SetSystemPrompt(currentPrompt + "\n\n" + idleMsg)
+				}
+			}
+
 		var toolCalls []map[string]any
 		var textParts []string
 		var err error

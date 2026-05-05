@@ -31,20 +31,51 @@ type TodoListState interface {
 // TodoList holds the agent's structured task list.
 // It is updated by TodoWriteTool and its content is injected into the system prompt.
 type TodoList struct {
-	mu    sync.RWMutex
-	Items []TodoItem
+	mu                    sync.RWMutex
+	Items                 []TodoItem
+	turnsSinceLastWrite   int
+	turnsSinceLastRemind  int
+	reminderMessageShown  bool
 }
+
+const (
+	todoReminderTurnsSinceWrite  = 10
+	todoReminderTurnsBetweenReminders = 10
+)
 
 // NewTodoList creates an empty task list.
 func NewTodoList() *TodoList {
 	return &TodoList{Items: make([]TodoItem, 0)}
 }
 
-// Update replaces the entire todo list.
+// Update replaces the entire todo list and resets the write counter.
 func (t *TodoList) Update(items []TodoItem) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.Items = items
+	t.turnsSinceLastWrite = 0
+}
+
+// IncrementTurn increments the turn counters. Returns true if a TodoWrite
+// reminder should be injected (model hasn't used TodoWrite for >=10 turns
+// and hasn't been reminded for >=10 turns).
+func (t *TodoList) IncrementTurn() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.turnsSinceLastWrite++
+	t.turnsSinceLastRemind++
+	shouldRemind := t.turnsSinceLastWrite >= todoReminderTurnsSinceWrite &&
+		t.turnsSinceLastRemind >= todoReminderTurnsBetweenReminders
+	if shouldRemind {
+		t.turnsSinceLastRemind = 0
+	}
+	return shouldRemind
+}
+
+// BuildIdleReminder returns a nudge message when the model hasn't used
+// TodoWrite for a while. This matches upstream's periodic todo_reminder attachment.
+func (t *TodoList) BuildIdleReminder() string {
+	return "The TodoWrite tool hasn't been used recently. If you're on tasks that would benefit from tracking progress, consider using the TodoWrite tool to update your task list. If your current task list is stale, update it. If you don't have a task list, create one for multi-step work."
 }
 
 // BuildReminder returns the task list formatted for injection into the system prompt.
