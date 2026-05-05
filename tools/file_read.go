@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 const maxFileSize = 256 * 1024 // 256 KB, matching Claude Code official
@@ -148,7 +149,16 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
 	}
 
-	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	// Detect encoding from BOM (matching upstream: UTF-16 LE support)
+	var content string
+	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+		// UTF-16 LE BOM — decode to UTF-8 string
+		u16s := bytesToUint16LE(data[2:])
+		content = string(utf16.Decode(u16s))
+	} else {
+		content = string(data)
+	}
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	// Strip UTF-8 BOM (matching official Claude Code behavior)
 	if strings.HasPrefix(content, "\xEF\xBB\xBF") {
 		content = content[3:]

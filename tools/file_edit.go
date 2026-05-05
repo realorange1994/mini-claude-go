@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 )
 
 // FileEditTool edits a file by replacing an exact string with a new string.
@@ -129,7 +130,17 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
 	}
 
-	content := string(data)
+	// Detect encoding from BOM (matching upstream: UTF-16 LE support)
+	var content string
+	var isUTF16LE bool
+	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+		// UTF-16 LE BOM detected — decode to UTF-8 string
+		isUTF16LE = true
+		u16s := bytesToUint16LE(data[2:])
+		content = string(utf16.Decode(u16s))
+	} else {
+		content = string(data)
+	}
 	hasCRLF := strings.Contains(content, "\r\n")
 
 	// Strip trailing whitespace from new_string (except .md/.mdx) matching official
@@ -173,32 +184,38 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
-	// Find positions in normalized content and apply replacement to original
-	if newStrNorm == "" && !strings.HasSuffix(oldStrNorm, "\n") {
-		// When deleting a line (newStr is empty), also strip a trailing \n
-		// that follows the oldString in the file (matching upstream).
-		// E.g. deleting "  let x = 1;" from "  let x = 1;\n" should remove the orphan \n too.
+	// Style the new string first (matching upstream: style before replace)
+	styledNewStr := preserveQuoteStyle(contentNorm, oldStr, newStr, oldStrNorm)
+
+	// Apply replacement with styled new string (style first, replace once — handles replaceAll correctly)
+	// When deleting a line (newStr is empty), also strip a trailing \n
+	// that follows the oldString in the file (matching upstream).
+	if styledNewStr == "" && !strings.HasSuffix(oldStrNorm, "\n") {
 		oldWithLF := oldStrNorm + "\n"
 		if replaceAll {
-			contentNorm = strings.ReplaceAll(contentNorm, oldWithLF, newStrNorm)
+			contentNorm = strings.ReplaceAll(contentNorm, oldWithLF, styledNewStr)
 		} else if idx := strings.Index(contentNorm, oldWithLF); idx >= 0 {
-			contentNorm = contentNorm[:idx] + newStrNorm + contentNorm[idx+len(oldWithLF):]
+			contentNorm = contentNorm[:idx] + styledNewStr + contentNorm[idx+len(oldWithLF):]
 		} else {
-			contentNorm = strings.Replace(contentNorm, oldStrNorm, newStrNorm, 1)
+			contentNorm = applyReplacement(contentNorm, oldStrNorm, styledNewStr, replaceAll)
 		}
 	} else {
-		contentNorm = applyReplacement(contentNorm, oldStrNorm, newStrNorm, replaceAll)
+		contentNorm = applyReplacement(contentNorm, oldStrNorm, styledNewStr, replaceAll)
 	}
-
-	// Restore original quote style
-	contentNorm = preserveQuoteStyle(contentNorm, oldStr, newStr, oldStrNorm, newStrNorm, replaceAll)
 
 	// Restore CRLF
 	if hasCRLF {
 		contentNorm = restoreCRLF(contentNorm)
 	}
 
-	if err := os.WriteFile(fp, []byte(contentNorm), 0o644); err != nil {
+	// Write file (preserve original encoding)
+	var out []byte
+	if isUTF16LE {
+		out = encodeUTF16LE(contentNorm)
+	} else {
+		out = []byte(contentNorm)
+	}
+	if err := os.WriteFile(fp, out, 0o644); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
 	// Update registry so subsequent writes are allowed without re-reading
@@ -217,31 +234,29 @@ func applyReplacement(content, oldStr, newStr string, replaceAll bool) string {
 	return strings.Replace(content, oldStr, newStr, 1)
 }
 
-// preserveQuoteStyle restores original curly quote characters in the replacement.
-// Matching upstream's logic:
-// 1. If oldStr === actualOldStr (no normalization happened), return newStr as-is.
-// 2. If normalization happened, check if the ACTUAL matched text in the file
-//    had curly quotes. If so, apply the same curly quote style to newStr.
-func preserveQuoteStyle(content, oldStr, newStr, oldStrNorm, newStrNorm string, replaceAll bool) string {
-	// If no normalization was needed, oldStr === oldStrNorm, return as-is
+// preserveQuoteStyle returns the new string with curly quote style matching the file.
+// Matching upstream's preserveQuoteStyle(oldString, actualOldString, newString):
+// 1. If oldStr == oldStrNorm (no normalization), return newStr as-is.
+// 2. Find the actual matched text in the file (oldStrNorm position in content).
+// 3. If the matched text has curly quotes, apply the same style to newStr.
+func preserveQuoteStyle(content, oldStr, newStr, oldStrNorm string) string {
+	// If no normalization was needed, return newStr as-is
 	if oldStr == oldStrNorm {
 		return newStr
 	}
 
-	// Find the position in the normalized content where the match occurred
+	// Find the actual matched text in the normalized content
 	idx := strings.Index(content, oldStrNorm)
 	if idx < 0 {
 		return newStr
 	}
-
-	// Extract the actual matched text from the normalized content
 	actualMatched := content[idx : idx+len(oldStrNorm)]
 
-	// Check if the actual matched text in the file has curly quotes
+	// Check if the actual matched text has curly quotes
 	hasCurlyDouble := strings.Contains(actualMatched, "\u201C") || strings.Contains(actualMatched, "\u201D")
 	hasCurlySingle := strings.Contains(actualMatched, "\u2018") || strings.Contains(actualMatched, "\u2019")
 
-	// Apply curly quote style to the new string
+	// Apply curly quote style to newStr
 	result := newStr
 	if hasCurlyDouble {
 		result = curlyToStraightDouble(result)
@@ -362,4 +377,32 @@ func restoreCRLF(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// encodeUTF16LE encodes a Go string as UTF-16 LE with BOM prefix.
+// Used to preserve the original file encoding when writing back.
+func encodeUTF16LE(s string) []byte {
+	runes := []rune(s)
+	u16s := utf16.Encode(runes)
+	// BOM + UTF-16 LE (little-endian): 2 bytes per uint16
+	out := make([]byte, 2+2*len(u16s))
+	out[0] = 0xFF // BOM low byte
+	out[1] = 0xFE // BOM high byte
+	for i, v := range u16s {
+		out[2+2*i] = byte(v)        // low byte
+		out[2+2*i+1] = byte(v >> 8) // high byte
+	}
+	return out
+}
+
+// bytesToUint16LE converts a little-endian byte slice to []uint16.
+func bytesToUint16LE(b []byte) []uint16 {
+	if len(b)%2 != 0 {
+		b = b[:len(b)-1] // drop trailing odd byte
+	}
+	u16s := make([]uint16, len(b)/2)
+	for i := range u16s {
+		u16s[i] = uint16(b[2*i]) | uint16(b[2*i+1])<<8
+	}
+	return u16s
 }
