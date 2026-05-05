@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	stdpath "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -314,8 +315,13 @@ func (r *Registry) GetRecentlyReadFiles(maxFiles int) []string {
 }
 
 // normalizeFilePath normalizes a path for consistent comparison.
-func normalizeFilePath(path string) string {
-	p := strings.ReplaceAll(path, "\\", "/")
+// Cleans . and .. components, converts backslashes, and lowercases.
+func normalizeFilePath(filePath string) string {
+	p := strings.ReplaceAll(filePath, "\\", "/")
+	// Clean . and .. components using path.Clean (works on forward-slash paths)
+	p = stdpath.Clean(p)
+	// Re-normalize in case path.Clean introduced backslashes on Windows
+	p = strings.ReplaceAll(p, "\\", "/")
 	return strings.ToLower(p)
 }
 
