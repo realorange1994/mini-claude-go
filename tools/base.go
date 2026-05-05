@@ -170,6 +170,8 @@ type fileReadInfo struct {
 	readOffset int       // offset used when reading (-1 if from edit/write, not a read_file call)
 	readLimit  int       // limit used when reading (-1 if from edit/write, not a read_file call)
 	content    string    // file content at read time (for content-based staleness fallback)
+	isPartial  bool      // true if this entry represents a partial (offset/limit) read_file call
+	fromRead   bool      // true if this entry was created by a read_file call (vs edit/write)
 }
 
 // Registry collects tool instances and provides lookup + API schema generation.
@@ -209,27 +211,27 @@ func (r *Registry) AllTools() []Tool {
 
 // MarkFileRead records that a file has been read by read_file, storing its current mtime.
 func (r *Registry) MarkFileRead(path string) {
-	r.MarkFileReadWithParams(path, -1, -1, "") // offset=-1 means not from read_file (edit/write)
+	r.MarkFileReadWithParams(path, -1, -1, "", false, false) // edit/write: not partial, not from read
 }
 
 // MarkFileReadWithContent records a file read with content for staleness fallback.
 // Used by edit/write operations that know the post-write content.
 func (r *Registry) MarkFileReadWithContent(path string, content string) {
-	r.MarkFileReadWithParams(path, -1, -1, content)
+	r.MarkFileReadWithParams(path, -1, -1, content, false, false) // edit/write: not partial, not from read
 }
 
 // MarkFileReadWithParams records that a file has been read, storing offset/limit
 // and content for dedup detection and content-based staleness fallback.
-// Use offset=-1, limit=-1 for edit/write operations.
-func (r *Registry) MarkFileReadWithParams(path string, offset, limit int, content string) {
+// Use offset=-1, limit=-1, isPartial=false, fromRead=false for edit/write operations.
+func (r *Registry) MarkFileReadWithParams(path string, offset, limit int, content string, isPartial bool, fromRead bool) {
 	// Expand before normalizing so that ~/foo and /home/user/foo map to the same key.
 	expanded := expandPath(path)
 	normalized := normalizeFilePath(expanded)
 	r.mu.Lock()
 	if info, err := os.Stat(expanded); err == nil {
-		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now(), readOffset: offset, readLimit: limit, content: content}
+		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now(), readOffset: offset, readLimit: limit, content: content, isPartial: isPartial, fromRead: fromRead}
 	} else {
-		r.filesRead[normalized] = fileReadInfo{readTime: time.Now(), readOffset: offset, readLimit: limit, content: content} // new file, no mtime yet
+		r.filesRead[normalized] = fileReadInfo{readTime: time.Now(), readOffset: offset, readLimit: limit, content: content, isPartial: isPartial, fromRead: fromRead} // new file, no mtime yet
 	}
 	r.mu.Unlock()
 }
@@ -271,7 +273,7 @@ func (r *Registry) CheckFileStale(path string) string {
 
 	// Partial-view check: if the file was only partially read (with
 	// offset/limit), the model must do a fresh full read before editing.
-	if storedInfo.readOffset != -1 && (storedInfo.readOffset != 1 || storedInfo.readLimit != -1) {
+	if storedInfo.isPartial {
 		return "Error: file was only partially read. You must do a fresh full read (without offset/limit) before editing."
 	}
 
@@ -289,9 +291,9 @@ func (r *Registry) CheckFileStale(path string) string {
 	}
 
 	// Timestamp changed. On Windows, timestamps can change without content changes
-	// (cloud sync, antivirus, etc.). For full reads (offset=-1, limit=-1) where
-	// we have the stored content, compare content as a fallback to avoid false positives.
-	isFullRead := storedInfo.readOffset == -1 && storedInfo.readLimit == -1
+	// (cloud sync, antivirus, etc.). For full reads where we have stored content,
+	// compare content as a fallback to avoid false positives.
+	isFullRead := !storedInfo.isPartial
 	if isFullRead && storedInfo.content != "" {
 		if currentContent, err := os.ReadFile(fp); err == nil {
 			if string(currentContent) == storedInfo.content {

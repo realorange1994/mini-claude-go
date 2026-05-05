@@ -132,10 +132,9 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 
 	// Dedup: if we've already read this exact range and the file hasn't
 	// changed on disk, return a stub instead of re-sending the full content.
-	// The earlier Read tool_result is still in context — two full copies
-	// waste cache_creation tokens on every subsequent turn.
+	// Only dedup entries from a prior read (not edit/write entries).
 	if t.registry != nil && limit >= 0 {
-		if storedInfo, wasRead := t.registry.CheckFileRead(fp); wasRead && storedInfo.readOffset != -1 {
+		if storedInfo, wasRead := t.registry.CheckFileRead(fp); wasRead && storedInfo.fromRead {
 			if storedInfo.readOffset == offset && storedInfo.readLimit == limit {
 				if currentMtime := info.ModTime(); currentMtime == storedInfo.mtime {
 					return ToolResult{Output: "File unchanged since last read. The content from the earlier read_file tool_result in this conversation is still current — refer to that instead of re-reading."}
@@ -214,10 +213,13 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 	// Only store content for full-file reads (when end >= total).
 	if t.registry != nil {
 		readContent := ""
+		isPartial := false
 		if end >= total {
 			readContent = content
+		} else {
+			isPartial = true
 		}
-		t.registry.MarkFileReadWithParams(fp, offset, limit, readContent)
+		t.registry.MarkFileReadWithParams(fp, offset, limit, readContent, isPartial, true) // fromRead=true
 	}
 
 	return ToolResult{Output: strings.TrimRight(result, "\n")}
