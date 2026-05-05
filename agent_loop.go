@@ -199,7 +199,7 @@ func (a *AgentLoop) registerWorkTaskTools() {
 }
 
 // EnqueueAgentNotification pushes a formatted task notification XML to the notification channel.
-func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptPath, outputFile string, toolsUsed int, durationMs int64) {
+func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptPath, outputFile string, toolsUsed int, totalTokens int, durationMs int64) {
 	notification := fmt.Sprintf(`<task-notification>
 <agentId>%s</agentId>
 <status>%s</status>
@@ -207,7 +207,7 @@ func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptP
 <output_file>%s</output_file>
 <transcript_path>%s</transcript_path>
 <usage><total_tokens>%d</total_tokens><tool_uses>%d</tool_uses><duration_ms>%d</duration_ms></usage>
-</task-notification>`, taskID, status, result, outputFile, transcriptPath, toolsUsed, toolsUsed, durationMs)
+</task-notification>`, taskID, status, result, outputFile, transcriptPath, totalTokens, toolsUsed, durationMs)
 
 	select {
 	case a.notificationChan <- notification:
@@ -280,6 +280,19 @@ type AgentLoop struct {
 	drainPendingMessagesFunc func() []string // called at turn boundaries to drain pending messages from parent task store
 	toolStateTracker         *ToolStateTracker // tracks tool state for injection into system prompt
 	todoList                 *tools.TodoList    // structured task list for TodoWrite tool
+	totalInputTokens         atomic.Int64      // cumulative input tokens across all turns
+	totalOutputTokens        atomic.Int64      // cumulative output tokens across all turns
+}
+
+// recordTokenUsage accumulates API token usage into the agent's running totals.
+// Called after each API response to maintain accurate cumulative counts.
+func (a *AgentLoop) recordTokenUsage(inputTokens, outputTokens int64) {
+	if inputTokens > 0 {
+		a.totalInputTokens.Add(inputTokens)
+	}
+	if outputTokens > 0 {
+		a.totalOutputTokens.Add(outputTokens)
+	}
 }
 
 // out writes formatted output to the agent's configured output writer.
@@ -1370,6 +1383,10 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		cancel()
 
 		if err == nil {
+			// Accumulate token usage from this non-streaming response
+			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
+				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
+			}
 			return response, nil
 		}
 
@@ -1571,6 +1588,11 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	// Record what was streamed (for retry safety)
 	a.lastDeltasState = adapter.DeltasState()
 
+	// Accumulate token usage from this streaming response
+	if collect.Usage != nil {
+		a.recordTokenUsage(int64(collect.Usage.InputTokens), int64(collect.Usage.OutputTokens))
+	}
+
 	// Detect incomplete streams: if the stream produced no assistant message
 	// (e.g., proxy returned 200 with empty body), treat as a stream error.
 	// This mirrors the upstream check: "if (!partialMessage || (newMessages.length === 0 && !stopReason))"
@@ -1683,6 +1705,10 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		cancel()
 
 		if err == nil {
+			// Accumulate token usage from this non-streaming response
+			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
+				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
+			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
@@ -1738,6 +1764,10 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		cancel()
 
 		if err == nil {
+			// Accumulate token usage from this non-streaming response
+			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
+				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
+			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.

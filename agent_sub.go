@@ -392,7 +392,7 @@ func (a *AgentLoop) SpawnSubAgent(
 			if bgTask != nil {
 				bgTask.SetStatus(tools.TaskFailed)
 			}
-			a.EnqueueAgentNotification(taskID, "failed", "", "", "", 0, 0)
+			a.EnqueueAgentNotification(taskID, "failed", "", "", "", 0, 0, 0)
 			return
 		}
 		defer childLoop.Close()
@@ -472,7 +472,7 @@ func (a *AgentLoop) SpawnSubAgent(
 		if bgTask != nil {
 				bgTask.SetStatus(tools.TaskCompleted)
 		}
-		a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), outputFilePath, turnsUsed, dur)
+		a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), outputFilePath, turnsUsed, int(childLoop.totalInputTokens.Load()+childLoop.totalOutputTokens.Load()), dur)
 	}()
 
 	return taskID, fmt.Sprintf("Agent launched in background.\n\nagentId: %s\nStatus: async_launched", taskID), "", outputFilePath, 0, time.Since(start).Milliseconds()
