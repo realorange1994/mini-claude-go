@@ -1189,12 +1189,54 @@ func (c *ConversationContext) ValidateToolPairing() {
 	}
 	c.entries = compacted
 
-	// Pass 3 (REMOVED): Previously removed tool_use blocks without matching results.
-	// This was counterproductive: when the API returns 2013, it's because a
-	// tool_result doesn't match a tool_use. Removing the tool_use block makes
-	// the orphaned tool_result even more orphaned, worsening the mismatch.
-	// Instead, we keep tool_use blocks intact and only remove orphaned results.
-	// The API will handle any tool_use without results gracefully.
+	// Pass 3: Insert synthetic tool_results for tool_use blocks without matching results.
+	// After compaction, a tool_use block may survive in the kept tail while its
+	// tool_result was in the summarized portion. The API requires every tool_use
+	// to have a corresponding tool_result — without one, it returns error 2013.
+	// Insert a synthetic error result right after the assistant message containing
+	// the unpaired tool_use. This matches upstream's ensureToolResultPairing.
+	var missingIDs []string
+	for id := range callIDs {
+		if !resultIDs[id] {
+			missingIDs = append(missingIDs, id)
+		}
+	}
+	if len(missingIDs) > 0 {
+		missingSet := make(map[string]bool, len(missingIDs))
+		for _, id := range missingIDs {
+			missingSet[id] = true
+		}
+		placeholder := "[Tool result missing due to internal error]"
+		var newEntries []conversationEntry
+		for i, entry := range c.entries {
+			newEntries = append(newEntries, entry)
+			if entry.role == "assistant" {
+				if blocks, ok := entry.content.(ToolUseContent); ok {
+					var synthResults []anthropic.ToolResultBlockParam
+					for _, b := range blocks {
+						if b.OfToolUse != nil && missingSet[b.OfToolUse.ID] {
+							synthResults = append(synthResults, anthropic.ToolResultBlockParam{
+								ToolUseID: b.OfToolUse.ID,
+								Content: []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: placeholder}}},
+								IsError: anthropic.Bool(true),
+							})
+							delete(missingSet, b.OfToolUse.ID)
+						}
+					}
+					if len(synthResults) > 0 {
+						newEntries = append(newEntries, conversationEntry{
+							role:    "user",
+							content: ToolResultContent(synthResults),
+						})
+						// If the next entry is also a user-role message (e.g., another
+						// tool_result), FixRoleAlternation will merge them later.
+						_ = i // suppress unused warning
+					}
+				}
+			}
+		}
+		c.entries = newEntries
+	}
 }
 
 // FixRoleAlternation ensures strict user/assistant alternation by merging

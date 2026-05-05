@@ -2498,6 +2498,12 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	}
 	a.context.KeepRecentMessages(keepCount)
 
+	// Fix message structure after KeepRecentMessages: remove orphaned tool_results
+	// (whose tool_use was in the summarized portion) and merge consecutive same-role
+	// messages. Without this, the API returns error 2013 for invalid message structure.
+	a.context.ValidateToolPairing()
+	a.context.FixRoleAlternation()
+
 	// Calculate real post-compact token count for cooldown
 	actualMessages := a.context.BuildMessages()
 	actualPostTokens := estimateMessageParamsTokens(actualMessages)
@@ -2550,6 +2556,12 @@ func (a *AgentLoop) tryLLMCompaction() {
 			keepCount = 8
 		}
 		a.context.KeepRecentMessages(keepCount)
+
+		// Fix message structure after KeepRecentMessages: remove orphaned tool_results
+		// (whose tool_use was in the summarized portion) and merge consecutive same-role
+		// messages. Without this, the API returns error 2013 for invalid message structure.
+		a.context.ValidateToolPairing()
+		a.context.FixRoleAlternation()
 
 		// Rebuild messages from the actual context (summary + attachments + any tail entries)
 		// and calculate the real post-compact token count for cooldown.
