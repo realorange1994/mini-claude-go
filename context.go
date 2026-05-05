@@ -1208,7 +1208,7 @@ func (c *ConversationContext) ValidateToolPairing() {
 		}
 		placeholder := "[Tool result missing due to internal error]"
 		var newEntries []conversationEntry
-		for i, entry := range c.entries {
+		for _, entry := range c.entries {
 			newEntries = append(newEntries, entry)
 			if entry.role == "assistant" {
 				if blocks, ok := entry.content.(ToolUseContent); ok {
@@ -1230,7 +1230,6 @@ func (c *ConversationContext) ValidateToolPairing() {
 						})
 						// If the next entry is also a user-role message (e.g., another
 						// tool_result), FixRoleAlternation will merge them later.
-						_ = i // suppress unused warning
 					}
 				}
 			}
