@@ -21,9 +21,15 @@ func NewFileReadTool(registry *Registry) *FileReadTool {
 
 func (*FileReadTool) Name() string        { return "read_file" }
 func (*FileReadTool) Description() string {
-	return "ALWAYS use this tool to read files. NEVER use exec with cat, head, or tail. " +
-		"You MUST read a file before editing it with edit_file. " +
-		"Returns numbered lines for easy reference."
+	return "Reads a file from the local filesystem. You can access any file directly by using this tool.\n\n" +
+		"Usage:\n" +
+		"- The file_path parameter must be an absolute path, not a relative path\n" +
+		"- By default, it reads up to 2000 lines starting from the beginning of the file\n" +
+		"- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n" +
+		"- Results are returned using cat -n format, with line numbers starting at 1\n" +
+		"- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs\n" +
+		"- You must read a file before editing it with edit_file or write_file.\n" +
+		"NEVER use exec with cat, head, or tail — always use this tool instead."
 }
 
 func (*FileReadTool) InputSchema() map[string]any {
