@@ -2519,6 +2519,51 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 	return recoveredPaths
 }
 
+// extractRecentToolCallsForSummary returns a list of recent tool call descriptions
+// for inclusion in compaction summaries. This helps the model understand what
+// work was done before compaction truncated the conversation history.
+func (a *AgentLoop) extractRecentToolCallsForSummary(n int) []string {
+	if a.context == nil {
+		return nil
+	}
+	entries := a.context.Entries()
+	var results []string
+	count := 0
+	for i := len(entries) - 1; i >= 0 && count < n; i-- {
+		entry := entries[i]
+		if blocks, ok := entry.content.(ToolUseContent); ok {
+			for j := len(blocks) - 1; j >= 0 && count < n; j-- {
+				if b := blocks[j].OfToolUse; b != nil {
+					inputMap, _ := b.Input.(map[string]any)
+					desc := b.Name
+					if inputMap != nil {
+						if pathVal, ok := inputMap["path"].(string); ok {
+							desc += " " + pathVal
+						} else if cmdVal, ok := inputMap["command"].(string); ok {
+							shortCmd := cmdVal
+							if len(shortCmd) > 80 {
+								shortCmd = shortCmd[:80] + "..."
+							}
+							desc += " " + shortCmd
+						} else if queryVal, ok := inputMap["query"].(string); ok {
+							desc += " " + queryVal
+						} else if promptVal, ok := inputMap["prompt"].(string); ok {
+							short := promptVal
+							if len(short) > 80 {
+								short = short[:80] + "..."
+							}
+							desc += " " + short
+						}
+					}
+					results = append([]string{desc}, results...)
+					count++
+				}
+			}
+		}
+	}
+	return results
+}
+
 // InjectRunningAgentStatus adds attachments for sub-agents that are still
 // running in the background. This prevents the model from spawning duplicate
 // agents after compaction. Matches upstream's createAsyncAgentAttachmentsIfNeeded.
@@ -2569,7 +2614,18 @@ func (a *AgentLoop) tryCompaction() {
 			// historical instructions instead of continuing. Inject boundary + summary
 			// with continuation directive, matching the SM-compact and LLM-compact paths.
 			a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
-			summaryContent := fmt.Sprintf("[compact: %d tokens compressed]\n\nThe conversation was compacted to save context. Recent messages are preserved verbatim.", preTokens)
+
+			// Build a richer summary by analyzing the conversation entries before
+			// they were truncated. Extract recent tool calls and their status.
+			recentToolCalls := a.extractRecentToolCallsForSummary(5)
+			summaryContent := fmt.Sprintf("[compact: %d tokens compressed]", preTokens)
+			if len(recentToolCalls) > 0 {
+				summaryContent += "\n\nRecent tool calls before compaction:"
+				for _, tc := range recentToolCalls {
+					summaryContent += "\n- " + tc
+				}
+			}
+			summaryContent += "\n\nThe conversation was compacted to save context. Recent messages are preserved verbatim."
 			if tp := a.TranscriptPath(); tp != "" {
 				summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
 			}
