@@ -162,9 +162,12 @@ func ValidateParams(tool Tool, params map[string]any) error {
 }
 
 // fileReadInfo tracks both the file's mtime (for staleness checks) and when it was read (for recency sorting).
+// Also tracks the offset and limit used during read, for dedup detection (file_unchanged stub).
 type fileReadInfo struct {
-	mtime    time.Time // file modification time at read time
-	readTime time.Time // when the file was read
+	mtime      time.Time // file modification time at read time
+	readTime   time.Time // when the file was read
+	readOffset int       // offset used when reading (-1 if from edit/write, not a read_file call)
+	readLimit  int       // limit used when reading (-1 if from edit/write, not a read_file call)
 }
 
 // Registry collects tool instances and provides lookup + API schema generation.
@@ -204,14 +207,21 @@ func (r *Registry) AllTools() []Tool {
 
 // MarkFileRead records that a file has been read by read_file, storing its current mtime.
 func (r *Registry) MarkFileRead(path string) {
+	r.MarkFileReadWithParams(path, -1, -1) // offset=-1 means not from read_file (edit/write)
+}
+
+// MarkFileReadWithParams records that a file has been read, storing offset/limit
+// for dedup detection (file_unchanged stub). Use offset=-1, limit=-1 for
+// edit/write operations that update the registry without a real read range.
+func (r *Registry) MarkFileReadWithParams(path string, offset, limit int) {
 	// Expand before normalizing so that ~/foo and /home/user/foo map to the same key.
 	expanded := expandPath(path)
 	normalized := normalizeFilePath(expanded)
 	r.mu.Lock()
 	if info, err := os.Stat(expanded); err == nil {
-		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now()}
+		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now(), readOffset: offset, readLimit: limit}
 	} else {
-		r.filesRead[normalized] = fileReadInfo{readTime: time.Now()} // new file, no mtime yet
+		r.filesRead[normalized] = fileReadInfo{readTime: time.Now(), readOffset: offset, readLimit: limit} // new file, no mtime yet
 	}
 	r.mu.Unlock()
 }
@@ -222,6 +232,15 @@ func (r *Registry) HasFileBeenRead(path string) bool {
 	_, ok := r.filesRead[normalizeFilePath(expandPath(path))]
 	r.mu.RUnlock()
 	return ok
+}
+
+// CheckFileRead returns the stored read info and whether the file has been read.
+// Used by the dedup check in read_file to avoid re-sending unchanged content.
+func (r *Registry) CheckFileRead(path string) (fileReadInfo, bool) {
+	r.mu.RLock()
+	info, ok := r.filesRead[normalizeFilePath(expandPath(path))]
+	r.mu.RUnlock()
+	return info, ok
 }
 
 // CheckFileStale returns an error message if the file was modified since last read.

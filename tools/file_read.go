@@ -89,22 +89,8 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions."), IsError: true}
 	}
 
-	data, err := os.ReadFile(fp)
-	if err != nil {
-		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
-	}
-
-	content := strings.ReplaceAll(string(data), "\r\n", "\n")
-	// Strip UTF-8 BOM (matching official Claude Code behavior)
-	if strings.HasPrefix(content, "\xEF\xBB\xBF") {
-		content = content[3:]
-	}
-	lines := strings.Split(content, "\n")
-	// Remove trailing empty element from split
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-
+	// Parse offset/limit early (needed for dedup check and final registry update).
+	// offset: line number to start at (1-indexed)
 	offset := 1
 	if o, ok := params["offset"]; ok {
 		switch v := o.(type) {
@@ -122,9 +108,8 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 		offset = 1
 	}
 
-	total := len(lines)
-
-	limit := total // default: read entire file (matching Claude Code official)
+	// limit: number of lines. -1 sentinel means "read entire file" (will be resolved after reading).
+	limit := -1
 	if lim, ok := params["limit"]; ok {
 		switch v := lim.(type) {
 		case float64:
@@ -137,6 +122,40 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 			}
 		}
 	}
+
+	// Dedup: if we've already read this exact range and the file hasn't
+	// changed on disk, return a stub instead of re-sending the full content.
+	// The earlier Read tool_result is still in context — two full copies
+	// waste cache_creation tokens on every subsequent turn.
+	if t.registry != nil && limit >= 0 {
+		if storedInfo, wasRead := t.registry.CheckFileRead(fp); wasRead && storedInfo.readOffset != -1 {
+			if storedInfo.readOffset == offset && storedInfo.readLimit == limit {
+				if currentMtime := info.ModTime(); currentMtime == storedInfo.mtime {
+					return ToolResult{Output: "File unchanged since last read. The content from the earlier read_file tool_result in this conversation is still current — refer to that instead of re-reading."}
+				}
+			}
+		}
+	}
+
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
+	}
+
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	// Strip UTF-8 BOM (matching official Claude Code behavior)
+	if strings.HasPrefix(content, "\xEF\xBB\xBF") {
+		content = content[3:]
+	}
+	lines := strings.Split(content, "\n")
+	// Remove trailing empty element from split
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	total := len(lines)
+
+	// Resolve limit sentinel (-1 means entire file).
 	if limit <= 0 {
 		limit = total
 	}
@@ -176,7 +195,7 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 
 	// Mark file as read in registry so write/edit checks pass
 	if t.registry != nil {
-		t.registry.MarkFileRead(fp)
+		t.registry.MarkFileReadWithParams(fp, offset, limit)
 	}
 
 	return ToolResult{Output: strings.TrimRight(result, "\n")}
