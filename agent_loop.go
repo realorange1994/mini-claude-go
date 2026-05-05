@@ -1160,6 +1160,17 @@ func (a *AgentLoop) ForceCompact() {
 			a.toolStateTracker.OnCompaction()
 		}
 		a.InjectRunningAgentStatus()
+		// Post-compact recovery: re-inject recently-read files so the model
+		// can still edit them without "file has not been read" errors.
+		recoveredPaths := a.PostCompactRecovery()
+		if a.toolStateTracker != nil {
+			for _, path := range recoveredPaths {
+				a.toolStateTracker.MarkFileFresh(path)
+			}
+			if len(recoveredPaths) == 0 {
+				a.toolStateTracker.ClearConclusions()
+			}
+		}
 		if a.config.cachedPrompt != nil {
 			a.config.cachedPrompt.MarkDirty()
 		}
@@ -1175,6 +1186,16 @@ func (a *AgentLoop) ForceCompact() {
 			a.toolStateTracker.OnCompaction()
 		}
 		a.InjectRunningAgentStatus()
+		// Post-compact recovery after truncation (same as LLM-compact path)
+		recoveredPaths := a.PostCompactRecovery()
+		if a.toolStateTracker != nil {
+			for _, path := range recoveredPaths {
+				a.toolStateTracker.MarkFileFresh(path)
+			}
+			if len(recoveredPaths) == 0 {
+				a.toolStateTracker.ClearConclusions()
+			}
+		}
 		fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
 	} else {
 		fmt.Printf("[compact] No compaction needed (%d entries)\n", before)
