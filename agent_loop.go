@@ -21,6 +21,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
+	"miniclaudecode-go/mcp"
 	"miniclaudecode-go/tools"
 	"miniclaudecode-go/transcript"
 	"miniclaudecode-go/skills"
@@ -2533,11 +2534,164 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 
 		if skillsRecovered > 0 {
-			a.out( "[post-compact] Recovered %d skills (%d chars)\n", skillsRecovered, totalChars)
+			a.out("[post-compact] Recovered %d skills (%d chars)\n", skillsRecovered, totalChars)
+		}
+	}
+
+	// --- Tools re-announcement ---
+	// After compaction the model loses all tool-use history. Re-announce the
+	// full tool inventory so the model knows what capabilities are available.
+	// MCP tools and skill tools are listed separately since they're dynamic.
+	if a.registry != nil {
+		toolsAttachment := a.buildPostCompactToolsAnnouncement()
+		if toolsAttachment != "" {
+			a.context.AddAttachment(toolsAttachment)
+			a.out("[post-compact] Re-announced tool inventory\n")
+		}
+	}
+
+	// --- MCP tools re-announcement ---
+	// Re-announce available MCP servers and their tools after compaction.
+	if a.config.MCPManager != nil {
+		mcpAttachment := a.buildPostCompactMCPAnnouncement()
+		if mcpAttachment != "" {
+			a.context.AddAttachment(mcpAttachment)
+			a.out("[post-compact] Re-announced MCP tools\n")
+		}
+	}
+
+	// --- Agent listing re-announcement ---
+	// Re-announce active background sub-agents after compaction so the model
+	// doesn't lose track of running tasks.
+	if a.agentTaskStore != nil {
+		agentAttachment := a.buildPostCompactAgentAnnouncement()
+		if agentAttachment != "" {
+			a.context.AddAttachment(agentAttachment)
+			a.out("[post-compact] Re-announced background agents\n")
 		}
 	}
 
 	return recoveredPaths
+}
+
+// buildPostCompactToolsAnnouncement re-announces all available tools after compaction.
+// The model loses tool-use history during compaction; this reminds it of what tools exist.
+func (a *AgentLoop) buildPostCompactToolsAnnouncement() string {
+	var sb strings.Builder
+	sb.WriteString("## Tools Available After Compaction\n\n")
+	sb.WriteString("The following tools are available. Use them as needed.\n\n")
+
+	// Native tools (non-MCP, non-skill)
+	var nativeTools []string
+	var mcpTools []string
+	var skillTools []string
+	for _, t := range a.registry.AllTools() {
+		name := t.Name()
+		desc := t.Description()
+		entry := fmt.Sprintf("- **%s**: %s", name, desc)
+		switch name {
+		case "mcp_call_tool", "mcp_server_status":
+			mcpTools = append(mcpTools, entry)
+		case "search_skills", "read_skill", "list_skills":
+			skillTools = append(skillTools, entry)
+		default:
+			nativeTools = append(nativeTools, entry)
+		}
+	}
+
+	if len(nativeTools) > 0 {
+		sb.WriteString("### Core Tools\n")
+		for _, t := range nativeTools {
+			sb.WriteString(t + "\n")
+		}
+		sb.WriteString("\n")
+	}
+	if len(mcpTools) > 0 {
+		sb.WriteString("### MCP Tools\n")
+		for _, t := range mcpTools {
+			sb.WriteString(t + "\n")
+		}
+		sb.WriteString("\n")
+	}
+	if len(skillTools) > 0 {
+		sb.WriteString("### Skill Tools\n")
+		for _, t := range skillTools {
+			sb.WriteString(t + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// buildPostCompactMCPAnnouncement re-announces MCP servers and tools after compaction.
+func (a *AgentLoop) buildPostCompactMCPAnnouncement() string {
+	mgr := a.config.MCPManager
+	servers := mgr.ListServers()
+	if len(servers) == 0 {
+		return ""
+	}
+
+	// Build per-server tool lists from AllToolsWithServer
+	serverTools := make(map[string][]mcp.Tool)
+	for _, tws := range mgr.AllToolsWithServer() {
+		serverTools[tws.Server] = append(serverTools[tws.Server], tws.Tool)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## MCP Servers After Compaction\n\n")
+	sb.WriteString("The following MCP servers are connected. Use list_mcp_tools to discover their tools, or call mcp_call_tool directly.\n\n")
+
+	for _, server := range servers {
+		status := mgr.GetServerStatus(server)
+		tools := serverTools[server]
+		statusIcon := "●"
+		if status != "connected" {
+			statusIcon = "○"
+		}
+		sb.WriteString(fmt.Sprintf("%s **%s** [%s] (%d tools)\n", statusIcon, server, status, len(tools)))
+		for _, tool := range tools {
+			desc := tool.Description
+			if len(desc) > 80 {
+				desc = desc[:80] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("  - %s: %s\n", tool.Name, desc))
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// buildPostCompactAgentAnnouncement re-announces active background sub-agents after compaction.
+func (a *AgentLoop) buildPostCompactAgentAnnouncement() string {
+	tasks := a.agentTaskStore.List()
+	if len(tasks) == 0 {
+		return ""
+	}
+
+	var active []*tools.AgentTask
+	for _, t := range tasks {
+		if t.Status == tools.TaskRunning || t.Status == tools.TaskPending {
+			active = append(active, t)
+		}
+	}
+	if len(active) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Background Agents After Compaction\n\n")
+	sb.WriteString("The following sub-agents are running. Do NOT spawn duplicates for the same task.\n\n")
+
+	for _, t := range active {
+		sb.WriteString(fmt.Sprintf("- agentId: %s, status: %s, description: %s\n", t.ID, t.Status, t.Description))
+		if !t.StartTime.IsZero() {
+			dur := time.Since(t.StartTime)
+			sb.WriteString(fmt.Sprintf("  (running for %s)\n", dur.Round(time.Second)))
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // extractRecentToolCallsForSummary returns a list of recent tool call descriptions
