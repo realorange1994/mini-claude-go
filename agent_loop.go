@@ -1027,7 +1027,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 					}
 					switch name {
 					case "read_file":
-						if path, ok := input["path"].(string); ok {
+						if path := extractFilePath(input); path != "" {
 							a.toolStateTracker.RecordFileRead(path)
 						}
 					case "grep":
@@ -1945,7 +1945,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	// Auto-snapshot before write/edit tools
 	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
-		if path, ok := input["path"].(string); ok && path != "" {
+		if path := extractFilePath(input); path != "" {
 			_ = a.snapshots.TakeSnapshotWithDesc(path, "before " + toolName)
 		}
 	}
@@ -1975,7 +1975,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	// been read first IF the file already exists. New file creation is always allowed.
 	// If the file was read but externally modified since, the write is blocked.
 	if (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") && !checkPermissions {
-		if path, ok := input["path"].(string); ok && path != "" {
+		if path := extractFilePath(input); path != "" {
 			if staleMsg := a.registry.CheckFileStale(path); staleMsg != "" {
 				return anthropic.ToolResultBlockParam{
 					ToolUseID: toolUseID,
@@ -2043,16 +2043,13 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	}
 	elapsed := time.Since(start)
 
-	// Mark file as read after successful read_file
-	if !result.IsError && toolName == "read_file" {
-		if path, ok := input["path"].(string); ok && path != "" {
-			a.registry.MarkFileRead(path)
-		}
-	}
+	// NOTE: FileReadTool.Execute now handles MarkFileRead internally.
+	// The agent_loop.go call below was removed to avoid duplication
+	// with potentially different path normalization.
 
 	// Post-snapshot for write tools: capture the new state with a meaningful description
 	if !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
-		if path, ok := input["path"].(string); ok && path != "" {
+		if path := extractFilePath(input); path != "" {
 			desc := toolName
 			if toolName == "edit_file" {
 				if oldStr, ok2 := input["old_string"].(string); ok2 {
@@ -2070,7 +2067,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	// rm/rmrf cleanup: clear snapshot history for deleted files
 	if !result.IsError && toolName == "fileops" {
 		if op, ok := input["operation"].(string); ok && (op == "rm" || op == "rmrf") {
-			if path, ok2 := input["path"].(string); ok2 && path != "" {
+			if path := extractFilePath(input); path != "" {
 				if op == "rm" {
 					a.snapshots.ClearPath(path)
 				} else {
@@ -2183,12 +2180,24 @@ func limitStr(s string, max int) string {
 	return s[:max] + "..."
 }
 
+// extractFilePath extracts the file path from tool input.
+// Checks both "file_path" (official key) and "path" (legacy key) for compatibility.
+func extractFilePath(input map[string]any) string {
+	if path, ok := input["file_path"].(string); ok && path != "" {
+		return path
+	}
+	if path, ok := input["path"].(string); ok && path != "" {
+		return path
+	}
+	return ""
+}
+
 // formatToolArgs formats tool input as a compact string, showing file paths prominently.
 func formatToolArgs(toolName string, input map[string]any) string {
 	// Show the most relevant arg for each tool type
 	switch toolName {
 	case "read_file", "write_file", "edit_file", "list_dir":
-		if path, ok := input["path"].(string); ok {
+		if path := extractFilePath(input); path != "" {
 			return path
 		}
 	case "exec":
@@ -2200,7 +2209,7 @@ func formatToolArgs(toolName string, input map[string]any) string {
 		}
 	case "grep":
 		if pattern, ok := input["pattern"].(string); ok {
-			if path, ok2 := input["path"].(string); ok2 {
+			if path := extractFilePath(input); path != "" {
 				return fmt.Sprintf("%q in %s", pattern, path)
 			}
 			return fmt.Sprintf("%q", pattern)

@@ -11,7 +11,13 @@ import (
 const maxFileSize = 256 * 1024 // 256 KB, matching Claude Code official
 
 // FileReadTool reads file contents with optional line range.
-type FileReadTool struct{}
+type FileReadTool struct {
+	registry *Registry // may be nil if tracker is not available
+}
+
+func NewFileReadTool(registry *Registry) *FileReadTool {
+	return &FileReadTool{registry: registry}
+}
 
 func (*FileReadTool) Name() string        { return "read_file" }
 func (*FileReadTool) Description() string {
@@ -41,9 +47,9 @@ func (*FileReadTool) InputSchema() map[string]any {
 	}
 }
 
-func (*FileReadTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileReadTool) CheckPermissions(params map[string]any) string { return "" }
 
-func (*FileReadTool) Execute(params map[string]any) ToolResult {
+func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		pathStr, _ = params["path"].(string)
@@ -166,6 +172,11 @@ func (*FileReadTool) Execute(params map[string]any) ToolResult {
 		result += fmt.Sprintf("\n\n(Showing lines %d-%d of %d. Use offset=%d to continue.)", offset, end, total, end+1)
 	} else {
 		result += fmt.Sprintf("\n\n(End of file - %d lines total)", total)
+	}
+
+	// Mark file as read in registry so write/edit checks pass
+	if t.registry != nil {
+		t.registry.MarkFileRead(fp)
 	}
 
 	return ToolResult{Output: strings.TrimRight(result, "\n")}

@@ -305,7 +305,7 @@ func DefaultConfig() Config {
 func DefaultRegistry() *tools.Registry {
 	r := tools.NewRegistry()
 	r.Register(&tools.ExecTool{})
-	r.Register(&tools.FileReadTool{})
+	r.Register(tools.NewFileReadTool(r))
 	r.Register(tools.NewFileWriteTool(r))
 	r.Register(tools.NewFileEditTool(r))
 	r.Register(&tools.GlobTool{})

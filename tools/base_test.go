@@ -6,7 +6,7 @@ import (
 )
 
 func TestValidateParamsAllPresent(t *testing.T) {
-	tool := &FileReadTool{}
+	tool := NewFileReadTool(nil)
 	params := map[string]any{"file_path": "test.go"}
 	if err := ValidateParams(tool, params); err != nil {
 		t.Errorf("expected no error, got %v", err)
@@ -14,7 +14,7 @@ func TestValidateParamsAllPresent(t *testing.T) {
 }
 
 func TestValidateParamsMissingRequired(t *testing.T) {
-	tool := &FileReadTool{}
+	tool := NewFileReadTool(nil)
 	params := map[string]any{}
 	err := ValidateParams(tool, params)
 	if err == nil {
