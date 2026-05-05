@@ -173,6 +173,15 @@ func (t *ToolStateTracker) ClearConclusions() {
 	t.conclusions = t.conclusions[:0]
 }
 
+// GetConclusions returns a copy of the recorded conclusions.
+func (t *ToolStateTracker) GetConclusions() []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	result := make([]string, len(t.conclusions))
+	copy(result, t.conclusions)
+	return result
+}
+
 // BuildSessionStateNote returns the text to inject into the system prompt.
 // Items are split into "fresh" (content still in context) and "stale" (cleared by compaction).
 func (t *ToolStateTracker) BuildSessionStateNote() string {

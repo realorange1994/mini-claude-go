@@ -1178,20 +1178,8 @@ func (a *AgentLoop) ForceCompact() {
 		// Add boundary + summary so BuildMessages resets at the boundary.
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 
-		// Build summary with recent tool calls for context
-		recentToolCalls := a.extractRecentToolCallsForSummary(5)
-		summaryContent := fmt.Sprintf("[compact: %d tokens compressed]", preTokens)
-		if len(recentToolCalls) > 0 {
-			summaryContent += "\n\nRecent tool calls before compaction:"
-			for _, tc := range recentToolCalls {
-				summaryContent += "\n- " + tc
-			}
-		}
-		summaryContent += "\n\nThe conversation was compacted to save context. Recent messages are preserved verbatim."
-		if tp := a.TranscriptPath(); tp != "" {
-			summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
-		}
-		summaryContent += "\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+		// Build structured summary matching upstream's getCompactUserSummaryMessage format.
+		summaryContent := a.buildCompactSummaryMessage(preTokens)
 		a.context.AddSummary(summaryContent)
 
 		if a.toolStateTracker != nil {
@@ -2748,6 +2736,50 @@ func (a *AgentLoop) buildPostCompactAgentAnnouncement() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// buildCompactSummaryMessage generates a structured summary message for the non-LLM
+// compact path, matching upstream's getCompactUserSummaryMessage format.
+// It uses toolStateTracker conclusions and recent tool calls to tell the model
+// what was completed vs. pending — preventing the model from re-executing
+// already-done work.
+func (a *AgentLoop) buildCompactSummaryMessage(preTokens int) string {
+	var sb strings.Builder
+
+	// Preamble matching upstream's getCompactUserSummaryMessage
+	sb.WriteString("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n")
+	sb.WriteString(fmt.Sprintf("[compact: %d tokens compressed]\n", preTokens))
+
+	// Include toolStateTracker conclusions if available (what the agent claimed was done).
+	if a.toolStateTracker != nil {
+		if conclusions := a.toolStateTracker.GetConclusions(); len(conclusions) > 0 {
+			sb.WriteString("\n## Completed Work\n")
+			for _, c := range conclusions {
+				sb.WriteString(fmt.Sprintf("- %s\n", c))
+			}
+		}
+	}
+
+	// Include recent tool calls to show what was being worked on.
+	if recentCalls := a.extractRecentToolCallsForSummary(5); len(recentCalls) > 0 {
+		sb.WriteString("\n## Recent Tool Calls Before Compaction\n")
+		for _, tc := range recentCalls {
+			sb.WriteString(fmt.Sprintf("- %s\n", tc))
+		}
+	}
+
+	sb.WriteString("\n## Current Work\n")
+	sb.WriteString("(compact truncated the conversation — recent messages are preserved verbatim below)\n")
+
+	// Transcript path for detail recovery.
+	if tp := a.TranscriptPath(); tp != "" {
+		sb.WriteString(fmt.Sprintf("\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s\n", tp))
+	}
+
+	sb.WriteString("\nRecent messages are preserved verbatim.\n\n")
+	sb.WriteString("Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.")
+
+	return sb.String()
+}
+
 // extractRecentToolCallsForSummary returns a list of recent tool call descriptions
 // for inclusion in compaction summaries. This helps the model understand what
 // work was done before compaction truncated the conversation history.
@@ -2844,21 +2876,10 @@ func (a *AgentLoop) tryCompaction() {
 			// with continuation directive, matching the SM-compact and LLM-compact paths.
 			a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 
-			// Build a richer summary by analyzing the conversation entries before
-			// they were truncated. Extract recent tool calls and their status.
-			recentToolCalls := a.extractRecentToolCallsForSummary(5)
-			summaryContent := fmt.Sprintf("[compact: %d tokens compressed]", preTokens)
-			if len(recentToolCalls) > 0 {
-				summaryContent += "\n\nRecent tool calls before compaction:"
-				for _, tc := range recentToolCalls {
-					summaryContent += "\n- " + tc
-				}
-			}
-			summaryContent += "\n\nThe conversation was compacted to save context. Recent messages are preserved verbatim."
-			if tp := a.TranscriptPath(); tp != "" {
-				summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
-			}
-			summaryContent += "\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+			// Build a structured summary matching upstream's getCompactUserSummaryMessage
+			// format. Without this, the model sees a bare "[compact: N tokens]" and
+			// re-executes historical instructions instead of continuing.
+			summaryContent := a.buildCompactSummaryMessage(preTokens)
 			a.context.AddSummary(summaryContent)
 
 			if a.toolStateTracker != nil {
