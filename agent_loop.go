@@ -1156,7 +1156,31 @@ func (a *AgentLoop) ForceCompact() {
 	}
 
 	// Try normal compaction first (may skip if not needed)
+	preTokens := a.context.EstimatedTokens()
 	if a.context.CompactContext() {
+		// CompactContext replaces entries with compressed messages but does NOT add
+		// a boundary marker. Without one, BuildMessages never clears the buffer,
+		// so the compressed messages are appended to a growing list and the model
+		// sees the full conversation anyway — compaction is effectively a no-op.
+		// Add boundary + summary so BuildMessages resets at the boundary.
+		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
+
+		// Build summary with recent tool calls for context
+		recentToolCalls := a.extractRecentToolCallsForSummary(5)
+		summaryContent := fmt.Sprintf("[compact: %d tokens compressed]", preTokens)
+		if len(recentToolCalls) > 0 {
+			summaryContent += "\n\nRecent tool calls before compaction:"
+			for _, tc := range recentToolCalls {
+				summaryContent += "\n- " + tc
+			}
+		}
+		summaryContent += "\n\nThe conversation was compacted to save context. Recent messages are preserved verbatim."
+		if tp := a.TranscriptPath(); tp != "" {
+			summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
+		}
+		summaryContent += "\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+		a.context.AddSummary(summaryContent)
+
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
 		}
