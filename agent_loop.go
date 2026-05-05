@@ -2397,11 +2397,45 @@ func (a *AgentLoop) tryCompaction() {
 	}
 
 	if a.compactor == nil {
-		a.context.CompactContext()
-		if a.toolStateTracker != nil {
-			a.toolStateTracker.OnCompaction()
+		preTokens := a.context.EstimatedTokens()
+		if a.context.CompactContext() {
+			// CompactContext truncates messages but doesn't add a continuation directive.
+			// Without one, the model sees an incomplete conversation and re-executes
+			// historical instructions instead of continuing. Inject boundary + summary
+			// with continuation directive, matching the SM-compact and LLM-compact paths.
+			a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
+			summaryContent := fmt.Sprintf("[compact: %d tokens compressed]\n\nThe conversation was compacted to save context. Recent messages are preserved verbatim.", preTokens)
+			if tp := a.TranscriptPath(); tp != "" {
+				summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
+			}
+			summaryContent += "\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+			a.context.AddSummary(summaryContent)
+
+			if a.toolStateTracker != nil {
+				a.toolStateTracker.OnCompaction()
+			}
+			a.InjectRunningAgentStatus()
+
+			// Post-compact recovery: re-inject recently read files
+			recoveredPaths := a.PostCompactRecovery()
+			if a.toolStateTracker != nil {
+				for _, path := range recoveredPaths {
+					a.toolStateTracker.MarkFileFresh(path)
+				}
+				if len(recoveredPaths) == 0 {
+					a.toolStateTracker.ClearConclusions()
+				}
+			}
+
+			// Keep recent messages — preserve actual message objects with tool structure intact
+			keepCount := a.config.PostCompactHistorySnipCount
+			if keepCount <= 0 {
+				keepCount = 8
+			}
+			a.context.KeepRecentMessages(keepCount)
+			a.context.ValidateToolPairing()
+			a.context.FixRoleAlternation()
 		}
-		a.InjectRunningAgentStatus()
 		return
 	}
 
