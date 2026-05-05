@@ -75,5 +75,9 @@ func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
+	// Update registry so subsequent writes are allowed without re-reading
+	if w.registry != nil {
+		w.registry.MarkFileRead(fp)
+	}
 	return ToolResult{Output: fmt.Sprintf("Wrote %d chars to %s", len(content), fp)}
 }

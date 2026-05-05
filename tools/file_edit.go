@@ -100,6 +100,10 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 		if err := os.WriteFile(fp, []byte(newStr), 0o644); err != nil {
 			return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 		}
+		// Update registry so subsequent writes are allowed without re-reading
+		if e.registry != nil {
+			e.registry.MarkFileRead(fp)
+		}
 		return ToolResult{Output: fmt.Sprintf("Successfully created %s", fp)}
 	}
 
@@ -187,6 +191,10 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 
 	if err := os.WriteFile(fp, []byte(contentNorm), 0o644); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
+	}
+	// Update registry so subsequent writes are allowed without re-reading
+	if e.registry != nil {
+		e.registry.MarkFileRead(fp)
 	}
 
 	return ToolResult{Output: fmt.Sprintf("Successfully edited %s", fp)}
