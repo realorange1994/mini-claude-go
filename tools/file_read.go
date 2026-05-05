@@ -132,7 +132,7 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
-	isPartialRequest := hasExplicitOffset || hasExplicitLimit
+	isPartialRequest := hasExplicitOffset && hasExplicitLimit
 
 	// Only enforce file size limit for full-file reads.
 	// Partial reads (with offset/limit) are allowed for large files.

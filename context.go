@@ -440,11 +440,10 @@ func (c *ConversationContext) truncateIfNeeded() {
 		}
 		first := c.entries[:1]
 		recent := c.entries[len(c.entries)-keep:]
-		// Preserve user/assistant alternation: if the first entry and the
-		// first kept-recent entry share the same role, drop the recent one.
-		if len(recent) > 0 && first[0].role == recent[0].role {
-			recent = recent[1:]
-		}
+		// Keep ALL entries and let FixRoleAlternation handle same-role merging.
+		// Previously, same-role entries were silently dropped here, causing content loss
+		// and the "re-executes historical instructions" bug (important user instructions
+		// in Summary/Attachment entries were permanently dropped).
 		c.entries = append(first, recent...)
 
 		// After truncation, validate tool pairing and fix role alternation.
