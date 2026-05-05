@@ -257,7 +257,7 @@ type AgentLoop struct {
 	skillTracker *skills.SkillTracker
 	compactor    *Compactor
 	useStream    bool
-	maxToolChars int           // max chars per tool result (default 8192)
+	maxToolChars int           // max chars per tool result (default 50000, matching upstream)
 	toolTimeout  time.Duration // per-tool execution timeout (default 30s)
 	maxTurns     int           // hard cap on turns (default from config.MaxTurns)
 	budget       *IterationBudget
@@ -352,7 +352,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		skillTracker: cfg.SkillTracker,
 		compactor:    NewCompactor(),
 		useStream:    useStream,
-		maxToolChars: 8192,
+		maxToolChars: 50000,
 		toolTimeout:  600 * time.Second,
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
