@@ -1865,6 +1865,7 @@ func (c *ConversationContext) PartialCompact(
 	pivotIndex int,
 	transcriptPath string,
 	keepTail int, // for "from" direction: number of recent entries to always keep
+	conclusions []string, // tool state tracker conclusions for "Completed Work" section
 ) (*PartialCompactResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1952,6 +1953,16 @@ func (c *ConversationContext) PartialCompact(
 		role:    "user",
 		content: SummaryContent(func() string {
 			s := fmt.Sprintf("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n[partial-compact: %s, %d tokens compressed]\n\n%s", direction, tokensBefore, summaryText)
+
+			// Include tool state tracker conclusions (what the agent claimed was done).
+			if len(conclusions) > 0 {
+				s += "\n## Completed Work\n"
+				for _, c := range conclusions {
+					s += fmt.Sprintf("- %s\n", c)
+				}
+				s += "\n"
+			}
+
 			if transcriptPath != "" {
 				s += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", transcriptPath)
 			}
@@ -2148,6 +2159,90 @@ func entriesToSummaryText(entries []conversationEntry) string {
 					if cb.OfText != nil {
 						text := cb.OfText.Text
 						// Extract key info from tool result
+						lines := strings.Count(text, "\n")
+						preview := text
+						if len(preview) > 100 {
+							preview = preview[:100] + "..."
+						}
+						sb.WriteString(fmt.Sprintf("[tool result: %d lines] %s\n", lines+1, preview))
+					}
+				}
+			}
+		}
+	}
+
+	// Append summary statistics
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("Summary of %d conversation turns with %d tool calls.\n", turnCount, toolCallCount))
+	if len(filesMentioned) > 0 {
+		files := make([]string, 0, len(filesMentioned))
+		for f := range filesMentioned {
+			files = append(files, f)
+		}
+		summary.WriteString(fmt.Sprintf("Files mentioned: %s\n", strings.Join(files, ", ")))
+	}
+	summary.WriteString("---\n")
+	summary.WriteString(sb.String())
+	return summary.String()
+}
+
+// entriesToSummaryTextForMessagesParams generates structured metadata from []anthropic.MessageParam.
+// This is needed because BuildMessages() returns MessageParam slices, while the
+// existing entriesToSummaryText works on internal conversationEntry slices.
+// Used by SM-compact and fallback paths to inject structured metadata into summaries.
+func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) string {
+	var sb strings.Builder
+	turnCount := 0
+	toolCallCount := 0
+	filesMentioned := make(map[string]bool)
+
+	for _, msg := range messages {
+		role := string(msg.Role)
+		for _, block := range msg.Content {
+			if block.OfText != nil {
+				text := block.OfText.Text
+				if role == "user" {
+					// Skip tool_result user messages (they have structured content)
+					isToolResult := false
+					for _, b := range msg.Content {
+						if b.OfToolResult != nil {
+							isToolResult = true
+							break
+						}
+					}
+					if !isToolResult {
+						turnCount++
+						preview := text
+						if len(preview) > 200 {
+							preview = preview[:200] + "..."
+						}
+						sb.WriteString(fmt.Sprintf("User: %s\n", preview))
+					}
+				} else if role == "assistant" {
+					preview := text
+					if len(preview) > 200 {
+						preview = preview[:200] + "..."
+					}
+					sb.WriteString(fmt.Sprintf("Assistant: %s\n", preview))
+				}
+			}
+			if block.OfToolUse != nil {
+				toolCallCount++
+				name := block.OfToolUse.Name
+				// Extract file paths from tool arguments
+				if m, ok := block.OfToolUse.Input.(map[string]any); ok {
+					if path, ok := m["path"].(string); ok {
+						filesMentioned[path] = true
+					} else if path, ok := m["file_path"].(string); ok {
+						filesMentioned[path] = true
+					}
+				}
+				sb.WriteString(fmt.Sprintf("[tool call: %s]\n", name))
+			}
+			if block.OfToolResult != nil {
+				for _, tc := range block.OfToolResult.Content {
+					if tc.OfText != nil {
+						text := tc.OfText.Text
 						lines := strings.Count(text, "\n")
 						preview := text
 						if len(preview) > 100 {

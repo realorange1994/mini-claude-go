@@ -931,6 +931,8 @@ func (a *AgentLoop) Run(userMessage string) string {
 				a.out( "\n[WARN] Tool pairing error (2013), repairing context...\n")
 				a.context.ValidateToolPairing()
 				a.context.FixRoleAlternation()
+				// Inject a recovery hint so the model produces properly sequenced tool calls
+				a.context.AddUserMessage("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.")
 				continue
 			}
 			// Truncated tool arguments -- model cut off mid-tool-call
@@ -1288,7 +1290,11 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 		pivotIndex = len(entries) - 1
 	}
 
-	result, err := a.context.PartialCompact(dir, pivotIndex, a.TranscriptPath(), 3)
+	var conclusions []string
+	if a.toolStateTracker != nil {
+		conclusions = a.toolStateTracker.GetConclusions()
+	}
+	result, err := a.context.PartialCompact(dir, pivotIndex, a.TranscriptPath(), 3, conclusions)
 	if err != nil {
 		fmt.Printf("[partial-compact] Error: %v\n", err)
 		return
@@ -1404,6 +1410,8 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			a.out( "\n[WARN] Tool pairing error (2013), repairing context...\n")
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
+			// Inject a recovery hint so the model produces properly sequenced tool calls
+			a.context.AddUserMessage("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.")
 			// Rebuild messages from repaired entries so the fix takes effect
 			messages = a.context.BuildMessages()
 			messages = NormalizeAPIMessages(messages)
@@ -1796,6 +1804,8 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			a.out( "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
+			// Inject a recovery hint so the model produces properly sequenced tool calls
+			a.context.AddUserMessage("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.")
 			// Rebuild messages from repaired entries so the fix takes effect
 			rebuilt := a.context.BuildMessages()
 			rebuilt = NormalizeAPIMessages(rebuilt)
@@ -2775,6 +2785,16 @@ func (a *AgentLoop) buildCompactSummaryMessage(preTokens int) string {
 	sb.WriteString("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n")
 	sb.WriteString(fmt.Sprintf("[compact: %d tokens compressed]\n", preTokens))
 
+	// Include structured metadata from the full conversation before compaction.
+	// This ensures the model sees an explicit inventory of files, tool calls,
+	// and user messages — matching the LLM compact path's structured output.
+	messages := a.context.BuildMessages()
+	structuredMeta := entriesToSummaryTextForMessagesParams(messages)
+	if structuredMeta != "" {
+		sb.WriteString("\n## Structured context from compacted messages:\n")
+		sb.WriteString(structuredMeta)
+	}
+
 	// Include toolStateTracker conclusions if available (what the agent claimed was done).
 	if a.toolStateTracker != nil {
 		if conclusions := a.toolStateTracker.GetConclusions(); len(conclusions) > 0 {
@@ -3002,11 +3022,20 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 		a.toolStateTracker.OnCompaction()
 	}
 
+	// Build structured metadata from the messages being compacted.
+	// This ensures the model sees an explicit inventory of files, tool calls,
+	// and user messages even when session memory only has high-level notes.
+	// Matches upstream's structured_meta injection in do_compact_llm_call.
+	structuredMeta := entriesToSummaryTextForMessagesParams(messages)
+	if structuredMeta != "" {
+		structuredMeta = "\n\n## Structured context from compacted messages:\n" + structuredMeta
+	}
+
 	// Format the session memory as a compact summary
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
 	// Match upstream's getCompactUserSummaryMessage: add transcript path for
 	// detail recovery, recentMessagesPreserved notice, and continuation instruction.
-	summaryContent := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + boundaryText + "\n\n" + sessionMemoryContent
+	summaryContent := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + boundaryText + "\n\n" + sessionMemoryContent + structuredMeta
 	if tp := a.TranscriptPath(); tp != "" {
 		summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
 	}
