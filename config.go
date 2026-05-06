@@ -16,9 +16,10 @@ import (
 type PermissionMode string
 
 const (
-	ModeAsk  PermissionMode = "ask"
-	ModeAuto PermissionMode = "auto"
-	ModePlan PermissionMode = "plan"
+	ModeAsk    PermissionMode = "ask"
+	ModeAuto   PermissionMode = "auto"
+	ModePlan   PermissionMode = "plan"
+	ModeBypass PermissionMode = "bypass"
 )
 
 // Config holds all runtime configuration.

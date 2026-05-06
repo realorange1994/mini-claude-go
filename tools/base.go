@@ -12,7 +12,22 @@ import (
 	"time"
 )
 
-// ToolResult holds the output of a tool execution.
+// canonicalPath normalizes a file path for consistent registry lookups.
+// It expands ~, resolves relative paths to absolute, converts backslashes to
+// forward slashes, and lowercases the result. This ensures that different
+// representations of the same file (e.g., "foo.txt" vs "./foo.txt" vs
+// "E:\workspace\foo.txt") all map to the same key in the registry.
+func canonicalPath(path string) string {
+	// First expand ~/foo style paths
+	expanded := expandPath(path)
+	// Then resolve to absolute to handle relative paths like ./foo.txt or ../bar.txt
+	if !filepath.IsAbs(expanded) {
+		if abs, err := filepath.Abs(expanded); err == nil {
+			expanded = abs
+		}
+	}
+	return normalizeFilePath(expanded)
+}
 type ToolResult struct {
 	Output   string
 	IsError  bool
@@ -224,11 +239,10 @@ func (r *Registry) MarkFileReadWithContent(path string, content string) {
 // and content for dedup detection and content-based staleness fallback.
 // Use offset=-1, limit=-1, isPartial=false, fromRead=false for edit/write operations.
 func (r *Registry) MarkFileReadWithParams(path string, offset, limit int, content string, isPartial bool, fromRead bool) {
-	// Expand before normalizing so that ~/foo and /home/user/foo map to the same key.
-	expanded := expandPath(path)
-	normalized := normalizeFilePath(expanded)
+	// Canonicalize the path to handle relative paths consistently.
+	normalized := canonicalPath(path)
 	r.mu.Lock()
-	if info, err := os.Stat(expanded); err == nil {
+	if info, err := os.Stat(path); err == nil {
 		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now(), readOffset: offset, readLimit: limit, content: content, isPartial: isPartial, fromRead: fromRead}
 	} else {
 		r.filesRead[normalized] = fileReadInfo{readTime: time.Now(), readOffset: offset, readLimit: limit, content: content, isPartial: isPartial, fromRead: fromRead} // new file, no mtime yet
@@ -239,7 +253,7 @@ func (r *Registry) MarkFileReadWithParams(path string, offset, limit int, conten
 // HasFileBeenRead checks if a file has been read by read_file.
 func (r *Registry) HasFileBeenRead(path string) bool {
 	r.mu.RLock()
-	_, ok := r.filesRead[normalizeFilePath(expandPath(path))]
+	_, ok := r.filesRead[canonicalPath(path)]
 	r.mu.RUnlock()
 	return ok
 }
@@ -248,7 +262,7 @@ func (r *Registry) HasFileBeenRead(path string) bool {
 // Used by the dedup check in read_file to avoid re-sending unchanged content.
 func (r *Registry) CheckFileRead(path string) (fileReadInfo, bool) {
 	r.mu.RLock()
-	info, ok := r.filesRead[normalizeFilePath(expandPath(path))]
+	info, ok := r.filesRead[canonicalPath(path)]
 	r.mu.RUnlock()
 	return info, ok
 }
@@ -256,14 +270,14 @@ func (r *Registry) CheckFileRead(path string) (fileReadInfo, bool) {
 // CheckFileStale returns an error message if the file was modified since last read.
 // Returns empty string if the file is safe to edit.
 func (r *Registry) CheckFileStale(path string) string {
-	fp := expandPath(path)
+	// Canonicalize the path to handle relative paths consistently.
+	normalized := canonicalPath(path)
 
 	// New file creation: file doesn't exist yet, allow without read
-	if _, err := os.Stat(fp); os.IsNotExist(err) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return ""
 	}
 
-	normalized := normalizeFilePath(fp)
 	r.mu.RLock()
 	storedInfo, wasRead := r.filesRead[normalized]
 	r.mu.RUnlock()
@@ -277,7 +291,7 @@ func (r *Registry) CheckFileStale(path string) string {
 		return "Error: file was only partially read. You must do a fresh full read (without offset/limit) before editing."
 	}
 
-	info, err := os.Stat(fp)
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "" // file was deleted, not a staleness issue
@@ -295,7 +309,7 @@ func (r *Registry) CheckFileStale(path string) string {
 	// compare content as a fallback to avoid false positives.
 	isFullRead := !storedInfo.isPartial
 	if isFullRead && storedInfo.content != "" {
-		if currentContent, err := os.ReadFile(fp); err == nil {
+		if currentContent, err := os.ReadFile(path); err == nil {
 			if string(currentContent) == storedInfo.content {
 				// Content unchanged despite timestamp change — safe to proceed
 				return ""

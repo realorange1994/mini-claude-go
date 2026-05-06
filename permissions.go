@@ -125,6 +125,10 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
 			}
 		}
+	case ModeBypass:
+		// Allow all tools directly without classifier evaluation.
+		// Tool's own security check (Layer 1) still runs unconditionally.
+		return nil
 	case ModeAuto:
 		return g.checkAutoMode(tool, params)
 	}

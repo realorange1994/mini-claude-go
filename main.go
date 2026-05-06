@@ -20,7 +20,7 @@ func main() {
 	model := flag.String("model", "", "Anthropic model to use")
 	apiKey := flag.String("api-key", "", "API key (overrides ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN env and config file)")
 	baseURL := flag.String("base-url", "", "Custom API base URL (overrides config file)")
-	mode := flag.String("mode", "ask", "Permission mode (ask|auto|plan)")
+	mode := flag.String("mode", "ask", "Permission mode (ask|auto|bypass|plan)")
 	maxTurns := flag.Int("max-turns", 90, "Max agent loop turns per message")
 	stream := flag.Bool("stream", false, "Enable streaming output")
 	projectDir := flag.String("dir", "", "Project directory (change working directory before starting)")
@@ -381,7 +381,7 @@ func runInteractive(agent *AgentLoop) {
 					if len(parts) > 1 {
 						modeVal := strings.ToLower(parts[1])
 						switch modeVal {
-						case "ask", "auto", "plan":
+						case "ask", "auto", "bypass", "plan":
 							agent.config.PermissionMode = PermissionMode(modeVal)
 							fmt.Printf("Mode changed to: %s\n", modeVal)
 						default:
@@ -389,7 +389,7 @@ func runInteractive(agent *AgentLoop) {
 						}
 					} else {
 						fmt.Printf("Current mode: %s\n", agent.config.PermissionMode)
-						fmt.Println("Usage: /mode [ask|auto|plan]")
+						fmt.Println("Usage: /mode [ask|auto|bypass|plan]")
 					}
 					continue
 				case "/help":
