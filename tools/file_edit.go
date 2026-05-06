@@ -61,6 +61,9 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 	if pathStr == "" {
 		pathStr, _ = params["path"].(string)
 	}
+	if pathStr == "" {
+		return ToolResult{Output: "Error: file_path is required", IsError: true}
+	}
 	oldStr, _ := params["old_string"].(string)
 	newStr, _ := params["new_string"].(string)
 	replaceAll, _ := params["replace_all"].(bool)

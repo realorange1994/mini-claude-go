@@ -51,6 +51,9 @@ func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	if pathStr == "" {
 		pathStr, _ = params["path"].(string)
 	}
+	if pathStr == "" {
+		return ToolResult{Output: "Error: file_path is required", IsError: true}
+	}
 	content, _ := params["content"].(string)
 
 	const maxWriteSize = 10 * 1024 * 1024 // 10MB

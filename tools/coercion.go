@@ -238,6 +238,9 @@ func coerceToArray(key string, argVal any, args map[string]any, warnings *[]Coer
 func RemapFilePath(params map[string]any) {
 	if fp, ok := params["file_path"].(string); ok && fp != "" {
 		params["path"] = fp
+	} else if _, exists := params["file_path"]; exists && params["file_path"] == nil {
+		// file_path is explicitly null — set path to empty so downstream validation fires
+		params["path"] = ""
 	}
 }
 
