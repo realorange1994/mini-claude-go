@@ -2,7 +2,9 @@ package skills
 
 import (
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 )
 
 // SkillTracker tracks which skills have been shown/read/used across agent turns.
@@ -11,7 +13,7 @@ import (
 type SkillTracker struct {
 	mu          sync.Mutex
 	shownSkills map[string]struct{}
-	readSkills  map[string]struct{}
+	readSkills  map[string]time.Time // name → time when read_skill was called
 	usedSkills  map[string]struct{}
 }
 
@@ -19,7 +21,7 @@ type SkillTracker struct {
 func NewSkillTracker() *SkillTracker {
 	return &SkillTracker{
 		shownSkills: make(map[string]struct{}),
-		readSkills:  make(map[string]struct{}),
+		readSkills:  make(map[string]time.Time),
 		usedSkills:  make(map[string]struct{}),
 	}
 }
@@ -40,10 +42,11 @@ func (t *SkillTracker) MarkShown(name string) {
 }
 
 // MarkRead marks a skill as read by the model (read_skill tool called).
+// Records the current timestamp for time-based ordering during post-compact recovery.
 func (t *SkillTracker) MarkRead(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.readSkills[name] = struct{}{}
+	t.readSkills[name] = time.Now()
 }
 
 // MarkUsed marks a skill as used (model performed actions after reading it).
@@ -124,14 +127,28 @@ func (t *SkillTracker) UsedCount() int {
 	return len(t.usedSkills)
 }
 
-// GetReadSkillNames returns the names of skills that have been read.
+// GetReadSkillNames returns the names of skills that have been read,
+// sorted by read time descending (most recently read first).
+// Matches upstream's invokedAt-based ordering.
 func (t *SkillTracker) GetReadSkillNames() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	names := make([]string, 0, len(t.readSkills))
-	for name := range t.readSkills {
-		names = append(names, name)
+	type nameTime struct {
+		name string
+		time time.Time
+	}
+	entries := make([]nameTime, 0, len(t.readSkills))
+	for name, t := range t.readSkills {
+		entries = append(entries, nameTime{name, t})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].time.After(entries[j].time) // most recent first
+	})
+
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.name
 	}
 	return names
 }

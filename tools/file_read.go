@@ -11,6 +11,10 @@ import (
 
 const maxFileSize = 256 * 1024 // 256 KB, matching Claude Code official
 
+// FileUnchangedStub is the prefix of the "file unchanged" dedup stub returned by read_file
+// when the file hasn't changed since the last read. Used for both stub generation and detection.
+const FileUnchangedStub = "File unchanged since last read."
+
 // FileReadTool reads file contents with optional line range.
 type FileReadTool struct {
 	registry *Registry // may be nil if tracker is not available
@@ -161,7 +165,7 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 		if storedInfo, wasRead := t.registry.CheckFileRead(fp); wasRead && storedInfo.fromRead {
 			if storedInfo.readOffset == offset && storedInfo.readLimit == limit {
 				if currentMtime := info.ModTime(); currentMtime == storedInfo.mtime {
-					return ToolResult{Output: "File unchanged since last read. The content from the earlier read_file tool_result in this conversation is still current — refer to that instead of re-reading."}
+					return ToolResult{Output: FileUnchangedStub + " The content from the earlier read_file tool_result in this conversation is still current — refer to that instead of re-reading."}
 				}
 			}
 		}

@@ -2393,8 +2393,8 @@ func getStringSlice(schema map[string]any, key string) []string {
 }
 
 // fileUnchangedStub is the prefix of the "file unchanged" dedup stub returned by read_file
-// when the file hasn't changed since the last read. Matches the text in file_read.go.
-const fileUnchangedStub = "File unchanged since last read."
+// when the file hasn't changed since the last read. Re-exports the constant from tools/file_read.go.
+var fileUnchangedStub = tools.FileUnchangedStub
 
 // shouldExcludeFromPostCompactRestore returns true if the file should NOT be
 // re-injected after compaction. Excludes CLAUDE.md (already in system prompt)
@@ -2617,6 +2617,22 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 	}
 
+		// --- Plan file recovery ---
+	// Re-inject the current plan file if one exists, so the model knows
+	// what it was working on and what to do next.
+	planAttachment := buildPostCompactPlanAttachment(a.config.ProjectDir)
+	if planAttachment != "" {
+		a.context.AddAttachment(planAttachment)
+		a.out("[post-compact] Recovered plan file\n")
+	}
+
+	// --- Plan mode recovery ---
+	// If in plan mode, remind the model to continue planning without executing.
+	if a.config.PermissionMode == ModePlan {
+		a.context.AddAttachment("## Plan Mode Active\n\nYou are in plan mode. Do NOT execute any tools without first presenting your plan to the user and getting their approval. Continue planning — do not execute.")
+		a.out("[post-compact] Plan mode reminder injected\n")
+	}
+
 	// --- Tools re-announcement ---
 	// After compaction the model loses all tool-use history. Re-announce the
 	// full tool inventory so the model knows what capabilities are available.
@@ -2703,6 +2719,55 @@ func (a *AgentLoop) buildPostCompactToolsAnnouncement() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// buildPostCompactPlanAttachment reads the most recent plan file from .claude/plan/
+// and returns it as an attachment. Matches upstream's createPlanAttachmentIfNeeded.
+func buildPostCompactPlanAttachment(projectDir string) string {
+	planDir := filepath.Join(projectDir, ".claude", "plan")
+	info, err := os.Stat(planDir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+
+	entries, err := os.ReadDir(planDir)
+	if err != nil {
+		return ""
+	}
+
+	// Find the most recently modified .md file
+	var newestPath string
+	var newestTime int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".md") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		modTime := info.ModTime().Unix()
+		if modTime > newestTime {
+			newestTime = modTime
+			newestPath = filepath.Join(planDir, entry.Name())
+		}
+	}
+
+	if newestPath == "" {
+		return ""
+	}
+
+	data, err := os.ReadFile(newestPath)
+	if err != nil {
+		return ""
+	}
+
+	content := string(data)
+	return fmt.Sprintf("A plan file exists from plan mode at: %s\n\nPlan contents:\n\n%s\n\nIf this plan is relevant to the current work and not already complete, continue working on it.", newestPath, content)
+}
+
 // buildPostCompactMCPAnnouncement re-announces MCP servers and tools after compaction.
 func (a *AgentLoop) buildPostCompactMCPAnnouncement() string {
 	mgr := a.config.MCPManager
@@ -2741,7 +2806,9 @@ func (a *AgentLoop) buildPostCompactMCPAnnouncement() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// buildPostCompactAgentAnnouncement re-announces active background sub-agents after compaction.
+// buildPostCompactAgentAnnouncement re-announces active and completed-but-unretrieved
+// background sub-agents after compaction. Matches upstream's createAsyncAgentAttachmentsIfNeeded
+// which includes all agents with retrieved==false (running + completed but not yet collected).
 func (a *AgentLoop) buildPostCompactAgentAnnouncement() string {
 	tasks := a.agentTaskStore.List()
 	if len(tasks) == 0 {
@@ -2749,24 +2816,43 @@ func (a *AgentLoop) buildPostCompactAgentAnnouncement() string {
 	}
 
 	var active []*tools.AgentTask
+	var completedUnretrieved []*tools.AgentTask
 	for _, t := range tasks {
 		if t.Status == tools.TaskRunning || t.Status == tools.TaskPending {
 			active = append(active, t)
+		} else if t.Status == tools.TaskCompleted && !t.Notified {
+			// Completed but results not yet retrieved by the user/main agent.
+			// Include these to prevent the model from re-spawning the same task.
+			completedUnretrieved = append(completedUnretrieved, t)
 		}
 	}
-	if len(active) == 0 {
+
+	if len(active) == 0 && len(completedUnretrieved) == 0 {
 		return ""
 	}
 
 	var sb strings.Builder
 	sb.WriteString("## Background Agents After Compaction\n\n")
-	sb.WriteString("The following sub-agents are running. Do NOT spawn duplicates for the same task.\n\n")
 
-	for _, t := range active {
-		sb.WriteString(fmt.Sprintf("- agentId: %s, status: %s, description: %s\n", t.ID, t.Status, t.Description))
-		if !t.StartTime.IsZero() {
-			dur := time.Since(t.StartTime)
-			sb.WriteString(fmt.Sprintf("  (running for %s)\n", dur.Round(time.Second)))
+	if len(active) > 0 {
+		sb.WriteString("The following sub-agents are running. Do NOT spawn duplicates for the same task.\n\n")
+		for _, t := range active {
+			sb.WriteString(fmt.Sprintf("- agentId: %s, status: %s, description: %s\n", t.ID, t.Status, t.Description))
+			if !t.StartTime.IsZero() {
+				dur := time.Since(t.StartTime)
+				sb.WriteString(fmt.Sprintf("  (running for %s)\n", dur.Round(time.Second)))
+			}
+		}
+	}
+
+	if len(completedUnretrieved) > 0 {
+		sb.WriteString("\nThe following sub-agents completed but results have not been retrieved. Check their output before spawning duplicates.\n\n")
+		for _, t := range completedUnretrieved {
+			outputInfo := ""
+			if t.OutputFile != "" {
+				outputInfo = fmt.Sprintf(", output: %s", t.OutputFile)
+			}
+			sb.WriteString(fmt.Sprintf("- agentId: %s, status: completed, description: %s%s\n", t.ID, t.Description, outputInfo))
 		}
 	}
 
