@@ -85,6 +85,10 @@ type Client struct {
 	tools   []Tool
 	running bool
 
+	// Instructions from the MCP server's initialize response.
+	// This contains usage guidance that the model needs to know about.
+	instructions string
+
 	// Server type
 	serverType serverType
 
@@ -201,9 +205,17 @@ func (c *Client) initializeStdio(ctx context.Context) error {
 		"clientInfo": {"name": "miniclaudecode", "version": "0.1.0"}
 	}`)
 
-	_, err := c.requestStdio(ctx, "initialize", params)
+	resp, err := c.requestStdio(ctx, "initialize", params)
 	if err != nil {
 		return err
+	}
+
+	// Parse instructions from the initialize response
+	var initResult struct {
+		Instructions string `json:"instructions"`
+	}
+	if err := json.Unmarshal(resp, &initResult); err == nil && initResult.Instructions != "" {
+		c.instructions = initResult.Instructions
 	}
 
 	notif := RPCNotification{
@@ -219,8 +231,20 @@ func (c *Client) initializeRemote(ctx context.Context) error {
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "miniclaudecode", "version": "0.1.0"},
 	}
-	_, err := c.requestRemote(ctx, "initialize", params)
-	return err
+	resp, err := c.requestRemote(ctx, "initialize", params)
+	if err != nil {
+		return err
+	}
+
+	// Parse instructions from the initialize response
+	var initResult struct {
+		Instructions string `json:"instructions"`
+	}
+	if err := json.Unmarshal(resp, &initResult); err == nil && initResult.Instructions != "" {
+		c.instructions = initResult.Instructions
+	}
+
+	return nil
 }
 
 // ListTools discovers available tools from this MCP server.
@@ -501,6 +525,11 @@ func (c *Client) Tools() []Tool {
 	return c.tools
 }
 
+// Instructions returns the server's usage instructions from the initialize response.
+func (c *Client) Instructions() string {
+	return c.instructions
+}
+
 // ─── Manager ───
 
 type ToolWithServer struct {
@@ -636,6 +665,32 @@ func (m *Manager) AllToolsWithServer() []ToolWithServer {
 		}
 	}
 	return all
+}
+
+// GetServerInstructions returns the usage instructions for a specific MCP server.
+func (m *Manager) GetServerInstructions(name string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	client, ok := m.clients[name]
+	if !ok {
+		return ""
+	}
+	return client.Instructions()
+}
+
+// AllServerInstructions returns all MCP server instructions as a map[serverName]instructions.
+func (m *Manager) AllServerInstructions() map[string]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string]string)
+	for name, client := range m.clients {
+		if instr := client.Instructions(); instr != "" {
+			result[name] = instr
+		}
+	}
+	return result
 }
 
 // StopAll terminates all MCP servers.

@@ -2798,6 +2798,7 @@ func buildPostCompactPlanAttachment(projectDir string) string {
 }
 
 // buildPostCompactMCPAnnouncement re-announces MCP servers and tools after compaction.
+// Includes per-server instructions from the MCP initialize response, matching upstream behavior.
 func (a *AgentLoop) buildPostCompactMCPAnnouncement() string {
 	mgr := a.config.MCPManager
 	servers := mgr.ListServers()
@@ -2810,6 +2811,9 @@ func (a *AgentLoop) buildPostCompactMCPAnnouncement() string {
 	for _, tws := range mgr.AllToolsWithServer() {
 		serverTools[tws.Server] = append(serverTools[tws.Server], tws.Tool)
 	}
+
+	// Get per-server instructions
+	serverInstructions := mgr.AllServerInstructions()
 
 	var sb strings.Builder
 	sb.WriteString("## MCP Servers After Compaction\n\n")
@@ -2829,6 +2833,10 @@ func (a *AgentLoop) buildPostCompactMCPAnnouncement() string {
 				desc = desc[:80] + "..."
 			}
 			sb.WriteString(fmt.Sprintf("  - %s: %s\n", tool.Name, desc))
+		}
+		// Inject per-server instructions if available
+		if instr, ok := serverInstructions[server]; ok && instr != "" {
+			sb.WriteString(fmt.Sprintf("\n  **Usage instructions for %s:**\n  %s\n", server, instr))
 		}
 	}
 

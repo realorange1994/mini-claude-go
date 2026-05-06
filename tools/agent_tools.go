@@ -123,6 +123,10 @@ func (t *AgentGetTool) Execute(params map[string]any) ToolResult {
 		return ToolResultError(fmt.Sprintf("Agent %s not found", agentID))
 	}
 
+	// Mark task as notified so post-compact recovery knows the model
+	// has already seen this agent's results.
+	task.Notified = true
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Agent: %s\n", task.ID))
 	sb.WriteString(fmt.Sprintf("  Status:        %s\n", task.Status))

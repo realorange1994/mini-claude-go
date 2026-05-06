@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,16 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// generateUUID creates a random UUID for compact boundary markers.
+// Used by the transcript, session storage, and QueryEngine to reference
+// specific compaction events.
+func generateUUID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
 
 // EntryContent is a sealed interface for conversation entry content types.
 // The unexported method prevents external types from implementing it.
@@ -36,6 +47,9 @@ func (ToolResultContent) entryContent() {}
 type CompactBoundaryContent struct {
 	Trigger           CompactTrigger
 	PreCompactTokens  int
+	// UUID uniquely identifies this compact boundary. Used by the transcript,
+	// session storage, and QueryEngine to reference specific compaction events.
+	UUID              string
 }
 
 func (CompactBoundaryContent) entryContent() {}
@@ -735,6 +749,7 @@ func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preComp
 		content: CompactBoundaryContent{
 			Trigger:          trigger,
 			PreCompactTokens: preCompactTokens,
+			UUID:             generateUUID(),
 		},
 	})
 }

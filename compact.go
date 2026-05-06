@@ -1345,6 +1345,11 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 			{Text: compactSystemPrompt},
 		},
 		Messages: finalMsgs,
+		// Disable extended thinking during compaction to prevent wasting output
+		// tokens on thinking blocks. The summary needs all available tokens.
+		Thinking: anthropic.ThinkingConfigParamUnion{
+			OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
+		},
 	}, option.WithHTTPClient(&http.Client{
 		Timeout: 60 * time.Second,
 	}))
@@ -1958,6 +1963,7 @@ func (c *ConversationContext) PartialCompact(
 		content: CompactBoundaryContent{
 			Trigger:          CompactTriggerAuto,
 			PreCompactTokens: tokensBefore,
+				UUID:             generateUUID(),
 		},
 	})
 
