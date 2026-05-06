@@ -1746,6 +1746,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 // Mirrors Claude Code's non-streaming fallback + retry budget.
 func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewParams) ([]map[string]any, []string, error) {
 	const maxRetries = 9 // 1 attempt + 9 retries = 10 total
+	consecutive500s := 0
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -1799,6 +1800,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			rebuilt := a.context.BuildMessages()
 			rebuilt = NormalizeAPIMessages(rebuilt)
 			params.Messages = rebuilt
+			consecutive500s = 0
 			continue
 		}
 
@@ -1808,6 +1810,25 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			isContextLengthError(errMsg) {
 			return nil, nil, err
 		}
+
+		// Track consecutive 500 errors as a heuristic for context overflow.
+		// When using a proxy (e.g., coze.site), context overflow often returns
+		// a generic 500 instead of "context_length_exceeded". If we see 3+
+		// consecutive 500s, assume context overflow and trigger compaction
+		// instead of retrying the same oversized request indefinitely.
+		is500 := strings.Contains(errMsg, " 500 ") || strings.Contains(errMsg, "500 Internal Server Error")
+		if is500 {
+			consecutive500s++
+			if consecutive500s >= 3 {
+				a.out("\n[WARN] Consecutive 500 errors detected (context overflow likely), triggering compaction...\n")
+				a.context.TruncateHistory()
+				return nil, nil, fmt.Errorf("context_length_exceeded")
+			}
+			// Transient 500: retry
+			a.out( "\n[WARN] Transient 500 during non-streaming (attempt %d/%d): %v\n", consecutive500s, 3, err)
+			continue
+		}
+		consecutive500s = 0
 
 		// Transient error: retry
 		if isTransientError(errMsg) {
