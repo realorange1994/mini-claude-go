@@ -93,6 +93,21 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error: binary file not supported: %s", ext), IsError: true}
 	}
 
+	// Magic bytes detection: even if the extension is unknown or misleading,
+	// detect common binary formats by their file header signatures.
+	// This catches renamed binaries (e.g., malware disguised as .txt).
+	if info.Size() >= 4 {
+		f, err := os.Open(fp)
+		if err == nil {
+			header := make([]byte, 512)
+			n, _ := f.Read(header)
+			f.Close()
+			if n >= 4 && isBinaryMagic(header[:n]) {
+				return ToolResult{Output: "Error: binary file detected (magic bytes mismatch)", IsError: true}
+			}
+		}
+	}
+
 	// Parse offset/limit early so we can skip the size check for partial reads.
 	// If the user specified offset and/or limit, they are reading a portion — allow it
 	// even for large files (matching upstream behavior).
@@ -297,6 +312,128 @@ func isDeviceFile(path string) bool {
 
 	// Check for /proc/self/fd/ and /proc/<pid>/fd/ patterns
 	if strings.Contains(normalized, "/proc/") && strings.Contains(normalized, "/fd/") {
+		return true
+	}
+
+	return false
+}
+
+// isBinaryMagic checks file header magic bytes to detect binary files
+// regardless of file extension. Catches renamed/misleading files.
+// Checks first 512 bytes (all known signatures fit within 512 bytes).
+func isBinaryMagic(header []byte) bool {
+	if len(header) < 1 {
+		return false
+	}
+
+	// PE/EXE/DLL: 4d 5a ("MZ") — 2 bytes
+	if len(header) >= 2 && header[0] == 'M' && header[1] == 'Z' {
+		return true
+	}
+
+	// GZIP: 1f 8b — 2 bytes
+	if len(header) >= 2 && header[0] == 0x1f && header[1] == 0x8b {
+		return true
+	}
+
+	// BZIP2: 42 5a ("BZ") — 2 bytes
+	if len(header) >= 2 && header[0] == 'B' && header[1] == 'Z' {
+		return true
+	}
+
+	// MP3 ID3v2: 49 44 33 ("ID3") — 3 bytes
+	if len(header) >= 3 && header[0] == 'I' && header[1] == 'D' && header[2] == '3' {
+		return true
+	}
+
+	// MP3 without ID3: ff fb or ff f3 or ff f2 — 2 bytes
+	if len(header) >= 2 && header[0] == 0xff && (header[1] == 0xfb || header[1] == 0xf3 || header[1] == 0xf2) {
+		return true
+	}
+
+	// JPEG: ff d8 ff — 3 bytes
+	if len(header) >= 3 && header[0] == 0xff && header[1] == 0xd8 && header[2] == 0xff {
+		return true
+	}
+
+	// Need at least 4 bytes for most signatures
+	if len(header) < 4 {
+		return false
+	}
+
+	// ELF executable: 7f 45 4c 46
+	if header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F' {
+		return true
+	}
+
+	// PDF: 25 50 44 46 ("%PDF")
+	if header[0] == '%' && header[1] == 'P' && header[2] == 'D' && header[3] == 'F' {
+		return true
+	}
+
+	// PNG: 89 50 4e 47 0d 0a 1a 0a
+	if len(header) >= 8 && header[0] == 0x89 && header[1] == 'P' && header[2] == 'N' && header[3] == 'G' {
+		return true
+	}
+
+	// GIF: 47 49 46 38 ("GIF8")
+	if len(header) >= 6 && header[0] == 'G' && header[1] == 'I' && header[2] == 'F' && header[3] == '8' {
+		return true
+	}
+
+	// ZIP/JAR/DOCX/XLSX/PPTX/ODT/APK (all ZIP-based): 50 4b 03 04 or 50 4b 05 06 (empty ZIP) or 50 4b 07 08 (spanned)
+	if len(header) >= 4 && header[0] == 'P' && header[1] == 'K' {
+		if (header[2] == 0x03 && header[3] == 0x04) ||
+			(header[2] == 0x05 && header[3] == 0x06) ||
+			(header[2] == 0x07 && header[3] == 0x08) {
+			return true
+		}
+	}
+
+	// XZ: fd 37 7a 58 5a 00
+	if len(header) >= 6 && header[0] == 0xfd && header[1] == '7' && header[2] == 'z' && header[3] == 'X' && header[4] == 'Z' && header[5] == 0x00 {
+		return true
+	}
+
+	// 7Z: 37 7a bc af 27 1c
+	if len(header) >= 6 && header[0] == '7' && header[1] == 'z' && header[2] == 0xbc && header[3] == 0xaf && header[4] == 0x27 && header[5] == 0x1c {
+		return true
+	}
+
+	// WebP: 52 49 46 46 ... 57 45 42 50 ("RIFF....WEBP")
+	if len(header) >= 12 && header[0] == 'R' && header[1] == 'I' && header[2] == 'F' && header[3] == 'F' &&
+		header[8] == 'W' && header[9] == 'E' && header[10] == 'B' && header[11] == 'P' {
+		return true
+	}
+
+	// WAV: 52 49 46 46 ... 57 41 56 45 ("RIFF....WAVE")
+	if len(header) >= 12 && header[0] == 'R' && header[1] == 'I' && header[2] == 'F' && header[3] == 'F' &&
+		header[8] == 'W' && header[9] == 'A' && header[10] == 'V' && header[11] == 'E' {
+		return true
+	}
+
+	// MP4/M4A/QuickTime: 00 00 00 XX 66 74 79 70
+	if len(header) >= 8 && header[4] == 'f' && header[5] == 't' && header[6] == 'y' && header[7] == 'p' {
+		return true
+	}
+
+	// Java .class: ca fe ba be
+	if len(header) >= 4 && header[0] == 0xca && header[1] == 0xfe && header[2] == 0xba && header[3] == 0xbe {
+		return true
+	}
+
+	// Wasm: 00 61 73 6d ("\0asm")
+	if len(header) >= 4 && header[0] == 0x00 && header[1] == 'a' && header[2] == 's' && header[3] == 'm' {
+		return true
+	}
+
+	// Python .pyc: 0d 0d 0d 0a or various magic numbers
+	if len(header) >= 4 && header[0] == 0x0d && header[1] == 0x0d && header[2] == 0x0d && header[3] == 0x0a {
+		return true
+	}
+
+	// Lua bytecode: 1b 4c 75 61 ("\033Lua")
+	if len(header) >= 4 && header[0] == 0x1b && header[1] == 'L' && header[2] == 'u' && header[3] == 'a' {
 		return true
 	}
 
