@@ -59,7 +59,7 @@ func (t *FileReadTool) CheckPermissions(params map[string]any) string { return "
 func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
-		pathStr, _ = params["path"].(string)
+		return ToolResult{Output: "Error: file_path is required", IsError: true}
 	}
 	fp := expandPath(pathStr)
 

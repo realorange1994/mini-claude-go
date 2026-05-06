@@ -49,9 +49,6 @@ func (*FileWriteTool) CheckPermissions(params map[string]any) string { return ""
 func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
-		pathStr, _ = params["path"].(string)
-	}
-	if pathStr == "" {
 		return ToolResult{Output: "Error: file_path is required", IsError: true}
 	}
 	content, _ := params["content"].(string)

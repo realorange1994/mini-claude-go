@@ -2036,10 +2036,8 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		tools.CoerceArguments(tool.InputSchema(), input)
 	}
 
-	// Remap official parameter names to internal names
-	// Official Claude Code uses file_path; our tools internally use path.
-	tools.RemapFilePath(input)
-	tools.RemapDirParam(input)
+		// Remap directory parameter name (official: directory, internal: dir)
+		tools.RemapDirParam(input)
 
 	// Record tool use to transcript
 	if a.transcript != nil {
@@ -2299,12 +2297,9 @@ func limitStr(s string, max int) string {
 }
 
 // extractFilePath extracts the file path from tool input.
-// Checks both "file_path" (official key) and "path" (legacy key) for compatibility.
+// Checks only "file_path" — matching official Claude Code schema.
 func extractFilePath(input map[string]any) string {
 	if path, ok := input["file_path"].(string); ok && path != "" {
-		return path
-	}
-	if path, ok := input["path"].(string); ok && path != "" {
 		return path
 	}
 	return ""

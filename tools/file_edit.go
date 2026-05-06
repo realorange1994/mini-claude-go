@@ -59,9 +59,6 @@ func (*FileEditTool) CheckPermissions(params map[string]any) string { return "" 
 func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
-		pathStr, _ = params["path"].(string)
-	}
-	if pathStr == "" {
 		return ToolResult{Output: "Error: file_path is required", IsError: true}
 	}
 	oldStr, _ := params["old_string"].(string)
