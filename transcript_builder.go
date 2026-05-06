@@ -106,15 +106,15 @@ func formatToolInputCompact(toolName string, input any) string {
 			return cmd
 		}
 	case "write_file":
-		if path, ok := params["path"].(string); ok {
+		if path, ok := params["file_path"].(string); ok {
 			return path
 		}
 	case "edit_file":
-		if path, ok := params["path"].(string); ok {
+		if path, ok := params["file_path"].(string); ok {
 			return path
 		}
 	case "read_file":
-		if path, ok := params["path"].(string); ok {
+		if path, ok := params["file_path"].(string); ok {
 			return path
 		}
 	case "grep":
