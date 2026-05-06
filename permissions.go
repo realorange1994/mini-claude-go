@@ -64,7 +64,9 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		switch tool.Name() {
 		case "exec":
 			target, _ = params["command"].(string)
-		case "write_file", "edit_file", "multi_edit", "fileops":
+		case "write_file", "edit_file", "multi_edit":
+			target, _ = params["file_path"].(string)
+		case "fileops":
 			target, _ = params["path"].(string)
 		}
 		if target != "" {
@@ -223,7 +225,7 @@ func (g *PermissionGate) askUserWithWarning(toolName string, params map[string]a
 	case "exec":
 		detail, _ = params["command"].(string)
 	case "write_file", "edit_file":
-		detail, _ = params["path"].(string)
+		detail, _ = params["file_path"].(string)
 	}
 
 	prompt := fmt.Sprintf("\n[Permission] Allow '%s'", toolName)
