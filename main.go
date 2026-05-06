@@ -398,7 +398,7 @@ func runInteractive(agent *AgentLoop) {
 					fmt.Println("  /compact        -- Force context compaction")
 					fmt.Println("  /partialcompact -- Directional partial compaction (up_to|from, [pivot])")
 					fmt.Println("  /clear          -- Clear conversation history")
-					fmt.Println("  /mode           -- Switch permission mode (ask|auto|plan)")
+					fmt.Println("  /mode           -- Switch permission mode (ask|auto|bypass|plan)")
 					fmt.Println("  /resume         -- Resume a previous session")
 					fmt.Println("  /tools          -- List available tools")
 					fmt.Println("  /quit           -- Exit")
