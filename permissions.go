@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"miniclaudecode-go/tools"
 )
@@ -22,6 +24,17 @@ type PermissionGate struct {
 	classifier    *AutoModeClassifier
 	transcriptSrc TranscriptSource
 	denialCount   int // consecutive denial count for auto mode
+	// recentlyApproved tracks recent user approvals from AskUserQuestion.
+	// When the classifier would deny a tool, we check if the user already
+	// explicitly approved it — if so, bypass the classifier.
+	recentlyApproved []approvedAction
+}
+
+// approvedAction records a user-approved dangerous tool call via AskUserQuestion.
+type approvedAction struct {
+	toolName string
+	params   string // compact serialization for matching
+	expires  time.Time
 }
 
 // TranscriptSource provides compact transcript data for the classifier.
@@ -174,6 +187,8 @@ func (g *PermissionGate) askUser(toolName string, params map[string]any) bool {
 // checkAutoMode implements the auto mode permission check using the classifier.
 // Safe tools are auto-allowed. Other tools are evaluated by the LLM classifier.
 // After 3 consecutive denials, falls back to interactive prompt.
+// IMPORTANT: If the user explicitly approved this tool via AskUserQuestion, we
+// bypass the classifier entirely (the user's explicit consent is binding).
 func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any) *tools.ToolResult {
 	// Fast path: whitelisted tools are always allowed
 	if IsAutoAllowlisted(tool.Name(), params) {
@@ -184,6 +199,14 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any) *
 	// If classifier is not available, fall back to legacy behavior: allow all
 	if g.classifier == nil || !g.classifier.IsEnabled() {
 		// No classifier configured: auto mode allows all tools (old behavior)
+		return nil
+	}
+
+	// Check if this tool was explicitly approved by the user via AskUserQuestion.
+	// If the user said "Yes, continue" to a question about this exact tool/action,
+	// their explicit consent is binding — skip the classifier.
+	if g.toolMatchesRecentApproval(tool.Name(), params) {
+		g.denialCount = 0
 		return nil
 	}
 
@@ -244,4 +267,67 @@ func (g *PermissionGate) askUserWithWarning(toolName string, params map[string]a
 		return answer == "y" || answer == "yes"
 	}
 	return false
+}
+
+// RecordUserApproval records that the user explicitly approved a tool action
+// (typically via AskUserQuestion). This approval is valid for 2 minutes and
+// allows the matching tool call to bypass the auto classifier.
+func (g *PermissionGate) RecordUserApproval(toolName string, params map[string]any) {
+	compact := compactParams(toolName, params)
+	g.recentlyApproved = append(g.recentlyApproved, approvedAction{
+		toolName: toolName,
+		params:   compact,
+		expires:  time.Now().Add(2 * time.Minute),
+	})
+	// Trim old entries
+	now := time.Now()
+	valid := g.recentlyApproved[:0]
+	for _, a := range g.recentlyApproved {
+		if a.expires.After(now) {
+			valid = append(valid, a)
+		}
+	}
+	g.recentlyApproved = valid
+}
+
+// toolMatchesRecentApproval checks if the given tool call matches a recent
+// explicit user approval (from AskUserQuestion). If so, the classifier is bypassed.
+func (g *PermissionGate) toolMatchesRecentApproval(toolName string, params map[string]any) bool {
+	now := time.Now()
+	compact := compactParams(toolName, params)
+	for _, a := range g.recentlyApproved {
+		if a.expires.After(now) && a.toolName == toolName && a.params == compact {
+			return true
+		}
+	}
+	return false
+}
+
+// compactParams produces a compact string representation of tool params for
+// matching user approvals. Only includes the key identifying parameter.
+func compactParams(toolName string, params map[string]any) string {
+	switch toolName {
+	case "exec":
+		if cmd, ok := params["command"].(string); ok {
+			return cmd
+		}
+	case "write_file", "edit_file", "multi_edit":
+		if p, ok := params["file_path"].(string); ok {
+			return p
+		}
+	case "fileops":
+		if p, ok := params["path"].(string); ok {
+			return p
+		}
+	case "git":
+		if args, ok := params["args"].(string); ok {
+			return args
+		}
+	default:
+		data, err := json.Marshal(params)
+		if err == nil {
+			return string(data)
+		}
+	}
+	return ""
 }

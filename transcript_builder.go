@@ -54,7 +54,12 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 				if len(content) > 100 {
 					content = content[:100] + "..."
 				}
-				sb.WriteString(fmt.Sprintf("[Result] %s\n", content))
+				// Check if this is an AskUserQuestion result with user approval
+				if isAskUserApproval(content) {
+					sb.WriteString(fmt.Sprintf("[Result] USER EXPLICITLY APPROVED: %s\n", content))
+				} else {
+					sb.WriteString(fmt.Sprintf("[Result] %s\n", content))
+				}
 			}
 
 		// Skip CompactBoundaryContent, SummaryContent, AttachmentContent
@@ -137,4 +142,34 @@ func formatToolInputCompact(toolName string, input any) string {
 		parts = append(parts, fmt.Sprintf("%s=%s", k, s))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// isAskUserApproval detects whether a tool result represents an explicit user
+// approval from AskUserQuestion. Returns true if the user selected an option
+// that indicates consent (yes/ok/sure/continue/allow/proceed/etc).
+func isAskUserApproval(result string) bool {
+	lower := strings.ToLower(result)
+	// AskUserQuestion format: "Q: ...\nA: <option>"
+	if !strings.Contains(lower, "q:") || !strings.Contains(lower, "a:") {
+		return false
+	}
+	// Extract the answer part
+	idx := strings.Index(lower, "a:")
+	if idx < 0 {
+		return false
+	}
+	answer := strings.TrimSpace(lower[idx+2:])
+	// Check for affirmative keywords
+	affirmations := []string{
+		"yes", "ok", "sure", "continue", "allow", "proceed",
+		"go ahead", "fine", "good", "agreed", "approve",
+		"do it", "go for it", "yes, continue", "approved",
+		"create", "yes allow", "yes approve",
+	}
+	for _, a := range affirmations {
+		if strings.Contains(answer, a) {
+			return true
+		}
+	}
+	return false
 }
