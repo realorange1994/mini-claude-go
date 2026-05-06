@@ -30,6 +30,7 @@ type Config struct {
 	MaxTurns               int
 	MaxContextMsgs         int
 	PermissionMode         PermissionMode
+	PrePlanMode           PermissionMode // remembers the mode before entering plan mode (for ExitPlanMode to restore)
 	AllowedCommands        []string
 	DeniedPatterns         []string
 	ProjectDir             string

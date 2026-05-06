@@ -962,8 +962,21 @@ func NewContextWindowTracker(model string, threshold float64, buffer int) *Conte
 }
 
 // modelContextWindow returns the context window size for a model.
+// Supports [1m] suffix and known Sonnet 4 / Opus 4 models for 1M context.
+// Falls back to 200K for all other models.
 func modelContextWindow(model string) int {
-	// Default to 200K for all Anthropic models
+	lower := strings.ToLower(model)
+	// Priority 1: [1m] suffix — explicit 1M context request
+	if strings.Contains(lower, "[1m]") {
+		return 1_000_000
+	}
+	// Priority 2: Sonnet 4 / Opus 4 裸模型（无 suffix）也支持 1M
+	// These are known 1M-capable models as of 2025
+	if (strings.Contains(lower, "sonnet-4") || strings.Contains(lower, "opus-4-6") || strings.Contains(lower, "opus-4-7")) &&
+		!strings.Contains(lower, "[haiku]") && !strings.Contains(lower, "[3.5]") && !strings.Contains(lower, "[3.0]") {
+		return 1_000_000
+	}
+	// Default to 200K for all other Anthropic models
 	return 200_000
 }
 

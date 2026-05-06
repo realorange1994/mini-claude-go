@@ -99,6 +99,24 @@ func (a *AgentLoop) registerAskUserQuestionTool() {
 	a.registry.Register(&tools.AskUserQuestionTool{})
 }
 
+// registerPlanModeTools registers the EnterPlanMode and ExitPlanMode tools.
+func (a *AgentLoop) registerPlanModeTools() {
+	a.registry.Register(&tools.EnterPlanModeTool{
+		GetMode: func() string { return string(a.config.PermissionMode) },
+		SetMode: func(mode string) {
+			if a.config.PermissionMode != ModePlan {
+				a.config.PrePlanMode = a.config.PermissionMode
+			}
+			a.config.PermissionMode = PermissionMode(mode)
+		},
+	})
+	a.registry.Register(&tools.ExitPlanModeTool{
+		GetMode:        func() string { return string(a.config.PermissionMode) },
+		SetMode:        func(mode string) { a.config.PermissionMode = PermissionMode(mode) },
+		GetPrePlanMode: func() string { return string(a.config.PrePlanMode) },
+	})
+}
+
 // registerTaskOutputTool registers the TaskOutputTool with this loop's callback.
 func (a *AgentLoop) registerTaskOutputTool() {
 	taskOutputTool := &tools.TaskOutputTool{
@@ -441,6 +459,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent.registerBashBgTool()
 	agent.registerAgentManagementTools()
 	agent.registerAskUserQuestionTool()
+	agent.registerPlanModeTools()
 
 	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
 	if tst, ok := agent.registry.Get("tool_search"); ok {
@@ -578,6 +597,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	agent.registerBashBgTool()
 	agent.registerAgentManagementTools()
 	agent.registerAskUserQuestionTool()
+	agent.registerPlanModeTools()
 
 	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
 	if tst, ok := agent.registry.Get("tool_search"); ok {
@@ -2666,6 +2686,15 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 	}
 
+	// --- Todo/Task recovery ---
+	// Re-inject task state by scanning transcript for task_create, task_update,
+	// and TodoWrite tool calls. This survives compact since the transcript persists.
+	taskAttachment := buildTaskRecoveryAttachment(a.context)
+	if taskAttachment != "" {
+		a.context.AddAttachment(taskAttachment)
+		a.out("[post-compact] Task/Todo state recovered\n")
+	}
+
 	return recoveredPaths
 }
 
@@ -2804,6 +2833,147 @@ func (a *AgentLoop) buildPostCompactMCPAnnouncement() string {
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// buildTaskRecoveryAttachment scans conversation entries for task_create, task_update,
+// and TodoWrite tool calls, extracts the most recent task state, and formats it as
+// an attachment for post-compact recovery. Matches upstream's extractTodosFromTranscript.
+func buildTaskRecoveryAttachment(ctx *ConversationContext) string {
+	entries := ctx.Entries()
+
+	// Scan backward for task tool calls and collect task state
+	type taskState struct {
+		id          string
+		subject     string
+		status      string
+		description string
+	}
+	latestTasks := make(map[string]taskState) // keyed by task ID
+	var todoItems []string                    // TodoWrite items
+
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		tu, ok := entry.content.(ToolUseContent)
+		if !ok {
+			continue
+		}
+		for _, block := range tu {
+			// Extract tool_use block info
+			jsonBytes, _ := json.Marshal(block)
+			var parsed struct {
+				Type  string `json:"type"`
+				Name  string `json:"name"`
+				Input struct {
+					Subject     string `json:"subject"`
+					Description string `json:"description"`
+					Status      string `json:"status"`
+					TaskId      string `json:"taskId"`
+					ID          string `json:"id"`
+					Todos       []struct {
+						Content  string `json:"content"`
+						Status   string `json:"status"`
+						Subject  string `json:"subject"`
+					} `json:"todos"`
+				} `json:"input"`
+			}
+			if json.Unmarshal(jsonBytes, &parsed) != nil || parsed.Type != "tool_use" {
+				continue
+			}
+
+			switch parsed.Name {
+			case "task_create":
+				id := parsed.Input.TaskId
+				if id == "" {
+					id = parsed.Input.ID
+				}
+				if id != "" {
+					if _, exists := latestTasks[id]; !exists {
+						latestTasks[id] = taskState{
+							id:          id,
+							subject:     parsed.Input.Subject,
+							status:      "pending",
+							description: parsed.Input.Description,
+						}
+					}
+				}
+			case "task_update":
+				id := parsed.Input.TaskId
+				if id == "" {
+					id = parsed.Input.ID
+				}
+				if id != "" {
+					if existing, ok := latestTasks[id]; ok {
+						if parsed.Input.Status != "" {
+							existing.status = parsed.Input.Status
+						}
+						if parsed.Input.Subject != "" {
+							existing.subject = parsed.Input.Subject
+						}
+						latestTasks[id] = existing
+					} else {
+						latestTasks[id] = taskState{
+							id:      id,
+							subject: parsed.Input.Subject,
+							status:  parsed.Input.Status,
+						}
+					}
+				}
+			case "TodoWrite":
+				if len(parsed.Input.Todos) > 0 && len(todoItems) == 0 {
+					for _, t := range parsed.Input.Todos {
+						status := t.Status
+						if status == "" {
+							status = "pending"
+						}
+						content := t.Content
+						if content == "" {
+							content = t.Subject
+						}
+						icon := "O" // pending
+						if status == "in_progress" {
+							icon = "◐"
+						} else if status == "completed" {
+							icon = "●"
+						}
+						todoItems = append(todoItems, fmt.Sprintf("%s %s [%s]", icon, content, status))
+					}
+				}
+			}
+		}
+	}
+
+	var sb strings.Builder
+
+	// Format task items
+	if len(latestTasks) > 0 {
+		sb.WriteString("## Tasks (recovered from transcript)\n\n")
+		for _, t := range latestTasks {
+			icon := "O"
+			if t.status == "in_progress" {
+				icon = "◐"
+			} else if t.status == "completed" {
+				icon = "●"
+			}
+			sb.WriteString(fmt.Sprintf("%s [%s] %s\n", icon, t.id, t.subject))
+			if t.description != "" {
+				sb.WriteString(fmt.Sprintf("  %s\n", t.description))
+			}
+		}
+	}
+
+	// Format todo items
+	if len(todoItems) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("## Todo List (recovered from transcript)\n\n")
+		for _, item := range todoItems {
+			sb.WriteString(item + "\n")
+		}
+		sb.WriteString("\nUse task_list, task_update, or TodoWrite to manage these items.\n")
+	}
+
+	return sb.String()
 }
 
 // buildPostCompactAgentAnnouncement re-announces active and completed-but-unretrieved
@@ -3118,10 +3288,28 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	}
 
 	// Format the session memory as a compact summary
+	// Cap session memory content at ~40K tokens to prevent context overflow.
+	// Matches upstream's DEFAULT_SM_COMPACT_CONFIG.maxTokens = 40_000.
+	const maxSessionMemoryTokens = 40_000
+	smTokens := EstimateTokens(sessionMemoryContent)
+	smContentForSummary := sessionMemoryContent
+	if smTokens > maxSessionMemoryTokens {
+		charLimit := maxSessionMemoryTokens * 4
+		runes := []rune(sessionMemoryContent)
+		if len(runes) > charLimit {
+			truncated := string(runes[:charLimit])
+			if nlIdx := strings.LastIndex(truncated, "\n"); nlIdx > charLimit/2 {
+				truncated = truncated[:nlIdx]
+			}
+			smContentForSummary = truncated + "\n\n[... session memory truncated for length. Read the full session memory file for details ...]"
+			a.out("\n[sm-compact] Session memory truncated: %d tokens -> %d token limit\n", smTokens, maxSessionMemoryTokens)
+		}
+	}
+
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
 	// Match upstream's getCompactUserSummaryMessage: add transcript path for
 	// detail recovery, recentMessagesPreserved notice, and continuation instruction.
-	summaryContent := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + boundaryText + "\n\n" + sessionMemoryContent + structuredMeta
+	summaryContent := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + boundaryText + "\n\n" + smContentForSummary + structuredMeta
 	if tp := a.TranscriptPath(); tp != "" {
 		summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
 	}

@@ -185,10 +185,41 @@ When working with tool results, write down any important information you might n
 
 Old tool results will be automatically cleared from context to free up space. The %d most recent results are always kept.`
 
+const planModeInstructions = `## Plan Mode Instructions
+
+When using plan mode, follow this 5-phase workflow:
+
+### Phase 1: Initial Understanding
+- Explore the codebase using read-only tools (glob, grep, file_read)
+- Launch EXPLORE_AGENT subagents in parallel to investigate different areas
+- Build a mental model of the codebase structure
+
+### Phase 2: Design
+- Launch PLAN_AGENT agents to design implementation approaches
+- Evaluate trade-offs between different approaches
+- Consider existing patterns and utilities in the codebase
+
+### Phase 3: Review
+- Read critical files identified during exploration
+- Ensure design aligns with user intent
+- Use AskUserQuestion to clarify requirements
+
+### Phase 4: Final Plan
+- Write your final plan to the plan file (the only file you can edit without approval)
+- Include: Context, approach, file changes, verification section
+- Reference existing functions and utilities with file paths
+
+### Phase 5: Call ExitPlanMode
+- After user approves the plan, use ExitPlanMode tool to exit plan mode
+- Then implement the approved plan
+
+## Current Permission Mode: PLAN
+In PLAN mode, only read-only operations are allowed. Write operations are blocked. Use the ExitPlanMode tool when ready to execute changes.`
+
 var modeDescriptions = map[string]string{
 	"ask":  "In ASK mode, potentially dangerous operations will require user confirmation.",
 	"auto": "In AUTO mode, all operations are auto-approved (use with caution).",
-	"plan": "In PLAN mode, only read-only operations are allowed. Write operations are blocked.",
+	"plan": planModeInstructions,
 }
 
 // BuildSystemPrompt constructs the system prompt from tool list, mode, project instructions, and skills.
