@@ -276,8 +276,8 @@ func TestFormatActionForClassifier(t *testing.T) {
 		contains string // output should contain this substring
 	}{
 		{"exec", map[string]any{"command": "ls -la"}, "ls -la"},
-		{"write_file", map[string]any{"path": "/tmp/test.txt"}, "/tmp/test.txt"},
-		{"edit_file", map[string]any{"path": "main.go", "old_string": "func main()"}, "main.go"},
+		{"write_file", map[string]any{"file_path": "/tmp/test.txt"}, "/tmp/test.txt"},
+		{"edit_file", map[string]any{"file_path": "main.go", "old_string": "func main()"}, "main.go"},
 		{"git", map[string]any{"args": "commit -m test"}, "commit -m test"},
 		{"agent", map[string]any{"description": "search", "prompt": "find all TODOs"}, "search"},
 	}
@@ -307,7 +307,7 @@ func TestFormatToolInputCompact(t *testing.T) {
 		contains string
 	}{
 		{"exec", map[string]any{"command": "ls"}, "ls"},
-		{"write_file", map[string]any{"path": "/tmp/f.txt"}, "/tmp/f.txt"},
+		{"write_file", map[string]any{"file_path": "/tmp/f.txt"}, "/tmp/f.txt"},
 		{"grep", map[string]any{"pattern": "TODO", "path": "src"}, "TODO"},
 		{"glob", map[string]any{"pattern": "**/*.go"}, "**/*.go"},
 	}
@@ -331,7 +331,7 @@ func TestCacheKeyGeneration(t *testing.T) {
 	}
 
 	// file ops should be cached by tool+path
-	key2 := c.cacheKey("write_file", map[string]any{"path": "/tmp/test.txt"})
+	key2 := c.cacheKey("write_file", map[string]any{"file_path": "/tmp/test.txt"})
 	if key2 != "write_file:/tmp/test.txt" {
 		t.Errorf("cacheKey for write_file: got %q, want %q", key2, "write_file:/tmp/test.txt")
 	}

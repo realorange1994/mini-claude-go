@@ -489,7 +489,11 @@ func toolArgSummary(toolName, argsJSON string) string {
 	}
 
 	switch toolName {
-	case "read_file", "write_file", "edit_file", "multi_edit", "fileops":
+	case "read_file", "write_file", "edit_file", "multi_edit":
+		if path, ok := input["file_path"].(string); ok {
+			return path
+		}
+	case "fileops":
 		if path, ok := input["path"].(string); ok {
 			return path
 		}

@@ -1054,17 +1054,17 @@ func formatActionForClassifier(toolName string, input map[string]any) string {
 			return action
 		}
 	case "write_file":
-		path, _ := input["path"].(string)
+		path, _ := input["file_path"].(string)
 		return fmt.Sprintf("Tool: write_file\nPath: %s", path)
 	case "edit_file":
-		path, _ := input["path"].(string)
+		path, _ := input["file_path"].(string)
 		oldStr, _ := input["old_string"].(string)
 		if len(oldStr) > 100 {
 			oldStr = oldStr[:100] + "..."
 		}
 		return fmt.Sprintf("Tool: edit_file\nPath: %s\nReplacing: %s", path, oldStr)
 	case "multi_edit":
-		path, _ := input["path"].(string)
+		path, _ := input["file_path"].(string)
 		return fmt.Sprintf("Tool: multi_edit\nPath: %s", path)
 	case "fileops":
 		op, _ := input["operation"].(string)
@@ -1119,13 +1119,19 @@ func (c *AutoModeClassifier) cacheKey(toolName string, input map[string]any) str
 			return "git:" + op
 		}
 	}
+	// For file tools (write_file, edit_file, multi_edit), cache by tool+file_path
+	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
+		if path, ok := input["file_path"].(string); ok {
+			return toolName + ":" + path
+		}
+	}
 	// For fileops, cache by tool+operation+path
 	if toolName == "fileops" {
 		op, _ := input["operation"].(string)
 		path, _ := input["path"].(string)
 		return "fileops:" + op + ":" + path
 	}
-	// For file ops, cache by tool+path
+	// For other file ops, cache by tool+path
 	if path, ok := input["path"].(string); ok {
 		return toolName + ":" + path
 	}

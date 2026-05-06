@@ -14,7 +14,7 @@ func TestMultiEditSuccess(t *testing.T) {
 
 	tool := &MultiEditTool{}
 	result := tool.Execute(map[string]any{
-		"path": fp,
+		"file_path": fp,
 		"edits": []any{
 			map[string]any{"old_string": "func foo()", "new_string": "func Foo()"},
 			map[string]any{"old_string": "func bar()", "new_string": "func Bar()"},
@@ -41,7 +41,7 @@ func TestMultiEditAtomicRollback(t *testing.T) {
 
 	tool := &MultiEditTool{}
 	result := tool.Execute(map[string]any{
-		"path": fp,
+		"file_path": fp,
 		"edits": []any{
 			map[string]any{"old_string": "func foo()", "new_string": "func Foo()"},
 			map[string]any{"old_string": "func missing()", "new_string": "func nope()"},
@@ -78,7 +78,7 @@ func TestMultiEditEmptyEdits(t *testing.T) {
 
 	tool := &MultiEditTool{}
 	result := tool.Execute(map[string]any{
-		"path": fp,
+		"file_path": fp,
 		"edits": []any{},
 	})
 	if !result.IsError {
