@@ -1046,7 +1046,19 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 			continue
 		}
 
-		// Check each block: is it already cleared? is it a compactable tool? is it large enough?
+		// Preserve error results — they contain important debugging info
+			hasError := false
+			for _, r := range results {
+				if r.IsError.Valid() && r.IsError.Value {
+					hasError = true
+					break
+				}
+			}
+			if hasError {
+				continue
+			}
+
+			// Check each block: is it already cleared? is it a compactable tool? is it large enough?
 		allCleared := true
 		hasCompactable := false
 		for _, r := range results {

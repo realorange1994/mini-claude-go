@@ -997,20 +997,22 @@ func estimateMessageParamsTokens(messages []anthropic.MessageParam) int {
 		total += 3
 		for _, block := range msg.Content {
 			if block.OfText != nil {
-				total += EstimateTokens(block.OfText.Text)
+				contentType := DetectContentType(block.OfText.Text)
+				total += EstimateContentTokens(block.OfText.Text, contentType)
 			}
 			if block.OfToolUse != nil {
 				total += 10 // overhead
-				total += EstimateTokens(block.OfToolUse.Name)
+				total += EstimateContentTokens(block.OfToolUse.Name, "code")
 				if data, err := json.Marshal(block.OfToolUse.Input); err == nil {
-					total += EstimateTokens(string(data))
+					total += EstimateContentTokens(string(data), "json")
 				}
 			}
 			if block.OfToolResult != nil {
 				total += 8 // overhead
 				for _, c := range block.OfToolResult.Content {
 					if c.OfText != nil {
-						total += EstimateTokens(c.OfText.Text)
+						contentType := DetectContentType(c.OfText.Text)
+						total += EstimateContentTokens(c.OfText.Text, contentType)
 					}
 				}
 			}
@@ -1474,6 +1476,11 @@ func dedupToolResults(messages []anthropic.MessageParam) []anthropic.MessagePara
 			contentHash := hashToolResultContent(block.OfToolResult)
 			toolUseID := block.OfToolResult.ToolUseID
 
+			// Skip error results — they contain important debugging info
+			if block.OfToolResult.IsError.Valid() && block.OfToolResult.IsError.Value {
+				continue
+			}
+
 			if firstID, exists := seen[contentHash]; exists && firstID != toolUseID {
 				// Duplicate - replace with reference
 				block.OfToolResult.Content = []anthropic.ToolResultBlockParamContentUnion{
@@ -1655,20 +1662,22 @@ func estimateSingleMessageTokens(msg anthropic.MessageParam) int {
 	total := 4 // role overhead
 	for _, block := range msg.Content {
 		if block.OfText != nil {
-			total += EstimateTokens(block.OfText.Text)
+			contentType := DetectContentType(block.OfText.Text)
+			total += EstimateContentTokens(block.OfText.Text, contentType)
 		}
 		if block.OfToolUse != nil {
 			total += 10 // tool_use overhead
-			total += EstimateTokens(block.OfToolUse.Name)
+			total += EstimateContentTokens(block.OfToolUse.Name, "code")
 			if data, err := json.Marshal(block.OfToolUse.Input); err == nil {
-				total += EstimateTokens(string(data))
+				total += EstimateContentTokens(string(data), "json")
 			}
 		}
 		if block.OfToolResult != nil {
 			total += 5 // tool_result overhead
 			for _, c := range block.OfToolResult.Content {
 				if c.OfText != nil {
-					total += EstimateTokens(c.OfText.Text)
+					contentType := DetectContentType(c.OfText.Text)
+					total += EstimateContentTokens(c.OfText.Text, contentType)
 				}
 			}
 		}
