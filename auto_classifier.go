@@ -46,6 +46,7 @@ const cacheTTL = 5 * time.Minute
 // Note: "git", "exec", "process" are handled separately with operation-level granularity.
 var AUTO_MODE_SAFE_TOOLS = map[string]bool{
 	"read_file":        true,
+	"write_file":       true, // creating new files is low-risk; overwriting handled by CheckFileStale
 	"glob":             true,
 	"grep":             true,
 	"list_dir":         true,
