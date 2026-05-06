@@ -48,9 +48,13 @@ type Config struct {
 	MicroCompactMinCharCount  int // minimum chars in a tool result to consider clearing; preserves small results
 	PostCompactRecoverFiles    bool
 	PostCompactMaxFiles        int
-	PostCompactMaxFileChars    int
-	PostCompactMaxSkillChars   int
-	PostCompactMaxTotalSkillChars int
+	PostCompactMaxFileChars    int // legacy char-based budget (deprecated, use PostCompactMaxFileTokens)
+	PostCompactMaxSkillChars   int // legacy char-based budget (deprecated, use PostCompactMaxSkillTokens)
+	PostCompactMaxTotalSkillChars int // legacy char-based budget (deprecated, use PostCompactMaxTotalSkillTokens)
+	// Token-based budgets for post-compact recovery (upstream uses tokens, not chars)
+	PostCompactMaxFileTokens       int // default 12500 (~50K chars / 4)
+	PostCompactMaxSkillTokens      int // default 1250 (~5K chars / 4)
+	PostCompactMaxTotalSkillTokens int // default 6250 (~25K chars / 4)
 	PostCompactHistorySnipCount   int
 	SessionMemory           *SessionMemory
 	// Reactive compaction: trigger compaction when token count spikes above
@@ -287,9 +291,13 @@ func DefaultConfig() Config {
 		MicroCompactMinCharCount:  2000, // only clear results >= 2000 chars; preserve small useful results
 		PostCompactRecoverFiles:       true,
 		PostCompactMaxFiles:           5,
-		PostCompactMaxFileChars:       50000,
-		PostCompactMaxSkillChars:      5000,
-		PostCompactMaxTotalSkillChars: 25000,
+		PostCompactMaxFileChars:       50000, // legacy, use PostCompactMaxFileTokens
+		PostCompactMaxSkillChars:      5000,  // legacy, use PostCompactMaxSkillTokens
+		PostCompactMaxTotalSkillChars: 25000, // legacy, use PostCompactMaxTotalSkillTokens
+		// Token-based budgets (upstream-compatible)
+		PostCompactMaxFileTokens:       12500, // ~50K chars at 4 chars/token
+		PostCompactMaxSkillTokens:      1250,  // ~5K chars at 4 chars/token
+		PostCompactMaxTotalSkillTokens: 6250,  // ~25K chars at 4 chars/token
 		PostCompactHistorySnipCount:   3,
 		ReactiveCompactEnabled:    true,
 		ReactiveCompactThreshold:  5000,

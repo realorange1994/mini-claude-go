@@ -2536,9 +2536,15 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		if maxFiles <= 0 {
 			maxFiles = 5
 		}
-		maxFileChars := a.config.PostCompactMaxFileChars
-		if maxFileChars <= 0 {
-			maxFileChars = 50000
+		// Use token-based budget (upstream-compatible), fall back to char-based if not set
+		maxFileTokens := a.config.PostCompactMaxFileTokens
+		if maxFileTokens <= 0 {
+			// Legacy char-based fallback: convert chars to approximate tokens
+			maxFileChars := a.config.PostCompactMaxFileChars
+			if maxFileChars <= 0 {
+				maxFileChars = 50000
+			}
+			maxFileTokens = maxFileChars / 4
 		}
 
 	// Collect file paths already visible in preserved messages (after boundary).
@@ -2547,7 +2553,7 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 	preservedReadPaths := collectReadToolFilePaths(a.context)
 
 	paths := a.registry.GetRecentlyReadFiles(maxFiles)
-	totalChars := 0
+	totalTokens := 0
 	filesRecovered := 0
 
 	for _, path := range paths {
@@ -2573,18 +2579,24 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 			}
 
 			content := string(data)
-			if totalChars+len(content) > maxFileChars {
-				// Truncate to fit budget
-				remaining := maxFileChars - totalChars
-				if remaining < 200 {
+			contentTokens := EstimateTokens(content)
+			if totalTokens+contentTokens > maxFileTokens {
+				// Truncate to fit budget — estimate how many chars fit in remaining tokens
+				remainingTokens := maxFileTokens - totalTokens
+				if remainingTokens < 50 {
 					break
 				}
-				content = content[:remaining] + "\n... [truncated]"
+				// Approximate char limit from remaining tokens
+				remainingChars := remainingTokens * 4
+				if remainingChars < len(content) {
+					content = content[:remainingChars] + "\n... [truncated]"
+				}
+				contentTokens = EstimateTokens(content)
 			}
 
 			attachment := fmt.Sprintf("[Post-compact file recovery: %s]\n```\n%s\n```", path, content)
 			a.context.AddAttachment(attachment)
-			totalChars += len(content)
+			totalTokens += contentTokens
 			filesRecovered++
 			recoveredPaths = append(recoveredPaths, path)
 
@@ -2593,23 +2605,32 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 
 		if filesRecovered > 0 {
-			a.out( "[post-compact] Recovered %d files (%d chars)\n", filesRecovered, totalChars)
+			a.out( "[post-compact] Recovered %d files (~%d tokens)\n", filesRecovered, totalTokens)
 		}
 	}
 
 	// --- Skill content recovery ---
 	if a.skillTracker != nil && a.config.SkillLoader != nil {
-		maxSkillChars := a.config.PostCompactMaxSkillChars
-		if maxSkillChars <= 0 {
-			maxSkillChars = 5000
+		// Use token-based budgets (upstream-compatible), fall back to char-based if not set
+		maxSkillTokens := a.config.PostCompactMaxSkillTokens
+		if maxSkillTokens <= 0 {
+			maxSkillChars := a.config.PostCompactMaxSkillChars
+			if maxSkillChars <= 0 {
+				maxSkillChars = 5000
+			}
+			maxSkillTokens = maxSkillChars / 4
 		}
-		maxTotalSkillChars := a.config.PostCompactMaxTotalSkillChars
-		if maxTotalSkillChars <= 0 {
-			maxTotalSkillChars = 25000
+		maxTotalSkillTokens := a.config.PostCompactMaxTotalSkillTokens
+		if maxTotalSkillTokens <= 0 {
+			maxTotalSkillChars := a.config.PostCompactMaxTotalSkillChars
+			if maxTotalSkillChars <= 0 {
+				maxTotalSkillChars = 25000
+			}
+			maxTotalSkillTokens = maxTotalSkillChars / 4
 		}
 
 		readSkills := a.skillTracker.GetReadSkillNames()
-		totalChars := 0
+		totalSkillTokens := 0
 		skillsRecovered := 0
 
 		for _, name := range readSkills {
@@ -2618,22 +2639,28 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 				continue
 			}
 
-			if len(content) > maxSkillChars {
-				content = content[:maxSkillChars] + "\n... [truncated]"
+			contentTokens := EstimateTokens(content)
+			if contentTokens > maxSkillTokens {
+				// Truncate per-skill: approximate char limit from token budget
+				charLimit := maxSkillTokens * 4
+				if charLimit < len(content) {
+					content = content[:charLimit] + "\n... [truncated]"
+					contentTokens = EstimateTokens(content)
+				}
 			}
 
-			if totalChars+len(content) > maxTotalSkillChars {
+			if totalSkillTokens+contentTokens > maxTotalSkillTokens {
 				break
 			}
 
 			attachment := fmt.Sprintf("[Post-compact skill recovery: %s]\n%s", name, content)
 			a.context.AddAttachment(attachment)
-			totalChars += len(content)
+			totalSkillTokens += contentTokens
 			skillsRecovered++
 		}
 
 		if skillsRecovered > 0 {
-			a.out("[post-compact] Recovered %d skills (%d chars)\n", skillsRecovered, totalChars)
+			a.out("[post-compact] Recovered %d skills (~%d tokens)\n", skillsRecovered, totalSkillTokens)
 		}
 	}
 
