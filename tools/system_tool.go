@@ -15,7 +15,7 @@ type SystemTool struct{}
 
 func (*SystemTool) Name() string    { return "system" }
 func (*SystemTool) Description() string {
-	return "Get system information. Supports uname, df (disk), free (memory), top (processes), uptime, who, w, hostname, and arch. On Windows, uses PowerShell cmdlets."
+	return "Get system information. Supports info (full system overview), uname, df (disk), free (memory), top (processes), uptime, who, w, hostname, and arch. On Windows, uses PowerShell cmdlets."
 }
 
 func (*SystemTool) InputSchema() map[string]any {
@@ -24,8 +24,8 @@ func (*SystemTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"operation": map[string]any{
 				"type":        "string",
-				"description": "System operation: uname, df, free, top, uptime, who, w, hostname, arch",
-				"enum":        []string{"uname", "df", "free", "top", "uptime", "who", "w", "hostname", "arch"},
+				"description": "System operation: info (full overview), uname, df, free, top, uptime, who, w, hostname, arch",
+				"enum":        []string{"info", "uname", "df", "free", "top", "uptime", "who", "w", "hostname", "arch"},
 			},
 			"flags": map[string]any{
 				"type":        "string",
@@ -58,6 +58,8 @@ func systemExecute(ctx context.Context, params map[string]any) ToolResult {
 
 	var result ToolResult
 	switch operation {
+	case "info":
+		result = systemInfo()
 	case "uname":
 		result = systemUname(params)
 	case "df":
@@ -82,6 +84,44 @@ func systemExecute(ctx context.Context, params map[string]any) ToolResult {
 	return result
 }
 
+// systemInfo returns a comprehensive system overview.
+func systemInfo() ToolResult {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("powershell", "-NoProfile", "-Command",
+			`$os = Get-CimInstance Win32_OperatingSystem; $cpu = Get-CimInstance Win32_Processor; $mem = [math]::Round($os.TotalVisibleMemorySize/1MB,2); $free = [math]::Round($os.FreePhysicalMemory/1MB,2); $used = [math]::Round($mem - $free, 2); $bootTime = $os.LastBootUpTime; $now = Get-Date; $diff = New-TimeSpan -Start $bootTime -End $now; $d = [math]::Floor($diff.TotalDays); $h = $diff.Hours; $m = $diff.Minutes; $uptimeStr = if ($d -gt 0) { "{0} days, {1}:{2}" -f $d, $h.ToString("00"), $m.ToString("00") } else { "{0}:{1}" -f $h.ToString("00"), $m.ToString("00") }; Write-Output "OS:       $($os.Caption) $($os.Version)"; Write-Output "Host:     $env:COMPUTERNAME"; Write-Output "Arch:     $($cpu.Name)"; Write-Output "CPU:      $($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) threads"; Write-Output "Memory:   ${used}GB used / ${mem}GB total ($(${free})GB free)"; Write-Output "Uptime:   $uptimeStr"`)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, stderr.String()), IsError: true}
+		}
+		return ToolResult{Output: strings.TrimSpace(stdout.String())}
+	}
+
+	// Unix: combine uname, uptime, memory, cpu info
+	var parts []string
+	// uname -a
+	if out, err := exec.Command("uname", "-a").CombinedOutput(); err == nil {
+		parts = append(parts, "OS:       "+strings.TrimSpace(string(out)))
+	}
+	// uptime
+	if out, err := exec.Command("uptime").CombinedOutput(); err == nil {
+		parts = append(parts, "Uptime:   "+strings.TrimSpace(string(out)))
+	}
+	// cpu info (nproc)
+	if out, err := exec.Command("nproc").CombinedOutput(); err == nil {
+		parts = append(parts, "CPU:      "+strings.TrimSpace(string(out))+" cores")
+	}
+	// memory (free -h, first 2 lines)
+	if out, err := exec.Command("free", "-h").CombinedOutput(); err == nil {
+		lines := strings.Split(string(out), "\n")
+		if len(lines) >= 2 {
+			parts = append(parts, "Memory:   "+strings.TrimSpace(lines[1]))
+		}
+	}
+	return ToolResult{Output: strings.Join(parts, "\n")}
+}
+
 // systemUname runs `uname` on Unix or `systeminfo` equivalent on Windows.
 func systemUname(params map[string]any) ToolResult {
 	flags, _ := params["flags"].(string)
@@ -92,8 +132,13 @@ func systemUname(params map[string]any) ToolResult {
 			args = strings.Fields(flags)
 		}
 		if len(args) == 0 || (len(args) == 1 && args[0] == "-a") {
+			// Return OS name, hostname, kernel version (like uname -a on Unix)
 			cmd := exec.Command("powershell", "-NoProfile", "-Command",
-				"$h = $env:COMPUTERNAME; $os = (Get-CimInstance Win32_OperatingSystem).Caption; $v = (Get-CimInstance Win32_OperatingSystem).Version; Write-Output \"Windows $h $os $v\"")
+				"$h = $env:COMPUTERNAME; "+
+					"$os = (Get-CimInstance Win32_OperatingSystem).Caption -replace 'Microsoft ', ''; "+
+					"$v = (Get-CimInstance Win32_OperatingSystem).Version; "+
+					"$arch = (Get-CimInstance Win32_Processor)[0].Name; "+
+					"Write-Output \"Windows $h $os $v $arch\"")
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, string(out)), IsError: true}
@@ -340,25 +385,29 @@ func systemUptime() ToolResult {
 // systemWho shows logged-in users.
 func systemWho() ToolResult {
 	if runtime.GOOS == "windows" {
+		// Primary: use Get-CimInstance to find currently logged-in users
 		cmd := exec.Command("powershell", "-NoProfile", "-Command",
-			`query user 2>$null | ForEach-Object { $_ }`)
+			`$sessions = Get-CimInstance Win32_LoggedOnUser | Where-Object { $_.StartTime -ne $null } | Group-Object Antecedent | ForEach-Object { $user = $_.Group[0].Antecedent.Name; $session = $_.Group[0].Dependent.StartTime; if ($session) { "$user  pts/0  $(Get-Date $session -Format 'yyyy-MM-dd HH:mm')" } }; if ($sessions) { $sessions } else { "No users logged in." }`)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		out := strings.TrimSpace(stdout.String())
-		if out == "" || strings.Contains(out, "No user exists") {
-			cmd2 := exec.Command("powershell", "-NoProfile", "-Command",
-				`Get-CimInstance Win32_LoggedOnUser | Where-Object { $_.StartTime } | Select-Object Antecedent -Unique | ForEach-Object { $_.Antecedent.Name }`)
-			var out2 bytes.Buffer
-			cmd2.Stdout = &out2
-			cmd2.Run()
-			users := strings.TrimSpace(out2.String())
-			if users == "" {
-				return ToolResult{Output: "No users logged in."}
+		if err := cmd.Run(); err == nil {
+			out := strings.TrimSpace(stdout.String())
+			if out != "" && !strings.Contains(out, "error") {
+				return ToolResult{Output: out}
 			}
+		}
+		// Fallback: try query user (may not exist on Windows Home)
+		cmd2 := exec.Command("powershell", "-NoProfile", "-Command",
+			`$u = Get-CimInstance Win32_ComputerSystem | Select-Object -ExpandProperty UserName; if ($u) { "$u  pts/0  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" } else { "No users logged in." }`)
+		var out2 bytes.Buffer
+		cmd2.Stdout = &out2
+		cmd2.Run()
+		users := strings.TrimSpace(out2.String())
+		if users != "" {
 			return ToolResult{Output: users}
 		}
-		return ToolResult{Output: out}
+		return ToolResult{Output: "No users logged in."}
 	}
 	cmd := exec.Command("who")
 	var stdout, stderr bytes.Buffer
