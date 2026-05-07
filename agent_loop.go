@@ -3431,23 +3431,8 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 		a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction (sm-compact): %d tokens compressed", preTokens), "auto")
 	}
 
-	// Phase 2: Post-compact recovery — re-inject critical context
-	recoveredPaths := a.PostCompactRecovery()
-
-	// Phase 2b: Inject running agent status so model doesn't spawn duplicates
-	a.InjectRunningAgentStatus()
-
-	// Mark recovered files as fresh (content is back in context).
-	// Also mark ALL tracked files as fresh if no specific recovery was done
-	// (the summary now contains the distilled knowledge).
-	// RunPostCompactCleanup (called from PostCompactRecovery) handles ClearConclusions.
-	if a.toolStateTracker != nil {
-		for _, path := range recoveredPaths {
-			a.toolStateTracker.MarkFileFresh(path)
-		}
-	}
-
-	// Phase 3: Keep recent messages — preserve actual message objects with tool structure intact.
+	// Phase 2: Keep recent messages — preserve with tool structure intact.
+	// Run BEFORE post-compact recovery so attachments appear AFTER kept messages.
 	// KeepRecentMessagesAdaptive uses token-based adaptive calculation instead of fixed count,
 	// matching upstream's calculateMessagesToKeepIndex:
 	//   - minTokens: enough context for recovery (~1K tokens = ~3 text blocks)
@@ -3460,6 +3445,22 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	// messages. Without this, the API returns error 2013 for invalid message structure.
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
+
+	// Phase 3: Post-compact recovery — re-inject critical context
+	recoveredPaths := a.PostCompactRecovery()
+
+	// Phase 3b: Inject running agent status so model doesn't spawn duplicates
+	a.InjectRunningAgentStatus()
+
+	// Mark recovered files as fresh (content is back in context).
+	// Also mark ALL tracked files as fresh if no specific recovery was done
+	// (the summary now contains the distilled knowledge).
+	// RunPostCompactCleanup (called from PostCompactRecovery) handles ClearConclusions.
+	if a.toolStateTracker != nil {
+		for _, path := range recoveredPaths {
+			a.toolStateTracker.MarkFileFresh(path)
+		}
+	}
 
 	// Calculate real post-compact token count for cooldown
 	actualMessages := a.context.BuildMessages()
@@ -3488,23 +3489,8 @@ func (a *AgentLoop) tryLLMCompaction() {
 			a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction: %s", summary), "auto")
 		}
 
-		// Phase 2: Post-compact recovery — re-inject critical context
-		recoveredPaths := a.PostCompactRecovery()
-
-		// Phase 2b: Inject running agent status so model doesn't spawn duplicates
-		a.InjectRunningAgentStatus()
-
-		// Mark recovered files as fresh (content is back in context).
-		if a.toolStateTracker != nil {
-			for _, path := range recoveredPaths {
-				a.toolStateTracker.MarkFileFresh(path)
-			}
-			if len(recoveredPaths) == 0 {
-				a.toolStateTracker.ClearConclusions()
-			}
-		}
-
-		// Phase 3: Keep recent messages — preserve actual message objects with tool structure intact.
+		// Phase 2: Keep recent messages — preserve with tool structure intact.
+		// Run BEFORE post-compact recovery so attachments appear AFTER kept messages.
 		// KeepRecentMessages keeps the original ToolUseContent/ToolResultContent blocks, not
 		// text conversions. Also adjusts backwards to preserve tool_use/tool_result pairing.
 		// This matches upstream's messagesToKeep mechanism.
@@ -3519,6 +3505,22 @@ func (a *AgentLoop) tryLLMCompaction() {
 		// messages. Without this, the API returns error 2013 for invalid message structure.
 		a.context.ValidateToolPairing()
 		a.context.FixRoleAlternation()
+
+		// Phase 3: Post-compact recovery — re-inject critical context
+		recoveredPaths := a.PostCompactRecovery()
+
+		// Phase 3b: Inject running agent status so model doesn't spawn duplicates
+		a.InjectRunningAgentStatus()
+
+		// Mark recovered files as fresh (content is back in context).
+		if a.toolStateTracker != nil {
+			for _, path := range recoveredPaths {
+				a.toolStateTracker.MarkFileFresh(path)
+			}
+			if len(recoveredPaths) == 0 {
+				a.toolStateTracker.ClearConclusions()
+			}
+		}
 
 		// Rebuild messages from the actual context (summary + attachments + any tail entries)
 		// and calculate the real post-compact token count for cooldown.
