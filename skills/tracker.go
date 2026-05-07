@@ -152,3 +152,28 @@ func (t *SkillTracker) GetReadSkillNames() []string {
 	}
 	return names
 }
+
+// ResetPostCompact resets the skill discovery state after compaction.
+// This clears:
+//   - shownSkills: system prompt will be rebuilt, all skills re-announced
+//   - readSkills: skill content was injected via attachments; re-injecting
+//     full skill listing is pure cache creation, so we reset read state too
+//
+// usedSkills is preserved because a skill being "used" (model performed
+// actions after reading it) is a durable fact about the conversation.
+func (t *SkillTracker) ResetPostCompact() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.shownSkills = make(map[string]struct{})
+	t.readSkills = make(map[string]time.Time)
+}
+
+// RestoreReadSkills restores the readSkills map from persisted state.
+// Used on resume to re-populate skill tracking from transcript attachments.
+func (t *SkillTracker) RestoreReadSkills(skills map[string]time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for name, ts := range skills {
+		t.readSkills[name] = ts
+	}
+}

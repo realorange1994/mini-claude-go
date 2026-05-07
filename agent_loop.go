@@ -546,6 +546,12 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		todoList:         tools.NewTodoList(),
 	}
 
+	// Restore skill state from transcript entries so skillTracker reflects
+	// which skills were already read in this session. This ensures skills
+	// survive multiple compaction cycles after resume (matching upstream's
+	// restoreSkillStateFromMessages).
+	restoreSkillStateFromEntries(agent.skillTracker, entries)
+
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 
@@ -711,6 +717,50 @@ func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config) *Conve
 	ctx.FixRoleAlternation()
 
 	return ctx
+}
+
+// restoreSkillStateFromEntries scans transcript entries for skill-related events
+// and restores the skill tracker's state on resume. This mirrors upstream's
+// restoreSkillStateFromMessages: it extracts read_skill invocations and
+// skill_listing attachments to restore skill read/shown state so skills survive
+// multiple compaction cycles after resume.
+func restoreSkillStateFromEntries(skillTracker *skills.SkillTracker, entries []transcript.Entry) {
+	if skillTracker == nil {
+		return
+	}
+	for _, entry := range entries {
+		// Track read_skill tool invocations: these indicate skills that were read.
+		// On resume, we restore the "read" state so the next compaction can
+		// re-inject skill content. The "shown" state is also restored so the
+		// discovery reminder isn't re-triggered for skills already announced.
+		if entry.Type == "tool_use" && entry.ToolName == "read_skill" {
+			if args, ok := entry.ToolArgs["name"].(string); ok && args != "" {
+				skillTracker.MarkShown(args) // mark as shown so it's not re-announced
+				skillTracker.MarkRead(args)  // mark as read so it's re-injected on next compact
+			}
+		}
+		// Also check for skill_listing attachment text to suppress re-announcement.
+		// These are injected as "[Post-compact skill recovery: <name>]" patterns.
+		if entry.Type == "user" && strings.Contains(entry.Content, "[Post-compact skill recovery:") {
+			// Extract skill name from the pattern
+			lines := strings.Split(entry.Content, "\n")
+			if len(lines) > 0 {
+				line := lines[0]
+				// Format: "[Post-compact skill recovery: <name>]"
+				start := strings.Index(line, "[Post-compact skill recovery: ")
+				if start >= 0 {
+					name := line[start+len("[Post-compact skill recovery: "):]
+					if end := strings.Index(name, "]"); end >= 0 {
+						name = name[:end]
+					}
+					if name != "" {
+						skillTracker.MarkShown(name)
+						skillTracker.MarkRead(name)
+					}
+				}
+			}
+		}
+	}
 }
 
 // SetInterrupted sets or clears the interrupted flag.
@@ -1219,13 +1269,8 @@ func (a *AgentLoop) ForceCompact() {
 			for _, path := range recoveredPaths {
 				a.toolStateTracker.MarkFileFresh(path)
 			}
-			if len(recoveredPaths) == 0 {
-				a.toolStateTracker.ClearConclusions()
-			}
 		}
-		if a.config.cachedPrompt != nil {
-			a.config.cachedPrompt.MarkDirty()
-		}
+		// RunPostCompactCleanup (in PostCompactRecovery) handles ClearConclusions + MarkDirty
 		return
 	}
 
@@ -1245,16 +1290,15 @@ func (a *AgentLoop) ForceCompact() {
 			a.toolStateTracker.OnCompaction()
 		}
 		a.InjectRunningAgentStatus()
-		// Post-compact recovery after truncation (same as LLM-compact path)
+		// Post-compact recovery after truncation. PostCompactRecovery includes
+		// RunPostCompactCleanup internally (ClearConclusions, MarkDirty, ResetPostCompact).
 		recoveredPaths := a.PostCompactRecovery()
 		if a.toolStateTracker != nil {
 			for _, path := range recoveredPaths {
 				a.toolStateTracker.MarkFileFresh(path)
 			}
-			if len(recoveredPaths) == 0 {
-				a.toolStateTracker.ClearConclusions()
-			}
 		}
+		// MarkDirty is handled by RunPostCompactCleanup
 		fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
 	} else {
 		fmt.Printf("[compact] No compaction needed (%d entries)\n", before)
@@ -1327,19 +1371,13 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 	if a.toolStateTracker != nil {
 		a.toolStateTracker.OnCompaction()
 	}
-	if a.config.cachedPrompt != nil {
-		a.config.cachedPrompt.MarkDirty()
-	}
 
 	// Post-compact recovery: re-inject critical context after partial compact.
-	// Partial compact removes messages and adds a boundary, so recent files may be lost.
+	// PostCompactRecovery includes RunPostCompactCleanup internally.
 	recoveredPaths := a.PostCompactRecovery()
 	if a.toolStateTracker != nil {
 		for _, path := range recoveredPaths {
 			a.toolStateTracker.MarkFileFresh(path)
-		}
-		if len(recoveredPaths) == 0 {
-			a.toolStateTracker.ClearConclusions()
 		}
 	}
 
@@ -2644,7 +2682,7 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 				// Truncate per-skill: approximate char limit from token budget
 				charLimit := maxSkillTokens * 4
 				if charLimit < len(content) {
-					content = content[:charLimit] + "\n... [truncated]"
+					content = content[:charLimit] + "\n\n[... skill content truncated for compaction; use Read on the skill path if you need the full text]"
 					contentTokens = EstimateTokens(content)
 				}
 			}
@@ -2722,7 +2760,38 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		a.out("[post-compact] Task/Todo state recovered\n")
 	}
 
+	// --- Post-compact cleanup ---
+	// Clear caches and tracking state that were invalidated by compaction.
+	// This matches upstream's runPostCompactCleanup() in postCompactCleanup.ts.
+	a.RunPostCompactCleanup()
+
 	return recoveredPaths
+}
+
+// RunPostCompactCleanup clears caches and tracking state after compaction.
+// Call this after PostCompactRecovery in every compaction path.
+// This prevents stale references (e.g. file history pointing to deleted messages,
+// skill tracker with compacted-away state) from corrupting subsequent turns.
+func (a *AgentLoop) RunPostCompactCleanup() {
+	// Clear skill discovery state: after compaction, the system prompt is rebuilt
+	// and should re-announce all skills as "new". The skill content is re-injected
+	// via post-compact attachments, so shown/read state should reset.
+	// Preserves usedSkills since "used" is a durable fact about the conversation.
+	if a.skillTracker != nil {
+		a.skillTracker.ResetPostCompact()
+	}
+
+	// Invalidate cached system prompt so it rebuilds fresh with post-compact state.
+	// The cache was built before compaction and references pre-compact entries.
+	if a.config.cachedPrompt != nil {
+		a.config.cachedPrompt.MarkDirty()
+	}
+
+	// Clear tool state conclusions. Compacted messages had conclusions from
+	// pre-compact tool results; those results may no longer be in context.
+	if a.toolStateTracker != nil {
+		a.toolStateTracker.ClearConclusions()
+	}
 }
 
 // buildPostCompactToolsAnnouncement re-announces all available tools after compaction.
@@ -3371,12 +3440,10 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	// Mark recovered files as fresh (content is back in context).
 	// Also mark ALL tracked files as fresh if no specific recovery was done
 	// (the summary now contains the distilled knowledge).
+	// RunPostCompactCleanup (called from PostCompactRecovery) handles ClearConclusions.
 	if a.toolStateTracker != nil {
 		for _, path := range recoveredPaths {
 			a.toolStateTracker.MarkFileFresh(path)
-		}
-		if len(recoveredPaths) == 0 {
-			a.toolStateTracker.ClearConclusions()
 		}
 	}
 
