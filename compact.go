@@ -2474,9 +2474,21 @@ func stripImages(messages []anthropic.MessageParam) []anthropic.MessageParam {
 						text = urlRe.ReplaceAllString(text, placeholder)
 						mutTc.OfText.Text = text
 					}
+					// Strip document blocks with base64 sources inside tool results
+					if mutTc.OfDocument != nil {
+						mutTc = anthropic.ToolResultBlockParamContentUnion{
+							OfText: &anthropic.TextBlockParam{Text: "[document content stripped]"},
+						}
+					}
 					newToolContent = append(newToolContent, mutTc)
 				}
 				mutBlock.OfToolResult.Content = newToolContent
+			}
+			// Strip document blocks with base64 sources (PDFs, etc.)
+			if mutBlock.OfDocument != nil {
+				mutBlock = anthropic.ContentBlockParamUnion{
+					OfText: &anthropic.TextBlockParam{Text: "[document content stripped]"},
+				}
 			}
 			newContent = append(newContent, mutBlock)
 		}
@@ -2484,4 +2496,84 @@ func stripImages(messages []anthropic.MessageParam) []anthropic.MessageParam {
 		result = append(result, mutMsg)
 	}
 	return result
+}
+
+// ─── Cached Microcompact (cache_edits API) ───────────────────────────────────
+
+type CachedMicrocompactTracker struct {
+	mu              sync.Mutex
+	registeredTools map[string]bool
+	toolOrder       []string
+	deletedRefs     map[string]bool
+	pinnedEdits     []any
+	maxTools        int
+	keepRecent      int
+}
+
+func NewCachedMicrocompactTracker() *CachedMicrocompactTracker {
+	return &CachedMicrocompactTracker{
+		registeredTools: make(map[string]bool),
+		deletedRefs:     make(map[string]bool),
+		maxTools:        10,
+		keepRecent:      5,
+	}
+}
+
+// RegisterToolUse records a tool_use_id for cache_edits tracking.
+// Called after each API response containing tool_use blocks.
+func (t *CachedMicrocompactTracker) RegisterToolUse(toolUseID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.registeredTools[toolUseID] {
+		t.registeredTools[toolUseID] = true
+		t.toolOrder = append(t.toolOrder, toolUseID)
+	}
+}
+
+// GetCacheEditsBlock returns a cache_edits block if the threshold is exceeded.
+// Deletes all but the most recent `keepRecent` tool results.
+// Returns nil if fewer than maxTools compactable tools exist.
+func (t *CachedMicrocompactTracker) GetCacheEditsBlock() map[string]any {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	var compactable []string
+	for _, id := range t.toolOrder {
+		if !t.deletedRefs[id] {
+			compactable = append(compactable, id)
+		}
+	}
+
+	if len(compactable) <= t.maxTools {
+		return nil
+	}
+
+	toDelete := compactable[:len(compactable)-t.keepRecent]
+	if len(toDelete) == 0 {
+		return nil
+	}
+
+	var edits []map[string]any
+	for _, id := range toDelete {
+		edits = append(edits, map[string]any{
+			"type":        "delete_tool_result",
+			"tool_use_id": id,
+		})
+		t.deletedRefs[id] = true
+	}
+
+	return map[string]any{
+		"type":  "cache_edits",
+		"edits": edits,
+	}
+}
+
+// Reset clears all cache_edits state after a full compaction.
+func (t *CachedMicrocompactTracker) Reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.registeredTools = make(map[string]bool)
+	t.toolOrder = nil
+	t.deletedRefs = make(map[string]bool)
+	t.pinnedEdits = nil
 }

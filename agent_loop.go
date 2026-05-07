@@ -300,6 +300,7 @@ type AgentLoop struct {
 	todoList                 *tools.TodoList    // structured task list for TodoWrite tool
 	totalInputTokens         atomic.Int64      // cumulative input tokens across all turns
 	totalOutputTokens        atomic.Int64      // cumulative output tokens across all turns
+	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
 }
 
 // recordTokenUsage accumulates API token usage into the agent's running totals.
@@ -397,6 +398,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		agentOutput:       os.Stderr,
 		toolStateTracker:  NewToolStateTracker(),
 		todoList:          tools.NewTodoList(),
+		cachedMC:          NewCachedMicrocompactTracker(),
 	}
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
@@ -1415,6 +1417,10 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	messages := a.context.BuildMessages()
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
+	// Inject cache_edits block if the cached microcompact tracker has deletions pending.
+	// This deletes old tool results server-side while preserving the prompt cache.
+	messages = a.injectCacheEdits(messages)
+
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
 		MaxTokens: a.currentMaxTokens.Load(),
@@ -1513,6 +1519,10 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 	messages := a.context.BuildMessages()
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
+
+	// Inject cache_edits block if the cached microcompact tracker has deletions pending.
+	// This deletes old tool results server-side while preserving the prompt cache.
+	messages = a.injectCacheEdits(messages)
 
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
@@ -1775,6 +1785,12 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
+			// Register tool_use IDs for cache_edits tracking
+			for _, call := range toolCalls {
+				if id, ok := call["id"].(string); ok {
+					a.cachedMC.RegisterToolUse(id)
+				}
+			}
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
@@ -1835,6 +1851,12 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
+			// Register tool_use IDs for cache_edits tracking
+			for _, call := range toolCalls {
+				if id, ok := call["id"].(string); ok {
+					a.cachedMC.RegisterToolUse(id)
+				}
+			}
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
@@ -2760,12 +2782,89 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		a.out("[post-compact] Task/Todo state recovered\n")
 	}
 
+	// --- Session Memory Recovery ---
+	// Re-inject session memory after compaction. Session memory contains
+	// user-defined notes that must survive context compaction.
+	if a.config.SessionMemory != nil {
+		smContent := a.config.SessionMemory.FormatForPrompt()
+		if smContent != "" {
+			// Cap at 40K tokens to avoid blowing past context limits
+			const maxSMTokens = 40_000
+			smTokens := EstimateTokens(smContent)
+			if smTokens > maxSMTokens {
+				charLimit := maxSMTokens * 4
+				if len(smContent) > charLimit {
+					// Truncate at a sentence boundary
+					content := smContent[:charLimit]
+					if nlIdx := strings.LastIndex(content, "\n"); nlIdx > charLimit/2 {
+						content = content[:nlIdx]
+					}
+					smContent = content + "\n\n[... session memory truncated for length ...]"
+				}
+			}
+			attachment := fmt.Sprintf("<session_memory>\n%s\n</session_memory>", smContent)
+			a.context.AddAttachment(attachment)
+			a.out("[post-compact] Session memory recovered\n")
+		}
+	}
+
 	// --- Post-compact cleanup ---
 	// Clear caches and tracking state that were invalidated by compaction.
 	// This matches upstream's runPostCompactCleanup() in postCompactCleanup.ts.
 	a.RunPostCompactCleanup()
 
 	return recoveredPaths
+}
+
+// injectCacheEdits injects a cache_edits content block into the last user message
+// if the cached microcompact tracker has pending deletions. The cache_edits block
+// deletes old tool results server-side while preserving the prompt cache.
+// Returns messages unchanged if no cache edits are pending.
+func (a *AgentLoop) injectCacheEdits(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	cacheEdits := a.cachedMC.GetCacheEditsBlock()
+	if cacheEdits == nil {
+		return messages
+	}
+
+	// Serialize messages to JSON for manipulation
+	raw, err := json.Marshal(messages)
+	if err != nil {
+		return messages
+	}
+
+	var msgsJSON []map[string]any
+	if err := json.Unmarshal(raw, &msgsJSON); err != nil {
+		return messages
+	}
+
+	// Find the last user message and inject the cache_edits block
+	for i := len(msgsJSON) - 1; i >= 0; i-- {
+		if msgsJSON[i]["role"] == "user" {
+			content, ok := msgsJSON[i]["content"].([]any)
+			if !ok {
+				// Content might be a string, convert to array
+				if s, ok2 := msgsJSON[i]["content"].(string); ok2 {
+					content = []any{map[string]any{"type": "text", "text": s}}
+				} else {
+					continue
+				}
+			}
+			msgsJSON[i]["content"] = append(content, cacheEdits)
+			break
+		}
+	}
+
+	// Reserialize back to messages
+	raw, err = json.Marshal(msgsJSON)
+	if err != nil {
+		return messages
+	}
+
+	var newMessages []anthropic.MessageParam
+	if err := json.Unmarshal(raw, &newMessages); err != nil {
+		return messages
+	}
+	return newMessages
 }
 
 // RunPostCompactCleanup clears caches and tracking state after compaction.
@@ -2792,6 +2891,10 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 	if a.toolStateTracker != nil {
 		a.toolStateTracker.ClearConclusions()
 	}
+
+	// Reset cached microcompact tracker — clear all registered tool IDs
+	// and deleted refs. After compaction, tool results are rebuilt from scratch.
+	a.cachedMC.Reset()
 }
 
 // buildPostCompactToolsAnnouncement re-announces all available tools after compaction.
