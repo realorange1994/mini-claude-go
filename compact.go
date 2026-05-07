@@ -1358,7 +1358,17 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 		},
 	}
 
-	stream := client.Messages.NewStreaming(ctx, params)
+	stream := client.Messages.NewStreaming(ctx, params,
+		// Add context_management to clear tool results and thinking blocks
+		// server-side during compaction. This preserves prompt cache (cache_edits)
+		// by only removing cleared content, not invalidating the entire cache.
+		option.WithJSONSet("context_management", map[string]any{
+			"edits": []map[string]any{
+				{"type": "clear_tool_uses_20250919", "clear_tool_inputs": true},
+				{"type": "clear_thinking_20251015"},
+			},
+		}),
+	)
 
 	var accumulated strings.Builder
 	for stream.Next() {
