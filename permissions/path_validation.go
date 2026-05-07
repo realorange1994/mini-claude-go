@@ -147,10 +147,10 @@ func ValidateReadPath(path string, ruleStore *RuleStore) PathValidationResult {
 		return result
 	}
 
-	// 2. Suspicious Windows patterns
+	// 2. Suspicious Windows patterns (prompt user, not hard denial)
 	if suspicious, msg := hasSuspiciousWindowsPathPattern(expanded); suspicious {
 		result.Message = msg
-		result.Reason = "other"
+		result.Reason = "safetyCheck"
 		return result
 	}
 

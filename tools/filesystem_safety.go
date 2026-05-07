@@ -76,6 +76,14 @@ func isDangerousFilePath(path string) (bool, string) {
 // Returns (true, message) if suspicious, (false, "") if safe.
 // Matches upstream's hasSuspiciousWindowsPathPattern.
 func hasSuspiciousWindowsPathPattern(path string) (bool, string) {
+	// NTFS Alternate Data Streams: colon after position 2 (e.g., file.txt:Zone.Identifier)
+	// Matches upstream: if (isWsl || isWindows) && path.slice(2).includes(':')
+	if len(path) > 2 {
+		rest := path[2:]
+		if strings.Contains(rest, ":") {
+			return true, "path contains NTFS Alternate Data Stream syntax"
+		}
+	}
 	// 8.3 short names (GIT~1, CLAUDE~1)
 	if reShortName.MatchString(path) {
 		return true, "path contains 8.3 short name pattern"
@@ -122,15 +130,23 @@ func indexOf(slice []string, item string) int {
 // Returns PermissionResult: allow if safe, ask with safetyCheck reason if unsafe.
 // Matches upstream's checkPathSafetyForAutoEdit.
 func CheckPathSafetyForAutoEdit(path string) PermissionResult {
-	// Check suspicious Windows path patterns
+	// Check suspicious Windows path patterns (NOT classifier-approvable)
 	if suspicious, _ := hasSuspiciousWindowsPathPattern(path); suspicious {
-		return PermissionResultAsk(
+		return PermissionResultAskNotClassifiable(
 			"Claude requested permissions to write to "+path+", which contains a suspicious Windows path pattern that requires manual approval.",
 			"safetyCheck",
 		)
 	}
 
-	// Check dangerous files/directories
+	// Check Claude config files (classifier-approvable)
+	if isClaudeConfigPath(path) {
+		return PermissionResultAsk(
+			"Claude requested permissions to edit "+path+", which is a Claude configuration file that requires manual approval.",
+			"safetyCheck",
+		)
+	}
+
+	// Check dangerous files/directories (classifier-approvable)
 	if dangerous, msg := isDangerousFilePath(path); dangerous {
 		return PermissionResultAsk(
 			"Claude requested permissions to edit "+path+" which is a sensitive file: "+msg,
@@ -139,4 +155,24 @@ func CheckPathSafetyForAutoEdit(path string) PermissionResult {
 	}
 
 	return PermissionResultPassthrough()
+}
+
+// isClaudeConfigPath checks if a path is a Claude Code configuration file or
+// directory that should be auto-edit blocked but classifier-approvable.
+// Matches upstream's Claude config file check in checkPathSafetyForAutoEdit.
+func isClaudeConfigPath(path string) bool {
+	p := strings.ReplaceAll(strings.ToLower(path), "\\", "/")
+	configPaths := []string{
+		".claude/settings.json",
+		".claude/settings.local.json",
+		".claude/commands/",
+		".claude/agents/",
+		".claude/skills/",
+	}
+	for _, configPath := range configPaths {
+		if strings.HasSuffix(p, configPath) || strings.Contains(p, "/"+configPath) {
+			return true
+		}
+	}
+	return false
 }

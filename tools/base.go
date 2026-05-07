@@ -153,10 +153,11 @@ const (
 // Replaces the previous string return type to distinguish deny (bypass-immune)
 // from ask (may be bypass-immune depending on DecisionReason).
 type PermissionResult struct {
-	Behavior       PermissionBehavior
-	Message        string // human-readable reason (required for deny/ask)
-	DecisionReason string // "safetyCheck", "rule", "tool", or ""
-	MatchedRule    string // optional: the rule that matched (for debugging)
+	Behavior             PermissionBehavior
+	Message              string // human-readable reason (required for deny/ask)
+	DecisionReason       string // "safetyCheck", "rule", "tool", or ""
+	MatchedRule          string // optional: the rule that matched (for debugging)
+	ClassifierApprovable bool   // true if auto-mode classifier may approve this ask; false if must always prompt
 }
 
 // PermissionResultAllow returns a simple allow result.
@@ -170,8 +171,16 @@ func PermissionResultDeny(msg string) PermissionResult {
 }
 
 // PermissionResultAsk returns an ask result (user approval required).
+// ClassifierApprovable defaults to true (auto-mode classifier may approve).
 func PermissionResultAsk(msg string, reason string) PermissionResult {
-	return PermissionResult{Behavior: PermissionAsk, Message: msg, DecisionReason: reason}
+	return PermissionResult{Behavior: PermissionAsk, Message: msg, DecisionReason: reason, ClassifierApprovable: true}
+}
+
+// PermissionResultAskNotClassifiable returns an ask result that the auto-mode
+// classifier cannot approve (must always prompt user). Used for suspicious
+// Windows path patterns that are too dangerous for automated approval.
+func PermissionResultAskNotClassifiable(msg string, reason string) PermissionResult {
+	return PermissionResult{Behavior: PermissionAsk, Message: msg, DecisionReason: reason, ClassifierApprovable: false}
 }
 
 // PermissionResultPassthrough returns a passthrough result (defer to framework).

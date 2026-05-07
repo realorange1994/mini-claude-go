@@ -145,7 +145,12 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		if g.isWriteTool(toolName) {
 			opType = permissions.OpWrite
 		}
-		vResult := permissions.ValidatePath(pathParam, opType, g.ruleStore, g.projectDir)
+		var vResult permissions.PathValidationResult
+		if opType == permissions.OpRead {
+			vResult = permissions.ValidateReadPath(pathParam, g.ruleStore)
+		} else {
+			vResult = permissions.ValidatePath(pathParam, opType, g.ruleStore, g.projectDir)
+		}
 		if !vResult.Allowed {
 			restoreStripped()
 			// Check if it requires user interaction (ask)
@@ -317,21 +322,37 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		}
 
 	case ModeAuto:
-		ret := g.checkAutoMode(tool, params)
+		ret := g.checkAutoMode(tool, params, result)
 		if ret != nil {
 			restoreStripped()
 		}
 		return ret
 	}
 
-	// Step 3b: allow or passthrough
+	// Step 3b: allow — tool-level allow is always allowed
 	if result.Behavior == tools.PermissionAllow {
 		restoreStripped()
 		return nil
 	}
 
-	// Step 4: passthrough — defer to mode-based logic (already handled above)
-	restoreStripped()
+	// Step 4: passthrough — defer to mode-based logic.
+	// For Ask mode: prompt for dangerous tools (already handled in switch above).
+	// For Auto mode: go through classifier.
+	// For Bypass mode: allow all (already handled in switch above).
+	if result.Behavior == tools.PermissionPassthrough {
+		switch g.config.PermissionMode {
+		case ModeAuto:
+			ret := g.checkAutoMode(tool, params, result)
+			if ret != nil {
+				restoreStripped()
+			}
+			return ret
+		default:
+			// Already handled in switch above (Ask/Bypass/Plan).
+			restoreStripped()
+			return nil
+		}
+	}
 	return nil
 }
 
@@ -373,7 +394,29 @@ func (g *PermissionGate) askUser(toolName string, params map[string]any) bool {
 // After 3 consecutive denials, falls back to interactive prompt.
 // IMPORTANT: If the user explicitly approved this tool via AskUserQuestion, we
 // bypass the classifier entirely (the user's explicit consent is binding).
-func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any) *tools.ToolResult {
+func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, toolResult tools.PermissionResult) *tools.ToolResult {
+	// If tool returned ask with ClassifierApprovable=false, always prompt user
+	// (classifier cannot approve suspicious Windows patterns, etc.)
+	if toolResult.Behavior == tools.PermissionAsk && !toolResult.ClassifierApprovable {
+		if g.shouldAvoidPrompts() {
+			return &tools.ToolResult{
+				Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", toolResult.Message),
+				IsError: true,
+			}
+		}
+		if !g.askUserWithWarning(tool.Name(), params, toolResult.Message) {
+			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+		}
+		return nil // user approved
+	}
+
+	// Step 3c: toolAlwaysAllowedRule — if rule store has a tool-level allow rule,
+	// allow without classifier evaluation.
+	if g.ruleStore != nil && g.ruleStore.HasAllowRule(tool.Name()) {
+		g.denialCount = 0
+		return nil
+	}
+
 	// Fast path: whitelisted tools are always allowed
 	if IsAutoAllowlisted(tool.Name(), params) {
 		g.denialCount = 0
