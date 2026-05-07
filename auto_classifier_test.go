@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"testing"
+
+	"miniclaudecode-go/tools"
 )
 
 func TestAutoAllowlisted(t *testing.T) {
@@ -385,14 +387,14 @@ func TestPermissionGateAutoModeWithClassifier(t *testing.T) {
 	gate := NewPermissionGate(&cfg)
 
 	// Without classifier: whitelisted tools auto-allow
-	whitelistedTool := &mockTool{name: "read_file", permissions: ""}
+	whitelistedTool := &mockTool{name: "read_file", permissions: tools.PermissionResultPassthrough()}
 	result := gate.Check(whitelistedTool, map[string]any{"path": "/tmp/test.txt"})
 	if result != nil {
 		t.Errorf("whitelisted tool should be allowed in auto mode without classifier, got: %v", result)
 	}
 
 	// Without classifier: non-whitelisted tools also auto-allow (legacy fallback)
-	execTool := &mockTool{name: "exec", permissions: ""}
+	execTool := &mockTool{name: "exec", permissions: tools.PermissionResultPassthrough()}
 	result = gate.Check(execTool, map[string]any{"command": "ls -la"})
 	if result != nil {
 		t.Errorf("exec should be auto-allowed when no classifier configured, got: %v", result)
@@ -405,7 +407,7 @@ func TestPermissionGateAutoModeDenialTracking(t *testing.T) {
 	gate := NewPermissionGate(&cfg)
 
 	// Without any classifier configured, non-whitelisted tools auto-allow (legacy)
-	execTool := &mockTool{name: "exec", permissions: ""}
+	execTool := &mockTool{name: "exec", permissions: tools.PermissionResultPassthrough()}
 	result := gate.Check(execTool, map[string]any{"command": "ls -la"})
 	if result != nil {
 		t.Error("without classifier, auto mode should auto-allow (legacy behavior)")
@@ -424,7 +426,7 @@ func TestPermissionGateAutoModeDenialCountReset(t *testing.T) {
 	gate.denialCount = 5
 
 	// Whitelisted tool should reset denial count to 0
-	whitelistedTool := &mockTool{name: "read_file", permissions: ""}
+	whitelistedTool := &mockTool{name: "read_file", permissions: tools.PermissionResultPassthrough()}
 	gate.Check(whitelistedTool, map[string]any{})
 	if gate.denialCount != 0 {
 		t.Errorf("whitelisted tool should reset denial count, got %d", gate.denialCount)
@@ -442,7 +444,7 @@ func TestPermissionGateAutoModeWhitelistResetsDenial(t *testing.T) {
 	gate.denialCount = 5
 
 	// Whitelisted tool should reset denial count
-	whitelistedTool := &mockTool{name: "read_file", permissions: ""}
+	whitelistedTool := &mockTool{name: "read_file", permissions: tools.PermissionResultPassthrough()}
 	gate.Check(whitelistedTool, map[string]any{})
 	if gate.denialCount != 0 {
 		t.Errorf("whitelisted tool should reset denial count, got %d", gate.denialCount)

@@ -68,16 +68,55 @@ func (g *PermissionGate) ResetPostCompact() {
 }
 
 // Check runs the permission gauntlet. Returns a ToolResult if denied, nil if allowed.
+// Implements upstream's hasPermissionsToUseToolInner flow:
+//   1a: deny rule → hard deny
+//   1b: ask rule → ask (sandbox exception)
+//   1c: tool.checkPermissions() → get PermissionResult
+//   1d: behavior === 'deny' → hard deny (bypass-immune)
+//   1e: requiresUserInteraction + ask → ask (bypass-immune)
+//   1f: content-specific ask rule → ask (bypass-immune)
+//   1g: safetyCheck → ask (bypass-immune)
+//   2a: bypassPermissions → behavior: 'allow' (only reached if 1a-1g didn't return)
+//   2b: allow rule → allow
+//   3: passthrough → ask (mode-based)
 func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.ToolResult {
-	// Layer 1: tool-level self-check (returns warning, not hard denial)
-	warning := tool.CheckPermissions(params)
+	// Layer 1: tool-level self-check
+	result := tool.CheckPermissions(params)
 
-	// UNCONDITIONAL: Block if tool's own security check fails, regardless of mode.
-	if warning != "" {
+	// Step 1d: deny is always bypass-immune
+	if result.Behavior == tools.PermissionDeny {
 		return &tools.ToolResult{
-			Output:  fmt.Sprintf("Permission denied: %s", warning),
+			Output:  fmt.Sprintf("Permission denied: %s", result.Message),
 			IsError: true,
 		}
+	}
+
+	// Step 1g: ask from safetyCheck is bypass-immune
+	if result.Behavior == tools.PermissionAsk && result.DecisionReason == "safetyCheck" {
+		if g.shouldAvoidPrompts() {
+			return &tools.ToolResult{
+				Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", result.Message),
+				IsError: true,
+			}
+		}
+		if !g.askUserWithWarning(tool.Name(), params, result.Message) {
+			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+		}
+		return nil // user approved
+	}
+
+	// Step 1e/1f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
+	if result.Behavior == tools.PermissionAsk {
+		if g.shouldAvoidPrompts() {
+			return &tools.ToolResult{
+				Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", result.Message),
+				IsError: true,
+			}
+		}
+		if !g.askUserWithWarning(tool.Name(), params, result.Message) {
+			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+		}
+		return nil // user approved
 	}
 
 	// Layer 1.5: denied patterns check (hard denial)
@@ -104,8 +143,10 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		}
 	}
 
-	// Layer 2: mode-based check
+	// Step 2a: bypass mode — allow all (only reached if 1d-1g didn't return)
 	switch g.config.PermissionMode {
+	case ModeBypass:
+		return nil
 	case ModePlan:
 		writeTools := map[string]bool{"exec": true, "write_file": true, "edit_file": true, "multi_edit": true, "fileops": true}
 		if writeTools[tool.Name()] {
@@ -129,15 +170,6 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 			return nil // non-dangerous tool, allow
 		}
 
-		if warning != "" {
-			// Tool returned a warning -- always ask user regardless of tool type
-			if !g.askUserWithWarning(tool.Name(), params, warning) {
-				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
-			}
-			return nil // user approved
-		}
-
-		// No warning but still dangerous -- ask normally
 		if isDangerous {
 			if tool.Name() == "exec" {
 				cmd, _ := params["command"].(string)
@@ -149,14 +181,17 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
 			}
 		}
-	case ModeBypass:
-		// Allow all tools directly without classifier evaluation.
-		// Tool's own security check (Layer 1) still runs unconditionally.
-		return nil
+
 	case ModeAuto:
 		return g.checkAutoMode(tool, params)
 	}
 
+	// Step 2b/3: allow or passthrough
+	if result.Behavior == tools.PermissionAllow {
+		return nil
+	}
+
+	// Step 3: passthrough — defer to mode-based logic (already handled above)
 	return nil
 }
 

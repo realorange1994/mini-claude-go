@@ -30,7 +30,7 @@ func (t *BriefTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *BriefTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *BriefTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *BriefTool) Execute(params map[string]any) ToolResult {
 	task, _ := params["task"].(string)

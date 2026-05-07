@@ -54,7 +54,13 @@ func (*FileEditTool) InputSchema() map[string]any {
 	}
 }
 
-func (*FileEditTool) CheckPermissions(params map[string]any) string { return "" }
+func (*FileEditTool) CheckPermissions(params map[string]any) PermissionResult {
+	pathStr, _ := params["file_path"].(string)
+	if pathStr == "" {
+		return PermissionResultPassthrough()
+	}
+	return CheckPathSafetyForAutoEdit(pathStr)
+}
 
 func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)

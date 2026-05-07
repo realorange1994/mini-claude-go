@@ -39,15 +39,15 @@ func (*WebFetchTool) InputSchema() map[string]any {
 	}
 }
 
-func (*WebFetchTool) CheckPermissions(params map[string]any) string {
+func (*WebFetchTool) CheckPermissions(params map[string]any) PermissionResult {
 	rawURL, _ := params["url"].(string)
 	if strings.HasPrefix(rawURL, "file://") {
-		return "Blocked: file:// URLs are not allowed"
+		return PermissionResultAsk("Blocked: file:// URLs are not allowed", "tool")
 	}
 	if containsInternalURL(rawURL) {
-		return "Blocked: internal/private URLs are not allowed"
+		return PermissionResultAsk("Blocked: internal/private URLs are not allowed", "tool")
 	}
-	return ""
+	return PermissionResultPassthrough()
 }
 
 func (*WebFetchTool) Execute(params map[string]any) ToolResult {

@@ -102,7 +102,7 @@ func compileDenyPatterns() []*regexp.Regexp {
 	return result
 }
 
-func (*ExecTool) CheckPermissions(params map[string]any) string {
+func (*ExecTool) CheckPermissions(params map[string]any) PermissionResult {
 	cmd, _ := params["command"].(string)
 	cmd = strings.TrimSpace(cmd)
 	lower := strings.ToLower(cmd)
@@ -111,19 +111,19 @@ func (*ExecTool) CheckPermissions(params map[string]any) string {
 	// Some patterns like fork bombs span multiple segments and must be checked whole.
 	for _, re := range denyRegexps {
 		if re.MatchString(lower) {
-			return "Dangerous command pattern detected: " + re.String()
+			return PermissionResultDeny("Dangerous command pattern detected: " + re.String())
 		}
 	}
 
 	// Warn about commands accessing internal/private URLs (check full command)
 	if containsInternalURL(cmd) {
-		return "Internal/private URL detected"
+		return PermissionResultAsk("Internal/private URL detected", "tool")
 	}
 
 	// Block commands targeting UNC paths (SMB/WebDAV) to prevent NTLM credential
 	// leakage on Windows (\\server\share can trigger SMB authentication)
 	if containsVulnerableUncPath(cmd) {
-		return "UNC path detected: commands targeting SMB/WebDAV shares are blocked"
+		return PermissionResultDeny("UNC path detected: commands targeting SMB/WebDAV shares are blocked")
 	}
 
 	// Check each subcommand of a compound command independently
@@ -145,7 +145,7 @@ func (*ExecTool) CheckPermissions(params map[string]any) string {
 	// (path resolution would be relative to the changed directory)
 	if hasCd {
 		if reason := validateRedirectTargets(cmd); reason != "" {
-			return reason
+			return PermissionResultAsk(reason, "tool")
 		}
 	}
 
@@ -160,26 +160,26 @@ func (*ExecTool) CheckPermissions(params map[string]any) string {
 
 		// Command substitution detection
 		if reason := detectCommandSubstitution(inner); reason != "" {
-			return reason
+			return PermissionResultAsk(reason, "tool")
 		}
 
 		// Glob and brace expansion in destructive commands
 		if reason := detectExpansion(inner); reason != "" {
-			return reason
+			return PermissionResultAsk(reason, "tool")
 		}
 
 		// Validate file paths in the command
 		if pathViolation := validatePaths(inner); pathViolation != "" {
-			return pathViolation
+			return PermissionResultAsk(pathViolation, "tool")
 		}
 
 		// Validate output redirection targets to prevent writing to sensitive paths
 		if reason := validateRedirectTargets(inner); reason != "" {
-			return reason
+			return PermissionResultAsk(reason, "tool")
 		}
 	}
 
-	return ""
+	return PermissionResultPassthrough()
 }
 
 func (et *ExecTool) Execute(params map[string]any) ToolResult {

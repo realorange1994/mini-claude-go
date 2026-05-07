@@ -44,7 +44,13 @@ func (*FileWriteTool) InputSchema() map[string]any {
 	}
 }
 
-func (*FileWriteTool) CheckPermissions(params map[string]any) string { return "" }
+func (*FileWriteTool) CheckPermissions(params map[string]any) PermissionResult {
+	pathStr, _ := params["file_path"].(string)
+	if pathStr == "" {
+		return PermissionResultPassthrough()
+	}
+	return CheckPathSafetyForAutoEdit(pathStr)
+}
 
 func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)

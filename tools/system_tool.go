@@ -40,7 +40,7 @@ func (*SystemTool) InputSchema() map[string]any {
 	}
 }
 
-func (*SystemTool) CheckPermissions(params map[string]any) string { return "" }
+func (*SystemTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (*SystemTool) Execute(params map[string]any) ToolResult {
 	return systemExecute(context.Background(), params)

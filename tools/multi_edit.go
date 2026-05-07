@@ -78,7 +78,13 @@ func (*MultiEditTool) InputSchema() map[string]any {
 	}
 }
 
-func (*MultiEditTool) CheckPermissions(params map[string]any) string { return "" }
+func (*MultiEditTool) CheckPermissions(params map[string]any) PermissionResult {
+	pathStr, _ := params["file_path"].(string)
+	if pathStr == "" {
+		return PermissionResultPassthrough()
+	}
+	return CheckPathSafetyForAutoEdit(pathStr)
+}
 
 func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)

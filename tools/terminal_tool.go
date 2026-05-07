@@ -50,8 +50,8 @@ func (*TerminalTool) InputSchema() map[string]any {
 	}
 }
 
-func (*TerminalTool) CheckPermissions(params map[string]any) string {
-	return ""
+func (*TerminalTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
 }
 
 func (*TerminalTool) Execute(params map[string]any) ToolResult {

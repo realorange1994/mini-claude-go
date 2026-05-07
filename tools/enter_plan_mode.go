@@ -32,8 +32,8 @@ func (t *EnterPlanModeTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *EnterPlanModeTool) CheckPermissions(params map[string]any) string {
-	return "" // auto-approved
+func (t *EnterPlanModeTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough() // auto-approved
 }
 
 func (t *EnterPlanModeTool) Execute(params map[string]any) ToolResult {

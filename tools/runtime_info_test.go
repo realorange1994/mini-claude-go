@@ -49,7 +49,7 @@ func TestRuntimeInfoSchema(t *testing.T) {
 func TestRuntimeInfoPermissions(t *testing.T) {
 	tool := &RuntimeInfoTool{}
 	result := tool.CheckPermissions(map[string]any{})
-	if result != "" {
-		t.Errorf("expected no permission denial, got: %s", result)
+	if result.Behavior != PermissionPassthrough {
+		t.Errorf("expected no permission denial, got: %v", result)
 	}
 }

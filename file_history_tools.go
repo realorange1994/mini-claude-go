@@ -34,7 +34,7 @@ func (t *FileHistoryTool) InputSchema() map[string]any {
 		},
 	}
 }
-func (t *FileHistoryTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, hasPath := params["path"].(string)
@@ -157,7 +157,7 @@ func (t *FileHistoryReadTool) InputSchema() map[string]any {
 		"required": []string{"path"},
 	}
 }
-func (t *FileHistoryReadTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryReadTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryReadTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -226,7 +226,7 @@ func (t *FileHistoryGrepTool) InputSchema() map[string]any {
 		"required": []string{"pattern"},
 	}
 }
-func (t *FileHistoryGrepTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryGrepTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryGrepTool) Execute(params map[string]any) tools.ToolResult {
 	pattern, ok := params["pattern"].(string)
@@ -341,7 +341,7 @@ func (t *FileRestoreTool) InputSchema() map[string]any {
 		"required": []string{"path"},
 	}
 }
-func (t *FileRestoreTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileRestoreTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileRestoreTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -378,7 +378,7 @@ func (t *FileRewindTool) InputSchema() map[string]any {
 		"required": []string{"path", "steps"},
 	}
 }
-func (t *FileRewindTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileRewindTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileRewindTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -428,7 +428,7 @@ func (t *FileHistoryDiffTool) InputSchema() map[string]any {
 		"required": []string{"path"},
 	}
 }
-func (t *FileHistoryDiffTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryDiffTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryDiffTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -585,7 +585,7 @@ func (t *FileHistorySummaryTool) InputSchema() map[string]any {
 		},
 	}
 }
-func (t *FileHistorySummaryTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistorySummaryTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistorySummaryTool) Execute(params map[string]any) tools.ToolResult {
 	var since time.Time
@@ -653,7 +653,7 @@ func (t *FileHistorySearchTool) InputSchema() map[string]any {
 		"required": []string{"path", "query"},
 	}
 }
-func (t *FileHistorySearchTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistorySearchTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistorySearchTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -717,7 +717,7 @@ func (t *FileHistoryTimelineTool) InputSchema() map[string]any {
 		},
 	}
 }
-func (t *FileHistoryTimelineTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryTimelineTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryTimelineTool) Execute(params map[string]any) tools.ToolResult {
 	var since time.Time
@@ -772,7 +772,7 @@ func (t *FileHistoryTagTool) InputSchema() map[string]any {
 		"required": []string{},
 	}
 }
-func (t *FileHistoryTagTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryTagTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryTagTool) Execute(params map[string]any) tools.ToolResult {
 	actionVal, _ := params["action"].(string)
@@ -893,7 +893,7 @@ func (t *FileHistoryAnnotateTool) InputSchema() map[string]any {
 		"required": []string{"path", "version", "message"},
 	}
 }
-func (t *FileHistoryAnnotateTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryAnnotateTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryAnnotateTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -938,7 +938,7 @@ func (t *FileHistoryCheckoutTool) InputSchema() map[string]any {
 		"required": []string{"path"},
 	}
 }
-func (t *FileHistoryCheckoutTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryCheckoutTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryCheckoutTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -983,7 +983,7 @@ func (t *FileHistoryBatchTool) InputSchema() map[string]any {
 		"required": []string{"pattern"},
 	}
 }
-func (t *FileHistoryBatchTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileHistoryBatchTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryBatchTool) Execute(params map[string]any) tools.ToolResult {
 	pattern, ok := params["pattern"].(string)

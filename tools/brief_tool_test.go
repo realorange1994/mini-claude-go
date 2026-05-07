@@ -58,8 +58,8 @@ func TestBriefToolInputSchema(t *testing.T) {
 func TestBriefToolCheckPermissions(t *testing.T) {
 	tool := &BriefTool{}
 	result := tool.CheckPermissions(map[string]any{"task": "test"})
-	if result != "" {
-		t.Errorf("expected no permission denial, got: %s", result)
+	if result.Behavior != PermissionPassthrough {
+		t.Errorf("expected no permission denial, got: %v", result)
 	}
 }
 

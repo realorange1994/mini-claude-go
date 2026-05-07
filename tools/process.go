@@ -48,7 +48,7 @@ func (*ProcessTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ProcessTool) CheckPermissions(params map[string]any) string { return "" }
+func (*ProcessTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (*ProcessTool) Execute(params map[string]any) ToolResult {
 	operation, _ := params["operation"].(string)

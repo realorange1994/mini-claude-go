@@ -41,7 +41,7 @@ func (t *ToolSearchTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *ToolSearchTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *ToolSearchTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *ToolSearchTool) Execute(params map[string]any) ToolResult {
 	if t.Registry == nil {

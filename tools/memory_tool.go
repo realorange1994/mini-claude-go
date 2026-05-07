@@ -43,7 +43,7 @@ func (t *MemoryAddTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *MemoryAddTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *MemoryAddTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *MemoryAddTool) Execute(params map[string]any) ToolResult {
 	category, _ := params["category"].(string)
@@ -79,7 +79,7 @@ func (t *MemorySearchTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *MemorySearchTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *MemorySearchTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *MemorySearchTool) Execute(params map[string]any) ToolResult {
 	query, _ := params["query"].(string)

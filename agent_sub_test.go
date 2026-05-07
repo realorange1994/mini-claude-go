@@ -15,7 +15,7 @@ type testRegistryTool struct {
 func (m testRegistryTool) Name() string                              { return m.name }
 func (m testRegistryTool) Description() string                       { return "" }
 func (m testRegistryTool) InputSchema() map[string]any             { return nil }
-func (m testRegistryTool) CheckPermissions(map[string]any) string  { return "" }
+func (m testRegistryTool) CheckPermissions(map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 func (m testRegistryTool) Execute(map[string]any) tools.ToolResult {
 	return tools.ToolResult{Output: ""}
 }

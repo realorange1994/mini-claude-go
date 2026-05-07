@@ -1168,8 +1168,8 @@ func TestGitTool_InfoCheckPermissions(t *testing.T) {
 	tool := &GitTool{}
 	params := map[string]interface{}{"operation": "info"}
 	warning := tool.CheckPermissions(params)
-	if warning != "" {
-		t.Errorf("CheckPermissions(info) = %q, want empty (read-only)", warning)
+	if warning.Behavior != PermissionPassthrough {
+		t.Errorf("CheckPermissions(info) = %v, want passthrough (read-only)", warning)
 	}
 }
 

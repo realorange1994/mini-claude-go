@@ -34,7 +34,7 @@ func (*ListMCPTools) InputSchema() map[string]any {
 	}
 }
 
-func (*ListMCPTools) CheckPermissions(params map[string]any) string { return "" }
+func (*ListMCPTools) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *ListMCPTools) Execute(params map[string]any) ToolResult {
 	if t.Manager == nil {
@@ -120,7 +120,7 @@ func (*MCPToolCaller) InputSchema() map[string]any {
 	}
 }
 
-func (*MCPToolCaller) CheckPermissions(params map[string]any) string { return "" }
+func (*MCPToolCaller) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 	if t.Manager == nil {
@@ -187,7 +187,7 @@ func (*MCPServerStatus) InputSchema() map[string]any {
 	}
 }
 
-func (*MCPServerStatus) CheckPermissions(params map[string]any) string { return "" }
+func (*MCPServerStatus) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *MCPServerStatus) Execute(params map[string]any) ToolResult {
 	if t.Manager == nil {

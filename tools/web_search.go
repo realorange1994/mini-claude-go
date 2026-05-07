@@ -55,12 +55,12 @@ func (*WebSearchTool) InputSchema() map[string]any {
 	}
 }
 
-func (*WebSearchTool) CheckPermissions(params map[string]any) string {
+func (*WebSearchTool) CheckPermissions(params map[string]any) PermissionResult {
 	query, _ := params["query"].(string)
 	if containsInternalURL(query) {
-		return "Search blocked: internal URL detected in query"
+		return PermissionResultAsk("Search blocked: internal URL detected in query", "tool")
 	}
-	return ""
+	return PermissionResultPassthrough()
 }
 
 func (*WebSearchTool) Execute(params map[string]any) ToolResult {

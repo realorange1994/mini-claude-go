@@ -16,7 +16,7 @@ func TestWebSearchEmptyQuery(t *testing.T) {
 func TestWebSearchPermissionInternalURL(t *testing.T) {
 	tool := &WebSearchTool{}
 	result := tool.CheckPermissions(map[string]any{"query": "curl http://10.0.0.1/secret"})
-	if result == "" {
+	if result.Behavior == PermissionPassthrough {
 		t.Error("expected denial for internal URL in query")
 	}
 }
@@ -24,8 +24,8 @@ func TestWebSearchPermissionInternalURL(t *testing.T) {
 func TestWebSearchPermissionPublicQuery(t *testing.T) {
 	tool := &WebSearchTool{}
 	result := tool.CheckPermissions(map[string]any{"query": "Go programming language"})
-	if result != "" {
-		t.Errorf("expected public query to be allowed, got: %s", result)
+	if result.Behavior != PermissionPassthrough {
+		t.Errorf("expected public query to be allowed, got: %v", result)
 	}
 }
 

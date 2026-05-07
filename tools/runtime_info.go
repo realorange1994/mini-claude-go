@@ -20,7 +20,7 @@ func (*RuntimeInfoTool) InputSchema() map[string]any {
 	}
 }
 
-func (*RuntimeInfoTool) CheckPermissions(params map[string]any) string { return "" }
+func (*RuntimeInfoTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (*RuntimeInfoTool) Execute(params map[string]any) ToolResult {
 	wd, _ := os.Getwd()

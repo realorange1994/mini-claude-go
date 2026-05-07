@@ -52,7 +52,20 @@ func (*FileOpsTool) InputSchema() map[string]any {
 	}
 }
 
-func (*FileOpsTool) CheckPermissions(params map[string]any) string { return "" }
+func (*FileOpsTool) CheckPermissions(params map[string]any) PermissionResult {
+	pathStr, _ := params["path"].(string)
+	if pathStr == "" {
+		return PermissionResultPassthrough()
+	}
+	// Check both source and destination paths
+	destStr, _ := params["destination"].(string)
+	if destStr != "" {
+		if result := CheckPathSafetyForAutoEdit(destStr); result.Behavior != PermissionPassthrough {
+			return result
+		}
+	}
+	return CheckPathSafetyForAutoEdit(pathStr)
+}
 
 func (*FileOpsTool) Execute(params map[string]any) ToolResult {
 	operation, _ := params["operation"].(string)

@@ -58,7 +58,9 @@ func (*FileReadTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *FileReadTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *FileReadTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["file_path"].(string)

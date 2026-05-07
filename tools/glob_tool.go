@@ -50,7 +50,7 @@ func (*GlobTool) InputSchema() map[string]any {
 	}
 }
 
-func (*GlobTool) CheckPermissions(params map[string]any) string { return "" }
+func (*GlobTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (*GlobTool) Execute(params map[string]any) ToolResult {
 	pattern, _ := params["pattern"].(string)

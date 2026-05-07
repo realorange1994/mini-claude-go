@@ -38,7 +38,7 @@ func (*ListDirTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ListDirTool) CheckPermissions(params map[string]any) string { return "" }
+func (*ListDirTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (*ListDirTool) Execute(params map[string]any) ToolResult {
 	pathStr, _ := params["path"].(string)

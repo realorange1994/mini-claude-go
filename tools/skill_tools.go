@@ -28,7 +28,7 @@ func (*ReadSkillTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ReadSkillTool) CheckPermissions(params map[string]any) string { return "" }
+func (*ReadSkillTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *ReadSkillTool) Execute(params map[string]any) ToolResult {
 	if t.Loader == nil {
@@ -64,7 +64,7 @@ func (*ListSkillsTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ListSkillsTool) CheckPermissions(params map[string]any) string { return "" }
+func (*ListSkillsTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *ListSkillsTool) Execute(params map[string]any) ToolResult {
 	if t.Loader == nil {
@@ -131,7 +131,7 @@ func (*SearchSkillsTool) InputSchema() map[string]any {
 	}
 }
 
-func (*SearchSkillsTool) CheckPermissions(params map[string]any) string { return "" }
+func (*SearchSkillsTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *SearchSkillsTool) Execute(params map[string]any) ToolResult {
 	if t.Loader == nil {

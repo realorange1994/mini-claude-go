@@ -63,8 +63,8 @@ func (*AskUserQuestionTool) InputSchema() map[string]any {
 	}
 }
 
-func (*AskUserQuestionTool) CheckPermissions(params map[string]any) string {
-	return "" // Always allowed - user must interact to proceed
+func (*AskUserQuestionTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough() // Always allowed - user must interact to proceed
 }
 
 func (*AskUserQuestionTool) Execute(params map[string]any) ToolResult {

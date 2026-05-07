@@ -35,8 +35,8 @@ func (t *ExitPlanModeTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *ExitPlanModeTool) CheckPermissions(params map[string]any) string {
-	return "" // auto-approved
+func (t *ExitPlanModeTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough() // auto-approved
 }
 
 func (t *ExitPlanModeTool) Execute(params map[string]any) ToolResult {

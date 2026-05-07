@@ -125,7 +125,7 @@ func TestMCPToolsCheckPermissions(t *testing.T) {
 
 	for _, tool := range tools {
 		result := tool.CheckPermissions(map[string]any{})
-		if result != "" {
+		if result.Behavior != PermissionPassthrough {
 			t.Errorf("%s: expected empty permission check, got %q", tool.Name(), result)
 		}
 	}

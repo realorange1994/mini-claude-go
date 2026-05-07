@@ -45,7 +45,7 @@ func (t *TaskOutputTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *TaskOutputTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *TaskOutputTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *TaskOutputTool) Execute(params map[string]any) ToolResult {
 	if t.GetOutputFunc == nil {

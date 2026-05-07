@@ -43,7 +43,7 @@ func (t *SendMessageTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *SendMessageTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *SendMessageTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *SendMessageTool) Execute(params map[string]any) ToolResult {
 	agentID, _ := params["agent_id"].(string)

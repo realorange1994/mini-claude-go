@@ -48,12 +48,12 @@ func (*ExaSearchTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ExaSearchTool) CheckPermissions(params map[string]any) string {
+func (*ExaSearchTool) CheckPermissions(params map[string]any) PermissionResult {
 	query, _ := params["query"].(string)
 	if containsExaInternalURL(query) {
-		return "Search blocked: internal URL detected in query"
+		return PermissionResultAsk("Search blocked: internal URL detected in query", "tool")
 	}
-	return ""
+	return PermissionResultPassthrough()
 }
 
 func (*ExaSearchTool) Execute(params map[string]any) ToolResult {
@@ -135,12 +135,12 @@ func (*ExaGetContentsTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ExaGetContentsTool) CheckPermissions(params map[string]any) string {
+func (*ExaGetContentsTool) CheckPermissions(params map[string]any) PermissionResult {
 	urlStr, _ := params["url"].(string)
 	if containsExaInternalURL(urlStr) {
-		return "Fetch blocked: internal URL detected"
+		return PermissionResultAsk("Fetch blocked: internal URL detected", "tool")
 	}
-	return ""
+	return PermissionResultPassthrough()
 }
 
 func (*ExaGetContentsTool) Execute(params map[string]any) ToolResult {

@@ -105,7 +105,7 @@ func (t *AgentTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *AgentTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *AgentTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	if t.SpawnFunc == nil {

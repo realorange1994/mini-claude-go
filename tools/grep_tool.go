@@ -117,7 +117,7 @@ func (*GrepTool) InputSchema() map[string]any {
 	}
 }
 
-func (*GrepTool) CheckPermissions(params map[string]any) string { return "" }
+func (*GrepTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (*GrepTool) Execute(params map[string]any) ToolResult {
 	pattern, _ := params["pattern"].(string)

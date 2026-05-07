@@ -161,86 +161,20 @@ func (*GitTool) InputSchema() map[string]interface{} {
 
 // CheckPermissions checks if the git operation is allowed and returns a warning message if not.
 // Returns empty string if allowed, or a non-empty warning message to show the user.
-func (*GitTool) CheckPermissions(params map[string]interface{}) string {
+// Only blocks truly destructive operations (reset --hard, push --force, etc.).
+// Normal state-modifying operations (commit, push without --force, checkout, etc.) are allowed.
+func (*GitTool) CheckPermissions(params map[string]interface{}) PermissionResult {
 	operation, _ := params["operation"].(string)
 	flags := getStringArray(params, "flags")
 
-	// Check for explicitly dangerous operations/flags
+	// Check for explicitly dangerous operations/flags (reset --hard, push --force, clean -f, branch -D)
 	if dangerous, msg := isDangerousOperation(operation, flags); dangerous {
-		return msg
+		return PermissionResultDeny(msg)
 	}
 
-	// Classify the operation
-	switch operation {
-	case "status", "diff", "log", "show", "describe", "blame", "shortlog",
-		"ls-files", "ls-tree", "rev-parse", "rev-list", "reflog", "info":
-		// Read-only operations: no warning needed
-		return ""
-
-	case "commit":
-		return "Warning: This commit will modify repository history."
-	case "push":
-		return "Warning: This push will transfer commits to the remote repository."
-	case "pull":
-		return "Warning: This pull will fetch and merge commits from the remote."
-	case "fetch":
-		return "Warning: This fetch will update remote-tracking references."
-	case "merge":
-		return "Warning: This merge will create a new commit integrating changes."
-	case "rebase":
-		return "Warning: This rebase will rewrite commit history."
-	case "reset":
-		return "Warning: This reset will move HEAD and potentially modify the index."
-	case "clean":
-		return "Warning: This clean will remove untracked files from the working tree."
-	case "checkout":
-		return "Warning: This checkout will modify the working tree."
-	case "switch":
-		return "Warning: This switch will change the current branch."
-	case "restore":
-		return "Warning: This restore will overwrite files in the working tree."
-	case "stash":
-		return "Warning: This stash will temporarily shelve changes."
-	case "branch":
-		// Branch listing is safe, creation is a write
-		hasListFlag := false
-		for _, f := range flags {
-			if f == "-l" || f == "--list" || f == "-a" || f == "--all" ||
-				f == "-r" || f == "--remotes" {
-				hasListFlag = true
-				break
-			}
-		}
-		if hasListFlag || len(flags) == 0 {
-			return "" // List-only is read-only
-		}
-		return "Warning: This branch operation will modify repository state."
-	case "tag":
-		// Tag listing is safe
-		for _, f := range flags {
-			if f == "-l" || f == "--list" {
-				return ""
-			}
-		}
-		return "Warning: This tag operation will modify repository state."
-	case "remote":
-		// Remote listing is safe
-		return ""
-	case "add":
-		return "Warning: This add will stage changes for commit."
-	case "rm":
-		return "Warning: This rm will remove files from the working tree and/or index."
-	case "mv":
-		return "Warning: This mv will move/rename files."
-	case "cherry-pick":
-		return "Warning: This cherry-pick will apply commits to the current branch."
-	case "revert":
-		return "Warning: This revert will create new commits that undo changes."
-	case "worktree":
-		return "Warning: This worktree operation will modify linked working trees."
-	default:
-		return ""
-	}
+	// All other operations are allowed (normal state-modifying git ops)
+	// Read-only operations don't need any check
+	return PermissionResultPassthrough()
 }
 
 func (*GitTool) Execute(params map[string]interface{}) ToolResult {

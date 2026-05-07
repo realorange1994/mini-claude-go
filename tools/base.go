@@ -106,12 +106,69 @@ func (m ToolResultMetadata) ToCompactSummary(output string) string {
 	return fmt.Sprintf("[%s] -> %s, %d lines%s", m.ToolName, status, lineCount, durationStr)
 }
 
+// PermissionBehavior represents the result of a tool's permission self-check.
+// Matches upstream's PermissionResult behavior: allow, deny, ask, passthrough.
+type PermissionBehavior int
+
+const (
+	// PermissionAllow grants permission without user interaction.
+	PermissionAllow PermissionBehavior = iota
+	// PermissionDeny is a hard denial that is bypass-immune (even in bypass mode).
+	PermissionDeny
+	// PermissionAsk requires user approval. When from a safetyCheck, it is bypass-immune.
+	PermissionAsk
+	// PermissionPassthrough defers to the framework's mode-based logic.
+	PermissionPassthrough
+)
+
+// PermissionResult is the structured return type for CheckPermissions.
+// Replaces the previous string return type to distinguish deny (bypass-immune)
+// from ask (may be bypass-immune depending on DecisionReason).
+type PermissionResult struct {
+	Behavior       PermissionBehavior
+	Message        string // human-readable reason (required for deny/ask)
+	DecisionReason string // "safetyCheck", "rule", "tool", or ""
+}
+
+// PermissionResultAllow returns a simple allow result.
+func PermissionResultAllow() PermissionResult {
+	return PermissionResult{Behavior: PermissionAllow}
+}
+
+// PermissionResultDeny returns a hard denial (bypass-immune).
+func PermissionResultDeny(msg string) PermissionResult {
+	return PermissionResult{Behavior: PermissionDeny, Message: msg, DecisionReason: "tool"}
+}
+
+// PermissionResultAsk returns an ask result (user approval required).
+func PermissionResultAsk(msg string, reason string) PermissionResult {
+	return PermissionResult{Behavior: PermissionAsk, Message: msg, DecisionReason: reason}
+}
+
+// PermissionResultPassthrough returns a passthrough result (defer to framework).
+func PermissionResultPassthrough() PermissionResult {
+	return PermissionResult{Behavior: PermissionPassthrough}
+}
+
+// IsBypassImmune returns true if this result should NOT be overridden by bypass mode.
+// Deny is always bypass-immune. Ask from safetyCheck is bypass-immune.
+func (r PermissionResult) IsBypassImmune() bool {
+	switch r.Behavior {
+	case PermissionDeny:
+		return true
+	case PermissionAsk:
+		return r.DecisionReason == "safetyCheck"
+	default:
+		return false
+	}
+}
+
 // Tool is the interface all tools must implement.
 type Tool interface {
 	Name() string
 	Description() string
 	InputSchema() map[string]any
-	CheckPermissions(params map[string]any) string
+	CheckPermissions(params map[string]any) PermissionResult
 	Execute(params map[string]any) ToolResult
 }
 

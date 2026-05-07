@@ -9,13 +9,13 @@ import (
 // Mock tool for testing
 type mockTool struct {
 	name        string
-	permissions string
+	permissions tools.PermissionResult
 }
 
-func (m *mockTool) Name() string                           { return m.name }
-func (m *mockTool) Description() string                    { return "mock tool" }
-func (m *mockTool) InputSchema() map[string]any            { return nil }
-func (m *mockTool) CheckPermissions(params map[string]any) string { return m.permissions }
+func (m *mockTool) Name() string                                           { return m.name }
+func (m *mockTool) Description() string                                    { return "mock tool" }
+func (m *mockTool) InputSchema() map[string]any                            { return nil }
+func (m *mockTool) CheckPermissions(params map[string]any) tools.PermissionResult { return m.permissions }
 func (m *mockTool) Execute(params map[string]any) tools.ToolResult {
 	return tools.ToolResult{Output: "ok"}
 }
@@ -26,7 +26,7 @@ func TestPermissionGateToolSelfCheck(t *testing.T) {
 	gate := NewPermissionGate(&cfg)
 
 	// Tool that warns about itself - in ModeAuto warnings are not enforced
-	tool := &mockTool{name: "test", permissions: ""}
+	tool := &mockTool{name: "test", permissions: tools.PermissionResultPassthrough()}
 	result := gate.Check(tool, map[string]any{})
 
 	if result != nil {
@@ -40,7 +40,7 @@ func TestPermissionGateToolAllowed(t *testing.T) {
 	gate := NewPermissionGate(&cfg)
 
 	// Tool that allows itself
-	tool := &mockTool{name: "test", permissions: ""}
+	tool := &mockTool{name: "test", permissions: tools.PermissionResultPassthrough()}
 	result := gate.Check(tool, map[string]any{})
 
 	if result != nil {
@@ -55,7 +55,7 @@ func TestPermissionGatePlanModeBlocksWrite(t *testing.T) {
 
 	writeTools := []string{"exec", "write_file", "edit_file", "multi_edit", "fileops"}
 	for _, toolName := range writeTools {
-		tool := &mockTool{name: toolName, permissions: ""}
+		tool := &mockTool{name: toolName, permissions: tools.PermissionResultPassthrough()}
 		result := gate.Check(tool, map[string]any{})
 
 		if result == nil {
@@ -71,7 +71,7 @@ func TestPermissionGatePlanModeAllowsRead(t *testing.T) {
 
 	readTools := []string{"read_file", "glob", "grep", "list_dir"}
 	for _, toolName := range readTools {
-		tool := &mockTool{name: toolName, permissions: ""}
+		tool := &mockTool{name: toolName, permissions: tools.PermissionResultPassthrough()}
 		result := gate.Check(tool, map[string]any{})
 
 		if result != nil {
@@ -87,7 +87,7 @@ func TestPermissionGateDeniedPatterns(t *testing.T) {
 	gate := NewPermissionGate(&cfg)
 
 	// Create a mock exec tool
-	tool := &mockTool{name: "exec", permissions: ""}
+	tool := &mockTool{name: "exec", permissions: tools.PermissionResultPassthrough()}
 
 	testCases := []struct {
 		command  string
@@ -114,9 +114,9 @@ func TestPermissionGateAutoModeAllowsAll(t *testing.T) {
 	gate := NewPermissionGate(&cfg)
 
 	// All tools should be allowed in auto mode (except denied patterns)
-	tools := []string{"exec", "write_file", "edit_file", "read_file"}
-	for _, toolName := range tools {
-		tool := &mockTool{name: toolName, permissions: ""}
+	toolNames := []string{"exec", "write_file", "edit_file", "read_file"}
+	for _, toolName := range toolNames {
+		tool := &mockTool{name: toolName, permissions: tools.PermissionResultPassthrough()}
 		result := gate.Check(tool, map[string]any{})
 
 		if result != nil {
@@ -135,7 +135,7 @@ func TestPermissionGateShouldAvoidPermissionPrompts(t *testing.T) {
 
 	dangerousTools := []string{"exec", "write_file", "edit_file", "multi_edit", "fileops"}
 	for _, toolName := range dangerousTools {
-		tool := &mockTool{name: toolName, permissions: ""}
+		tool := &mockTool{name: toolName, permissions: tools.PermissionResultPassthrough()}
 		result := gate.Check(tool, map[string]any{})
 		if result == nil {
 			t.Errorf("expected %s to be denied when ShouldAvoidPermissionPrompts=true", toolName)
@@ -147,7 +147,7 @@ func TestPermissionGateShouldAvoidPermissionPrompts(t *testing.T) {
 	// Non-dangerous tools should still be allowed without prompting
 	safeTools := []string{"read_file", "glob", "grep", "list_dir"}
 	for _, toolName := range safeTools {
-		tool := &mockTool{name: toolName, permissions: ""}
+		tool := &mockTool{name: toolName, permissions: tools.PermissionResultPassthrough()}
 		result := gate.Check(tool, map[string]any{})
 		if result != nil {
 			t.Errorf("expected %s to be allowed when ShouldAvoidPermissionPrompts=true", toolName)

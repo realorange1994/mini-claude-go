@@ -14,7 +14,7 @@ func TestBashDenyRmRf(t *testing.T) {
 	}
 	for _, cmd := range dangerous {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected denial for: %s", cmd)
 		}
 	}
@@ -30,7 +30,7 @@ func TestBashDenyInternalURL(t *testing.T) {
 	}
 	for _, cmd := range cmds {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected internal URL to be denied: %s", cmd)
 		}
 	}
@@ -44,7 +44,7 @@ func TestBashDenyForkBomb(t *testing.T) {
 	}
 	for _, cmd := range cmds {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected fork bomb denial for: %s", cmd)
 		}
 	}
@@ -72,7 +72,7 @@ func TestBashLsCommand(t *testing.T) {
 func TestBashDenyMkfs(t *testing.T) {
 	tool := &ExecTool{}
 	result := tool.CheckPermissions(map[string]any{"command": "mkfs.ext4 /dev/sda"})
-	if result == "" {
+	if result.Behavior == PermissionPassthrough {
 		t.Error("expected denial for mkfs")
 	}
 }
@@ -80,7 +80,7 @@ func TestBashDenyMkfs(t *testing.T) {
 func TestBashDenySudoRm(t *testing.T) {
 	tool := &ExecTool{}
 	result := tool.CheckPermissions(map[string]any{"command": "sudo rm -rf /tmp/test"})
-	if result == "" {
+	if result.Behavior == PermissionPassthrough {
 		t.Error("expected denial for sudo rm")
 	}
 }
@@ -88,7 +88,7 @@ func TestBashDenySudoRm(t *testing.T) {
 func TestBashDenyRedirectToDev(t *testing.T) {
 	tool := &ExecTool{}
 	result := tool.CheckPermissions(map[string]any{"command": "echo bad > /dev/sda"})
-	if result == "" {
+	if result.Behavior == PermissionPassthrough {
 		t.Error("expected denial for redirect to /dev/sda")
 	}
 }
@@ -96,8 +96,8 @@ func TestBashDenyRedirectToDev(t *testing.T) {
 func TestBashAllowPublicURL(t *testing.T) {
 	tool := &ExecTool{}
 	result := tool.CheckPermissions(map[string]any{"command": "curl https://example.com/api"})
-	if result != "" {
-		t.Errorf("expected public URL to be allowed, got: %s", result)
+	if result.Behavior != PermissionPassthrough {
+		t.Errorf("expected public URL to be allowed, got: %v", result)
 	}
 }
 
@@ -106,7 +106,7 @@ func TestBashDenyPowerCommands(t *testing.T) {
 	cmds := []string{"shutdown -h now", "reboot", "poweroff"}
 	for _, cmd := range cmds {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected denial for: %s", cmd)
 		}
 	}
@@ -390,7 +390,7 @@ func TestCheckPermissionsCommandSubstitution(t *testing.T) {
 	}
 	for _, cmd := range dangerous {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected denial for: %s", cmd)
 		}
 	}
@@ -408,7 +408,7 @@ func TestCheckPermissionsGlobExpansion(t *testing.T) {
 	}
 	for _, cmd := range dangerous {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected denial for: %s", cmd)
 		}
 	}
@@ -421,8 +421,8 @@ func TestCheckPermissionsGlobExpansion(t *testing.T) {
 	}
 	for _, cmd := range safe {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result != "" {
-			t.Errorf("expected allowance for: %s, got: %s", cmd, result)
+		if result.Behavior != PermissionPassthrough {
+			t.Errorf("expected allowance for: %s, got: %v", cmd, result)
 		}
 	}
 }
@@ -438,7 +438,7 @@ func TestCheckPermissionsCompoundCommand(t *testing.T) {
 	}
 	for _, cmd := range dangerous {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected denial for compound command: %s", cmd)
 		}
 	}
@@ -454,7 +454,7 @@ func TestCheckPermissionsWrapperStripping(t *testing.T) {
 	}
 	for _, cmd := range dangerous {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected denial for wrapped command: %s", cmd)
 		}
 	}
@@ -553,7 +553,7 @@ func TestCheckPermissionsPathProtection(t *testing.T) {
 	}
 	for _, cmd := range dangerous {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected denial for: %s", cmd)
 		}
 	}
@@ -573,7 +573,7 @@ func TestCheckPermissionsCriticalProjectFiles(t *testing.T) {
 	}
 	for _, cmd := range dangerous {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
+		if result.Behavior == PermissionPassthrough {
 			t.Errorf("expected denial for critical project file: %s", cmd)
 		}
 	}
@@ -588,8 +588,8 @@ func TestCheckPermissionsWindowsPaths(t *testing.T) {
 	}
 	for _, cmd := range dangerous {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
-		if result == "" {
-			t.Logf("expected denial for Windows path: %s (got: %s)", cmd, result)
+		if result.Behavior == PermissionPassthrough {
+			t.Logf("expected denial for Windows path: %s (got: %v)", cmd, result)
 		}
 	}
 }

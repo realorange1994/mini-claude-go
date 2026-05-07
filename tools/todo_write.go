@@ -187,7 +187,7 @@ func (t *TodoWriteTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *TodoWriteTool) CheckPermissions(params map[string]any) string { return "" }
+func (t *TodoWriteTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
 func (t *TodoWriteTool) Execute(params map[string]any) ToolResult {
 	todosRaw, ok := params["todos"].([]any)
