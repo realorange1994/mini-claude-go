@@ -248,7 +248,7 @@ func TestPartialCompactUpTo(t *testing.T) {
 	}
 
 	// Partial compact "up_to" at pivot 4 (summarize first 4 entries, keep rest)
-	result, err := ctx.PartialCompact(PartialCompactUpTo, 4, "", 3)
+	result, err := ctx.PartialCompact(PartialCompactUpTo, 4, "", 3, nil)
 	if err != nil {
 		t.Fatalf("partial compact failed: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestPartialCompactFrom(t *testing.T) {
 	}
 
 	// Partial compact "from" at pivot 2 (keep first 2 entries + last 3, summarize the middle)
-	result, err := ctx.PartialCompact(PartialCompactFrom, 2, "", 3)
+	result, err := ctx.PartialCompact(PartialCompactFrom, 2, "", 3, nil)
 	if err != nil {
 		t.Fatalf("partial compact failed: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestPartialCompactInvalidDirection(t *testing.T) {
 	ctx := NewConversationContext(cfg)
 	ctx.AddUserMessage("hello")
 
-	_, err := ctx.PartialCompact(PartialCompactDirection("invalid"), 0, "", 3)
+	_, err := ctx.PartialCompact(PartialCompactDirection("invalid"), 0, "", 3, nil)
 	if err == nil {
 		t.Error("expected error for invalid direction")
 	}
@@ -340,7 +340,7 @@ func TestPartialCompactEmptyEntries(t *testing.T) {
 	cfg := DefaultConfig()
 	ctx := NewConversationContext(cfg)
 
-	_, err := ctx.PartialCompact(PartialCompactUpTo, 0, "", 3)
+	_, err := ctx.PartialCompact(PartialCompactUpTo, 0, "", 3, nil)
 	if err == nil {
 		t.Error("expected error for empty entries")
 	}
