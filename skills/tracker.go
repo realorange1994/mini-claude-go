@@ -155,16 +155,23 @@ func (t *SkillTracker) GetReadSkillNames() []string {
 
 // ResetPostCompact resets the skill discovery state after compaction.
 // This clears:
-//   - shownSkills: system prompt will be rebuilt, all skills re-announced
-//   - readSkills: skill content was injected via attachments; re-injecting
-//     full skill listing is pure cache creation, so we reset read state too
+//   - readSkills: skill content was re-injected via attachments; the attachments
+//     survive in the transcript, so re-injecting full skill listing is pure
+//     cache creation (~4K tokens). We reset read state to prevent re-injection.
+//   - shownSkills is PRESERVED: re-injecting the full skill_listing (~4K tokens)
+//     post-compact is pure cache creation with marginal benefit. The model still
+//     has SkillTool in schema, invoked_skills preserves used skill content, and
+//     dynamic additions are handled by the skill change detector.
 //
 // usedSkills is preserved because a skill being "used" (model performed
 // actions after reading it) is a durable fact about the conversation.
+// Matches upstream's postCompactCleanup.ts rationale (it intentionally does NOT
+// call resetSentSkillNames).
 func (t *SkillTracker) ResetPostCompact() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.shownSkills = make(map[string]struct{})
+	// Only reset readSkills to prevent re-injecting full skill listing.
+	// shownSkills is preserved so the ~4K token skill listing is not re-announced.
 	t.readSkills = make(map[string]time.Time)
 }
 

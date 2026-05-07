@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1184,7 +1183,7 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 	// prompt-too-long, progressively drop the oldest rounds and retry.
 	var lastErr error
 	for attempt := 0; attempt <= MAX_PTL_RETRIES; attempt++ {
-		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, transcriptPath)
+		result, err := doCompactLLMCallWithRetry(messages, model, apiKey, baseURL, previousSummary, transcriptPath)
 		if err == nil {
 			return result, nil
 		}
@@ -1280,6 +1279,13 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 }
 
 // doCompactLLMCall performs a single attempt at the LLM compaction API call.
+// Returns ErrCompactStreamIncomplete if the stream ended without receiving a message
+// (e.g., proxy returned 200 with empty body), signaling the caller to retry.
+var ErrCompactStreamIncomplete = fmt.Errorf("stream ended without receiving any events")
+
+// doCompactLLMCall makes a single streaming compaction API call.
+// Collects text incrementally and returns the result. The caller should retry on
+// transient failures (rate limit, timeout, network).
 func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, transcriptPath string) (*CompactionResultLLM, error) {
 	preTokens := estimateMessageParamsTokens(messages)
 
@@ -1335,10 +1341,10 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 	}
 	client := anthropic.NewClient(opts...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+	params := anthropic.MessageNewParams{
 		Model:     model,
 		MaxTokens: 20000,
 		System: []anthropic.TextBlockParam{
@@ -1350,22 +1356,28 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 		Thinking: anthropic.ThinkingConfigParamUnion{
 			OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
 		},
-	}, option.WithHTTPClient(&http.Client{
-		Timeout: 60 * time.Second,
-	}))
-	if err != nil {
-		return nil, fmt.Errorf("compact API error: %w", err)
 	}
 
-	// Extract summary text
-	var summaryText string
-	for _, block := range resp.Content {
-		if block.Type == "text" {
-			summaryText += block.Text
+	stream := client.Messages.NewStreaming(ctx, params)
+
+	var accumulated strings.Builder
+	for stream.Next() {
+		event := stream.Current()
+		switch e := event.AsAny().(type) {
+		case anthropic.ContentBlockDeltaEvent:
+			if e.Delta.Type == "text_delta" {
+				accumulated.WriteString(e.Delta.Text)
+			}
 		}
 	}
+
+	if err := stream.Err(); err != nil {
+		return nil, fmt.Errorf("compact streaming error: %w", err)
+	}
+
+	summaryText := accumulated.String()
 	if summaryText == "" {
-		return nil, fmt.Errorf("no summary text in response")
+		return nil, ErrCompactStreamIncomplete
 	}
 	summaryText = extractSummaryFromCompactOutput(summaryText)
 
@@ -1387,6 +1399,66 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 		PreCompactTokens:  preTokens,
 		PostCompactTokens: postTokens,
 	}, nil
+}
+
+// isTransientCompactError returns true if err is a transient failure that
+// warrants retrying the streaming compaction call.
+func isTransientCompactError(errMsg string) bool {
+	return strings.Contains(errMsg, "rate_limit") ||
+		strings.Contains(errMsg, "429") ||
+		strings.Contains(errMsg, "timeout") ||
+		strings.Contains(errMsg, "deadline exceeded") ||
+		strings.Contains(errMsg, "connection reset") ||
+		strings.Contains(errMsg, "network") ||
+		strings.Contains(errMsg, "context deadline exceeded") ||
+		strings.Contains(errMsg, "context canceled") ||
+		strings.Contains(errMsg, "server_error") ||
+		strings.Contains(errMsg, "service_unavailable") ||
+		strings.Contains(errMsg, "stream ended without receiving any events")
+}
+
+// doCompactLLMCallWithRetry wraps doCompactLLMCall with retry logic for transient
+// failures. It retries up to MAX_COMPACT_STREAMING_RETRIES times with exponential
+// backoff, matching upstream's streamCompactSummary retry behavior.
+const MAX_COMPACT_STREAMING_RETRIES = 2
+
+func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, transcriptPath string) (*CompactionResultLLM, error) {
+	var lastErr error
+	for attempt := 0; attempt <= MAX_COMPACT_STREAMING_RETRIES; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 5s, 15s, 45s...
+			delay := time.Duration(5*attempt*attempt) * time.Second
+			if delay < 5*time.Second {
+				delay = 5 * time.Second
+			}
+			fmt.Fprintf(os.Stderr, "\n[Compaction] streaming retry %d/%d after %v...\n",
+				attempt, MAX_COMPACT_STREAMING_RETRIES, delay)
+			select {
+			case <-time.After(delay):
+			}
+		}
+
+		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, transcriptPath)
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+		errMsg := err.Error()
+
+		// Do NOT retry on PTL errors — let the PTL loop handle them
+		if isContextLengthError(errMsg) {
+			return nil, err
+		}
+
+		// Retry on transient failures; bail on definitive errors
+		if !isTransientCompactError(errMsg) {
+			// Permanent failure (auth, model not found, etc.)
+			return nil, err
+		}
+	}
+
+	return nil, fmt.Errorf("compact streaming failed after %d retries: %w", MAX_COMPACT_STREAMING_RETRIES, lastErr)
 }
 
 // ─── Content-type-aware token estimation for API messages ────────────────────

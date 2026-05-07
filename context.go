@@ -267,10 +267,11 @@ type conversationEntry struct {
 
 // ConversationContext manages the conversation message history and system prompt.
 type ConversationContext struct {
-	mu           sync.RWMutex
-	config       Config
-	entries      []conversationEntry
-	systemPrompt string
+	mu                     sync.RWMutex
+	config                 Config
+	entries                []conversationEntry
+	systemPrompt           string
+	lastSummarizedIndex    int // index of last entry included in summary/compact (-1 = none)
 }
 
 // NewConversationContext creates a new context.
@@ -911,6 +912,144 @@ func (c *ConversationContext) KeepRecentMessages(count int) {
 
 	// Append the kept entries after the boundary+summary as preserved messages
 	c.entries = append(c.entries, keptEntries...)
+}
+
+// KeepRecentMessagesAdaptive calculates how many recent messages to keep using
+// token budgets (matching upstream's calculateMessagesToKeepIndex). It ensures:
+//   - At least minTokens tokens are kept (enough context for recovery)
+//   - At least minTextMsgs text messages are kept (so the model can see recent text)
+//   - At most maxTokens tokens are kept (prevent tail from consuming context)
+func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs, maxTokens int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if minTokens <= 0 {
+		minTokens = 1000 // ~3 text blocks of assistant output
+	}
+	if minTextMsgs <= 0 {
+		minTextMsgs = 4
+	}
+	if maxTokens <= 0 {
+		maxTokens = 10_000
+	}
+
+	// Find the most recent CompactBoundaryContent
+	boundaryIdx := -1
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+	if boundaryIdx < 0 {
+		return
+	}
+
+	// Walk backward from boundary, collecting entries until token/min constraints are met
+	var keptEntries []conversationEntry
+	accumTokens := 0
+	textMsgCount := 0
+
+	for i := boundaryIdx - 1; i >= 0; i-- {
+		entry := c.entries[i]
+		switch entry.content.(type) {
+		case CompactBoundaryContent, SummaryContent, AttachmentContent:
+			continue // skip meta entries
+		}
+
+		toks := entryEstimatedTokens(&entry)
+		if accumTokens > 0 || textMsgCount > 0 {
+			// Already collecting: prepend this entry
+			keptEntries = append([]conversationEntry{entry}, keptEntries...)
+			accumTokens += toks
+			if isTextEntry(&entry) {
+				textMsgCount++
+			}
+		} else {
+			// First entry to consider
+			keptEntries = append([]conversationEntry{entry}, keptEntries...)
+			accumTokens = toks
+			if isTextEntry(&entry) {
+				textMsgCount++
+			}
+		}
+
+		// Check if we've met all constraints
+		if accumTokens >= minTokens && textMsgCount >= minTextMsgs {
+			break // met minimum requirements
+		}
+		// If we've exceeded max tokens, stop collecting
+		if accumTokens >= maxTokens {
+			break
+		}
+	}
+
+	if len(keptEntries) == 0 {
+		return
+	}
+
+	// Adjust backwards to preserve tool_use/tool_result pairing.
+	keptEntries = adjustForToolPairing(c.entries[:boundaryIdx], keptEntries)
+
+	// Update lastSummarizedIndex: the last entry before the boundary that was NOT kept
+	// (i.e., entries 0..lastKeptIndex were summarized)
+	if len(keptEntries) > 0 {
+		for i := boundaryIdx - 1; i >= 0; i-- {
+			if c.entries[i] == keptEntries[0] {
+				c.lastSummarizedIndex = i
+				break
+			}
+		}
+	}
+
+	// Append the kept entries after the boundary+summary as preserved messages
+	c.entries = append(c.entries, keptEntries...)
+}
+
+// entryEstimatedTokens returns a rough token estimate for a single entry.
+func entryEstimatedTokens(entry *conversationEntry) int {
+	switch v := entry.content.(type) {
+	case TextContent:
+		return EstimateTokens(string(v))
+	case ToolUseContent:
+		toks := 0
+		for _, b := range v {
+			if b.OfText != nil {
+				toks += EstimateTokens(b.OfText.Text)
+			}
+			if b.OfToolUse != nil {
+				toks += len(b.OfToolUse.ID)/4 + len(b.OfToolUse.Name)/4
+				if m, ok := b.OfToolUse.Input.(map[string]any); ok {
+					for k, val := range m {
+						toks += len(k)/4 + len(fmt.Sprintf("%v", val))/4
+					}
+				}
+			}
+		}
+		return toks
+	case ToolResultContent:
+		toks := 0
+		for _, r := range v {
+			for _, c := range r.Content {
+				if c.OfText != nil {
+					toks += EstimateTokens(c.OfText.Text)
+				}
+			}
+		}
+		return toks
+	default:
+		return 10 // fallback for meta entries
+	}
+}
+
+// isTextEntry returns true if the entry is a text message (not a tool call/result).
+func isTextEntry(entry *conversationEntry) bool {
+	switch entry.content.(type) {
+	case TextContent, SummaryContent:
+		return true
+	default:
+		return false
+	}
 }
 
 // adjustForToolPairing walks backwards from the kept range to include assistant
