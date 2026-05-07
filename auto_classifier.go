@@ -588,6 +588,17 @@ func NewAutoModeClassifier(apiKey, baseURL, model string) *AutoModeClassifier {
 	}
 }
 
+// ClearCache clears the classification result cache.
+// Called post-compaction to invalidate stale decisions.
+func (c *AutoModeClassifier) ClearCache() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cache = make(map[string]cacheEntry)
+}
+
 // IsEnabled returns whether the classifier is operational.
 func (c *AutoModeClassifier) IsEnabled() bool {
 	return c != nil && c.enabled

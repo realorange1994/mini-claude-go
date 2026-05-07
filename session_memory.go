@@ -123,6 +123,67 @@ func (sm *SessionMemory) SearchNotes(query string) []MemoryEntry {
 	return result
 }
 
+// FormatForPromptCompact formats memory entries for injection after compaction.
+// Each section is truncated to maxSectionChars (~8000) matching upstream's
+// truncateSessionMemoryForCompact.
+func (sm *SessionMemory) FormatForPromptCompact(maxSectionChars int) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if len(sm.entries) == 0 {
+		return ""
+	}
+
+	// Group by category
+	groups := make(map[string][]MemoryEntry)
+	var categories []string
+	for _, e := range sm.entries {
+		if _, ok := groups[e.Category]; !ok {
+			categories = append(categories, e.Category)
+		}
+		groups[e.Category] = append(groups[e.Category], e)
+	}
+	sort.Strings(categories)
+
+	var sb strings.Builder
+	sb.WriteString("## Session Memory\n\n")
+	sb.WriteString("The following notes were recorded during this or previous sessions. Use them as context.\n\n")
+
+	for _, cat := range categories {
+		entries := groups[cat]
+		sectionHeader := fmt.Sprintf("### %s\n", cat)
+		sb.WriteString(sectionHeader)
+
+		// Track remaining budget for this section
+		remaining := maxSectionChars - len(sectionHeader)
+		for _, e := range entries {
+			line := fmt.Sprintf("- %s\n", e.Content)
+			if remaining <= 0 {
+				continue
+			}
+			if len(line) <= remaining {
+				sb.WriteString(line)
+				remaining -= len(line)
+			} else {
+				// Truncate at sentence boundary
+				truncated := line[:remaining]
+				if nlIdx := strings.LastIndex(truncated, "\n"); nlIdx > 0 {
+					sb.WriteString(line[:nlIdx+1])
+				} else if dotIdx := strings.LastIndex(truncated, ". "); dotIdx > 0 {
+					sb.WriteString(line[:dotIdx+2] + "]\n")
+				} else {
+					sb.WriteString(truncated + "]\n")
+				}
+				sb.WriteString("  [... section truncated ...]\n")
+				break
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
 // FormatForPrompt formats memory entries for injection into the system prompt.
 func (sm *SessionMemory) FormatForPrompt() string {
 	sm.mu.RLock()

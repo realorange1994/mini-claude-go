@@ -58,6 +58,15 @@ func (g *PermissionGate) WithTranscriptSource(src TranscriptSource) *PermissionG
 	return g
 }
 
+// ResetPostCompact clears classifier cache and approval state after context compaction.
+func (g *PermissionGate) ResetPostCompact() {
+	if g.classifier != nil {
+		g.classifier.ClearCache()
+	}
+	g.recentlyApproved = nil
+	g.denialCount = 0
+}
+
 // Check runs the permission gauntlet. Returns a ToolResult if denied, nil if allowed.
 func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.ToolResult {
 	// Layer 1: tool-level self-check (returns warning, not hard denial)

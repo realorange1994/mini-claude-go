@@ -2785,23 +2785,10 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 	// --- Session Memory Recovery ---
 	// Re-inject session memory after compaction. Session memory contains
 	// user-defined notes that must survive context compaction.
+	// Uses per-section truncation matching upstream's truncateSessionMemoryForCompact.
 	if a.config.SessionMemory != nil {
-		smContent := a.config.SessionMemory.FormatForPrompt()
+		smContent := a.config.SessionMemory.FormatForPromptCompact(8_000)
 		if smContent != "" {
-			// Cap at 40K tokens to avoid blowing past context limits
-			const maxSMTokens = 40_000
-			smTokens := EstimateTokens(smContent)
-			if smTokens > maxSMTokens {
-				charLimit := maxSMTokens * 4
-				if len(smContent) > charLimit {
-					// Truncate at a sentence boundary
-					content := smContent[:charLimit]
-					if nlIdx := strings.LastIndex(content, "\n"); nlIdx > charLimit/2 {
-						content = content[:nlIdx]
-					}
-					smContent = content + "\n\n[... session memory truncated for length ...]"
-				}
-			}
 			attachment := fmt.Sprintf("<session_memory>\n%s\n</session_memory>", smContent)
 			a.context.AddAttachment(attachment)
 			a.out("[post-compact] Session memory recovered\n")
@@ -2895,6 +2882,10 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 	// Reset cached microcompact tracker — clear all registered tool IDs
 	// and deleted refs. After compaction, tool results are rebuilt from scratch.
 	a.cachedMC.Reset()
+
+	// Classifier and permission state — stale decisions may reference
+	// compacted messages, so clear them to force re-evaluation.
+	a.gate.ResetPostCompact()
 }
 
 // buildPostCompactToolsAnnouncement re-announces all available tools after compaction.
@@ -3439,7 +3430,7 @@ func (a *AgentLoop) tryCompaction() {
 	// This is the preferred path when memory is available: saves an LLM API call
 	// and leverages incrementally collected session memory as the context summary.
 	if a.config.SessionMemory != nil {
-		if memContent := a.config.SessionMemory.FormatForPrompt(); memContent != "" {
+		if memContent := a.config.SessionMemory.FormatForPromptCompact(8_000); memContent != "" {
 			a.trySMCompact(memContent)
 			// Mark system prompt dirty after compaction
 			if a.config.cachedPrompt != nil {
@@ -3540,10 +3531,10 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	// Run BEFORE post-compact recovery so attachments appear AFTER kept messages.
 	// KeepRecentMessagesAdaptive uses token-based adaptive calculation instead of fixed count,
 	// matching upstream's calculateMessagesToKeepIndex:
-	//   - minTokens: enough context for recovery (~1K tokens = ~3 text blocks)
-	//   - minTextMsgs: ensure at least 4 text messages are visible post-compact
-	//   - maxTokens: cap tail at ~10K to avoid bloating context with tool results
-	a.context.KeepRecentMessagesAdaptive(1000, 4, 10000)
+	//   - minTokens: enough context for recovery (~10K tokens)
+	//   - minTextMsgs: ensure at least 5 text messages are visible post-compact
+	//   - maxTokens: cap tail at ~40K to avoid bloating context with tool results
+	a.context.KeepRecentMessagesAdaptive(10_000, 5, 40_000)
 
 	// Fix message structure after KeepRecentMessages: remove orphaned tool_results
 	// (whose tool_use was in the summarized portion) and merge consecutive same-role
