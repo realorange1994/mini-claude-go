@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"miniclaudecode-go/mcp"
+	"miniclaudecode-go/permissions"
 	"miniclaudecode-go/skills"
 	"miniclaudecode-go/tools"
 )
@@ -85,6 +86,9 @@ type Config struct {
 	// EscalatedMaxOutputTokens is the fallback max_tokens used when the
 	// default cap is hit (matching Claude's ESCALATED_MAX_TOKENS = 64,000).
 	EscalatedMaxOutputTokens int
+	// RuleStore holds permission rules loaded from settings files.
+	// May be nil if no settings files with permissions section are found.
+	RuleStore *permissions.RuleStore
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -117,6 +121,7 @@ type ClaudeSettings struct {
 	MCP struct {
 		Servers map[string]MCPServerConfig `json:"servers"`
 	} `json:"mcp"`
+	Permissions permissions.PermissionsConfig `json:"permissions"`
 }
 
 // homeClaudeDir returns the path to ~/.claude, or empty string if undetermined.
@@ -232,6 +237,9 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 			}
 		}
 	}
+
+	// Load permission rules from settings files (project + home)
+	cfg.RuleStore = permissions.LoadRulesFromAllSources(projectDir)
 
 	// Start MCP servers if any
 	if servers := mcpMgr.ListServers(); len(servers) > 0 {

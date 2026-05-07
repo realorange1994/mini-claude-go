@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"miniclaudecode-go/permissions"
 	"miniclaudecode-go/tools"
 )
 
@@ -28,6 +29,12 @@ type PermissionGate struct {
 	// When the classifier would deny a tool, we check if the user already
 	// explicitly approved it — if so, bypass the classifier.
 	recentlyApproved []approvedAction
+	// ruleStore holds permission rules loaded from settings.json files.
+	ruleStore *permissions.RuleStore
+	// projectDir is the working directory for path validation.
+	projectDir string
+	// strippedRules holds dangerous rules stripped in auto mode for restoration.
+	strippedRules map[string][]*permissions.ParsedRule
 }
 
 // approvedAction records a user-approved dangerous tool call via AskUserQuestion.
@@ -44,6 +51,13 @@ type TranscriptSource interface {
 
 func NewPermissionGate(cfg *Config) *PermissionGate {
 	return &PermissionGate{config: cfg}
+}
+
+// WithRuleStore sets the rule store for permission rule checks.
+func (g *PermissionGate) WithRuleStore(rs *permissions.RuleStore, projectDir string) *PermissionGate {
+	g.ruleStore = rs
+	g.projectDir = projectDir
+	return g
 }
 
 // WithClassifier sets the auto mode classifier.
@@ -69,30 +83,142 @@ func (g *PermissionGate) ResetPostCompact() {
 
 // Check runs the permission gauntlet. Returns a ToolResult if denied, nil if allowed.
 // Implements upstream's hasPermissionsToUseToolInner flow:
-//   1a: deny rule → hard deny
-//   1b: ask rule → ask (sandbox exception)
-//   1c: tool.checkPermissions() → get PermissionResult
-//   1d: behavior === 'deny' → hard deny (bypass-immune)
-//   1e: requiresUserInteraction + ask → ask (bypass-immune)
-//   1f: content-specific ask rule → ask (bypass-immune)
-//   1g: safetyCheck → ask (bypass-immune)
-//   2a: bypassPermissions → behavior: 'allow' (only reached if 1a-1g didn't return)
-//   2b: allow rule → allow
-//   3: passthrough → ask (mode-based)
+//   0:  auto mode: strip dangerous rules on entry, restore on exit
+//   1a: tool-level deny rule → deny (bypass-immune)
+//   1b: content-specific deny rule → deny
+//   1c: file path validation → deny/ask/safetyCheck
+//   1d: tool-level ask rule → ask (bypass-immune)
+//   1e: content-specific ask rule → ask (bypass-immune)
+//   2:  tool.CheckPermissions() → get PermissionResult
+//   2d: behavior === 'deny' → hard deny (bypass-immune)
+//   2e: requiresUserInteraction + ask → ask (bypass-immune)
+//   2f: content-specific ask rule → ask (bypass-immune)
+//   2g: safetyCheck → ask (bypass-immune)
+//   3a: bypassPermissions → behavior: 'allow' (only reached if 1-2 didn't return)
+//   3b: allow rule → allow
+//   4: passthrough → ask (mode-based)
 func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.ToolResult {
-	// Layer 1: tool-level self-check
+	// STEP 0: Auto mode — strip dangerous allow rules on entry
+	autoModeStripped := false
+	if g.config.PermissionMode == ModeAuto && g.ruleStore != nil && !g.shouldAvoidPrompts() {
+		if g.strippedRules == nil {
+			g.strippedRules = g.ruleStore.StripDangerousAllowRules()
+			autoModeStripped = true
+		}
+	}
+
+	// Helper: restore stripped rules on early exit
+	restoreStripped := func() {
+		if autoModeStripped && g.strippedRules != nil && g.ruleStore != nil {
+			g.ruleStore.RestoreStrippedRules(g.strippedRules)
+			g.strippedRules = nil
+		}
+	}
+
+	// Get tool name and content for rule matching
+	toolName := tool.Name()
+	upstreamName := tools.InternalToUpstreamName(toolName)
+	content := g.extractRuleContent(toolName, params)
+	pathParam := g.extractPathParam(toolName, params)
+
+	// STEP 1a: Tool-level deny rule (bypass-immune)
+	if rule := g.findToolLevelDeny(upstreamName); rule != nil {
+		restoreStripped()
+		return &tools.ToolResult{
+			Output:  fmt.Sprintf("Permission denied by rule: %s", rule.Content),
+			IsError: true,
+		}
+	}
+
+	// STEP 1b: Content-specific deny rule (bypass-immune)
+	if rule := g.findContentDeny(upstreamName, content); rule != nil {
+		restoreStripped()
+		return &tools.ToolResult{
+			Output:  fmt.Sprintf("Permission denied by rule: %s", rule.Content),
+			IsError: true,
+		}
+	}
+
+	// STEP 1c: File path validation for write/read/fileops tools
+	if pathParam != "" {
+		opType := permissions.OpRead
+		if g.isWriteTool(toolName) {
+			opType = permissions.OpWrite
+		}
+		vResult := permissions.ValidatePath(pathParam, opType, g.ruleStore, g.projectDir)
+		if !vResult.Allowed {
+			restoreStripped()
+			// Check if it requires user interaction (ask)
+			if vResult.Reason == "safetyCheck" || vResult.Reason == "rule" {
+				// Return as a safetyCheck ask — caller will prompt user
+				askResult := tools.PermissionResultAsk(vResult.Message, vResult.Reason)
+				askResult.MatchedRule = vResult.Reason
+				if g.shouldAvoidPrompts() {
+					return &tools.ToolResult{
+						Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", askResult.Message),
+						IsError: true,
+					}
+				}
+				if !g.askUserWithWarning(tool.Name(), params, askResult.Message) {
+					return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+				}
+				// User approved — allow to continue
+			} else {
+				return &tools.ToolResult{
+					Output:  fmt.Sprintf("Permission denied: %s", vResult.Message),
+					IsError: true,
+				}
+			}
+		}
+	}
+
+	// STEP 1d: Tool-level ask rule (bypass-immune)
+	if rule := g.findToolLevelAsk(upstreamName); rule != nil {
+		restoreStripped()
+		if g.shouldAvoidPrompts() {
+			return &tools.ToolResult{
+				Output:  fmt.Sprintf("Permission denied: %s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content),
+				IsError: true,
+			}
+		}
+		msg := fmt.Sprintf("Tool requires confirmation by rule: %s", rule.Content)
+		if !g.askUserWithWarning(tool.Name(), params, msg) {
+			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+		}
+		return nil // user approved
+	}
+
+	// STEP 1e: Content-specific ask rule (bypass-immune)
+	if rule := g.findContentAsk(upstreamName, content); rule != nil {
+		restoreStripped()
+		if g.shouldAvoidPrompts() {
+			return &tools.ToolResult{
+				Output:  fmt.Sprintf("Permission denied: %s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content),
+				IsError: true,
+			}
+		}
+		msg := fmt.Sprintf("Tool requires confirmation by rule: %s", rule.Content)
+		if !g.askUserWithWarning(tool.Name(), params, msg) {
+			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+		}
+		return nil // user approved
+	}
+
+	// STEP 2: tool-level self-check
 	result := tool.CheckPermissions(params)
 
-	// Step 1d: deny is always bypass-immune
+	// Step 2d: deny is always bypass-immune
 	if result.Behavior == tools.PermissionDeny {
+		restoreStripped()
 		return &tools.ToolResult{
 			Output:  fmt.Sprintf("Permission denied: %s", result.Message),
 			IsError: true,
 		}
 	}
 
-	// Step 1g: ask from safetyCheck is bypass-immune
+	// Step 2e: ask from safetyCheck is bypass-immune
 	if result.Behavior == tools.PermissionAsk && result.DecisionReason == "safetyCheck" {
+		restoreStripped()
 		if g.shouldAvoidPrompts() {
 			return &tools.ToolResult{
 				Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", result.Message),
@@ -105,8 +231,9 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		return nil // user approved
 	}
 
-	// Step 1e/1f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
+	// Step 2f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
 	if result.Behavior == tools.PermissionAsk {
+		restoreStripped()
 		if g.shouldAvoidPrompts() {
 			return &tools.ToolResult{
 				Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", result.Message),
@@ -134,6 +261,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 			lower := strings.ToLower(target)
 			for _, pattern := range g.config.DeniedPatterns {
 				if strings.Contains(lower, strings.ToLower(pattern)) {
+					restoreStripped()
 					return &tools.ToolResult{
 						Output:  fmt.Sprintf("Permission denied: matches denied pattern %q", pattern),
 						IsError: true,
@@ -143,13 +271,15 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		}
 	}
 
-	// Step 2a: bypass mode — allow all (only reached if 1d-1g didn't return)
+	// Step 3a: bypass mode — allow all (only reached if 1-2 didn't return)
 	switch g.config.PermissionMode {
 	case ModeBypass:
+		restoreStripped()
 		return nil
 	case ModePlan:
 		writeTools := map[string]bool{"exec": true, "write_file": true, "edit_file": true, "multi_edit": true, "fileops": true}
 		if writeTools[tool.Name()] {
+			restoreStripped()
 			return &tools.ToolResult{
 				Output:  fmt.Sprintf("Permission denied: '%s' is blocked in plan (read-only) mode.", tool.Name()),
 				IsError: true,
@@ -165,8 +295,10 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 
 		if g.shouldAvoidPrompts() {
 			if isDangerous {
+				restoreStripped()
 				return &tools.ToolResult{Output: fmt.Sprintf("Permission denied: '%s' requires user approval (interactive prompts disabled for sub-agent).", tool.Name()), IsError: true}
 			}
+			restoreStripped()
 			return nil // non-dangerous tool, allow
 		}
 
@@ -174,24 +306,32 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 			if tool.Name() == "exec" {
 				cmd, _ := params["command"].(string)
 				if g.isSafeCommand(cmd) {
+					restoreStripped()
 					return nil // Safe command, allow without asking
 				}
 			}
 			if !g.askUser(tool.Name(), params) {
+				restoreStripped()
 				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
 			}
 		}
 
 	case ModeAuto:
-		return g.checkAutoMode(tool, params)
+		ret := g.checkAutoMode(tool, params)
+		if ret != nil {
+			restoreStripped()
+		}
+		return ret
 	}
 
-	// Step 2b/3: allow or passthrough
+	// Step 3b: allow or passthrough
 	if result.Behavior == tools.PermissionAllow {
+		restoreStripped()
 		return nil
 	}
 
-	// Step 3: passthrough — defer to mode-based logic (already handled above)
+	// Step 4: passthrough — defer to mode-based logic (already handled above)
+	restoreStripped()
 	return nil
 }
 
@@ -374,4 +514,108 @@ func compactParams(toolName string, params map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// extractRuleContent extracts the content parameter for rule matching.
+// For exec/bash tools, uses the command; for file tools, uses the path.
+func (g *PermissionGate) extractRuleContent(toolName string, params map[string]any) string {
+	switch toolName {
+	case "exec":
+		if cmd, ok := params["command"].(string); ok {
+			return cmd
+		}
+	case "write_file", "edit_file", "multi_edit":
+		if p, ok := params["file_path"].(string); ok {
+			return p
+		}
+	case "read_file":
+		if p, ok := params["file_path"].(string); ok {
+			return p
+		}
+	case "fileops":
+		if p, ok := params["path"].(string); ok {
+			return p
+		}
+	case "git":
+		if args, ok := params["args"].(string); ok {
+			return args
+		}
+	}
+	return ""
+}
+
+// extractPathParam extracts the file path parameter for path validation.
+func (g *PermissionGate) extractPathParam(toolName string, params map[string]any) string {
+	switch toolName {
+	case "write_file", "edit_file", "multi_edit", "read_file":
+		if p, ok := params["file_path"].(string); ok {
+			return p
+		}
+	case "fileops":
+		if p, ok := params["path"].(string); ok {
+			return p
+		}
+	}
+	return ""
+}
+
+// isWriteTool returns true if the tool performs write operations.
+func (g *PermissionGate) isWriteTool(toolName string) bool {
+	switch toolName {
+	case "write_file", "edit_file", "multi_edit", "fileops":
+		return true
+	}
+	return false
+}
+
+// findToolLevelDeny checks if there's a tool-level deny rule for the given tool.
+func (g *PermissionGate) findToolLevelDeny(upstreamName string) *permissions.ParsedRule {
+	if g.ruleStore == nil {
+		return nil
+	}
+	if g.ruleStore.HasDenyRule(upstreamName) {
+		if rules := g.ruleStore.GetRulesForTool(upstreamName); len(rules) > 0 {
+			for _, r := range rules {
+				if r.Behavior == "deny" && r.IsToolLevel() {
+					return r
+				}
+			}
+		}
+		return &permissions.ParsedRule{ToolName: upstreamName, Content: upstreamName, Behavior: "deny"}
+	}
+	return nil
+}
+
+// findContentDeny checks if there's a content-specific deny rule for the given tool and content.
+func (g *PermissionGate) findContentDeny(upstreamName, content string) *permissions.ParsedRule {
+	if g.ruleStore == nil || content == "" {
+		return nil
+	}
+	return g.ruleStore.FindContentRule(upstreamName, content, "deny")
+}
+
+// findToolLevelAsk checks if there's a tool-level ask rule for the given tool.
+func (g *PermissionGate) findToolLevelAsk(upstreamName string) *permissions.ParsedRule {
+	if g.ruleStore == nil {
+		return nil
+	}
+	if g.ruleStore.HasAskRule(upstreamName) {
+		if rules := g.ruleStore.GetRulesForTool(upstreamName); len(rules) > 0 {
+			for _, r := range rules {
+				if r.Behavior == "ask" && r.IsToolLevel() {
+					return r
+				}
+			}
+		}
+		return &permissions.ParsedRule{ToolName: upstreamName, Content: upstreamName, Behavior: "ask"}
+	}
+	return nil
+}
+
+// findContentAsk checks if there's a content-specific ask rule for the given tool and content.
+func (g *PermissionGate) findContentAsk(upstreamName, content string) *permissions.ParsedRule {
+	if g.ruleStore == nil || content == "" {
+		return nil
+	}
+	return g.ruleStore.FindContentRule(upstreamName, content, "ask")
 }

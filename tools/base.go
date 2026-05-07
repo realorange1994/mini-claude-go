@@ -12,6 +12,25 @@ import (
 	"time"
 )
 
+// Tool name constants for rule system integration.
+// These are the internal names used by our tools.
+const (
+	FileReadToolName  = "read_file"
+	FileWriteToolName = "write_file"
+	FileEditToolName  = "edit_file"
+	ExecToolName      = "exec"
+	GitToolName       = "git"
+)
+
+// Upstream tool name aliases for rule system compatibility.
+// Maps upstream tool names to our internal names.
+var UpstreamToolAliases = map[string]string{
+	"Read":  FileReadToolName,
+	"Write": FileWriteToolName,
+	"Edit":  FileEditToolName,
+	"Bash":  ExecToolName,
+}
+
 // canonicalPath normalizes a file path for consistent registry lookups.
 // It expands ~, resolves relative paths to absolute, converts backslashes to
 // forward slashes, and lowercases the result. This ensures that different
@@ -27,6 +46,15 @@ func canonicalPath(path string) string {
 		}
 	}
 	return normalizeFilePath(expanded)
+}
+
+// InternalToUpstreamName maps an internal tool name to its upstream name.
+// Returns the input unchanged if no alias exists.
+func InternalToUpstreamName(internal string) string {
+	if upstream, ok := UpstreamToolAliases[internal]; ok {
+		return upstream
+	}
+	return internal
 }
 type ToolResult struct {
 	Output   string
@@ -128,6 +156,7 @@ type PermissionResult struct {
 	Behavior       PermissionBehavior
 	Message        string // human-readable reason (required for deny/ask)
 	DecisionReason string // "safetyCheck", "rule", "tool", or ""
+	MatchedRule    string // optional: the rule that matched (for debugging)
 }
 
 // PermissionResultAllow returns a simple allow result.
