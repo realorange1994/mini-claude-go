@@ -3266,8 +3266,10 @@ func (a *AgentLoop) InjectRunningAgentStatus() {
 // When session memory exists and has content, uses SM-compact (免 API 压缩)
 // to skip the LLM call and use session memory as the summary directly.
 func (a *AgentLoop) tryCompaction() {
-	// Phase 0: Micro-compact — clear old tool results every turn (cheap, no LLM call)
-	if a.config.MicroCompactEnabled {
+	// Phase 0: Micro-compact — clear old tool results (cheap, no LLM call)
+	// Time-based trigger: only fire when gap since last assistant > threshold (default 60 min).
+	// When gapMinutes=0, fires every turn (legacy count-based behavior).
+	if a.config.MicroCompactEnabled && a.context.ShouldTimeBasedMicroCompact(a.config.MicroCompactGapMinutes) {
 		keepRecent := a.config.MicroCompactKeepRecent
 		if keepRecent <= 0 {
 			keepRecent = 5

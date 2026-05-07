@@ -272,6 +272,7 @@ type ConversationContext struct {
 	entries                []conversationEntry
 	systemPrompt           string
 	lastSummarizedIndex    int // index of last entry included in summary/compact (-1 = none)
+	lastAssistantTime      time.Time // timestamp of last assistant message added; used for time-based microcompact
 }
 
 // NewConversationContext creates a new context.
@@ -329,6 +330,26 @@ func (c *ConversationContext) SetSystemPrompt(prompt string) {
 	c.systemPrompt = prompt
 }
 
+// LastAssistantTime returns the timestamp of the last assistant message.
+func (c *ConversationContext) LastAssistantTime() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastAssistantTime
+}
+
+// ShouldTimeBasedMicroCompact returns true when the time gap since the last
+// assistant message exceeds gapMinutes. A gapMinutes of 0 means always fire
+// (legacy count-based behavior for backward compatibility).
+func (c *ConversationContext) ShouldTimeBasedMicroCompact(gapMinutes int) bool {
+	if gapMinutes <= 0 {
+		return true // disabled or legacy — fire every turn
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	gap := time.Since(c.lastAssistantTime)
+	return gap >= time.Duration(gapMinutes)*time.Minute
+}
+
 // SystemPrompt returns the system prompt.
 func (c *ConversationContext) SystemPrompt() string {
 	c.mu.RLock()
@@ -358,6 +379,7 @@ func (c *ConversationContext) AddAssistantText(text string) {
 		role:    "assistant",
 		content: TextContent(text),
 	})
+	c.lastAssistantTime = time.Now()
 	c.truncateIfNeeded()
 }
 
@@ -383,6 +405,7 @@ func (c *ConversationContext) AddAssistantToolCalls(toolCalls []map[string]any) 
 		role:    "assistant",
 		content: ToolUseContent(blocks),
 	})
+	c.lastAssistantTime = time.Now()
 	c.truncateIfNeeded()
 }
 

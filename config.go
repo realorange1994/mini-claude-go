@@ -46,6 +46,7 @@ type Config struct {
 	MicroCompactKeepRecent     int
 	MicroCompactPlaceholder    string
 	MicroCompactMinCharCount  int // minimum chars in a tool result to consider clearing; preserves small results
+	MicroCompactGapMinutes     int // time gap (minutes) since last assistant message before triggering microcompact; 0 = disabled (run every turn)
 	PostCompactRecoverFiles    bool
 	PostCompactMaxFiles        int
 	PostCompactMaxFileChars    int // legacy char-based budget (deprecated, use PostCompactMaxFileTokens)
@@ -289,6 +290,7 @@ func DefaultConfig() Config {
 		MicroCompactKeepRecent:     5,
 		MicroCompactPlaceholder:    "[Old tool result content cleared]",
 		MicroCompactMinCharCount:  2000, // only clear results >= 2000 chars; preserve small useful results
+		MicroCompactGapMinutes:     60,  // trigger microcompact when gap > 60 min since last assistant; matches server cache TTL; 0 = disabled
 		PostCompactRecoverFiles:       true,
 		PostCompactMaxFiles:           5,
 		PostCompactMaxFileChars:       50000, // legacy, use PostCompactMaxFileTokens
