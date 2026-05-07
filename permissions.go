@@ -152,32 +152,41 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 			vResult = permissions.ValidatePath(pathParam, opType, g.ruleStore, g.projectDir)
 		}
 		if !vResult.Allowed {
-			restoreStripped()
-			// Check if it requires user interaction (ask)
-			if vResult.Reason == "safetyCheck" || vResult.Reason == "rule" {
-				// Return as a safetyCheck ask — caller will prompt user
-				askResult := tools.PermissionResultAsk(vResult.Message, vResult.Reason)
-				askResult.MatchedRule = vResult.Reason
-				if g.shouldAvoidPrompts() {
+			// Bypass mode: allow all path access (skip validation)
+			// Auto mode: skip path validation — let classifier decide
+			if g.config.PermissionMode == ModeBypass || g.config.PermissionMode == ModeAuto {
+				// Fall through to allow / classifier evaluation
+			} else {
+				restoreStripped()
+				// Check if it requires user interaction (ask)
+				if vResult.Reason == "safetyCheck" || vResult.Reason == "rule" {
+					// Return as a safetyCheck ask — caller will prompt user
+					askResult := tools.PermissionResultAsk(vResult.Message, vResult.Reason)
+					askResult.MatchedRule = vResult.Reason
+					if g.shouldAvoidPrompts() {
+						return &tools.ToolResult{
+							Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", askResult.Message),
+							IsError: true,
+						}
+					}
+					if !g.askUserWithWarning(tool.Name(), params, askResult.Message) {
+						return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+					}
+					// User approved — allow to continue
+				} else {
 					return &tools.ToolResult{
-						Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", askResult.Message),
+						Output:  fmt.Sprintf("Permission denied: %s", vResult.Message),
 						IsError: true,
 					}
-				}
-				if !g.askUserWithWarning(tool.Name(), params, askResult.Message) {
-					return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
-				}
-				// User approved — allow to continue
-			} else {
-				return &tools.ToolResult{
-					Output:  fmt.Sprintf("Permission denied: %s", vResult.Message),
-					IsError: true,
 				}
 			}
 		}
 	}
 
 	// STEP 1d: Tool-level ask rule (bypass-immune)
+	// STEP 1e: Content-specific ask rule (bypass-immune)
+	// Bypass mode: skip ask rules, allow through
+	if g.config.PermissionMode != ModeBypass {
 	if rule := g.findToolLevelAsk(upstreamName); rule != nil {
 		restoreStripped()
 		if g.shouldAvoidPrompts() {
@@ -208,6 +217,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		}
 		return nil // user approved
 	}
+	} // end bypass skip for steps 1d-1e
 
 	// STEP 2: tool-level self-check
 	result := tool.CheckPermissions(params)
@@ -222,7 +232,8 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	}
 
 	// Step 2e: ask from safetyCheck is bypass-immune
-	if result.Behavior == tools.PermissionAsk && result.DecisionReason == "safetyCheck" {
+	// Bypass mode: skip, allow through
+	if g.config.PermissionMode != ModeBypass && result.Behavior == tools.PermissionAsk && result.DecisionReason == "safetyCheck" {
 		restoreStripped()
 		if g.shouldAvoidPrompts() {
 			return &tools.ToolResult{
@@ -237,7 +248,8 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	}
 
 	// Step 2f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
-	if result.Behavior == tools.PermissionAsk {
+	// Bypass mode: skip, allow through
+	if g.config.PermissionMode != ModeBypass && result.Behavior == tools.PermissionAsk {
 		restoreStripped()
 		if g.shouldAvoidPrompts() {
 			return &tools.ToolResult{

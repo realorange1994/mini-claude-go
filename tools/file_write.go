@@ -22,7 +22,8 @@ func (*FileWriteTool) Description() string {
 		"Usage:\n" +
 		"- This tool will overwrite the existing file if there is one at the provided path.\n" +
 		"- If this is an existing file, you MUST use the read_file tool first to read the file's contents. This tool will fail if you did not read the file first.\n" +
-		"- Prefer the edit_file tool for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.\n" +
+		"- To modify an existing file: use read_file first, then use edit_file (preferred for small changes) or write_file (for complete rewrites).\n" +
+		"- To create a new file: write_file works directly — no read needed.\n" +
 		"- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n" +
 		"- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."
 }

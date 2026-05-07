@@ -377,13 +377,13 @@ func (r *Registry) CheckFileStale(path string) string {
 	storedInfo, wasRead := r.filesRead[normalized]
 	r.mu.RUnlock()
 	if !wasRead {
-		return "Error: file has not been read yet. Read it first with read_file before editing."
+		return "Error: file has not been read. For existing files, you MUST use read_file first before write_file/edit_file. For new files, write_file works directly without reading. To modify an existing file: 1) read_file to read it, 2) edit_file for small changes or write_file for complete rewrites."
 	}
 
 	// Partial-view check: if the file was only partially read (with
 	// offset/limit), the model must do a fresh full read before editing.
 	if storedInfo.isPartial {
-		return "Error: file was only partially read. You must do a fresh full read (without offset/limit) before editing."
+		return "Error: file was only partially read (with offset/limit). You must do a fresh full read (read_file without offset/limit parameters) before editing."
 	}
 
 	info, err := os.Stat(path)
