@@ -819,6 +819,7 @@ maxTurns := cfg.MaxTurns
 			apiKey = os.Getenv("ANTHROPIC_API_KEY")
 		}
 		classifier := NewAutoModeClassifier(apiKey, cfg.BaseURL, classifierModel)
+		classifier.SetClaudeMd(LoadProjectInstructions(cfg.ProjectDir))
 		child.gate.WithClassifier(classifier)
 		child.gate.WithTranscriptSource(child.context)
 	}

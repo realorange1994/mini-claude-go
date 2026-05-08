@@ -412,6 +412,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 			classifierModel = cfg.Model // default: same as main model
 		}
 		classifier := NewAutoModeClassifier(apiKey, cfg.BaseURL, classifierModel)
+		classifier.SetClaudeMd(LoadProjectInstructions(cfg.ProjectDir))
 		agent.gate.WithClassifier(classifier)
 		agent.gate.WithTranscriptSource(agent.context)
 		if classifier.IsEnabled() {
@@ -567,6 +568,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 			classifierModel = cfg.Model
 		}
 		classifier := NewAutoModeClassifier(apiKey, cfg.BaseURL, classifierModel)
+		classifier.SetClaudeMd(LoadProjectInstructions(cfg.ProjectDir))
 		agent.gate.WithClassifier(classifier)
 		agent.gate.WithTranscriptSource(agent.context)
 	}

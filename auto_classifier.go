@@ -31,6 +31,7 @@ type AutoModeClassifier struct {
 	cache     map[string]cacheEntry
 	mu        sync.RWMutex
 	enabled   bool
+	claudeMd  string // project CLAUDE.md content for user intent context
 }
 
 type cacheEntry struct {
@@ -599,6 +600,12 @@ func (c *AutoModeClassifier) ClearCache() {
 	c.cache = make(map[string]cacheEntry)
 }
 
+// SetClaudeMd sets the project CLAUDE.md content to be included in classifier
+// context. This helps the classifier understand user intent from project config.
+func (c *AutoModeClassifier) SetClaudeMd(content string) {
+	c.claudeMd = content
+}
+
 // IsEnabled returns whether the classifier is operational.
 func (c *AutoModeClassifier) IsEnabled() bool {
 	return c != nil && c.enabled
@@ -640,11 +647,13 @@ func (c *AutoModeClassifier) Classify(
 }
 
 // Two-stage classifier constants, modeled after upstream yoloClassifier.ts.
-// Stage 1 (fast): 64 base + 2048 thinking padding = 2112 tokens for quick allow/block.
-// Stage 2 (thinking): 4096 base + 2048 thinking padding = 6144 tokens for full reasoning.
+// Stage 1 (fast): 64 base + 2048 thinking padding = 2112 tokens.
+// The thinking budget headroom prevents stop_reason=max_tokens from truncating
+// before the decision tool_use is emitted.
+// Stage 2 (thinking): 4096 base + 2048 thinking padding = 6144 tokens.
 const (
-	stage1MaxTokens = 2112  // 64 + 2048
-	stage2MaxTokens = 6144  // 4096 + 2048
+	stage1MaxTokens = 2112
+	stage2MaxTokens = 6144
 )
 
 // callClassifier makes LLM API calls to classify the tool action using a
@@ -665,7 +674,14 @@ func (c *AutoModeClassifier) callClassifier(
 ) ClassifierResult {
 	actionDesc := formatActionForClassifier(toolName, toolInput)
 
-	userMsg := "## Recent conversation transcript:\n"
+	userMsg := ""
+	if c.claudeMd != "" {
+		userMsg += "The following is the project CLAUDE.md configuration. " +
+			"These are instructions the user provided and should be treated as " +
+			"part of the user's intent when evaluating actions.\n\n" +
+			"<user_claude_md>\n" + c.claudeMd + "\n</user_claude_md>\n\n"
+	}
+	userMsg += "## Recent conversation transcript:\n"
 	if transcript != "" {
 		// Truncate transcript to avoid exceeding context
 		if len(transcript) > 4000 {
@@ -680,12 +696,18 @@ func (c *AutoModeClassifier) callClassifier(
 
 	// Stage 1: fast classification
 	result, err := c.callStage1(ctx, userMsg, actionDesc)
-	if err == nil {
+	if err != nil {
+		// Stage 1 API error — escalate to Stage 2 for reasoning
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 error (%s), escalating to Stage 2\n", err)
+		return c.callStage2(ctx, userMsg, actionDesc)
+	}
+	if result.Allow {
+		// Fast path: allowed by Stage 1
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 ALLOWED: %s (%s)\n", actionDesc, result.Reason)
 		return result
 	}
-
-	// Stage 1 failed or blocked — escalate to Stage 2 for full reasoning
-	fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 blocked (%s), escalating to Stage 2 reasoning\n", err)
+	// Stage 1 blocked — escalate to Stage 2 for thorough review
+	fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 blocked (%s), escalating to Stage 2\n", result.Reason)
 	return c.callStage2(ctx, userMsg, actionDesc)
 }
 
@@ -695,7 +717,7 @@ func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc
 		Model:     c.model,
 		MaxTokens: stage1MaxTokens,
 		System: []anthropic.TextBlockParam{
-			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT},
+			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT, CacheControl: anthropic.CacheControlEphemeralParam{}},
 		},
 		Tools: []anthropic.ToolUnionParam{
 			{
@@ -761,7 +783,7 @@ func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc
 		Model:     c.model,
 		MaxTokens: stage2MaxTokens,
 		System: []anthropic.TextBlockParam{
-			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT},
+			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT, CacheControl: anthropic.CacheControlEphemeralParam{}},
 		},
 		Tools: []anthropic.ToolUnionParam{
 			{
