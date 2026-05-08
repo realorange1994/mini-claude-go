@@ -24,7 +24,8 @@ type PermissionGate struct {
 	config        *Config
 	classifier    *AutoModeClassifier
 	transcriptSrc TranscriptSource
-	denialCount   int // consecutive denial count for auto mode
+	denialCount     int   // consecutive denial count for auto mode
+	totalDenialCount int  // total denial count for session-level cap
 	// recentlyApproved tracks recent user approvals from AskUserQuestion.
 	// When the classifier would deny a tool, we check if the user already
 	// explicitly approved it — if so, bypass the classifier.
@@ -79,6 +80,7 @@ func (g *PermissionGate) ResetPostCompact() {
 	}
 	g.recentlyApproved = nil
 	g.denialCount = 0
+	g.totalDenialCount = 0
 }
 
 // Check runs the permission gauntlet. Returns a ToolResult if denied, nil if allowed.
@@ -460,10 +462,22 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 
 	if !result.Allow {
 		g.denialCount++
+		g.totalDenialCount++
 		// After 3 consecutive denials, fall back to interactive prompt
 		// (unless interactive prompts are disabled for sub-agents)
 		if g.denialCount >= 3 && !g.shouldAvoidPrompts() {
 			fmt.Fprintf(os.Stderr, "  [auto-classifier] %d consecutive denials, falling back to manual approval\n", g.denialCount)
+			if g.askUser(tool.Name(), params) {
+				g.denialCount = 0
+				return nil
+			}
+			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+		}
+		// Session-level cap: after 20 total denials, force interactive review
+		// to prevent the classifier from silently blocking all work.
+		if g.totalDenialCount >= 20 && !g.shouldAvoidPrompts() {
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] %d total denials this session, requiring manual review\n", g.totalDenialCount)
+			g.totalDenialCount = 0 // reset after forcing review
 			if g.askUser(tool.Name(), params) {
 				g.denialCount = 0
 				return nil
