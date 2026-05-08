@@ -3568,7 +3568,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 // Returns true if compaction was performed.
 func (a *AgentLoop) tryLLMCompaction() {
 	messages := a.context.BuildMessages()
-	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL, a.TranscriptPath())
+	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL, a.context.SystemPrompt(), a.TranscriptPath())
 	if performed && summary != "" {
 		// Advance compaction epoch BEFORE clearing context — marks all tracked items as stale.
 		if a.toolStateTracker != nil {

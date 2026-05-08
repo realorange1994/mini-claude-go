@@ -1104,6 +1104,7 @@ func (c *Compactor) Compact(
 	model string,
 	apiKey string,
 	baseURL string,
+	systemPrompt string,
 	transcriptPath string) (summary string, performed bool) {
 	c.mu.Lock()
 	if c.disabled {
@@ -1132,7 +1133,7 @@ func (c *Compactor) Compact(
 	}
 	c.mu.Unlock()
 
-	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary, transcriptPath)
+	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary, systemPrompt, transcriptPath)
 	if err != nil {
 		c.mu.Lock()
 		c.llmCompactFailedCount++
@@ -1174,7 +1175,7 @@ func (c *Compactor) Compact(
 // retry, up to MAX_PTL_RETRIES times.
 const MAX_PTL_RETRIES = 3
 
-func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, transcriptPath string) (*CompactionResultLLM, error) {
+func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string) (*CompactionResultLLM, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages to compact")
 	}
@@ -1183,7 +1184,7 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 	// prompt-too-long, progressively drop the oldest rounds and retry.
 	var lastErr error
 	for attempt := 0; attempt <= MAX_PTL_RETRIES; attempt++ {
-		result, err := doCompactLLMCallWithRetry(messages, model, apiKey, baseURL, previousSummary, transcriptPath)
+		result, err := doCompactLLMCallWithRetry(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath)
 		if err == nil {
 			return result, nil
 		}
@@ -1286,7 +1287,7 @@ var ErrCompactStreamIncomplete = fmt.Errorf("stream ended without receiving any 
 // doCompactLLMCall makes a single streaming compaction API call.
 // Collects text incrementally and returns the result. The caller should retry on
 // transient failures (rate limit, timeout, network).
-func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, transcriptPath string) (*CompactionResultLLM, error) {
+func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string) (*CompactionResultLLM, error) {
 	preTokens := estimateMessageParamsTokens(messages)
 
 	// Apply 3-pass pre-pruning before sending to LLM
@@ -1348,7 +1349,7 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 		Model:     model,
 		MaxTokens: 20000,
 		System: []anthropic.TextBlockParam{
-			{Text: compactSystemPrompt},
+			{Text: systemPrompt, CacheControl: anthropic.CacheControlEphemeralParam{}},
 		},
 		Messages: finalMsgs,
 		// Disable extended thinking during compaction to prevent wasting output
@@ -1432,7 +1433,7 @@ func isTransientCompactError(errMsg string) bool {
 // backoff, matching upstream's streamCompactSummary retry behavior.
 const MAX_COMPACT_STREAMING_RETRIES = 2
 
-func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, transcriptPath string) (*CompactionResultLLM, error) {
+func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string) (*CompactionResultLLM, error) {
 	var lastErr error
 	for attempt := 0; attempt <= MAX_COMPACT_STREAMING_RETRIES; attempt++ {
 		if attempt > 0 {
@@ -1448,7 +1449,7 @@ func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, 
 			}
 		}
 
-		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, transcriptPath)
+		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath)
 		if err == nil {
 			return result, nil
 		}
