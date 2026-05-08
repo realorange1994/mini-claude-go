@@ -372,7 +372,7 @@ func (a *AgentLoop) SpawnSubAgent(
 
 	// Launch background goroutine with independent cancellation
 	go func() {
-		defer a.activeSubAgents.Add(-1)
+		defer a.activeSubAgents.Done()
 		defer asyncCancel() // ensure context is released when done
 
 
@@ -797,8 +797,10 @@ maxTurns := cfg.MaxTurns
 		agentOutput:  io.Discard,    // default: discard output; background agents override with taskOutputWriter
 			toolStateTracker: NewToolStateTracker(), // track tool state for sub-agent
 			todoList:         tools.NewTodoList(),   // sub-agents need their own todo list to avoid nil panic
+			cachedMC:         NewCachedMicrocompactTracker(), // cache_edits tracking for sub-agent
 	}
 	child.gate = NewPermissionGate(&child.config)
+	child.currentMaxTokens.Store(int64(child.config.MaxOutputTokens))
 
 	// Wire BashTool's BackgroundTaskCallback so sub-agents can spawn background
 	// bash commands. When this child agent exits, childLoop.Close() kills all

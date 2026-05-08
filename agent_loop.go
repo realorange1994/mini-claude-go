@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -284,7 +285,7 @@ type AgentLoop struct {
 	lastDeltasState DeltasState // tracks what was streamed in last attempt
 	rateLimitState  RateLimitState // rate limit headers from API responses
 	prevTurnTokens  int            // tracks token count from previous turn for reactive compact
-	activeSubAgents atomic.Int32   // count of currently running sub-agents
+	activeSubAgents sync.WaitGroup // tracks running sub-agents (Wait blocks until all complete)
 	taskStore       *TaskStore     // tracks all sub-agent tasks (bash + sub-agents)
 	agentTaskStore  *tools.AgentTaskStore // tracks background agent tasks (with output capture)
 	currentMaxTokens atomic.Int64  // effective max_tokens for API calls (escates on max_tokens hit)
@@ -1215,6 +1216,18 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 // Close releases resources (transcript writer) and stops background goroutines.
 func (a *AgentLoop) Close() {
+	// Wait for background sub-agents to finish (with timeout)
+	done := make(chan struct{})
+	go func() {
+		a.activeSubAgents.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		a.out("[WARN] Timed out waiting for sub-agents after 60s\n")
+	}
+
 	// Kill all running background tasks (sub-agents and bash tasks)
 	if a.taskStore != nil {
 		for _, task := range a.taskStore.AllTasks() {
