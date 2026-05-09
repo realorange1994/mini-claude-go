@@ -303,8 +303,9 @@ func (a *AgentLoop) spawnBackgroundBashCommand(command, workingDir string) (stri
 
 	outputFile := filepath.Join(outputDir, taskID+".output")
 
-	// Create/truncate the output file
-	f, err := os.Create(outputFile)
+	// Open output file in append mode so that if exec_tool.go's timeout goroutine
+	// already wrote partial data to this file, it won't be overwritten.
+	f, err := os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return "", "", fmt.Sprintf("Error: failed to create output file: %v", err)
 	}
@@ -482,6 +483,82 @@ func escapeXML(s string) string {
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	s = strings.ReplaceAll(s, "'", "&apos;")
 	return s
+}
+
+// registerExistingProcessAsBgTask registers an already-running exec process as a
+// background task after a timeout. The caller (exec_tool.go) will handle writing
+// captured output to the output file. The errCh goroutine (already running) calls
+// cmd.Wait() and sends the result to errCh. The timeout case's goroutine receives
+// from errCh and calls the returned completionCallback.
+// Returns (taskID, outputFilePath, errText, completionCallback).
+func (a *AgentLoop) registerExistingProcessAsBgTask(command, workingDir string, cmd *exec.Cmd) (string, string, string, func(error)) {
+	taskID := generateBashTaskID()
+
+	// Create output directory
+	outputDir := bashBgTasksDir()
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return "", "", fmt.Sprintf("Error: failed to create task output directory: %v", err), nil
+	}
+
+	outputFile := filepath.Join(outputDir, taskID+".output")
+
+	// Open output file and write header
+	f, err := os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return "", "", fmt.Sprintf("Error: failed to create output file: %v", err), nil
+	}
+
+	fmt.Fprintf(f, "--- Background Task (timeout): %s ---\n", taskID)
+	fmt.Fprintf(f, "Command: %s\n", command)
+	fmt.Fprintf(f, "Working Dir: %s\n", workingDir)
+	fmt.Fprintf(f, "Timed out: %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(f, "--- Output ---\n\n")
+	f.Close()
+
+	// Register in the task store
+	a.taskStore.RegisterBashBgTask(taskID, command, outputFile)
+
+	// Set the process reference for KillTask
+	task := a.taskStore.GetTask(taskID)
+	if task != nil && cmd != nil && cmd.Process != nil {
+		task.mu.Lock()
+		task.Process = cmd.Process
+		task.mu.Unlock()
+	}
+
+	// Return a completionCallback that will be called by the timeout case's
+	// goroutine after it receives from errCh (which means cmd.Wait() completed).
+	onDone := func(waitErr error) {
+		start := time.Now()
+		elapsed := time.Since(start)
+
+		exitCode := 0
+		if waitErr != nil {
+			if exitErr, ok := waitErr.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+
+		// Append footer to output file
+		f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "\n--- Task Complete ---\n")
+			fmt.Fprintf(f, "Exit code: %d\n", exitCode)
+			fmt.Fprintf(f, "Duration (post-timeout): %s\n", elapsed.Round(time.Millisecond))
+			status := "completed"
+			if exitCode != 0 {
+				status = "failed"
+			}
+			fmt.Fprintf(f, "Status: %s\n", status)
+			f.Close()
+		}
+
+		a.finishBashBgTask(taskID, exitCode, "")
+	}
+
+	return taskID, outputFile, "", onDone
 }
 
 // readBashBgTaskOutput reads the output file of a background bash task.

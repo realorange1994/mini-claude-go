@@ -16,11 +16,22 @@ import (
 // Returns (taskID, outputFilePath, errorText).
 type BashBgTaskCallback func(command, workingDir string) (taskID, outputFilePath, errText string)
 
+// TimeoutCallback is called when an exec command times out (not user interrupt).
+// If non-nil, the timed-out process is registered as a background task that continues running.
+// Returns (taskID, outputFilePath, errText, completionCallback).
+// The completionCallback is called by the errCh goroutine when cmd.Wait() returns,
+// so the callback does NOT need to call cmd.Wait() itself (avoiding double-Wait panics).
+type TimeoutCallback func(command, workingDir string, cmd *exec.Cmd) (taskID, outputFilePath, errText string, completionCallback func(waitErr error))
+
 // ExecTool executes shell commands with security guards.
 type ExecTool struct {
 	// BackgroundTaskCallback, when set, enables run_in_background support.
 	// When nil, background requests fall through to foreground execution.
 	BackgroundTaskCallback BashBgTaskCallback
+
+	// TimeoutCallback, when set, enables auto-backgrounding of timed-out commands.
+	// The process continues running independently; the callback registers it as a task.
+	TimeoutCallback TimeoutCallback
 }
 
 func (*ExecTool) Name() string { return "exec" }
@@ -187,7 +198,7 @@ func (et *ExecTool) Execute(params map[string]any) ToolResult {
 	if bg, ok := params["run_in_background"].(bool); ok && bg {
 		return et.execInBackground(params)
 	}
-	return execToolExecute(context.Background(), params)
+	return et.execToolExecute(context.Background(), params)
 }
 
 // ExecuteContext runs the command with context support for cancellation.
@@ -196,7 +207,7 @@ func (et *ExecTool) ExecuteContext(ctx context.Context, params map[string]any) T
 	if bg, ok := params["run_in_background"].(bool); ok && bg {
 		return et.execInBackground(params)
 	}
-	return execToolExecute(ctx, params)
+	return et.execToolExecute(ctx, params)
 }
 
 // execInBackground handles the run_in_background=true case.
@@ -210,7 +221,7 @@ func (et *ExecTool) execInBackground(params map[string]any) ToolResult {
 
 	if et.BackgroundTaskCallback == nil {
 		// Fallback: run in foreground if callback not set
-		return execToolExecute(context.Background(), params)
+		return et.execToolExecute(context.Background(), params)
 	}
 
 	// Determine working directory
@@ -230,7 +241,7 @@ func (et *ExecTool) execInBackground(params map[string]any) ToolResult {
 	}.WithMetadata(NewToolResultMetadata("exec", 0))
 }
 
-func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
+func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 	command, _ := params["command"].(string)
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -275,15 +286,16 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 		wd = expandPath(wd)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, shell, flag, command)
+	// Note: we do NOT use context.WithTimeout or CommandContext here.
+	// The timeout is handled at the select level below. On timeout, the
+	// process continues running in the background (registered via TimeoutCallback).
+	// On user interrupt (ctx.Done()), the process is killed.
+	cmd := exec.Command(shell, flag, command)
 	cmd.Dir = wd
 	cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
 
-	// Set up process group on Unix so we can kill the entire tree on timeout
-	// (matching upstream's tree-kill behavior). No-op on Windows.
+	// Set up process group on Unix so we can kill the entire tree on user interrupt.
+	// No-op on Windows.
 	setupProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
@@ -301,34 +313,117 @@ func execToolExecute(ctx context.Context, params map[string]any) ToolResult {
 
 	// Read outputs concurrently
 	type readResult struct {
-		data string
+		data     string
 		isStderr bool
 	}
 	outputCh := make(chan readResult, 2)
 
 	go func() {
 		data := readLimited(stdout, 50000)
-		outputCh <- readResult{data, false}
+		select {
+		case outputCh <- readResult{data, false}:
+		default:
+		}
 	}()
 	go func() {
 		data := readLimited(stderr, 25000)
-		outputCh <- readResult{"STDERR:\n" + data, true}
+		select {
+		case outputCh <- readResult{"STDERR:\n" + data, true}:
+		default:
+		}
 	}()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- cmd.Wait() }()
+	go func() {
+		waitErr := cmd.Wait()
+		select {
+		case errCh <- waitErr:
+		default:
+		}
+	}()
+
+	// Use a timer for timeout instead of context.WithTimeout. This way, when the
+	// timeout fires we can return without killing the process — letting it continue
+	// in the background. Context cancellation (user interrupt) still kills the process.
+	timeoutTimer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer timeoutTimer.Stop()
 
 	select {
+	case <-timeoutTimer.C:
+		// Timeout: don't kill the process. Register as a background task instead.
+		// The process continues running independently.
+		if cmd.Process == nil {
+			return ToolResult{Output: fmt.Sprintf("Error: command timed out after %dms.", timeoutMs), IsError: true}
+		}
+		// Close pipes to unblock reader goroutines — the process keeps running.
+		_ = stdout.Close()
+		_ = stderr.Close()
+		if et.TimeoutCallback != nil {
+			// Drain remaining output from the reader goroutines (non-blocking).
+			var stdoutOut, stderrOut string
+			for i := 0; i < 2; i++ {
+				select {
+				case r := <-outputCh:
+					if r.isStderr {
+						stderrOut = r.data
+					} else {
+						stdoutOut = r.data
+					}
+				default:
+				}
+			}
+			combinedOutput := stdoutOut
+			if stderrOut != "" && stderrOut != "STDERR:\n" {
+				combinedOutput += "\n" + stderrOut
+			}
+			taskID, outputFile, errText, onDone := et.TimeoutCallback(command, wd, cmd)
+			if errText != "" {
+				return ToolResult{Output: fmt.Sprintf("Error: command timed out after %dms. %s", timeoutMs, errText), IsError: true}
+			}
+			// Write captured output to the background task's output file.
+			if outputFile != "" && combinedOutput != "" {
+				if f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+					fmt.Fprintf(f, "%s", combinedOutput)
+					f.Close()
+				}
+			}
+			// The errCh goroutine will call cmd.Wait() when the process completes.
+			// It sends the result to errCh (non-blocking) — but nobody is listening
+			// anymore (this function already returned). We need to notify the
+			// background task when the process completes, so the onDone callback
+			// is called by the errCh goroutine. But errCh already fired — we can't
+			// wait for it here. Instead, spawn a goroutine that waits for errCh and
+			// calls onDone.
+			go func() {
+				wErr := <-errCh
+				if onDone != nil {
+					onDone(wErr)
+				}
+			}()
+			return ToolResult{
+				Output: fmt.Sprintf(
+					"Command timed out after %dms and is continuing in the background.\n"+
+						"Task ID: %s\nOutput file: %s\n"+
+						"Use the task_output tool to check results when ready.",
+					timeoutMs, taskID, outputFile),
+				IsError: false,
+			}
+		}
+		// Fallback: no callback — return timeout info (process continues)
+		return ToolResult{
+			Output: fmt.Sprintf(
+				"Error: command timed out after %dms and is continuing in the background.",
+				timeoutMs),
+			IsError: true,
+		}
 	case <-ctx.Done():
+		// Context cancelled: user interrupt (Ctrl+C). Kill the process.
 		if cmd.Process != nil {
-			// Kill the entire process group (matching upstream's tree-kill)
-			// On Unix, sends SIGKILL to the process group via negative PID.
-			// On Windows, just kills the process (no process groups).
 			killProcessGroup(cmd.Process.Pid)
 			cmd.Process.Kill()
 		}
 		<-errCh
-		return ToolResult{Output: fmt.Sprintf("Error: command timed out after %dms. Consider using run_in_background: true for long-running commands.", timeoutMs), IsError: true}
+		return ToolResult{Output: "Interrupted by user", IsError: true}
 	case err := <-errCh:
 		var stdoutOut, stderrOut string
 		for i := 0; i < 2; i++ {

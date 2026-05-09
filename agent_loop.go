@@ -136,10 +136,13 @@ func (a *AgentLoop) registerTaskStopTool() {
 
 // registerBashBgTool wires the ExecTool's BackgroundTaskCallback to this loop's
 // spawnBackgroundBashCommand method, enabling run_in_background support.
+// TimeoutCallback is wired to registerExistingProcessAsBgTask for auto-backgrounding
+// timed-out exec commands.
 func (a *AgentLoop) registerBashBgTool() {
 	if tool, ok := a.registry.Get("exec"); ok {
 		if execTool, ok := tool.(*tools.ExecTool); ok {
 			execTool.BackgroundTaskCallback = a.spawnBackgroundBashCommand
+			execTool.TimeoutCallback = a.registerExistingProcessAsBgTask
 		}
 	}
 }
@@ -1229,20 +1232,12 @@ func (a *AgentLoop) Close() {
 		a.out("[WARN] Timed out waiting for sub-agents after 60s\n")
 	}
 
-	// Kill all running background tasks (sub-agents and bash tasks)
-	if a.taskStore != nil {
-		for _, task := range a.taskStore.AllTasks() {
-			if !task.IsTerminal() {
-				if task.Process != nil {
-					_ = task.Process.Kill()
-				}
-				if task.CancelFunc != nil {
-					task.CancelFunc()
-				}
-				task.Status = TaskStatusKilled
-			}
-		}
-	}
+	// Note: we no longer kill background tasks on Close() timeout.
+	// Background tasks (sub-agents, exec) continue running independently.
+	// They complete naturally or are cleaned up by the eviction ticker.
+	// This matches Claude Code upstream behavior where the parent stops
+	// waiting but the background task keeps running.
+
 	// Signal the eviction ticker to stop
 	if a.evictionDone != nil {
 		close(a.evictionDone)
