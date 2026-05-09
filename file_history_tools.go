@@ -1159,5 +1159,10 @@ func expandPath(p string) string {
 	if filepath.IsAbs(p) {
 		return p
 	}
+	// Handle Unix-style absolute paths like /e/ on Windows: convert /x/ to X:\
+	if len(p) >= 3 && p[0] == '/' && (p[1] >= 'a' && p[1] <= 'z' || p[1] >= 'A' && p[1] <= 'Z') && p[2] == '/' {
+		abs := strings.ToUpper(string(p[1])) + ":\\" + p[3:]
+		return filepath.Clean(abs)
+	}
 	return filepath.Join(getCwd(), p)
 }

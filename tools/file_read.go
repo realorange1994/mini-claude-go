@@ -265,6 +265,10 @@ func expandPath(p string) string {
 	if len(p) == 2 && p[1] == ':' && (p[0] >= 'A' && p[0] <= 'Z' || p[0] >= 'a' && p[0] <= 'z') {
 		p = p + string(filepath.Separator)
 	}
+	// Handle Unix-style absolute paths like /e/ on Windows: convert /x/ to X:\
+	if len(p) >= 3 && p[0] == '/' && (p[1] >= 'a' && p[1] <= 'z' || p[1] >= 'A' && p[1] <= 'Z') && p[2] == '/' {
+		p = strings.ToUpper(string(p[1])) + ":\\" + p[3:]
+	}
 	return filepath.Clean(p)
 }
 

@@ -540,14 +540,15 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		toolTimeout:      600 * time.Second,
 		maxTurns:         maxTurns,
 		budget:           NewIterationBudget(maxTurns),
-		taskStore:          NewTaskStore(),
-		notificationChan:   make(chan string, 64),
-		evictionDone:       make(chan struct{}),
-		agentNameRegistry:  make(map[string]string),
-		workTaskStore:      NewWorkTaskStore(),
-		agentOutput:     os.Stderr,
-		toolStateTracker: NewToolStateTracker(),
+		taskStore:        NewTaskStore(),
+		notificationChan:  make(chan string, 64),
+		evictionDone:     make(chan struct{}),
+		agentNameRegistry: make(map[string]string),
+		workTaskStore:    NewWorkTaskStore(),
+		agentOutput:      os.Stderr,
+		toolStateTracker:  NewToolStateTracker(),
 		todoList:         tools.NewTodoList(),
+		cachedMC:         NewCachedMicrocompactTracker(),
 	}
 
 	// Restore skill state from transcript entries so skillTracker reflects
@@ -3418,6 +3419,13 @@ func (a *AgentLoop) tryCompaction() {
 			}
 			a.InjectRunningAgentStatus()
 
+			// Persist compaction boundary and summary to transcript for resume support.
+			// Without this, --resume replays the full un-compacted history.
+			if a.transcript != nil {
+				_ = a.transcript.WriteCompact("compact_context", preTokens)
+				_ = a.transcript.WriteSummary(summaryContent)
+			}
+
 			// Post-compact recovery: re-inject recently read files
 			recoveredPaths := a.PostCompactRecovery()
 			if a.toolStateTracker != nil {
@@ -3537,6 +3545,12 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	a.context.AddCompactBoundary(CompactTriggerSMCompact, preTokens)
 	a.context.AddSummary(summaryContent)
 
+	// Persist compaction boundary and summary to transcript for resume support.
+	if a.transcript != nil {
+		_ = a.transcript.WriteCompact("sm-compact", preTokens)
+		_ = a.transcript.WriteSummary(summaryContent)
+	}
+
 	// Update session memory with compaction state
 	if a.config.SessionMemory != nil {
 		a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction (sm-compact): %d tokens compressed", preTokens), "auto")
@@ -3594,6 +3608,13 @@ func (a *AgentLoop) tryLLMCompaction() {
 		preTokens := a.context.EstimatedTokens()
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 		a.context.AddSummary(summary)
+
+		// Persist compaction boundary and summary to transcript for resume support.
+		// Without this, --resume replays the full un-compacted history.
+		if a.transcript != nil {
+			_ = a.transcript.WriteCompact("auto", preTokens)
+			_ = a.transcript.WriteSummary(summary)
+		}
 
 		// Save compaction summary to session memory
 		if a.config.SessionMemory != nil {

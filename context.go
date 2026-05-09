@@ -1492,17 +1492,17 @@ func (c *ConversationContext) FixRoleAlternation() {
 				// user-role messages, which the Anthropic API rejects as error 2013.
 				// Note: ToolResultContent is NOT merged with TextContent - doing so
 				// would destroy the tool_use/tool_result pairing.
-				merged := false
+				wasMerged := false
 				switch a := last.content.(type) {
 				case TextContent:
 					if b, ok := entry.content.(TextContent); ok {
 						last.content = TextContent(string(a) + "\n" + string(b))
-						merged = true
+						wasMerged = true
 					} else if entry.role == "user" {
 						switch entry.content.(type) {
 						case SummaryContent, AttachmentContent:
 							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
-							merged = true
+							wasMerged = true
 						}
 					}
 				case SummaryContent:
@@ -1510,7 +1510,7 @@ func (c *ConversationContext) FixRoleAlternation() {
 						switch entry.content.(type) {
 						case SummaryContent, TextContent, AttachmentContent:
 							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
-							merged = true
+							wasMerged = true
 						}
 					}
 				case AttachmentContent:
@@ -1518,28 +1518,28 @@ func (c *ConversationContext) FixRoleAlternation() {
 						switch entry.content.(type) {
 						case SummaryContent, TextContent, AttachmentContent:
 							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
-							merged = true
+							wasMerged = true
 						}
 					}
 				case ToolUseContent:
 					if b, ok := entry.content.(ToolUseContent); ok {
 						last.content = append(a, b...)
-						merged = true
+						wasMerged = true
 					}
 				case ToolResultContent:
 					if b, ok := entry.content.(ToolResultContent); ok {
 						last.content = append(a, b...)
-						merged = true
+						wasMerged = true
 					}
 				}
-				if merged {
+				if wasMerged {
 					continue
 				}
+			}
 		}
+		merged = append(merged, entry)
 	}
-	merged = append(merged, entry)
-}
-c.entries = merged
+	c.entries = merged
 }
 
 // entryContentToText serializes any EntryContent to a plain text string.
