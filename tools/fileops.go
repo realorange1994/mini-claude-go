@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // FileOpsTool provides file operations (mkdir, rm, mv, cp, chmod, ln).
@@ -115,6 +116,14 @@ func opMkdir(path string, params map[string]any) ToolResult {
 
 func opRemove(path string) ToolResult {
 	if err := os.Remove(path); err != nil {
+		// Retry: when write_file and fileops rm are called concurrently in the same
+		// tool batch, the file may not be visible yet (Windows directory entry delay).
+		if os.IsNotExist(err) {
+			time.Sleep(50 * time.Millisecond)
+			if err2 := os.Remove(path); err2 == nil {
+				return ToolResult{Output: fmt.Sprintf("Removed: %s", path)}
+			}
+		}
 		return ToolResult{Output: fmt.Sprintf("Error removing: %v", err), IsError: true}
 	}
 	return ToolResult{Output: fmt.Sprintf("Removed: %s", path)}
