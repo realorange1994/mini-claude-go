@@ -101,6 +101,10 @@ func (t *AgentTool) InputSchema() map[string]any {
 				"type":        "integer",
 				"description": "Maximum number of turns the sub-agent can execute before being forcibly stopped (optional, default 200). A turn is one user/assistant exchange. Set a reasonable limit to prevent runaway agents.",
 			},
+			"timeout": map[string]any{
+				"type":        "integer",
+				"description": "Timeout in milliseconds (max 600000 / 10 minutes). Default: 600000 (10 minutes). Controls how long the parent waits before considering the agent timed out. The agent always runs in background regardless of timeout.",
+			},
 		},
 	}
 }

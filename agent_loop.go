@@ -2187,10 +2187,10 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	if timeoutMs > 600000 {
 		timeoutMs = 600000
 	}
-	// Restore timeout (as int ms) for exec tool only.
+	// Restore timeout (as int ms) for exec, agent, and MCP tools.
 	// For other tools, the timeout is handled via context deadline.
 	delete(input, "timeout")
-	if toolName == "exec" || toolName == "mcp_call_tool" {
+	if toolName == "exec" || toolName == "mcp_call_tool" || toolName == "agent" {
 		input["timeout"] = timeoutMs
 	}
 

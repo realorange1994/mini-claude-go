@@ -125,6 +125,14 @@ func (*MCPToolCaller) InputSchema() map[string]any {
 				"type":        "object",
 				"description": "Arguments to pass to the tool.",
 			},
+			"timeout": map[string]any{
+				"type":        "integer",
+				"description": "Timeout in milliseconds (max 600000 / 10 minutes). Default: 30000 (30 seconds).",
+			},
+			"run_in_background": map[string]any{
+				"type":        "boolean",
+				"description": "Set to true to run this MCP call in the background immediately. Returns a task ID right away. Use task_output to check results later.",
+			},
 		},
 		"required": []string{"tool"},
 	}
@@ -152,6 +160,26 @@ func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 	server, _ := params["server"].(string)
 	args, _ := params["arguments"].(map[string]any)
 	callArgs := mcp.ToolCallArgs(args)
+
+	// Parse timeout (ms). Default: 30s, max: 600s, min: 1s.
+	timeoutMs := mcpDefaultTimeoutMs
+	if timeoutVal, ok := params["timeout"]; ok {
+		switch v := timeoutVal.(type) {
+		case float64:
+			timeoutMs = int(v)
+		case int:
+			timeoutMs = v
+		}
+	}
+	if timeoutMs < 1000 {
+		timeoutMs = 1000
+	}
+	if timeoutMs > 600000 {
+		timeoutMs = 600000
+	}
+
+	// Parse run_in_background
+	runInBackground, _ := params["run_in_background"].(bool)
 
 	// Use context.Background() — timeout is handled by the timer-based select below.
 	// This ensures user interrupt (via explicit context cancellation) still works,
@@ -194,10 +222,41 @@ func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 		close(resultReady)
 	}()
 
-	// Use a timer for timeout instead of context.WithTimeout. This way, when the
-	// timeout fires we can return without cancelling the context — the MCP call
-	// continues running in the background. User interrupt still kills via context.
-	timer := time.NewTimer(time.Duration(mcpDefaultTimeoutMs) * time.Millisecond)
+	// Handle run_in_background=true: register as bg task immediately.
+	if runInBackground {
+		if t.TimeoutCallback != nil {
+			taskID, outputFile, errText, onDone := t.TimeoutCallback(toolName, server, args)
+			if errText != "" {
+				return ToolResult{Output: fmt.Sprintf("Error: failed to start background task: %s", errText), IsError: true}
+			}
+			go func() {
+				<-resultReady
+				for {
+					select {
+					case r := <-resultCh:
+						if onDone != nil {
+							onDone(r.text, r.isError)
+						}
+					default:
+						return
+					}
+				}
+			}()
+			return ToolResult{
+				Output: fmt.Sprintf(
+					"MCP call started in background.\n"+
+						"Tool: %s\nTask ID: %s\nOutput file: %s\n"+
+						"Use the task_output tool to check results when ready.",
+					toolName, taskID, outputFile),
+			}
+		}
+		// Fallback: no callback, just run synchronously
+		r := <-resultCh
+		return ToolResult{Output: r.text, IsError: r.isError}
+	}
+
+	// Normal/foreground execution with timeout.
+	timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
 	defer timer.Stop()
 
 	select {
@@ -206,7 +265,6 @@ func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 		if t.TimeoutCallback != nil {
 			taskID, outputFile, errText, onDone := t.TimeoutCallback(toolName, server, args)
 			// Spawn goroutine to collect the result when it arrives.
-			// The resultCh is still open — the background goroutine is still running.
 			go func() {
 				select {
 				case <-resultCh:
@@ -227,18 +285,18 @@ func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 				}
 			}()
 			if errText != "" {
-				return ToolResult{Output: fmt.Sprintf("Error: MCP call timed out after %dms. %s", mcpDefaultTimeoutMs/1000, errText), IsError: true}
+				return ToolResult{Output: fmt.Sprintf("Error: MCP call timed out after %dms. %s", timeoutMs, errText), IsError: true}
 			}
 			return ToolResult{
 				Output: fmt.Sprintf(
-					"MCP call timed out after %ds and is continuing in the background.\n"+
+					"MCP call timed out after %dms and is continuing in the background.\n"+
 						"Tool: %s\nTask ID: %s\nOutput file: %s\n"+
 						"Use the task_output tool to check results when ready.",
-					mcpDefaultTimeoutMs/1000, toolName, taskID, outputFile),
+					timeoutMs, toolName, taskID, outputFile),
 			}
 		}
 		return ToolResult{
-			Output: fmt.Sprintf("Error: MCP call timed out after %ds. Use task_output later to check if it completed.", mcpDefaultTimeoutMs/1000),
+			Output: fmt.Sprintf("Error: MCP call timed out after %dms. Use task_output later to check if it completed.", timeoutMs),
 			IsError: true,
 		}
 	case r := <-resultCh:
