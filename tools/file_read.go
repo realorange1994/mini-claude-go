@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 )
 
@@ -78,7 +79,14 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 
 	info, err := os.Stat(fp)
 	if os.IsNotExist(err) {
-		return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", pathStr), IsError: true}
+		// Retry: when write_file and read_file are called concurrently in the same
+		// tool batch, the file may not be visible yet (especially on Windows where
+		// directory entries are updated asynchronously). Wait briefly and retry.
+		time.Sleep(50 * time.Millisecond)
+		info, err = os.Stat(fp)
+		if os.IsNotExist(err) {
+			return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", pathStr), IsError: true}
+		}
 	}
 	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}

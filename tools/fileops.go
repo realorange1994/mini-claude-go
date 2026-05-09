@@ -79,9 +79,9 @@ func (*FileOpsTool) Execute(params map[string]any) ToolResult {
 	switch operation {
 	case "mkdir":
 		return opMkdir(fp, params)
-	case "rm":
+	case "rm", "delete", "remove":
 		return opRemove(fp)
-	case "rmrf":
+	case "rmrf", "rmdir":
 		return opRemoveAll(fp)
 	case "mv":
 		return opMove(fp, params)

@@ -86,6 +86,12 @@ func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
+	// Sync to ensure the file is flushed to disk before subsequent read_file calls
+	// in the same batch can see it (tool calls are executed concurrently).
+	if f, err := os.Open(fp); err == nil {
+		f.Sync()
+		f.Close()
+	}
 	// Update registry so subsequent writes are allowed without re-reading
 	if w.registry != nil {
 		w.registry.MarkFileReadWithContent(fp, content)

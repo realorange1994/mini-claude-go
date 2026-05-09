@@ -766,8 +766,7 @@ func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc
 	}
 
 	if result.Allow {
-		// Fast path: allowed by stage 1
-		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 ALLOWED: %s (%s)\n", actionDesc, result.Reason)
+		// Fast path: allowed by stage 1 (caller logs the result)
 		return result, nil
 	}
 
