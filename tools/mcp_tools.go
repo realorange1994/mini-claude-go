@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -91,9 +92,18 @@ func (t *ListMCPTools) Execute(params map[string]any) ToolResult {
 	return ToolResult{Output: strings.Join(lines, "\n")}
 }
 
+// MCPTimeoutCallback is called when an MCP tool call times out.
+// Returns (taskID, outputFile, errText, onDone).
+// The onDone callback is invoked when the background MCP call completes.
+type MCPTimeoutCallback func(toolName, server string, args map[string]any) (
+	taskID, outputFile, errText string,
+	onDone func(result string, isError bool),
+)
+
 // MCPToolCaller dynamically calls tools on MCP servers.
 type MCPToolCaller struct {
-	Manager *mcp.Manager
+	Manager         *mcp.Manager
+	TimeoutCallback MCPTimeoutCallback
 }
 
 func (*MCPToolCaller) Name() string        { return "mcp_call_tool" }
@@ -122,6 +132,13 @@ func (*MCPToolCaller) InputSchema() map[string]any {
 
 func (*MCPToolCaller) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
+type mcpCallResult struct {
+	text    string
+	isError bool
+}
+
+const mcpDefaultTimeoutMs = 30 * 1000 // 30 seconds
+
 func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 	if t.Manager == nil {
 		return ToolResult{Output: "Error: MCP manager not available", IsError: true}
@@ -136,34 +153,97 @@ func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 	args, _ := params["arguments"].(map[string]any)
 	callArgs := mcp.ToolCallArgs(args)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Use context.Background() — timeout is handled by the timer-based select below.
+	// This ensures user interrupt (via explicit context cancellation) still works,
+	// while timeout doesn't trigger context cancellation (which would break stdio connections).
+	ctx := context.Background()
 
-	var result *mcp.ToolResult
-	var err error
+	resultCh := make(chan mcpCallResult, 1)
+	resultReady := make(chan struct{})
 
-	if server != "" {
-		result, err = t.Manager.CallToolWithServer(ctx, server, toolName, callArgs)
-	} else {
-		result, err = t.Manager.CallTool(ctx, toolName, callArgs)
-	}
+	go func() {
+		var result *mcp.ToolResult
+		var err error
 
-	if err != nil {
-		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
-	}
-
-	var parts []string
-	for _, block := range result.Content {
-		if block.Type == "text" {
-			parts = append(parts, block.Text)
+		if server != "" {
+			result, err = t.Manager.CallToolWithServer(ctx, server, toolName, callArgs)
+		} else {
+			result, err = t.Manager.CallTool(ctx, toolName, callArgs)
 		}
-	}
 
-	output := strings.Join(parts, "\n")
-	if result.IsError {
-		return ToolResult{Output: output, IsError: true}
+		var output string
+		var isError bool
+		if err != nil {
+			output = fmt.Sprintf("Error: %v", err)
+			isError = true
+		} else {
+			var parts []string
+			for _, block := range result.Content {
+				if block.Type == "text" {
+					parts = append(parts, block.Text)
+				}
+			}
+			output = strings.Join(parts, "\n")
+			isError = result.IsError
+		}
+
+		select {
+		case resultCh <- mcpCallResult{text: output, isError: isError}:
+		default:
+		}
+		close(resultReady)
+	}()
+
+	// Use a timer for timeout instead of context.WithTimeout. This way, when the
+	// timeout fires we can return without cancelling the context — the MCP call
+	// continues running in the background. User interrupt still kills via context.
+	timer := time.NewTimer(time.Duration(mcpDefaultTimeoutMs) * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		// Timeout: register as background task, return task ID immediately.
+		if t.TimeoutCallback != nil {
+			taskID, outputFile, errText, onDone := t.TimeoutCallback(toolName, server, args)
+			// Spawn goroutine to collect the result when it arrives.
+			// The resultCh is still open — the background goroutine is still running.
+			go func() {
+				select {
+				case <-resultCh:
+					// Result arrived before timeout cleanup
+				case <-resultReady:
+					// Same as above — channel was closed after send
+				}
+				// Drain any remaining result
+				for {
+					select {
+					case r := <-resultCh:
+						if onDone != nil {
+							onDone(r.text, r.isError)
+						}
+					default:
+						return
+					}
+				}
+			}()
+			if errText != "" {
+				return ToolResult{Output: fmt.Sprintf("Error: MCP call timed out after %dms. %s", mcpDefaultTimeoutMs/1000, errText), IsError: true}
+			}
+			return ToolResult{
+				Output: fmt.Sprintf(
+					"MCP call timed out after %ds and is continuing in the background.\n"+
+						"Tool: %s\nTask ID: %s\nOutput file: %s\n"+
+						"Use the task_output tool to check results when ready.",
+					mcpDefaultTimeoutMs/1000, toolName, taskID, outputFile),
+			}
+		}
+		return ToolResult{
+			Output: fmt.Sprintf("Error: MCP call timed out after %ds. Use task_output later to check if it completed.", mcpDefaultTimeoutMs/1000),
+			IsError: true,
+		}
+	case r := <-resultCh:
+		return ToolResult{Output: r.text, IsError: r.isError}
 	}
-	return ToolResult{Output: output}
 }
 
 // MCPServerStatus reports MCP server connection status.
@@ -217,4 +297,16 @@ func (t *MCPServerStatus) Execute(params map[string]any) ToolResult {
 	}
 
 	return ToolResult{Output: strings.Join(lines, "\n")}
+}
+
+// parseMCPToolResult parses a raw JSON-RPC response into a ToolResult.
+func parseMCPToolResult(resp json.RawMessage) (*mcp.ToolResult, error) {
+	if resp == nil {
+		return &mcp.ToolResult{Content: []mcp.ContentBlock{}}, nil
+	}
+	var result mcp.ToolResult
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

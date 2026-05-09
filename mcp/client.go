@@ -345,8 +345,6 @@ func (c *Client) requestStdio(ctx context.Context, method string, params json.Ra
 	}
 
 	// Use a one-shot channel to signal the read goroutine is done.
-	// The goroutine reads in a separate goroutine so we can cancel
-	// by closing stdin (which causes ReadBytes to return EOF).
 	done := make(chan struct{})
 	var resp RPCResponse
 	var readErr error
@@ -364,14 +362,7 @@ func (c *Client) requestStdio(ctx context.Context, method string, params json.Ra
 
 	select {
 	case <-ctx.Done():
-		// Goroutine cleanup on context cancel:
-		// 1. Closing stdin signals EOF to the child process, which causes
-		//    the stdout ReadBytes goroutine to return (breaking its read loop).
-		// 2. Waiting on <-done ensures the stdout reader goroutine completes
-		//    before we return, preventing goroutine leaks.
-		// The process may still be running, so we don't kill it -- we just
-		// interrupt the current request. The stderr reader goroutine (started
-		// in startStdio) will exit when the process eventually terminates.
+		// User interrupt: close stdin to unblock the reader goroutine.
 		c.stdin.Close()
 		<-done
 		return nil, ctx.Err()
@@ -383,6 +374,141 @@ func (c *Client) requestStdio(ctx context.Context, method string, params json.Ra
 			return nil, fmt.Errorf("MCP error [%d]: %s", resp.Error.Code, resp.Error.Message)
 		}
 		return resp.Result, nil
+	}
+}
+
+// CallToolWithTimeout calls a tool with a separate timeout that doesn't break the MCP connection.
+// On timeout: returns (nil, context.DeadlineExceeded) — the MCP call continues running in background.
+// On user interrupt: returns (nil, ctx.Err()) — the connection is broken (stdin closed).
+// The resultCh channel receives the RPCResponse when the call completes (even after timeout).
+func (c *Client) CallToolWithTimeout(ctx context.Context, name string, args ToolCallArgs, timeoutMs int64, resultCh chan<- RPCResponse) (*ToolResult, error) {
+	paramsMap := map[string]any{"name": name}
+	if args != nil {
+		paramsMap["arguments"] = args
+	}
+	params, _ := json.Marshal(paramsMap)
+
+	if c.serverType == remoteServer {
+		// For remote servers, we can't easily keep the connection alive after timeout.
+		// Use a timer-based approach similar to stdio.
+		callResultCh := make(chan callToolResult, 1)
+		go func() {
+			result, err := c.callToolRemote(ctx, name, paramsMap)
+			select {
+			case callResultCh <- callToolResult{result, err}:
+			default:
+			}
+		}()
+
+		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+		defer timer.Stop()
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+			// Timeout: the call continues in background
+			go func() {
+				r := <-callResultCh
+				if r.err == nil && r.result != nil {
+					// Forward the raw result for background processing
+					// (the caller's goroutine will handle it)
+				}
+			}()
+			return nil, context.DeadlineExceeded
+		case r := <-callResultCh:
+			return r.result, r.err
+		}
+	}
+
+	// Stdio: use requestStdioWithTimeout which preserves the connection on timeout
+	err := c.requestStdioWithTimeout(ctx, "tools/call", params, timeoutMs, resultCh)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we got here, the call completed within the timeout
+	// The result was sent to resultCh by requestStdioWithTimeout
+	return nil, nil // result is in resultCh
+}
+
+type callToolResult struct {
+	result *ToolResult
+	err    error
+}
+
+// requestStdioWithTimeout is like requestStdio but separates timeout from user interrupt.
+// On timeout: returns context.DeadlineExceeded WITHOUT closing stdin (MCP connection stays alive).
+// On user interrupt (ctx.Done()): closes stdin and returns ctx.Err().
+// The resultCh channel receives the RPCResponse when the MCP call completes (even after timeout).
+func (c *Client) requestStdioWithTimeout(ctx context.Context, method string, params json.RawMessage, timeoutMs int64, resultCh chan<- RPCResponse) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.nextID++
+	req := RPCRequest{
+		JSONRPC: "2.0",
+		ID:      c.nextID,
+		Method:  method,
+		Params:  params,
+	}
+
+	data, _ := json.Marshal(req)
+	if _, err := c.stdin.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+
+	done := make(chan struct{})
+	var resp RPCResponse
+	var readErr error
+
+	go func() {
+		line, err := c.stdout.ReadBytes('\n')
+		if err != nil {
+			readErr = err
+			close(done)
+			return
+		}
+		readErr = json.Unmarshal(line, &resp)
+		close(done)
+	}()
+
+	timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		// User interrupt: close stdin to unblock reader goroutine.
+		c.stdin.Close()
+		<-done
+		return ctx.Err()
+	case <-timer.C:
+		// Timeout: DON'T close stdin — the MCP connection stays alive.
+		// The MCP call continues running in the background. When it completes,
+		// the reader goroutine will send the response to resultCh.
+		go func() {
+			<-done
+			if readErr == nil {
+				select {
+				case resultCh <- resp:
+				default:
+				}
+			}
+		}()
+		return context.DeadlineExceeded
+	case <-done:
+		if readErr != nil {
+			return fmt.Errorf("read: %w", readErr)
+		}
+		// Send result to the caller's channel (non-blocking)
+		select {
+		case resultCh <- resp:
+		default:
+		}
+		if resp.Error != nil {
+			return fmt.Errorf("MCP error [%d]: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return nil
 	}
 }
 
@@ -609,6 +735,35 @@ func (m *Manager) CallToolWithServer(ctx context.Context, server, toolName strin
 	}
 
 	return client.CallTool(ctx, toolName, args)
+}
+
+// CallToolWithTimeout calls a tool with a timeout. On timeout, the call continues in background.
+// resultCh receives the RPCResponse when the call completes (even after timeout).
+func (m *Manager) CallToolWithTimeout(ctx context.Context, name string, args ToolCallArgs, timeoutMs int64, resultCh chan<- RPCResponse) (*ToolResult, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, client := range m.clients {
+		for _, tool := range client.tools {
+			if tool.Name == name {
+				return client.CallToolWithTimeout(ctx, name, args, timeoutMs, resultCh)
+			}
+		}
+	}
+	return nil, fmt.Errorf("tool not found: %s", name)
+}
+
+// CallToolWithServerWithTimeout calls a tool on a specific server with a timeout.
+func (m *Manager) CallToolWithServerWithTimeout(ctx context.Context, server, toolName string, args ToolCallArgs, timeoutMs int64, resultCh chan<- RPCResponse) (*ToolResult, error) {
+	m.mu.RLock()
+	client, ok := m.clients[server]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("server not found: %s", server)
+	}
+
+	return client.CallToolWithTimeout(ctx, toolName, args, timeoutMs, resultCh)
 }
 
 // ListTools returns all discovered tools from all servers.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -253,6 +254,21 @@ func (ts *TaskStore) Delete(agentID string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	delete(ts.tasks, agentID)
+}
+
+// RegisterMCPBgTask registers a new background MCP task with its output file path.
+func (ts *TaskStore) RegisterMCPBgTask(agentID, toolName, server, outputFile string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	task := &TaskState{
+		ID:           agentID,
+		Status:       TaskStatusRunning,
+		Description:  toolName,
+		SubagentType: server, // store server name here
+		OutputFile:   outputFile,
+		StartTime:    time.Now(),
+	}
+	ts.tasks[agentID] = task
 }
 
 // RegisterBashBgTask registers a new background bash task with its output file path.
@@ -561,7 +577,142 @@ func (a *AgentLoop) registerExistingProcessAsBgTask(command, workingDir string, 
 	return taskID, outputFile, "", onDone
 }
 
-// readBashBgTaskOutput reads the output file of a background bash task.
+// registerMCPTimeoutAsBgTask registers an MCP tool call that timed out as a
+// background task. The MCP call continues running in the background.
+// Returns (taskID, outputFilePath, errText, onDone).
+// The onDone callback is invoked when the background MCP call completes.
+func (a *AgentLoop) registerMCPTimeoutAsBgTask(toolName, server string, args map[string]any) (string, string, string, func(result string, isError bool)) {
+	taskID := "mcp-" + generateBashTaskID()
+
+	// Create output directory
+	outputDir := filepath.Join(".claude", "tasks", "mcp")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return "", "", fmt.Sprintf("Error: failed to create task output directory: %v", err), nil
+	}
+
+	outputFile := filepath.Join(outputDir, taskID+".output")
+
+	// Open output file and write header
+	f, err := os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return "", "", fmt.Sprintf("Error: failed to create output file: %v", err), nil
+	}
+
+	fmt.Fprintf(f, "--- MCP Task (timeout): %s ---\n", taskID)
+	fmt.Fprintf(f, "Tool: %s\n", toolName)
+	if server != "" {
+		fmt.Fprintf(f, "Server: %s\n", server)
+	}
+	fmt.Fprintf(f, "Timed out: %s\n", time.Now().Format(time.RFC3339))
+	if args != nil {
+		argsJSON, _ := json.Marshal(args)
+		if len(argsJSON) > 500 {
+			argsJSON = argsJSON[:500]
+		}
+		fmt.Fprintf(f, "Arguments: %s\n", string(argsJSON))
+	}
+	fmt.Fprintf(f, "--- Result ---\n\n")
+	f.Close()
+
+	// Register in the task store
+	a.taskStore.RegisterMCPBgTask(taskID, toolName, server, outputFile)
+
+	// Return a completionCallback that writes the result to the output file.
+	onDone := func(result string, isError bool) {
+		f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "%s\n", result)
+			status := "completed"
+			if isError {
+				status = "failed"
+			}
+			fmt.Fprintf(f, "\n--- MCP Task Complete ---\n")
+			fmt.Fprintf(f, "Status: %s\n", status)
+			fmt.Fprintf(f, "Completed: %s\n", time.Now().Format(time.RFC3339))
+			f.Close()
+		}
+
+		a.finishMCPBgTask(taskID, result, isError)
+	}
+
+	return taskID, outputFile, "", onDone
+}
+
+// finishMCPBgTask marks a background MCP task as completed and sends a notification.
+func (a *AgentLoop) finishMCPBgTask(taskID string, result string, isError bool) {
+	task := a.taskStore.GetTask(taskID)
+	if task == nil {
+		return
+	}
+
+	// Guard: don't overwrite if already killed
+	task.mu.Lock()
+	alreadyTerminal := task.Status == TaskStatusKilled
+	task.mu.Unlock()
+	if alreadyTerminal {
+		return
+	}
+
+	if !isError {
+		durationMs := time.Since(task.StartTime).Milliseconds()
+		a.taskStore.CompleteTask(taskID, fmt.Sprintf("MCP tool call completed (background)"), 1, durationMs)
+	} else {
+		a.taskStore.FailTask(taskID, result)
+	}
+
+	status := "completed"
+	summary := "MCP tool call completed"
+	if isError {
+		status = "failed"
+		summary = "MCP tool call failed"
+	}
+
+	outputFile := task.OutputFile
+	toolName := task.Description
+	server := task.SubagentType // we reuse SubagentType to store server name
+
+	notification := fmt.Sprintf(`<task-notification>
+<task_id>%s</task_id>
+<task_type>mcp</task_type>
+<status>%s</status>
+<output_file>%s</output_file>
+<tool>%s</tool>
+<server>%s</server>
+<summary>%s</summary>
+</task-notification>`, taskID, status, outputFile, escapeXML(toolName), escapeXML(server), escapeXML(summary))
+
+	select {
+	case a.notificationChan <- notification:
+	default:
+	}
+}
+
+// readMCPBgTaskOutput reads the output file of a background MCP task.
+// Returns (output, errorText).
+func (a *AgentLoop) readMCPBgTaskOutput(taskID string) (string, string) {
+	task := a.taskStore.GetTask(taskID)
+	if task == nil {
+		return "", fmt.Sprintf("MCP task %s not found", taskID)
+	}
+
+	if task.OutputFile == "" {
+		return "", fmt.Sprintf("MCP task %s has no output file", taskID)
+	}
+	data, err := os.ReadFile(task.OutputFile)
+	if err != nil {
+		return "", fmt.Sprintf("Error reading output file: %v", err)
+	}
+
+	output := string(data)
+	const maxOutput = 50000
+	if len(output) > maxOutput {
+		half := maxOutput / 2
+		truncated := len(output) - maxOutput
+		output = output[:half] + fmt.Sprintf("\n\n... (%d chars truncated) ...\n\n", truncated) + output[len(output)-half:]
+	}
+
+	return fmt.Sprintf("MCP Task %s (%s):\n%s", taskID, task.Status, output), ""
+}
 // Returns (output, errorText).
 func (a *AgentLoop) readBashBgTaskOutput(taskID string, block bool, timeout time.Duration) (string, string) {
 	task := a.taskStore.GetTask(taskID)

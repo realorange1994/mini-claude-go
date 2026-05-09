@@ -138,11 +138,17 @@ func (a *AgentLoop) registerTaskStopTool() {
 // spawnBackgroundBashCommand method, enabling run_in_background support.
 // TimeoutCallback is wired to registerExistingProcessAsBgTask for auto-backgrounding
 // timed-out exec commands.
+// Also wires MCPToolCaller's TimeoutCallback for auto-backgrounding timed-out MCP calls.
 func (a *AgentLoop) registerBashBgTool() {
 	if tool, ok := a.registry.Get("exec"); ok {
 		if execTool, ok := tool.(*tools.ExecTool); ok {
 			execTool.BackgroundTaskCallback = a.spawnBackgroundBashCommand
 			execTool.TimeoutCallback = a.registerExistingProcessAsBgTask
+		}
+	}
+	if tool, ok := a.registry.Get("mcp_call_tool"); ok {
+		if mcpTool, ok := tool.(*tools.MCPToolCaller); ok {
+			mcpTool.TimeoutCallback = a.registerMCPTimeoutAsBgTask
 		}
 	}
 }
