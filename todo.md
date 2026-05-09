@@ -87,3 +87,8 @@
 - **原因**: `buildCompactSummaryMessage()` 在 `CompactContext()` 之后调用，此时 `BuildMessages()` 返回空/截断的消息列表，导致摘要显示 "0 conversation turns with 0 tool calls"
 - **修复**: 在 `CompactContext()` 之前捕获 `BuildMessages()` 和 `extractRecentToolCallsForSummary()`，将预捕获数据传递给 `buildCompactSummaryMessage()`
 - **提交**: ea46040
+## Bug 10: panic in KeepRecentMessagesAdaptive — incomparable type ToolUseContent
+- **位置**: context.go:1021 `c.entries[i] == keptEntries[0]`
+- **原因**: `conversationEntry.content` 是 `EntryContent` 接口，包装了 `ToolUseContent`（切片类型）。Go 不允许用 `==` 比较包含不可比较类型的接口值
+- **修复**: 移除指针比较，改为在遍历时直接记录 `keptStartIdx`（最低索引），压缩后直接使用 `keptStartIdx` 设置 `lastSummarizedIndex`
+- **状态**: 已修复

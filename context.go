@@ -970,6 +970,7 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 
 	// Walk backward from boundary, collecting entries until token/min constraints are met
 	var keptEntries []conversationEntry
+	keptStartIdx := -1 // lowest index in c.entries that was kept
 	accumTokens := 0
 	textMsgCount := 0
 
@@ -996,6 +997,7 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 				textMsgCount++
 			}
 		}
+		keptStartIdx = i
 
 		// Check if we've met all constraints
 		if accumTokens >= minTokens && textMsgCount >= minTextMsgs {
@@ -1014,15 +1016,10 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 	// Adjust backwards to preserve tool_use/tool_result pairing.
 	keptEntries = adjustForToolPairing(c.entries[:boundaryIdx], keptEntries)
 
-	// Update lastSummarizedIndex: the last entry before the boundary that was NOT kept
-	// (i.e., entries 0..lastKeptIndex were summarized)
-	if len(keptEntries) > 0 {
-		for i := boundaryIdx - 1; i >= 0; i-- {
-			if c.entries[i] == keptEntries[0] {
-				c.lastSummarizedIndex = i
-				break
-			}
-		}
+	// Update lastSummarizedIndex: the lowest index of kept entries.
+	// Entries before this index were summarized/compacted.
+	if keptStartIdx >= 0 {
+		c.lastSummarizedIndex = keptStartIdx
 	}
 
 	// Append the kept entries after the boundary+summary as preserved messages
