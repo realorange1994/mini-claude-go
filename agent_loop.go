@@ -23,9 +23,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
 	"miniclaudecode-go/mcp"
+	"miniclaudecode-go/skills"
 	"miniclaudecode-go/tools"
 	"miniclaudecode-go/transcript"
-	"miniclaudecode-go/skills"
 )
 
 // IterationBudget manages the turn budget for the agent loop.
@@ -276,40 +276,40 @@ func (a *AgentLoop) InjectNotifications(notifications []string) {
 
 // AgentLoop drives the core agentic loop.
 type AgentLoop struct {
-	config       Config
-	registry     *tools.Registry
-	gate         *PermissionGate
-	context      *ConversationContext
-	client       anthropic.Client
-	snapshots    *SnapshotHistory
-	transcript   *transcript.Writer
-	skillTracker *skills.SkillTracker
-	compactor    *Compactor
-	useStream    bool
-	maxToolChars int           // max chars per tool result (default 50000, matching upstream)
-	toolTimeoutMs int // per-tool execution timeout in ms (default 600000 = 10min)
-	maxTurns     int           // hard cap on turns (default from config.MaxTurns)
-	budget       *IterationBudget
-	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
-	lastDeltasState DeltasState // tracks what was streamed in last attempt
-	rateLimitState  RateLimitState // rate limit headers from API responses
-	prevTurnTokens  int            // tracks token count from previous turn for reactive compact
-	activeSubAgents sync.WaitGroup // tracks running sub-agents (Wait blocks until all complete)
-	taskStore       *TaskStore     // tracks all sub-agent tasks (bash + sub-agents)
-	agentTaskStore  *tools.AgentTaskStore // tracks background agent tasks (with output capture)
-	currentMaxTokens atomic.Int64  // effective max_tokens for API calls (escates on max_tokens hit)
-	notificationChan chan string   // buffered channel for async task notifications
-	evictionDone    chan struct{}  // signals the eviction ticker goroutine to stop
-	agentNameRegistry map[string]string // maps short agent names to task IDs
-	cancelCtx      context.Context   // cancellable context for async sub-agents
-	cancelFunc     context.CancelFunc // cancel function for async sub-agents
-	workTaskStore  *WorkTaskStore    // tracks LLM work items (TODO list)
-	agentOutput    io.Writer         // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
-	drainPendingMessagesFunc func() []string // called at turn boundaries to drain pending messages from parent task store
-	toolStateTracker         *ToolStateTracker // tracks tool state for injection into system prompt
-	todoList                 *tools.TodoList    // structured task list for TodoWrite tool
-	totalInputTokens         atomic.Int64      // cumulative input tokens across all turns
-	totalOutputTokens        atomic.Int64      // cumulative output tokens across all turns
+	config                   Config
+	registry                 *tools.Registry
+	gate                     *PermissionGate
+	context                  *ConversationContext
+	client                   anthropic.Client
+	snapshots                *SnapshotHistory
+	transcript               *transcript.Writer
+	skillTracker             *skills.SkillTracker
+	compactor                *Compactor
+	useStream                bool
+	maxToolChars             int // max chars per tool result (default 50000, matching upstream)
+	toolTimeoutMs            int // per-tool execution timeout in ms (default 600000 = 10min)
+	maxTurns                 int // hard cap on turns (default from config.MaxTurns)
+	budget                   *IterationBudget
+	interrupted              atomic.Bool                // set by Ctrl+C handler to stop the loop
+	lastDeltasState          DeltasState                // tracks what was streamed in last attempt
+	rateLimitState           RateLimitState             // rate limit headers from API responses
+	prevTurnTokens           int                        // tracks token count from previous turn for reactive compact
+	activeSubAgents          sync.WaitGroup             // tracks running sub-agents (Wait blocks until all complete)
+	taskStore                *TaskStore                 // tracks all sub-agent tasks (bash + sub-agents)
+	agentTaskStore           *tools.AgentTaskStore      // tracks background agent tasks (with output capture)
+	currentMaxTokens         atomic.Int64               // effective max_tokens for API calls (escates on max_tokens hit)
+	notificationChan         chan string                // buffered channel for async task notifications
+	evictionDone             chan struct{}              // signals the eviction ticker goroutine to stop
+	agentNameRegistry        map[string]string          // maps short agent names to task IDs
+	cancelCtx                context.Context            // cancellable context for async sub-agents
+	cancelFunc               context.CancelFunc         // cancel function for async sub-agents
+	workTaskStore            *WorkTaskStore             // tracks LLM work items (TODO list)
+	agentOutput              io.Writer                  // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
+	drainPendingMessagesFunc func() []string            // called at turn boundaries to drain pending messages from parent task store
+	toolStateTracker         *ToolStateTracker          // tracks tool state for injection into system prompt
+	todoList                 *tools.TodoList            // structured task list for TodoWrite tool
+	totalInputTokens         atomic.Int64               // cumulative input tokens across all turns
+	totalOutputTokens        atomic.Int64               // cumulative output tokens across all turns
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
 }
 
@@ -342,7 +342,7 @@ func newHTTPClient() *http.Client {
 		Timeout: 300 * time.Second, // overall request timeout
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,  // connection timeout
+				Timeout:   30 * time.Second, // connection timeout
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 			TLSHandshakeTimeout:   30 * time.Second,
@@ -385,24 +385,24 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	}
 
 	agent := &AgentLoop{
-		config:       cfg,
-		registry:     registry,
-		gate:         NewPermissionGate(&cfg), // points to agent.config after assignment
-		context:      ctx,
-		client:       client,
-		snapshots:    cfg.FileHistory,
-		transcript:   tw,
-		skillTracker: cfg.SkillTracker,
-		compactor:    NewCompactor(),
-		useStream:    useStream,
-		maxToolChars: 50000,
-		toolTimeoutMs: 600000, // 10 minutes
-		maxTurns:     maxTurns,
-		budget:       NewIterationBudget(maxTurns),
-		taskStore:       NewTaskStore(),
-		agentTaskStore:  tools.NewAgentTaskStore(),
-		notificationChan: make(chan string, 64),
-		evictionDone:    make(chan struct{}),
+		config:            cfg,
+		registry:          registry,
+		gate:              NewPermissionGate(&cfg), // points to agent.config after assignment
+		context:           ctx,
+		client:            client,
+		snapshots:         cfg.FileHistory,
+		transcript:        tw,
+		skillTracker:      cfg.SkillTracker,
+		compactor:         NewCompactor(),
+		useStream:         useStream,
+		maxToolChars:      50000,
+		toolTimeoutMs:     600000, // 10 minutes
+		maxTurns:          maxTurns,
+		budget:            NewIterationBudget(maxTurns),
+		taskStore:         NewTaskStore(),
+		agentTaskStore:    tools.NewAgentTaskStore(),
+		notificationChan:  make(chan string, 64),
+		evictionDone:      make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
 		workTaskStore:     NewWorkTaskStore(),
 		agentOutput:       os.Stderr,
@@ -535,30 +535,30 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	}
 
 	agent := &AgentLoop{
-		config:           cfg,
-		registry:         registry,
-		gate:             gate,
-		context:          convCtx,
-		client:           client,
-		snapshots:        cfg.FileHistory,
-		transcript:       tw,
-		skillTracker:     cfg.SkillTracker,
-		compactor:        NewCompactor(),
-		useStream:        useStream,
-		maxToolChars:     50000,
-		toolTimeoutMs:  600000, // 10 minutes
-		maxTurns:         maxTurns,
-		budget:           NewIterationBudget(maxTurns),
-		taskStore:        NewTaskStore(),
-		agentTaskStore:   tools.NewAgentTaskStore(),
+		config:            cfg,
+		registry:          registry,
+		gate:              gate,
+		context:           convCtx,
+		client:            client,
+		snapshots:         cfg.FileHistory,
+		transcript:        tw,
+		skillTracker:      cfg.SkillTracker,
+		compactor:         NewCompactor(),
+		useStream:         useStream,
+		maxToolChars:      50000,
+		toolTimeoutMs:     600000, // 10 minutes
+		maxTurns:          maxTurns,
+		budget:            NewIterationBudget(maxTurns),
+		taskStore:         NewTaskStore(),
+		agentTaskStore:    tools.NewAgentTaskStore(),
 		notificationChan:  make(chan string, 64),
-		evictionDone:     make(chan struct{}),
+		evictionDone:      make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
-		workTaskStore:    NewWorkTaskStore(),
-		agentOutput:      os.Stderr,
+		workTaskStore:     NewWorkTaskStore(),
+		agentOutput:       os.Stderr,
 		toolStateTracker:  NewToolStateTracker(),
-		todoList:         tools.NewTodoList(),
-		cachedMC:         NewCachedMicrocompactTracker(),
+		todoList:          tools.NewTodoList(),
+		cachedMC:          NewCachedMicrocompactTracker(),
 	}
 
 	// Restore skill state from transcript entries so skillTracker reflects
@@ -828,7 +828,6 @@ func (a *AgentLoop) extractConclusions(text string) {
 	}
 }
 
-
 func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(baseCtx, timeout)
 
@@ -880,12 +879,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 		contextWindow = 200_000
 	}
 	expanded := PreprocessContextReferences(userMessage, cwd, contextWindow)
-		if expanded.Expanded && !expanded.Blocked {
+	if expanded.Expanded && !expanded.Blocked {
 		userMessage = expanded.Message
 	} else if len(expanded.Warnings) > 0 {
 		// Log warnings even if blocked
 		for _, w := range expanded.Warnings {
-			a.out( "[WARN] %s\n", w)
+			a.out("[WARN] %s\n", w)
 		}
 	}
 
@@ -902,8 +901,6 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// Empty response tracking -- prevents infinite loops on thinking-only responses
 	consecutiveEmptyResponses := 0
 	const maxEmptyResponses = 3
-
-
 
 	// Preflight compression for resumed sessions
 	const preflightThreshold = 100000 // ~100k tokens
@@ -944,7 +941,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				threshold = 5000
 			}
 			if result := CheckReactiveCompact(currentTokens, a.prevTurnTokens, threshold); result != nil {
-				a.out( "\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
+				a.out("\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
 					a.prevTurnTokens, currentTokens, result.TokenDelta, threshold)
 				a.tryCompaction()
 			}
@@ -961,32 +958,32 @@ func (a *AgentLoop) Run(userMessage string) string {
 			a.context.SetSystemPrompt(sysPrompt)
 		}
 
-			// Inject tool state tracker session state into system prompt.
-			// This gives the agent visibility into what it has already done,
-			// preventing redundant reads and searches.
-			if a.toolStateTracker != nil {
-				currentPrompt := a.context.SystemPrompt()
-				sessionState := a.toolStateTracker.BuildSessionStateNote()
-				a.context.SetSystemPrompt(currentPrompt + "\n\n" + sessionState)
-			}
+		// Inject tool state tracker session state into system prompt.
+		// This gives the agent visibility into what it has already done,
+		// preventing redundant reads and searches.
+		if a.toolStateTracker != nil {
+			currentPrompt := a.context.SystemPrompt()
+			sessionState := a.toolStateTracker.BuildSessionStateNote()
+			a.context.SetSystemPrompt(currentPrompt + "\n\n" + sessionState)
+		}
 
-			// Inject todo reminder into system prompt every turn (if tasks exist).
-			// This ensures the model sees its task list and stays on track.
-			if reminder := a.todoList.BuildReminder(); reminder != "" {
-				currentPrompt := a.context.SystemPrompt()
-				a.context.SetSystemPrompt(currentPrompt + "\n\n" + reminder + "\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.")
-			}
+		// Inject todo reminder into system prompt every turn (if tasks exist).
+		// This ensures the model sees its task list and stays on track.
+		if reminder := a.todoList.BuildReminder(); reminder != "" {
+			currentPrompt := a.context.SystemPrompt()
+			a.context.SetSystemPrompt(currentPrompt + "\n\n" + reminder + "\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.")
+		}
 
-			// Periodic TodoWrite idle reminder: if model hasn't used TodoWrite
-			// for 10+ turns, inject a nudge to create/update task list.
-			if a.todoList.IncrementTurn() {
-				if a.todoList.BuildReminder() == "" {
-					// No tasks exist and model is idle — nudge to use TodoWrite
-					idleMsg := a.todoList.BuildIdleReminder()
-					currentPrompt := a.context.SystemPrompt()
-					a.context.SetSystemPrompt(currentPrompt + "\n\n" + idleMsg)
-				}
+		// Periodic TodoWrite idle reminder: if model hasn't used TodoWrite
+		// for 10+ turns, inject a nudge to create/update task list.
+		if a.todoList.IncrementTurn() {
+			if a.todoList.BuildReminder() == "" {
+				// No tasks exist and model is idle — nudge to use TodoWrite
+				idleMsg := a.todoList.BuildIdleReminder()
+				currentPrompt := a.context.SystemPrompt()
+				a.context.SetSystemPrompt(currentPrompt + "\n\n" + idleMsg)
 			}
+		}
 
 		var toolCalls []map[string]any
 		var textParts []string
@@ -1002,19 +999,19 @@ func (a *AgentLoop) Run(userMessage string) string {
 			errMsg := err.Error()
 			// User interrupt -- return immediately
 			if strings.Contains(errMsg, "interrupted by user") {
-				a.out( "\n[WARN] Interrupted.\n")
+				a.out("\n[WARN] Interrupted.\n")
 				return finalText
 			}
 			// Model confusion -- echoed tool syntax as text; recover by retrying
 			if strings.Contains(errMsg, "model confused") {
-				a.out( "\n[WARN] Model confused, retrying...\n")
+				a.out("\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
 				a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
 				continue
 			}
 			// 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
 			if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-				a.out( "\n[WARN] Tool pairing error (2013), repairing context...\n")
+				a.out("\n[WARN] Tool pairing error (2013), repairing context...\n")
 				a.context.ValidateToolPairing()
 				a.context.FixRoleAlternation()
 				// Inject a recovery hint so the model produces properly sequenced tool calls
@@ -1023,7 +1020,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 			// Truncated tool arguments -- model cut off mid-tool-call
 			if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
-				a.out( "\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
+				a.out("\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
 				a.context.AddUserMessage("ERROR: Your tool call arguments was cut off due to length limits. Do NOT repeat the truncated tool call. If you need to make multiple tool calls, make them one at a time with shorter arguments.")
 				continue
 			}
@@ -1032,7 +1029,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if strings.Contains(errMsg, "stream stalled") {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
-					a.out( "\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
+					a.out("\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
 				if a.toolStateTracker != nil {
@@ -1052,7 +1049,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if isContextLengthError(errMsg) {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
-					a.out( "\n[ERR] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
+					a.out("\n[ERR] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
 					return finalText
 				}
 
@@ -1087,10 +1084,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 				// No text and no tool calls -- thinking-only response
 				consecutiveEmptyResponses++
 				if consecutiveEmptyResponses >= maxEmptyResponses {
-					a.out( "\n[ERR] No actionable response after %d attempts, giving up\n", maxEmptyResponses)
+					a.out("\n[ERR] No actionable response after %d attempts, giving up\n", maxEmptyResponses)
 					return fmt.Sprintf("Model returned no actionable response %d times in a row", maxEmptyResponses)
 				}
-				a.out( "\n[WARN] No text/tool_use in response (attempt %d/%d), continuing...\n",
+				a.out("\n[WARN] No text/tool_use in response (attempt %d/%d), continuing...\n",
 					consecutiveEmptyResponses, maxEmptyResponses)
 				// Inject hint to encourage actual output
 				a.context.AddUserMessage("Please continue and provide your response in text or use a tool.")
@@ -1141,30 +1138,30 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		a.executeToolCallsConcurrent(toolCalls)
 
-			// Update tool state tracker after tool execution
-			if a.toolStateTracker != nil {
-				for _, call := range toolCalls {
-					name, _ := call["name"].(string)
-					input, _ := call["input"].(map[string]any)
-					if input == nil {
-						continue
+		// Update tool state tracker after tool execution
+		if a.toolStateTracker != nil {
+			for _, call := range toolCalls {
+				name, _ := call["name"].(string)
+				input, _ := call["input"].(map[string]any)
+				if input == nil {
+					continue
+				}
+				switch name {
+				case "read_file":
+					if path := extractFilePath(input); path != "" {
+						a.toolStateTracker.RecordFileRead(path)
 					}
-					switch name {
-					case "read_file":
-						if path := extractFilePath(input); path != "" {
-							a.toolStateTracker.RecordFileRead(path)
-						}
-					case "grep":
-						if pattern, ok := input["pattern"].(string); ok {
-							a.toolStateTracker.RecordSearch(pattern, true)
-						}
-					case "glob":
-						if pattern, ok := input["pattern"].(string); ok {
-							a.toolStateTracker.RecordSearch(pattern, true)
-						}
+				case "grep":
+					if pattern, ok := input["pattern"].(string); ok {
+						a.toolStateTracker.RecordSearch(pattern, true)
+					}
+				case "glob":
+					if pattern, ok := input["pattern"].(string); ok {
+						a.toolStateTracker.RecordSearch(pattern, true)
 					}
 				}
 			}
+		}
 
 		// Between-turn drain: inject sub-agent completion notifications
 		// into the conversation context (matching Claude Code's query.ts
@@ -1192,7 +1189,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		// Check for interrupt after tool execution
 		if a.IsInterrupted() {
-			a.out( "\n[WARN] Interrupted by user.\n")
+			a.out("\n[WARN] Interrupted by user.\n")
 			a.SetInterrupted(false)
 			return finalText
 		}
@@ -1203,7 +1200,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// to get a conclusive answer (like Claude Code's max_turns handling).
 	// Tools are removed in this call to force a text-only response.
 	if finalText == "" && a.budget.GraceCall() {
-		a.out( "\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
+		a.out("\n[WARN] Max turns (%d) reached, requesting final answer...\n", a.maxTurns)
 		a.context.AddUserMessage("You have reached the maximum number of tool use turns. Please provide a final summary based on the work done so far. Do NOT call any more tools.")
 		// Call WITHOUT tools to force text-only response
 		toolCallsGrace, textPartsGrace, err := a.callWithNonStreamingNoTools()
@@ -1264,6 +1261,12 @@ func (a *AgentLoop) ForceCompact() {
 		return
 	}
 
+	// Capture full conversation data before any truncation.
+	// buildCompactSummaryMessage needs pre-compacted entries to generate useful
+	// structured metadata ("N conversation turns with N tool calls").
+	preCompactMessages := a.context.BuildMessages()
+	preCompactToolCalls := a.extractRecentToolCallsForSummary(5)
+
 	// Try normal compaction first (may skip if not needed)
 	preTokens := a.context.EstimatedTokens()
 	if a.context.CompactContext() {
@@ -1275,7 +1278,7 @@ func (a *AgentLoop) ForceCompact() {
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 
 		// Build structured summary matching upstream's getCompactUserSummaryMessage format.
-		summaryContent := a.buildCompactSummaryMessage(preTokens)
+		summaryContent := a.buildCompactSummaryMessage(preTokens, preCompactMessages, preCompactToolCalls)
 		a.context.AddSummary(summaryContent)
 
 		if a.toolStateTracker != nil {
@@ -1304,7 +1307,7 @@ func (a *AgentLoop) ForceCompact() {
 		// often re-executes already-completed work.
 		preTokens := a.context.EstimatedTokens()
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
-		summaryContent := a.buildCompactSummaryMessage(preTokens)
+		summaryContent := a.buildCompactSummaryMessage(preTokens, preCompactMessages, preCompactToolCalls)
 		a.context.AddSummary(summaryContent)
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
@@ -1489,7 +1492,7 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 
 		// 2013 error: tool pairing broken -- repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-			a.out( "\n[WARN] Tool pairing error (2013), repairing context...\n")
+			a.out("\n[WARN] Tool pairing error (2013), repairing context...\n")
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
 			// Inject a recovery hint so the model produces properly sequenced tool calls
@@ -1568,7 +1571,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 				// Use rate limit header delay if it's reasonable (not >3x backoff)
 				delay = rlim
 			}
-			a.out( "\n[WARN] Retrying stream (attempt %d/%d), waiting %v...\n",
+			a.out("\n[WARN] Retrying stream (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxStreamRetries+1, delay)
 			time.Sleep(delay)
 		}
@@ -1602,7 +1605,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 		// Transient error (network, timeout, 5xx): decide retry strategy
 		if isTransientError(errMsg) {
-			a.out( "\n[WARN] Transient error during stream: %v\n", err)
+			a.out("\n[WARN] Transient error during stream: %v\n", err)
 			// Clear accumulated state before retry -- the API will send
 			// a completely new response with new tool IDs on reconnect,
 			// so old collected data would have mismatched IDs.
@@ -1614,24 +1617,24 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 				continue
 			case DeltasStateToolInFlight:
 				// Tool call started but incomplete -- cleared above, retry
-				a.out( "  [!] Connection dropped mid-tool-call; reconnecting...\n")
+				a.out("  [!] Connection dropped mid-tool-call; reconnecting...\n")
 				continue
 			case DeltasStateTextOnly:
 				// Text already streamed to user -- can't retry without duplication,
 				// but we have what was collected so far. Fall back to non-streaming
 				// for a complete fresh response (matching Hermes outer retry pattern).
-				a.out( "  [!] Stream interrupted after text output, falling back to non-streaming...\n")
+				a.out("  [!] Stream interrupted after text output, falling back to non-streaming...\n")
 				return a.callWithNonStreamingFallback(params)
 			}
 		}
 
 		// Non-transient error during stream -> try non-streaming fallback
-		a.out( "\n[WARN] Stream failed (%v), falling back to non-streaming...\n", err)
+		a.out("\n[WARN] Stream failed (%v), falling back to non-streaming...\n", err)
 		return a.callWithNonStreamingFallback(params)
 	}
 
 	// All stream retries exhausted -> try non-streaming fallback
-	a.out( "\n[WARN] Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
+	a.out("\n[WARN] Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
 	return a.callWithNonStreamingFallback(params)
 }
 
@@ -1648,7 +1651,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 			return err
 		}
 		if collect.IsToolUseAsText() {
-			a.out( "\n[WARN] Model confused, aborting stream...\n")
+			a.out("\n[WARN] Model confused, aborting stream...\n")
 			cancel()
 			return fmt.Errorf("model confused: echoed tool syntax as text")
 		}
@@ -1695,7 +1698,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 
 	// Check for tool-as-text echo and truncated arguments
 	if collect.IsToolUseAsText() {
-		a.out( "\n[WARN] Model echoed tool syntax as text -- recovering\n")
+		a.out("\n[WARN] Model echoed tool syntax as text -- recovering\n")
 		collect.Text = ""
 	}
 
@@ -1705,7 +1708,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		for _, tc := range collect.ToolCalls {
 			names = append(names, tc.Name)
 		}
-		a.out( "\n[WARN] Tool arguments truncated: %v\n", names)
+		a.out("\n[WARN] Tool arguments truncated: %v\n", names)
 		return nil, nil, fmt.Errorf("tool arguments were truncated (incomplete JSON)")
 	}
 
@@ -1748,7 +1751,7 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
 	messages := a.context.BuildMessages()
-	messages = NormalizeAPIMessages(messages)   // KV cache reuse
+	messages = NormalizeAPIMessages(messages) // KV cache reuse
 	params := anthropic.MessageNewParams{
 		Model:     a.config.Model,
 		MaxTokens: a.currentMaxTokens.Load(),
@@ -1788,7 +1791,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := jitteredBackoff(attempt)
-			a.out( "\n[WARN] Retrying final call (attempt %d/%d), waiting %v...\n",
+			a.out("\n[WARN] Retrying final call (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
 			time.Sleep(delay)
 		}
@@ -1854,7 +1857,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			if rlim := a.rateLimitState.RetryDelay(); rlim > 0 && rlim < delay*3 {
 				delay = rlim
 			}
-			a.out( "\n[WARN] Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
+			a.out("\n[WARN] Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
 			time.Sleep(delay)
 		}
@@ -1899,7 +1902,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 		// 2013 error: tool pairing broken -- repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-			a.out( "\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
+			a.out("\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
 			// Inject a recovery hint so the model produces properly sequenced tool calls
@@ -1933,14 +1936,14 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				return nil, nil, fmt.Errorf("context_length_exceeded")
 			}
 			// Transient 500: retry
-			a.out( "\n[WARN] Transient 500 during non-streaming (attempt %d/%d): %v\n", consecutive500s, 3, err)
+			a.out("\n[WARN] Transient 500 during non-streaming (attempt %d/%d): %v\n", consecutive500s, 3, err)
 			continue
 		}
 		consecutive500s = 0
 
 		// Transient error: retry
 		if isTransientError(errMsg) {
-			a.out( "\n[WARN] Transient error during non-streaming: %v\n", err)
+			a.out("\n[WARN] Transient error during non-streaming: %v\n", err)
 			continue
 		}
 
@@ -2005,7 +2008,7 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 		if len(preview) > 120 {
 			preview = preview[:120] + "..."
 		}
-		a.out( "\n[THINK] %s\n", preview)
+		a.out("\n[THINK] %s\n", preview)
 	}
 
 	// Capture stop_reason for max_tokens escalation
@@ -2023,9 +2026,9 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 		inputPreview := formatToolArgs(toolName, input)
 
 		if toolName == "exec" {
-			a.out( "  [%s]: %s\n", toolName, inputPreview)
+			a.out("  [%s]: %s\n", toolName, inputPreview)
 		} else {
-			a.out( "  [%s] %s\n", toolName, inputPreview)
+			a.out("  [%s] %s\n", toolName, inputPreview)
 		}
 	}
 
@@ -2058,8 +2061,8 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 
 	// Execute approved tool calls concurrently
 	type jobResult struct {
-		index int
-		param anthropic.ToolResultBlockParam
+		index  int
+		param  anthropic.ToolResultBlockParam
 		output string
 	}
 	ch := make(chan jobResult, len(entries))
@@ -2165,8 +2168,8 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		tools.CoerceArguments(tool.InputSchema(), input)
 	}
 
-		// Remap directory parameter name (official: directory, internal: dir)
-		tools.RemapDirParam(input)
+	// Remap directory parameter name (official: directory, internal: dir)
+	tools.RemapDirParam(input)
 
 	// Record tool use to transcript
 	if a.transcript != nil {
@@ -2198,7 +2201,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	// Auto-snapshot before write/edit tools
 	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
 		if path := extractFilePath(input); path != "" {
-			_ = a.snapshots.TakeSnapshotWithDesc(path, "before " + toolName)
+			_ = a.snapshots.TakeSnapshotWithDesc(path, "before "+toolName)
 		}
 	}
 
@@ -2237,7 +2240,6 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 			}
 		}
 	}
-
 
 	if checkPermissions {
 		denial := a.gate.Check(tool, input)
@@ -2342,19 +2344,19 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	// Display timing to stderr
 	if cancelled {
-		a.out( "  [TIMEOUT] timed out after %v\n", ctxDeadline.Round(time.Millisecond))
+		a.out("  [TIMEOUT] timed out after %v\n", ctxDeadline.Round(time.Millisecond))
 	} else if result.IsError {
 		preview := limitStr(output, 150)
-		a.out( "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
+		a.out("  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
 	} else {
 		preview := toolResultPreview(toolName, output)
 		if toolName == "exec" {
 			// For exec, show result with tool name prefix
-			a.out( "  [+] %s: %s\n", toolName, preview)
+			a.out("  [+] %s: %s\n", toolName, preview)
 		} else if preview == "" {
-			a.out( "  [+] %s\n", toolName)
+			a.out("  [+] %s\n", toolName)
 		} else {
-			a.out( "  [+] %s: %s\n", toolName, preview)
+			a.out("  [+] %s: %s\n", toolName, preview)
 		}
 	}
 
@@ -2369,7 +2371,6 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		IsError:   param.NewOpt(result.IsError),
 	}, output
 }
-
 
 // toolResultPreview extracts the most relevant part of a tool result for display.
 func toolResultPreview(toolName, output string) string {
@@ -2640,33 +2641,33 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 			maxFileTokens = maxFileChars / 4
 		}
 
-	// Collect file paths already visible in preserved messages (after boundary).
-	// These are files whose read results survived compaction, so re-injecting
-	// them would be redundant. Matches upstream's collectReadToolFilePaths.
-	preservedReadPaths := collectReadToolFilePaths(a.context)
+		// Collect file paths already visible in preserved messages (after boundary).
+		// These are files whose read results survived compaction, so re-injecting
+		// them would be redundant. Matches upstream's collectReadToolFilePaths.
+		preservedReadPaths := collectReadToolFilePaths(a.context)
 
-	paths := a.registry.GetRecentlyReadFiles(maxFiles)
-	totalTokens := 0
-	filesRecovered := 0
+		paths := a.registry.GetRecentlyReadFiles(maxFiles)
+		totalTokens := 0
+		filesRecovered := 0
 
-	for _, path := range paths {
-		// Expand the normalized path back to a real path
-		realPath := path
-		if !filepath.IsAbs(realPath) {
-			realPath = filepath.Join(a.config.ProjectDir, realPath)
-		}
+		for _, path := range paths {
+			// Expand the normalized path back to a real path
+			realPath := path
+			if !filepath.IsAbs(realPath) {
+				realPath = filepath.Join(a.config.ProjectDir, realPath)
+			}
 
-		// Skip plan files and memory files (CLAUDE.md, etc.)
-		if shouldExcludeFromPostCompactRestore(realPath, a.config.ProjectDir) {
-			continue
-		}
+			// Skip plan files and memory files (CLAUDE.md, etc.)
+			if shouldExcludeFromPostCompactRestore(realPath, a.config.ProjectDir) {
+				continue
+			}
 
-		// Skip files already visible in the preserved message tail
-		if preservedReadPaths != nil && preservedReadPaths[realPath] {
-			continue
-		}
+			// Skip files already visible in the preserved message tail
+			if preservedReadPaths != nil && preservedReadPaths[realPath] {
+				continue
+			}
 
-		data, err := os.ReadFile(realPath)
+			data, err := os.ReadFile(realPath)
 			if err != nil {
 				continue // file may have been deleted
 			}
@@ -2698,7 +2699,7 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 
 		if filesRecovered > 0 {
-			a.out( "[post-compact] Recovered %d files (~%d tokens)\n", filesRecovered, totalTokens)
+			a.out("[post-compact] Recovered %d files (~%d tokens)\n", filesRecovered, totalTokens)
 		}
 	}
 
@@ -2757,7 +2758,7 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 	}
 
-		// --- Plan file recovery ---
+	// --- Plan file recovery ---
 	// Re-inject the current plan file if one exists, so the model knows
 	// what it was working on and what to do next.
 	planAttachment := buildPostCompactPlanAttachment(a.config.ProjectDir)
@@ -3106,9 +3107,9 @@ func buildTaskRecoveryAttachment(ctx *ConversationContext) string {
 					TaskId      string `json:"taskId"`
 					ID          string `json:"id"`
 					Todos       []struct {
-						Content  string `json:"content"`
-						Status   string `json:"status"`
-						Subject  string `json:"subject"`
+						Content string `json:"content"`
+						Status  string `json:"status"`
+						Subject string `json:"subject"`
 					} `json:"todos"`
 				} `json:"input"`
 			}
@@ -3270,7 +3271,10 @@ func (a *AgentLoop) buildPostCompactAgentAnnouncement() string {
 // It uses toolStateTracker conclusions and recent tool calls to tell the model
 // what was completed vs. pending — preventing the model from re-executing
 // already-done work.
-func (a *AgentLoop) buildCompactSummaryMessage(preTokens int) string {
+//
+// messages and recentToolCalls are the pre-compacted conversation data.
+// If messages is nil, BuildMessages() is called (backwards compat).
+func (a *AgentLoop) buildCompactSummaryMessage(preTokens int, messages []anthropic.MessageParam, recentToolCalls []string) string {
 	var sb strings.Builder
 
 	// Preamble matching upstream's getCompactUserSummaryMessage
@@ -3280,7 +3284,9 @@ func (a *AgentLoop) buildCompactSummaryMessage(preTokens int) string {
 	// Include structured metadata from the full conversation before compaction.
 	// This ensures the model sees an explicit inventory of files, tool calls,
 	// and user messages — matching the LLM compact path's structured output.
-	messages := a.context.BuildMessages()
+	if messages == nil {
+		messages = a.context.BuildMessages()
+	}
 	structuredMeta := entriesToSummaryTextForMessagesParams(messages)
 	if structuredMeta != "" {
 		sb.WriteString("\n## Structured context from compacted messages:\n")
@@ -3298,9 +3304,15 @@ func (a *AgentLoop) buildCompactSummaryMessage(preTokens int) string {
 	}
 
 	// Include recent tool calls to show what was being worked on.
-	if recentCalls := a.extractRecentToolCallsForSummary(5); len(recentCalls) > 0 {
+	// If recentToolCalls was pre-captured, use it; otherwise extract fresh.
+	if len(recentToolCalls) > 0 {
 		sb.WriteString("\n## Recent Tool Calls Before Compaction\n")
-		for _, tc := range recentCalls {
+		for _, tc := range recentToolCalls {
+			sb.WriteString(fmt.Sprintf("- %s\n", tc))
+		}
+	} else if calls := a.extractRecentToolCallsForSummary(5); len(calls) > 0 {
+		sb.WriteString("\n## Recent Tool Calls Before Compaction\n")
+		for _, tc := range calls {
 			sb.WriteString(fmt.Sprintf("- %s\n", tc))
 		}
 	}
@@ -3328,7 +3340,7 @@ func (a *AgentLoop) injectTruncationContinuation(preTokens int) {
 		return
 	}
 	a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
-	summaryContent := a.buildCompactSummaryMessage(preTokens)
+	summaryContent := a.buildCompactSummaryMessage(preTokens, nil, nil)
 	a.context.AddSummary(summaryContent)
 }
 
@@ -3408,7 +3420,7 @@ func (a *AgentLoop) tryCompaction() {
 		}
 		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
 		if cleared > 0 {
-			a.out( "\n[micro-compact] Cleared %d old tool results\n", cleared)
+			a.out("\n[micro-compact] Cleared %d old tool results\n", cleared)
 			// NOTE: do NOT call toolStateTracker.OnCompaction() here.
 			// Micro-compact clears OLD tool results (beyond keepRecent threshold) by
 			// replacing their text with placeholders. This is lightweight text replacement,
@@ -3423,6 +3435,12 @@ func (a *AgentLoop) tryCompaction() {
 
 	if a.compactor == nil {
 		preTokens := a.context.EstimatedTokens()
+		// Capture messages and recent tool calls BEFORE compaction clears entries.
+		// buildCompactSummaryMessage needs the full conversation context to generate
+		// a useful summary; after CompactContext(), entries are truncated and the
+		// summary would show "0 conversation turns with 0 tool calls".
+		preCompactMessages := a.context.BuildMessages()
+		preCompactToolCalls := a.extractRecentToolCallsForSummary(5)
 		if a.context.CompactContext() {
 			// CompactContext truncates messages but doesn't add a continuation directive.
 			// Without one, the model sees an incomplete conversation and re-executes
@@ -3433,7 +3451,7 @@ func (a *AgentLoop) tryCompaction() {
 			// Build a structured summary matching upstream's getCompactUserSummaryMessage
 			// format. Without this, the model sees a bare "[compact: N tokens]" and
 			// re-executes historical instructions instead of continuing.
-			summaryContent := a.buildCompactSummaryMessage(preTokens)
+			summaryContent := a.buildCompactSummaryMessage(preTokens, preCompactMessages, preCompactToolCalls)
 			a.context.AddSummary(summaryContent)
 
 			if a.toolStateTracker != nil {
@@ -3569,7 +3587,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	}
 	summaryContent += "\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
 
-	a.out( "\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
+	a.out("\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
 		preTokens, EstimateTokens(summaryContent)+6)
 
 	// Inject boundary + summary into context
