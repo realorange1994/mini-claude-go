@@ -2821,7 +2821,7 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 	// user-defined notes that must survive context compaction.
 	// Uses per-section truncation matching upstream's truncateSessionMemoryForCompact.
 	if a.config.SessionMemory != nil {
-		smContent := a.config.SessionMemory.FormatForPromptCompact(8_000)
+		smContent := a.config.SessionMemory.FormatForPromptCompact()
 		if smContent != "" {
 			attachment := fmt.Sprintf("<session_memory>\n%s\n</session_memory>", smContent)
 			a.context.AddAttachment(attachment)
@@ -3496,7 +3496,7 @@ func (a *AgentLoop) tryCompaction() {
 	// This is the preferred path when memory is available: saves an LLM API call
 	// and leverages incrementally collected session memory as the context summary.
 	if a.config.SessionMemory != nil {
-		if memContent := a.config.SessionMemory.FormatForPromptCompact(8_000); memContent != "" {
+		if memContent := a.config.SessionMemory.FormatForPromptCompact(); memContent != "" {
 			a.trySMCompact(memContent)
 			// Mark system prompt dirty after compaction
 			if a.config.cachedPrompt != nil {

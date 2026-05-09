@@ -10,16 +10,108 @@ import (
 	"time"
 )
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const (
+	// Default session memory template matching upstream's structured format.
+	// Each section has a header and italic description (template instruction).
+	// The LLM updates only the content, preserving the structure.
+	defaultSessionMemoryTemplate = `# Session Title
+_A short and distinctive 5-10 word descriptive title. Super info dense, no filler_
+
+# Current State
+_What is actively being worked on right now? Pending tasks not yet completed. Immediate next steps._
+
+# Task Specification
+_What did the user ask to build? Any design decisions or explanatory context._
+
+# Files and Functions
+_What are the important files? What do they contain and why are they relevant?_
+
+# Workflow
+_What bash commands are usually run and in what order? How to interpret their output?_
+
+# Errors & Corrections
+_Errors encountered and how they were fixed. What did the user correct? What approaches failed?_
+
+# Codebase and System Documentation
+_What are the important system components? How do they work/fit together?_
+
+# Learnings
+_What has worked well? What has not? What to avoid? Do not duplicate items from other sections._
+
+# Key Results
+_If the user asked for a specific output (answer, table, document), repeat the exact result here._
+
+# Worklog
+_Step by step, what was attempted and done? Very terse summary for each step._
+`
+
+	// Token budget constants (matching upstream: MAX_SECTION_LENGTH=2000, MAX_TOTAL=12000)
+	maxTokensPerSection    = 2000
+	maxTotalSessionMemoryTokens = 12000
+
+	// Entry expiration: state entries expire after 7 days,
+	// other categories expire after 30 days.
+	entryExpirationState     = 7 * 24 * time.Hour
+	entryExpirationOther      = 30 * 24 * time.Hour
+
+	// Max entries per category (to prevent unbounded growth)
+	maxStateEntries     = 20
+	maxDecisionEntries  = 30
+	maxPreferenceEntries = 20
+	maxReferenceEntries = 50
+	maxTestEntries      = 20
+)
+
+// ─── MemoryEntry ─────────────────────────────────────────────────────────────
+
 // MemoryEntry represents a single memory note.
 type MemoryEntry struct {
-	Category  string    // "preference" | "decision" | "state" | "reference"
-	Content   string    // the actual note text
-	Timestamp time.Time // when it was created
-	Source    string    // "user" | "assistant" | "auto"
+	Category   string    // "preference" | "decision" | "state" | "reference" | "test"
+	Content    string    // the actual note text
+	Timestamp  time.Time // when it was created
+	Source     string    // "user" | "assistant" | "auto" | "disk"
 }
 
+// maxEntriesForCategory returns the max entries limit for a given category.
+func maxEntriesForCategory(category string) int {
+	switch category {
+	case "state":
+		return maxStateEntries
+	case "decision":
+		return maxDecisionEntries
+	case "preference":
+		return maxPreferenceEntries
+	case "reference":
+		return maxReferenceEntries
+	case "test":
+		return maxTestEntries
+	default:
+		return 20
+	}
+}
+
+// expirationForCategory returns the TTL for entries in a given category.
+func expirationForCategory(category string) time.Duration {
+	switch category {
+	case "state":
+		return entryExpirationState
+	default:
+		return entryExpirationOther
+	}
+}
+
+// isExpired returns true if the entry is older than the category TTL.
+func (e MemoryEntry) isExpired() bool {
+	return time.Since(e.Timestamp) > expirationForCategory(e.Category)
+}
+
+// ─── SessionMemory ───────────────────────────────────────────────────────────
+
 // SessionMemory manages structured notes that persist across the session.
-// It runs as a background goroutine that periodically flushes notes to disk.
+// It uses file locking to safely handle concurrent writes from multiple
+// instances, and expires old entries on load to prevent unbounded growth.
 type SessionMemory struct {
 	mu         sync.RWMutex
 	entries    []MemoryEntry
@@ -27,11 +119,9 @@ type SessionMemory struct {
 	filePath   string
 	dirty      bool
 	stopCh     chan struct{}
-	wg         sync.WaitGroup // waits for flush goroutine to complete
+	wg         sync.WaitGroup
 	maxEntries int
-	// onAdd is an optional callback invoked when a note is added.
-	// Used to mark the system prompt dirty so memory appears in the next turn.
-	onAdd func()
+	onAdd      func() // optional callback invoked when a note is added
 }
 
 // NewSessionMemory creates a new SessionMemory for the given project.
@@ -45,20 +135,21 @@ func NewSessionMemory(projectDir string) *SessionMemory {
 	}
 	sm.loadFromDisk()
 	// Clear state entries loaded from disk — they are stale session context
-	// that should not bleed into new sessions. State entries are ephemeral
-	// and should only reflect the current session's accumulated knowledge.
+	// that should not bleed into new sessions.
 	sm.ClearStateEntries()
+	// Remove expired entries from other categories.
+	sm.removeExpiredEntries()
 	return sm
 }
 
 // SetOnAdd sets the callback invoked when a note is added.
 func (sm *SessionMemory) SetOnAdd(fn func()) {
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	sm.onAdd = fn
-	sm.mu.Unlock()
 }
 
-// AddNote adds a new memory entry and marks the memory as dirty.
+// AddNote adds a new memory entry and schedules a flush to disk.
 func (sm *SessionMemory) AddNote(category, content, source string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -68,9 +159,7 @@ func (sm *SessionMemory) AddNote(category, content, source string) {
 		if e.Category == category && e.Content == content {
 			sm.entries[i].Timestamp = time.Now()
 			sm.dirty = true
-			if sm.onAdd != nil {
-				sm.onAdd()
-			}
+			sm.maybeInvokeOnAdd()
 			return
 		}
 	}
@@ -82,15 +171,46 @@ func (sm *SessionMemory) AddNote(category, content, source string) {
 		Source:    source,
 	})
 
-	// Enforce max entries (keep newest)
-	if len(sm.entries) > sm.maxEntries {
-		sm.entries = sm.entries[len(sm.entries)-sm.maxEntries:]
-	}
+	// Enforce per-category max entries (keep newest)
+	sm.trimCategoryEntriesLocked(category)
 
 	sm.dirty = true
+	sm.maybeInvokeOnAdd()
+}
+
+// maybeInvokeOnAdd invokes the onAdd callback if set (must hold lock).
+func (sm *SessionMemory) maybeInvokeOnAdd() {
 	if sm.onAdd != nil {
 		sm.onAdd()
 	}
+}
+
+// trimCategoryEntriesLocked removes oldest entries in a category to enforce max.
+// Caller must hold sm.mu write lock.
+func (sm *SessionMemory) trimCategoryEntriesLocked(category string) {
+	max := maxEntriesForCategory(category)
+	count := 0
+	// Count entries in this category
+	for _, e := range sm.entries {
+		if e.Category == category {
+			count++
+		}
+	}
+	if count <= max {
+		return
+	}
+	// Remove oldest entries in this category until count == max
+	excess := count - max
+	removed := 0
+	result := make([]MemoryEntry, 0, len(sm.entries))
+	for _, e := range sm.entries {
+		if e.Category == category && removed < excess {
+			removed++
+			continue
+		}
+		result = append(result, e)
+	}
+	sm.entries = result
 }
 
 // GetNotes returns all memory entries, sorted by category then timestamp.
@@ -127,65 +247,30 @@ func (sm *SessionMemory) SearchNotes(query string) []MemoryEntry {
 	return result
 }
 
-// FormatForPromptCompact formats memory entries for injection after compaction.
-// Each section is truncated to maxSectionChars (~8000) matching upstream's
-// truncateSessionMemoryForCompact.
-func (sm *SessionMemory) FormatForPromptCompact(maxSectionChars int) string {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	if len(sm.entries) == 0 {
-		return ""
+// removeExpiredEntries removes entries older than their category TTL.
+// Must be called while holding write lock.
+func (sm *SessionMemory) removeExpiredEntries() {
+	before := len(sm.entries)
+	sm.entries = filterEntries(sm.entries, func(e MemoryEntry) bool {
+		// Expire all entries older than category TTL.
+		// State entries are always cleared on session start, so they
+		// shouldn't be here. But we expire other categories too.
+		return !e.isExpired()
+	})
+	if len(sm.entries) < before {
+		sm.dirty = true
 	}
+}
 
-	// Group by category
-	groups := make(map[string][]MemoryEntry)
-	var categories []string
-	for _, e := range sm.entries {
-		if _, ok := groups[e.Category]; !ok {
-			categories = append(categories, e.Category)
+// filterEntries returns entries that match the predicate.
+func filterEntries(entries []MemoryEntry, keep func(MemoryEntry) bool) []MemoryEntry {
+	result := make([]MemoryEntry, 0, len(entries))
+	for _, e := range entries {
+		if keep(e) {
+			result = append(result, e)
 		}
-		groups[e.Category] = append(groups[e.Category], e)
 	}
-	sort.Strings(categories)
-
-	var sb strings.Builder
-	sb.WriteString("## Session Memory\n\n")
-	sb.WriteString("The following notes were recorded during this or previous sessions. Use them as context.\n\n")
-
-	for _, cat := range categories {
-		entries := groups[cat]
-		sectionHeader := fmt.Sprintf("### %s\n", cat)
-		sb.WriteString(sectionHeader)
-
-		// Track remaining budget for this section
-		remaining := maxSectionChars - len(sectionHeader)
-		for _, e := range entries {
-			line := fmt.Sprintf("- %s\n", e.Content)
-			if remaining <= 0 {
-				continue
-			}
-			if len(line) <= remaining {
-				sb.WriteString(line)
-				remaining -= len(line)
-			} else {
-				// Truncate at sentence boundary
-				truncated := line[:remaining]
-				if nlIdx := strings.LastIndex(truncated, "\n"); nlIdx > 0 {
-					sb.WriteString(line[:nlIdx+1])
-				} else if dotIdx := strings.LastIndex(truncated, ". "); dotIdx > 0 {
-					sb.WriteString(line[:dotIdx+2] + "]\n")
-				} else {
-					sb.WriteString(truncated + "]\n")
-				}
-				sb.WriteString("  [... section truncated ...]\n")
-				break
-			}
-		}
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
+	return result
 }
 
 // FormatForPrompt formats memory entries for injection into the system prompt.
@@ -224,59 +309,309 @@ func (sm *SessionMemory) FormatForPrompt() string {
 	return sb.String()
 }
 
+// FormatForPromptCompact formats memory entries for injection after compaction.
+// Each section is truncated to maxTokensPerSection (~2000 tokens),
+// with a total cap of maxTotalSessionMemoryTokens (~12000 tokens),
+// matching upstream's truncateSessionMemoryForCompact.
+func (sm *SessionMemory) FormatForPromptCompact() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if len(sm.entries) == 0 {
+		return ""
+	}
+
+	// Group by category
+	groups := make(map[string][]MemoryEntry)
+	var categories []string
+	for _, e := range sm.entries {
+		if _, ok := groups[e.Category]; !ok {
+			categories = append(categories, e.Category)
+		}
+		groups[e.Category] = append(groups[e.Category], e)
+	}
+	sort.Strings(categories)
+
+	// Rough char budget: ~4 chars/token (roughTokenCountEstimation uses length/4).
+	// maxTotal chars = maxTotalSessionMemoryTokens * 4
+	maxTotalChars := maxTotalSessionMemoryTokens * 4
+	maxSectionChars := maxTokensPerSection * 4
+
+	var sb strings.Builder
+	totalBudget := maxTotalChars
+	totalUsed := 0
+
+	sb.WriteString("## Session Memory\n\n")
+	sb.WriteString("The following notes were recorded during this or previous sessions. Use them as context.\n\n")
+
+	for _, cat := range categories {
+		entries := groups[cat]
+		sectionHeader := fmt.Sprintf("### %s\n", cat)
+		sb.WriteString(sectionHeader)
+		sectionUsed := len(sectionHeader)
+		overflowed := false
+
+		for _, e := range entries {
+			line := fmt.Sprintf("- %s\n", e.Content)
+			lineLen := len(line)
+			if totalUsed+lineLen > totalBudget {
+				overflowed = true
+				break
+			}
+			// Per-section budget check (keep section under maxSectionChars)
+			if sectionUsed+lineLen > maxSectionChars {
+				// Truncate at sentence or line boundary
+				remaining := maxSectionChars - sectionUsed - len("  [... truncated ...]\n")
+				if remaining > 0 {
+					truncated := truncateLine(line, remaining)
+					sb.WriteString(truncated)
+					sb.WriteString("  [... truncated ...]\n")
+				}
+				overflowed = true
+				break
+			}
+			sb.WriteString(line)
+			sectionUsed += lineLen
+			totalUsed += lineLen
+		}
+
+		if overflowed && cat != categories[len(categories)-1] {
+			// If we overflowed but have more sections, add a truncation marker
+			// only if we're NOT on the last section (to avoid redundant marker)
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// truncateLine truncates a line to fit within remaining budget.
+// It finds a good break point (sentence boundary, line boundary, or char limit).
+func truncateLine(line string, maxLen int) string {
+	if len(line) <= maxLen {
+		return line
+	}
+	// Try sentence boundary (. )
+	if idx := strings.LastIndex(line[:maxLen], ". "); idx > 0 {
+		return line[:idx+1] + "\n"
+	}
+	// Try newline
+	if idx := strings.LastIndex(line[:maxLen], "\n"); idx > 0 {
+		return line[:idx] + "\n"
+	}
+	return line[:maxLen] + "\n"
+}
+
+// LoadSessionMemoryTemplate returns the default session memory template.
+func LoadSessionMemoryTemplate() string {
+	return defaultSessionMemoryTemplate
+}
+
+// FormatForTemplate returns the current session memory formatted as a markdown
+// file, preserving the template structure (headers and descriptions).
+// Uses the structured template format matching upstream.
+func (sm *SessionMemory) FormatForTemplate() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if len(sm.entries) == 0 {
+		return defaultSessionMemoryTemplate
+	}
+
+	// Group entries by category into a simple map
+	sectionContent := make(map[string][]string)
+	for _, e := range sm.entries {
+		sectionContent[e.Category] = append(sectionContent[e.Category], e.Content)
+	}
+
+	// Build structured output based on template sections
+	var sb strings.Builder
+
+	// Session Title
+	sb.WriteString("# Session Title\n")
+	sb.WriteString("_A short and distinctive 5-10 word descriptive title. Super info dense, no filler_\n")
+	if items, ok := sectionContent["state"]; ok {
+		// Use first state entry as a hint for the title
+		sb.WriteString(items[0])
+		if len(items) > 1 {
+			for _, item := range items[1:] {
+				if len(sb.String()) < 200 {
+					sb.WriteString(" | " + item)
+				}
+			}
+		}
+	}
+	sb.WriteString("\n\n")
+
+	// Current State
+	sb.WriteString("# Current State\n")
+	sb.WriteString("_What is actively being worked on right now? Pending tasks not yet completed. Immediate next steps._\n")
+	for _, item := range sectionContent["state"] {
+		sb.WriteString("- " + item + "\n")
+	}
+	sb.WriteString("\n")
+
+	// Task Specification (use decision entries)
+	sb.WriteString("# Task Specification\n")
+	sb.WriteString("_What did the user ask to build? Any design decisions or explanatory context._\n")
+	for _, item := range sectionContent["decision"] {
+		sb.WriteString("- " + item + "\n")
+	}
+	sb.WriteString("\n")
+
+	// Files and Functions (use reference entries)
+	sb.WriteString("# Files and Functions\n")
+	sb.WriteString("_What are the important files? What do they contain and why are they relevant?_\n")
+	for _, item := range sectionContent["reference"] {
+		sb.WriteString("- " + item + "\n")
+	}
+	sb.WriteString("\n")
+
+	// Workflow (no default category, use state items that mention commands)
+	sb.WriteString("# Workflow\n")
+	sb.WriteString("_What bash commands are usually run and in what order? How to interpret their output?_\n")
+	sb.WriteString("\n")
+
+	// Errors & Corrections (use decision entries mentioning errors)
+	sb.WriteString("# Errors & Corrections\n")
+	sb.WriteString("_Errors encountered and how they were fixed. What did the user correct? What approaches failed?_\n")
+	sb.WriteString("\n")
+
+	// Codebase and System Documentation
+	sb.WriteString("# Codebase and System Documentation\n")
+	sb.WriteString("_What are the important system components? How do they work/fit together?_\n")
+	sb.WriteString("\n")
+
+	// Learnings
+	sb.WriteString("# Learnings\n")
+	sb.WriteString("_What has worked well? What has not? What to avoid? Do not duplicate items from other sections._\n")
+	sb.WriteString("\n")
+
+	// Key Results
+	sb.WriteString("# Key Results\n")
+	sb.WriteString("_If the user asked for a specific output (answer, table, document), repeat the exact result here._\n")
+	sb.WriteString("\n")
+
+	// Worklog
+	sb.WriteString("# Worklog\n")
+	sb.WriteString("_Step by step, what was attempted and done? Very terse summary for each step._\n")
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
 // loadFromDisk reads memory entries from the session memory file.
+// Parses both the structured template format (upstream-compatible) and the
+// simple list format (legacy).
 func (sm *SessionMemory) loadFromDisk() {
 	data, err := os.ReadFile(sm.filePath)
 	if err != nil {
 		return // no file yet
 	}
 
-	// Parse markdown format: ### Category\n<!-- timestamp -->\n- content\n
-	lines := strings.Split(string(data), "\n")
+	sm.entries = sm.parseMarkdownEntries(string(data))
+}
+
+// parseMarkdownEntries parses entries from a markdown session memory file.
+// Handles both structured template format (with section headers like "# Section")
+// and simple list format (with "### Category" headers).
+func (sm *SessionMemory) parseMarkdownEntries(data string) []MemoryEntry {
+	var entries []MemoryEntry
+	lines := strings.Split(data, "\n")
 	var currentCategory string
 	var lastTimestamp time.Time
+
 	for _, line := range lines {
+		// Structured template section (upstream format): # Section Title
+		if strings.HasPrefix(line, "# ") {
+			// Map template sections to categories
+			lower := strings.ToLower(strings.TrimSpace(line[2:]))
+			switch {
+			case strings.Contains(lower, "current state"):
+				currentCategory = "state"
+			case strings.Contains(lower, "task spec"):
+				currentCategory = "decision"
+			case strings.Contains(lower, "files"):
+				currentCategory = "reference"
+			case strings.Contains(lower, "workflow"):
+				currentCategory = "reference"
+			case strings.Contains(lower, "error"):
+				currentCategory = "decision"
+			case strings.Contains(lower, "learn"):
+				currentCategory = "preference"
+			case strings.Contains(lower, "key result"):
+				currentCategory = "reference"
+			case strings.Contains(lower, "worklog"):
+				currentCategory = "reference"
+			case strings.Contains(lower, "codebase"):
+				currentCategory = "reference"
+			case strings.Contains(lower, "session title"):
+				currentCategory = "state"
+			default:
+				currentCategory = ""
+			}
+			continue
+		}
+
+		// Simple list category header (legacy format): ### Category
 		if strings.HasPrefix(line, "### ") {
 			currentCategory = strings.TrimSpace(strings.TrimPrefix(line, "### "))
-		} else if strings.HasPrefix(line, "<!-- ") && strings.HasSuffix(line, " -->") {
+			continue
+		}
+
+		// Template description line (italic, starts with "_"): skip
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) > 0 && trimmed[0] == '_' && strings.HasSuffix(trimmed, "_") {
+			continue // description line, skip
+		}
+
+		// Timestamp comment: <!-- timestamp -->
+		if strings.HasPrefix(line, "<!-- ") && strings.HasSuffix(line, " -->") {
 			ts := strings.TrimPrefix(line, "<!-- ")
 			ts = strings.TrimSuffix(ts, " -->")
 			if t, err := time.Parse(time.RFC3339, ts); err == nil {
 				lastTimestamp = t
 			}
-		} else if strings.HasPrefix(line, "- ") && currentCategory != "" {
+			continue
+		}
+
+		// Bullet point: - content
+		if strings.HasPrefix(line, "- ") && currentCategory != "" {
 			content := strings.TrimSpace(strings.TrimPrefix(line, "- "))
-			sm.entries = append(sm.entries, MemoryEntry{
+			if content == "" {
+				continue
+			}
+			entries = append(entries, MemoryEntry{
 				Category:  currentCategory,
-				Content:   content,
+				Content:  content,
 				Timestamp: lastTimestamp,
-				Source:    "disk",
+				Source:   "disk",
 			})
 		}
 	}
+
+	return entries
 }
 
 // ClearStateEntries removes all entries in the "state" category.
 // Called at session start to prevent stale session context from
-// previous sessions from bleeding in, and before compaction to
-// prepare for new state injection.
+// previous sessions from bleeding in.
 func (sm *SessionMemory) ClearStateEntries() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	result := make([]MemoryEntry, 0, len(sm.entries))
-	for _, e := range sm.entries {
-		if e.Category != "state" {
-			result = append(result, e)
-		}
+	before := len(sm.entries)
+	sm.entries = filterEntries(sm.entries, func(e MemoryEntry) bool {
+		return e.Category != "state"
+	})
+	if len(sm.entries) < before {
+		sm.dirty = true
 	}
-	sm.entries = result
-	sm.dirty = true
 }
 
 // SaveConclusions appends conclusion entries as state memory.
-// Called before ClearConclusions() so the agent's accumulated
-// work knowledge is preserved across compaction.
+// Called before compaction so the agent's accumulated work knowledge
+// is preserved across compaction.
 func (sm *SessionMemory) SaveConclusions(conclusions []string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -307,16 +642,18 @@ func (sm *SessionMemory) SaveConclusions(conclusions []string) {
 		}
 	}
 
-	if len(sm.entries) > sm.maxEntries {
-		sm.entries = sm.entries[len(sm.entries)-sm.maxEntries:]
-	}
+	// Enforce max state entries
+	sm.trimCategoryEntriesLocked("state")
+
 	sm.dirty = true
 }
 
 // FlushToDisk writes memory entries to disk if dirty.
+// Uses file locking to prevent corruption from concurrent writes.
 func (sm *SessionMemory) FlushToDisk() error {
 	return sm.flushToDisk()
 }
+
 func (sm *SessionMemory) flushToDisk() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -325,6 +662,15 @@ func (sm *SessionMemory) flushToDisk() error {
 		return nil
 	}
 
+	if err := sm.writeAllEntriesLocked(); err != nil {
+		return err
+	}
+	sm.dirty = false
+	return nil
+}
+
+// writeAllEntriesLocked writes all entries to disk. Caller must hold write lock.
+func (sm *SessionMemory) writeAllEntriesLocked() error {
 	// Ensure directory exists
 	dir := filepath.Dir(sm.filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -343,20 +689,47 @@ func (sm *SessionMemory) flushToDisk() error {
 	sort.Strings(categories)
 
 	var sb strings.Builder
-	for _, cat := range categories {
+	for i, cat := range categories {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
 		sb.WriteString(fmt.Sprintf("### %s\n", cat))
 		for _, e := range groups[cat] {
 			sb.WriteString(fmt.Sprintf("<!-- %s -->\n", e.Timestamp.Format(time.RFC3339)))
 			sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
 		}
-		sb.WriteString("\n")
 	}
 
-	if err := os.WriteFile(sm.filePath, []byte(sb.String()), 0644); err != nil {
+	content := sb.String()
+	if content == "" {
+		// No entries — write empty file (don't delete it, preserve it as marker)
+		content = ""
+	}
+
+	// Use file locking to prevent concurrent write corruption.
+	// Open existing file for read+write, acquire exclusive lock, write, unlock.
+	// If file doesn't exist, create it first.
+	f, err := os.OpenFile(sm.filePath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Errorf("open memory file: %w", err)
+	}
+
+	// Acquire exclusive lock (blocking)
+	if err := lockFile(f); err != nil {
+		f.Close()
+		return fmt.Errorf("lock memory file: %w", err)
+	}
+
+	// Write with exclusive lock held
+	if err := os.WriteFile(sm.filePath, []byte(content), 0644); err != nil {
+		unlockFile(f)
+		f.Close()
 		return fmt.Errorf("write memory file: %w", err)
 	}
 
-	sm.dirty = false
+	// Unlock and close
+	unlockFile(f)
+	f.Close()
 	return nil
 }
 
@@ -388,4 +761,16 @@ func (sm *SessionMemory) StartFlushLoop() {
 func (sm *SessionMemory) Stop() {
 	close(sm.stopCh)
 	sm.wg.Wait()
+}
+
+// ─── File Locking ─────────────────────────────────────────────────────────────
+
+// lockFile acquires an exclusive advisory lock on the given file handle.
+// Uses syscall.LockFileEx on Windows. On non-Windows platforms, this is a no-op.
+func lockFile(f *os.File) error {
+	return lockFileEx(f, true)
+}
+
+func unlockFile(f *os.File) error {
+	return unlockFileEx(f, true)
 }
