@@ -57,3 +57,33 @@
   3. `errCh` goroutine 在 `cmd.Wait()` 返回后 drain outputCh（此时 reader goroutines 才完成），然后写入输出文件和退出代码
   4. 修复 `onDone` 的 elapsed 计算错误（原来 `time.Since(start)` 在 `start` 之后立即执行，总是0）
 - **验证**: ✅ 8行命令（8秒）超时设置为5秒，超时后继续运行3秒，所有输出正确捕获，Duration 准确 (3.457s)，无重复 footer/exit code
+
+---
+
+# Compaction Context Loss Bugs
+
+## Bug 6: Stale session memory state persists across sessions
+- **位置**: session_memory.go `NewSessionMemory()` → `loadFromDisk()` 加载所有条目包括 stale state
+- **原因**: `state` 类别的条目是会话级别的临时上下文，不应跨会话保留。上一会话的 "Compaction: 4128 tokens" 等条目在新会话中变成无效的噪音
+- **修复**: `NewSessionMemory()` 在 `loadFromDisk()` 后调用 `ClearStateEntries()` 清除 stale state
+- **提交**: e6012b9
+
+## Bug 7: toolStateTracker conclusions lost permanently after compaction
+- **位置**: agent_loop.go `ClearConclusions()` 在 3 个地方被调用，但没有先保存结论
+- **原因**: `ClearConclusions()` 直接清除所有结论，不保留到任何持久化存储。压缩后 agent 的工作知识（"已修复 bug X"、"已实现 feature Y"）永久丢失
+- **修复**: 在每个 `ClearConclusions()` 调用前添加 `SaveConclusions()`，将结论保存到 session memory 的 `state` 类别
+- **提交**: e6012b9
+
+## Bug 8: SM-compact/LLM-compact use stale state & bloated summaries
+- **位置**: agent_loop.go LLM-compact 路径 line 3646
+- **原因**: `AddNote("state", fmt.Sprintf("Compaction: %s", summary), "auto")` 将整个 LLM 生成的摘要文本作为 state 条目保存，导致 session memory 膨胀并在未来会话中变成 stale 上下文
+- **修复**:
+  1. 在 SM-compact 和 LLM-compact 路径的 `OnCompaction()` 后添加 `ClearStateEntries()` 清除 stale state
+  2. 将 LLM-compact 的 state 保存改为 `"Compaction (auto): %d tokens compressed"`（与 SM-compact 的 `"Compaction (sm-compact): %d tokens compressed"` 一致）
+- **提交**: e6012b9
+
+## Bug 9: buildCompactSummaryMessage called after CompactContext clears entries
+- **位置**: agent_loop.go truncation fallback path (a.compactor == nil)
+- **原因**: `buildCompactSummaryMessage()` 在 `CompactContext()` 之后调用，此时 `BuildMessages()` 返回空/截断的消息列表，导致摘要显示 "0 conversation turns with 0 tool calls"
+- **修复**: 在 `CompactContext()` 之前捕获 `BuildMessages()` 和 `extractRecentToolCallsForSummary()`，将预捕获数据传递给 `buildCompactSummaryMessage()`
+- **提交**: ea46040
