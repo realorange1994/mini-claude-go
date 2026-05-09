@@ -544,9 +544,11 @@ func (a *AgentLoop) registerExistingProcessAsBgTask(command, workingDir string, 
 
 	// Return a completionCallback that will be called by the timeout case's
 	// goroutine after it receives from errCh (which means cmd.Wait() completed).
+	// Note: the exec_tool.go goroutine already writes the exit code to the output
+	// file before calling onDone, so onDone only writes the footer summary.
+	timeoutTime := time.Now()
 	onDone := func(waitErr error) {
-		start := time.Now()
-		elapsed := time.Since(start)
+		elapsed := time.Since(timeoutTime)
 
 		exitCode := 0
 		if waitErr != nil {
@@ -561,7 +563,6 @@ func (a *AgentLoop) registerExistingProcessAsBgTask(command, workingDir string, 
 		f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY, 0644)
 		if err == nil {
 			fmt.Fprintf(f, "\n--- Task Complete ---\n")
-			fmt.Fprintf(f, "Exit code: %d\n", exitCode)
 			fmt.Fprintf(f, "Duration (post-timeout): %s\n", elapsed.Round(time.Millisecond))
 			status := "completed"
 			if exitCode != 0 {

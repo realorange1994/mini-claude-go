@@ -355,51 +355,66 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		if cmd.Process == nil {
 			return ToolResult{Output: fmt.Sprintf("Error: command timed out after %dms.", timeoutMs), IsError: true}
 		}
-		// Close pipes to unblock reader goroutines — the process keeps running.
-		_ = stdout.Close()
-		_ = stderr.Close()
+		// IMPORTANT: Do NOT close the pipes here!
+		// On Windows, closing stdout/stderr pipes causes the process to receive
+		// a broken pipe error and exit immediately — defeating auto-backgrounding.
+		// Reader goroutines are still running (blocked on open pipes). They will
+		// finish after cmd.Wait() returns and closes the pipes. The errCh goroutine
+		// drains outputCh and writes to the output file after the process exits.
 		if et.TimeoutCallback != nil {
-			// Drain remaining output from the reader goroutines (non-blocking).
-			var stdoutOut, stderrOut string
-			for i := 0; i < 2; i++ {
-				select {
-				case r := <-outputCh:
+			taskID, outputFile, errText, onDone := et.TimeoutCallback(command, wd, cmd)
+			if errText != "" {
+				return ToolResult{Output: fmt.Sprintf("Error: command timed out after %dms. %s", timeoutMs, errText), IsError: true}
+			}
+			// Spawn goroutine to wait for the process to exit, then drain the
+			// reader goroutines' output and call onDone. The reader goroutines
+			// are still running (blocked on the open pipes) — they will only
+			// complete after cmd.Wait() returns and the pipes are closed.
+			go func(outFile string) {
+				wErr := <-errCh
+				// Now cmd.Wait() has returned and the pipes are closed.
+				// The reader goroutines have finished and sent their results to outputCh.
+				var stdoutOut, stderrOut string
+				for i := 0; i < 2; i++ {
+					r := <-outputCh
 					if r.isStderr {
 						stderrOut = r.data
 					} else {
 						stdoutOut = r.data
 					}
-				default:
 				}
-			}
-			combinedOutput := stdoutOut
-			if stderrOut != "" && stderrOut != "STDERR:\n" {
-				combinedOutput += "\n" + stderrOut
-			}
-			taskID, outputFile, errText, onDone := et.TimeoutCallback(command, wd, cmd)
-			if errText != "" {
-				return ToolResult{Output: fmt.Sprintf("Error: command timed out after %dms. %s", timeoutMs, errText), IsError: true}
-			}
-			// Write captured output to the background task's output file.
-			if outputFile != "" && combinedOutput != "" {
-				if f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
-					fmt.Fprintf(f, "%s", combinedOutput)
-					f.Close()
+				// Write captured output to the task's output file.
+				if outFile != "" {
+					if stdoutOut != "" || stderrOut != "" {
+						if f, err := os.OpenFile(outFile, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+							if stdoutOut != "" {
+								fmt.Fprintf(f, "%s", stdoutOut)
+							}
+							if stderrOut != "" && stderrOut != "STDERR:\n" {
+								fmt.Fprintf(f, "%s", stderrOut)
+							}
+							f.Close()
+						}
+					}
+					// Determine exit code for the onDone callback.
+					exitCode := 0
+					if wErr != nil {
+						if exitErr, ok := wErr.(*exec.ExitError); ok {
+							exitCode = exitErr.ExitCode()
+						} else {
+							exitCode = 1
+						}
+					}
+					// Append exit code info before onDone writes the footer.
+					if f, err := os.OpenFile(outFile, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+						fmt.Fprintf(f, "\nExit code: %d\n", exitCode)
+						f.Close()
+					}
 				}
-			}
-			// The errCh goroutine will call cmd.Wait() when the process completes.
-			// It sends the result to errCh (non-blocking) — but nobody is listening
-			// anymore (this function already returned). We need to notify the
-			// background task when the process completes, so the onDone callback
-			// is called by the errCh goroutine. But errCh already fired — we can't
-			// wait for it here. Instead, spawn a goroutine that waits for errCh and
-			// calls onDone.
-			go func() {
-				wErr := <-errCh
 				if onDone != nil {
 					onDone(wErr)
 				}
-			}()
+			}(outputFile)
 			return ToolResult{
 				Output: fmt.Sprintf(
 					"Command timed out after %dms and is continuing in the background.\n"+
