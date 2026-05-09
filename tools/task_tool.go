@@ -267,7 +267,7 @@ func (t *TaskUpdateTool) InputSchema() map[string]any {
 			},
 			"status": map[string]any{
 				"type":        "string",
-				"enum":        []string{"pending", "in_progress", "completed", "deleted"},
+				"enum":        []any{"pending", "in_progress", "completed", "deleted"},
 				"description": "New status for the task",
 			},
 			"owner": map[string]any{

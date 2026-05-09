@@ -172,7 +172,7 @@ func (t *TodoWriteTool) InputSchema() map[string]any {
 						},
 						"status": map[string]any{
 							"type":        "string",
-							"enum":        []string{"pending", "in_progress", "completed"},
+							"enum":        []any{"pending", "in_progress", "completed"},
 							"description": "Current task status",
 						},
 						"activeForm": map[string]any{
