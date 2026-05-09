@@ -790,7 +790,7 @@ maxTurns := cfg.MaxTurns
 		compactor:    NewCompactor(),
 		useStream:    a.useStream,
 		maxToolChars: a.maxToolChars,
-		toolTimeout:  a.toolTimeout,
+		toolTimeoutMs: a.toolTimeoutMs,
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
 		taskStore:    NewTaskStore(), // track background bash tasks spawned by this sub-agent

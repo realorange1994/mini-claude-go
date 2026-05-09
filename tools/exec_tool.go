@@ -256,12 +256,12 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		case int:
 			timeoutMs = v
 		}
-	}
-	if timeoutMs <= 0 {
-		timeoutMs = 120000
-	}
-	if timeoutMs > 600000 { // max 10 minutes
-		timeoutMs = 600000
+		if timeoutMs <= 0 {
+			timeoutMs = 120000
+		}
+		if timeoutMs > 600000 { // max 10 minutes
+			timeoutMs = 600000
+		}
 	}
 
 	var shell, flag string

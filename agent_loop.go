@@ -287,7 +287,7 @@ type AgentLoop struct {
 	compactor    *Compactor
 	useStream    bool
 	maxToolChars int           // max chars per tool result (default 50000, matching upstream)
-	toolTimeout  time.Duration // per-tool execution timeout (default 30s)
+	toolTimeoutMs int // per-tool execution timeout in ms (default 600000 = 10min)
 	maxTurns     int           // hard cap on turns (default from config.MaxTurns)
 	budget       *IterationBudget
 	interrupted  atomic.Bool   // set by Ctrl+C handler to stop the loop
@@ -396,7 +396,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		compactor:    NewCompactor(),
 		useStream:    useStream,
 		maxToolChars: 50000,
-		toolTimeout:  600 * time.Second,
+		toolTimeoutMs: 600000, // 10 minutes
 		maxTurns:     maxTurns,
 		budget:       NewIterationBudget(maxTurns),
 		taskStore:       NewTaskStore(),
@@ -546,7 +546,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		compactor:        NewCompactor(),
 		useStream:        useStream,
 		maxToolChars:     50000,
-		toolTimeout:      600 * time.Second,
+		toolTimeoutMs:  600000, // 10 minutes
 		maxTurns:         maxTurns,
 		budget:           NewIterationBudget(maxTurns),
 		taskStore:        NewTaskStore(),
@@ -2172,20 +2172,27 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		_ = a.transcript.WriteToolUse(toolUseID, toolName, input)
 	}
 
-	// Agent-controlled timeout -- default 600s, clamped to [1, 600] seconds
-	timeout := a.toolTimeout
+	// Agent-controlled timeout in milliseconds.
+	// The timeout param from input is in ms (per tool schema).
+	// Note: after CoerceArguments, timeout may be int (from float64 coercion) or float64.
+	timeoutMs := a.toolTimeoutMs
 	if t, ok := input["timeout"].(float64); ok && t > 0 {
-		secs := int(t)
-		if secs < 1 {
-			secs = 1
-		}
-		if secs > 600 {
-			secs = 600
-		}
-		timeout = time.Duration(secs) * time.Second
+		timeoutMs = int(t)
+	} else if t, ok := input["timeout"].(int); ok && t > 0 {
+		timeoutMs = t
 	}
-	// Remove timeout from tool input -- it's a meta-parameter, not a tool param
+	if timeoutMs < 1000 {
+		timeoutMs = 1000
+	}
+	if timeoutMs > 600000 {
+		timeoutMs = 600000
+	}
+	// Restore timeout (as int ms) for exec tool only.
+	// For other tools, the timeout is handled via context deadline.
 	delete(input, "timeout")
+	if toolName == "exec" || toolName == "mcp_call_tool" {
+		input["timeout"] = timeoutMs
+	}
 
 	// Auto-snapshot before write/edit tools
 	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
@@ -2242,11 +2249,19 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}
 	}
 
-	// Execute with interrupt-aware context (agent-controlled timeout, default 30s)
-	if timeout <= 0 {
-		timeout = 600 * time.Second
+	// Execute with interrupt-aware context. For exec and MCP tools, we use a very long
+	// timeout (10min) because they manage their own timeouts (which auto-background
+	// timed-out calls instead of killing them). For other tools, use the user-specified
+	// For exec/mcp_call_tool, give a 10-minute context deadline so their own
+	// timer-based timeouts fire first (auto-backgrounding the call instead of killing it).
+	// For other tools, use the user-specified timeout as the context deadline.
+	var ctxDeadline time.Duration
+	if toolName == "exec" || toolName == "mcp_call_tool" {
+		ctxDeadline = 600000 * time.Millisecond // 10 minutes
+	} else {
+		ctxDeadline = time.Duration(timeoutMs) * time.Millisecond
 	}
-	ctx, cancel := a.interruptCtx(context.Background(), timeout)
+	ctx, cancel := a.interruptCtx(context.Background(), ctxDeadline)
 	defer cancel()
 
 	resultCh := make(chan tools.ToolResult, 1)
@@ -2280,7 +2295,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 			}
 		} else {
 			result = tools.ToolResult{
-				Output:  fmt.Sprintf("Error: %s timed out after %v", toolName, timeout),
+				Output:  fmt.Sprintf("Error: %s timed out after %v", toolName, ctxDeadline.Round(time.Millisecond)),
 				IsError: true,
 			}
 		}
@@ -2326,7 +2341,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	// Display timing to stderr
 	if cancelled {
-		a.out( "  [TIMEOUT] timed out after %v\n", timeout)
+		a.out( "  [TIMEOUT] timed out after %v\n", ctxDeadline.Round(time.Millisecond))
 	} else if result.IsError {
 		preview := limitStr(output, 150)
 		a.out( "  [ERR] %s (%v): %s\n", toolName, elapsed.Round(10*time.Millisecond), preview)
