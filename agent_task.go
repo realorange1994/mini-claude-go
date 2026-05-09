@@ -288,7 +288,7 @@ func (ts *TaskStore) RegisterBashBgTask(agentID, description, outputFile string)
 
 // --- Bash background task functions (consolidated from bash_bg_task.go) ---
 
-// generateBashTaskID generates a unique task ID with the format "b" + 8 random alphanumeric chars.
+// generateBashTaskID generates a unique task ID with the format "exec-" + 8 random alphanumeric chars.
 func generateBashTaskID() string {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, 8)
@@ -297,7 +297,7 @@ func generateBashTaskID() string {
 	for i := range 8 {
 		result[i] = chars[int(b[i])%len(chars)]
 	}
-	return "b" + string(result)
+	return "exec-" + string(result)
 }
 
 // bashBgTasksDir returns the directory for background bash task output files.
@@ -583,7 +583,7 @@ func (a *AgentLoop) registerExistingProcessAsBgTask(command, workingDir string, 
 // Returns (taskID, outputFilePath, errText, onDone).
 // The onDone callback is invoked when the background MCP call completes.
 func (a *AgentLoop) registerMCPTimeoutAsBgTask(toolName, server string, args map[string]any) (string, string, string, func(result string, isError bool)) {
-	taskID := "mcp-" + generateBashTaskID()
+	taskID := "mcp-" + generateBashTaskID()[5:] // generateBashTaskID returns "exec-xxxxxxxx", skip prefix
 
 	// Create output directory
 	outputDir := filepath.Join(".claude", "tasks", "mcp")

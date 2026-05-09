@@ -938,11 +938,46 @@ func (a *AgentLoop) GetSubAgentStatus(agentID string) string {
 
 // GetSubAgentOutput retrieves the output of a sub-agent task, optionally
 // blocking until the task completes. This is the callback wired to TaskOutputTool.
-// For bash background tasks (with OutputFile), it reads output from the disk file.
-func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.Duration) (string, string) {
-	// Try the new AgentTaskStore first
-	if a.agentTaskStore != nil {
-		if task := a.agentTaskStore.Get(agentID); task != nil {
+// Routes based on task ID prefix:
+//   - "agent-*" -> agentTaskStore (sub-agents)
+//   - "exec-*" -> taskStore (bash background tasks)
+//   - "mcp-*" -> taskStore (MCP background tasks)
+func (a *AgentLoop) GetSubAgentOutput(taskID string, block bool, timeout time.Duration) (string, string) {
+	// Route based on ID prefix
+	switch {
+	case strings.HasPrefix(taskID, "agent-"):
+		return a.getAgentTaskOutput(taskID, block, timeout)
+	case strings.HasPrefix(taskID, "exec-"), strings.HasPrefix(taskID, "mcp-"):
+		return a.getBashBgTaskOutput(taskID, block, timeout)
+	default:
+		// Fallback: try agentTaskStore, then taskStore
+		if out, err := a.getAgentTaskOutput(taskID, block, timeout); err == "" {
+			return out, ""
+		}
+		return a.getBashBgTaskOutput(taskID, block, timeout)
+	}
+}
+
+// getAgentTaskOutput retrieves output from agentTaskStore (sub-agents).
+func (a *AgentLoop) getAgentTaskOutput(taskID string, block bool, timeout time.Duration) (string, string) {
+	if a.agentTaskStore == nil {
+		return "", "agent task store not available"
+	}
+	task := a.agentTaskStore.Get(taskID)
+	if task == nil {
+		return "", fmt.Sprintf("agent %s not found", taskID)
+	}
+	if task.IsTerminal() {
+		result := fmt.Sprintf("Agent: %s\nStatus: %s\nOutput:\n%s", task.ID, task.Status, task.GetOutput())
+		if tp := task.GetTranscriptPath(); tp != "" {
+			result += fmt.Sprintf("\nTranscriptPath: %s", tp)
+		}
+		return result, ""
+	}
+	if block {
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			time.Sleep(500 * time.Millisecond)
 			if task.IsTerminal() {
 				result := fmt.Sprintf("Agent: %s\nStatus: %s\nOutput:\n%s", task.ID, task.Status, task.GetOutput())
 				if tp := task.GetTranscriptPath(); tp != "" {
@@ -950,37 +985,23 @@ func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.D
 				}
 				return result, ""
 			}
-			if block {
-				deadline := time.Now().Add(timeout)
-				for time.Now().Before(deadline) {
-					time.Sleep(500 * time.Millisecond)
-					if task.IsTerminal() {
-						result := fmt.Sprintf("Agent: %s\nStatus: %s\nOutput:\n%s", task.ID, task.Status, task.GetOutput())
-						if tp := task.GetTranscriptPath(); tp != "" {
-							result += fmt.Sprintf("\nTranscriptPath: %s", tp)
-						}
-						return result, ""
-					}
-				}
-				return fmt.Sprintf("Agent: %s\nStatus: %s (still running after timeout)", task.ID, task.Status), ""
-			}
-			return fmt.Sprintf("Agent: %s\nStatus: %s (still running)", task.ID, task.Status), ""
 		}
+		return fmt.Sprintf("Agent: %s\nStatus: %s (still running after timeout)", task.ID, task.Status), ""
 	}
+	return fmt.Sprintf("Agent: %s\nStatus: %s (still running)", task.ID, task.Status), ""
+}
 
-	// Fall back to legacy TaskStore for bash background tasks
+// getBashBgTaskOutput retrieves output from taskStore (bash and MCP background tasks).
+func (a *AgentLoop) getBashBgTaskOutput(taskID string, block bool, timeout time.Duration) (string, string) {
 	if a.taskStore == nil {
 		return "", "task store not available"
 	}
-
-	task := a.taskStore.GetTask(agentID)
+	task := a.taskStore.GetTask(taskID)
 	if task == nil {
-		return "", fmt.Sprintf("agent %s not found", agentID)
+		return "", fmt.Sprintf("task %s not found", taskID)
 	}
-
 	if task.IsTerminal() {
 		result := formatTaskResult(task)
-		// For bash tasks with output file, append the file contents
 		if task.OutputFile != "" && task.Result == "" {
 			if data, err := os.ReadFile(task.OutputFile); err == nil {
 				result += fmt.Sprintf("\n\n--- Output from %s ---\n%s", task.OutputFile, string(data))
@@ -988,9 +1009,7 @@ func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.D
 		}
 		return result, ""
 	}
-
 	if block {
-		// Poll until task completes or timeout
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
 			time.Sleep(500 * time.Millisecond)
@@ -1004,10 +1023,9 @@ func (a *AgentLoop) GetSubAgentOutput(agentID string, block bool, timeout time.D
 				return result, ""
 			}
 		}
-		return fmt.Sprintf("Agent: %s\nStatus: %d (still running after timeout)", task.ID, task.Status), ""
+		return fmt.Sprintf("Task: %s\nStatus: %s (still running after timeout)", task.ID, task.Status), ""
 	}
-
-	return fmt.Sprintf("Agent: %s\nStatus: %d (still running)", task.ID, task.Status), ""
+	return fmt.Sprintf("Task: %s\nStatus: %s (still running)", task.ID, task.Status), ""
 }
 
 // formatTaskResult formats a task's result for display.

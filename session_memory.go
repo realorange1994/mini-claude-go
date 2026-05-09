@@ -44,6 +44,10 @@ func NewSessionMemory(projectDir string) *SessionMemory {
 		maxEntries: 100,
 	}
 	sm.loadFromDisk()
+	// Clear state entries loaded from disk — they are stale session context
+	// that should not bleed into new sessions. State entries are ephemeral
+	// and should only reflect the current session's accumulated knowledge.
+	sm.ClearStateEntries()
 	return sm
 }
 
@@ -252,7 +256,67 @@ func (sm *SessionMemory) loadFromDisk() {
 	}
 }
 
-// flushToDisk writes memory entries to disk if dirty.
+// ClearStateEntries removes all entries in the "state" category.
+// Called at session start to prevent stale session context from
+// previous sessions from bleeding in, and before compaction to
+// prepare for new state injection.
+func (sm *SessionMemory) ClearStateEntries() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	result := make([]MemoryEntry, 0, len(sm.entries))
+	for _, e := range sm.entries {
+		if e.Category != "state" {
+			result = append(result, e)
+		}
+	}
+	sm.entries = result
+	sm.dirty = true
+}
+
+// SaveConclusions appends conclusion entries as state memory.
+// Called before ClearConclusions() so the agent's accumulated
+// work knowledge is preserved across compaction.
+func (sm *SessionMemory) SaveConclusions(conclusions []string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if len(conclusions) == 0 {
+		return
+	}
+
+	for _, c := range conclusions {
+		if c == "" {
+			continue
+		}
+		// Check if this conclusion already exists to avoid duplicates
+		exists := false
+		for _, e := range sm.entries {
+			if e.Category == "state" && e.Content == c {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			sm.entries = append(sm.entries, MemoryEntry{
+				Category:  "state",
+				Content:   c,
+				Timestamp: time.Now(),
+				Source:    "auto",
+			})
+		}
+	}
+
+	if len(sm.entries) > sm.maxEntries {
+		sm.entries = sm.entries[len(sm.entries)-sm.maxEntries:]
+	}
+	sm.dirty = true
+}
+
+// FlushToDisk writes memory entries to disk if dirty.
+func (sm *SessionMemory) FlushToDisk() error {
+	return sm.flushToDisk()
+}
 func (sm *SessionMemory) flushToDisk() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

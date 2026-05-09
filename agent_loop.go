@@ -550,6 +550,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		maxTurns:         maxTurns,
 		budget:           NewIterationBudget(maxTurns),
 		taskStore:        NewTaskStore(),
+		agentTaskStore:   tools.NewAgentTaskStore(),
 		notificationChan:  make(chan string, 64),
 		evictionDone:     make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
@@ -2905,9 +2906,14 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 		a.config.cachedPrompt.MarkDirty()
 	}
 
-	// Clear tool state conclusions. Compacted messages had conclusions from
-	// pre-compact tool results; those results may no longer be in context.
-	if a.toolStateTracker != nil {
+	// Save tool state conclusions to session memory BEFORE clearing.
+	// Conclusions represent the agent's accumulated knowledge about work done;
+	// if not saved, they are permanently lost after compaction.
+	if a.toolStateTracker != nil && a.config.SessionMemory != nil {
+		conclusions := a.toolStateTracker.GetConclusions()
+		if len(conclusions) > 0 {
+			a.config.SessionMemory.SaveConclusions(conclusions)
+		}
 		a.toolStateTracker.ClearConclusions()
 	}
 
@@ -3449,6 +3455,9 @@ func (a *AgentLoop) tryCompaction() {
 					a.toolStateTracker.MarkFileFresh(path)
 				}
 				if len(recoveredPaths) == 0 {
+					if a.config.SessionMemory != nil {
+						a.config.SessionMemory.SaveConclusions(a.toolStateTracker.GetConclusions())
+					}
 					a.toolStateTracker.ClearConclusions()
 				}
 			}
@@ -3515,6 +3524,12 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	// After this point, items from the previous epoch are marked "cleared from context".
 	if a.toolStateTracker != nil {
 		a.toolStateTracker.OnCompaction()
+	}
+
+	// Clear stale state entries from session memory — the old state context is no
+	// longer valid after compaction, and the new compaction will write fresh state.
+	if a.config.SessionMemory != nil {
+		a.config.SessionMemory.ClearStateEntries()
 	}
 
 	// Build structured metadata from the messages being compacted.
@@ -3619,6 +3634,11 @@ func (a *AgentLoop) tryLLMCompaction() {
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
 		}
+		// Clear stale state entries from session memory - the old state context is no
+		// longer valid after compaction, and the new compaction will write fresh state.
+		if a.config.SessionMemory != nil {
+			a.config.SessionMemory.ClearStateEntries()
+		}
 
 		// Inject boundary marker and summary into context
 		preTokens := a.context.EstimatedTokens()
@@ -3632,9 +3652,10 @@ func (a *AgentLoop) tryLLMCompaction() {
 			_ = a.transcript.WriteSummary(summary)
 		}
 
-		// Save compaction summary to session memory
+		// Save compaction state to session memory — store a compact token count marker,
+		// not the full summary text (which bloats session memory for future sessions).
 		if a.config.SessionMemory != nil {
-			a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction: %s", summary), "auto")
+			a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction (auto): %d tokens compressed", preTokens), "auto")
 		}
 
 		// Phase 2: Keep recent messages — preserve with tool structure intact.
@@ -3666,6 +3687,9 @@ func (a *AgentLoop) tryLLMCompaction() {
 				a.toolStateTracker.MarkFileFresh(path)
 			}
 			if len(recoveredPaths) == 0 {
+				if a.config.SessionMemory != nil {
+					a.config.SessionMemory.SaveConclusions(a.toolStateTracker.GetConclusions())
+				}
 				a.toolStateTracker.ClearConclusions()
 			}
 		}
