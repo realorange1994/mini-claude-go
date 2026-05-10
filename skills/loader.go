@@ -268,6 +268,8 @@ func (l *Loader) parseSkillFileLocked(name string, path string, source string) *
 
 	available := true
 	var missingDeps []string
+	// meta.Available defaults to true when the "available:" key is absent
+	// from frontmatter. Only honour an explicit "available: false".
 	if !meta.Available {
 		available = false
 	}
@@ -322,6 +324,7 @@ func parseFrontmatter(content string) SkillMeta {
 
 	frontmatter := rest[:endIdx]
 	var meta SkillMeta
+	meta.Available = true // default: available unless explicitly set to false
 
 	// Track which multi-key block we're in
 	var currentKey string

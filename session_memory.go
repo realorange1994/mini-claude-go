@@ -48,8 +48,11 @@ _Step by step, what was attempted and done? Very terse summary for each step._
 `
 
 	// Token budget constants (matching upstream: MAX_SECTION_LENGTH=2000, MAX_TOTAL=12000)
-	maxTokensPerSection    = 2000
-	maxTotalSessionMemoryTokens = 12000
+	// Increased to 20000 per section and 60000 total to preserve more context across
+	// compaction cycles. 12000 total tokens is insufficient for long coding sessions
+	// where session memory accumulates important state, decisions, and reference info.
+	maxTokensPerSection           = 20000
+	maxTotalSessionMemoryTokens   = 60000
 
 	// Entry expiration: state entries expire after 7 days,
 	// other categories expire after 30 days.
