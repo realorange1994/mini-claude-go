@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -297,47 +299,53 @@ func NewConversationContext(cfg Config) *ConversationContext {
 	return &ConversationContext{config: cfg}
 }
 
-// EstimatedTokens returns a rough token estimate for all entries (total chars / 4).
+// EstimatedTokens returns a content-type-aware token estimate with 4/3 safety margin.
+// Uses DetectContentType + EstimateContentTokens for more accurate estimation than chars/4.
 func (c *ConversationContext) EstimatedTokens() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	totalChars := 0
+	rawTotal := 0
 	for _, entry := range c.entries {
 		switch v := entry.content.(type) {
 		case TextContent:
-			totalChars += len(v)
+			ct := DetectContentType(string(v))
+			rawTotal += EstimateContentTokens(string(v), ct)
 		case ToolUseContent:
 			for _, b := range v {
 				if b.OfText != nil {
-					totalChars += len(b.OfText.Text)
+					rawTotal += EstimateContentTokens(b.OfText.Text, "code")
 				}
 				if b.OfToolUse != nil {
-					totalChars += len(b.OfToolUse.ID) + len(b.OfToolUse.Name)
+					rawTotal += 10 // tool_use overhead
+					rawTotal += EstimateContentTokens(b.OfToolUse.Name, "code")
 					if m, ok := b.OfToolUse.Input.(map[string]any); ok {
-						for k, val := range m {
-							totalChars += len(k) + len(fmt.Sprintf("%v", val))
+						if data, err := json.Marshal(m); err == nil {
+							rawTotal += EstimateContentTokens(string(data), "json")
 						}
 					}
 				}
 			}
 		case ToolResultContent:
 			for _, r := range v {
-				for _, c := range r.Content {
-					if c.OfText != nil {
-						totalChars += len(c.OfText.Text)
+				rawTotal += 8 // tool_result overhead
+				for _, cb := range r.Content {
+					if cb.OfText != nil {
+						ct := DetectContentType(cb.OfText.Text)
+						rawTotal += EstimateContentTokens(cb.OfText.Text, ct)
 					}
 				}
 			}
 		case CompactBoundaryContent:
 			// Boundary markers are small, ignore for estimation
 		case SummaryContent:
-			totalChars += len(v)
+			rawTotal += EstimateContentTokens(string(v), "natural")
 		}
 	}
-	if totalChars < 4 {
+	if rawTotal == 0 {
 		return 0
 	}
-	return totalChars / 4
+	// Apply 4/3 safety margin (same as estimateMessageParamsTokens)
+	return int(math.Ceil(float64(rawTotal) * 4.0 / 3.0))
 }
 
 // SetSystemPrompt sets the system prompt.

@@ -45,14 +45,15 @@ type CanUseToolFn func(toolName string, args map[string]any) (allowed bool, reas
 // ─── ForkedAgentConfig ───────────────────────────────────────────────────────
 
 type ForkedAgentConfig struct {
-	CacheSafeParams CacheSafeParams
-	ForkMessages    []anthropic.MessageParam // fork's own messages (only these differ → cache HIT)
-	CanUseTool      CanUseToolFn
-	MaxTokens       int
-	QuerySource     string // tracking label (e.g., "session_memory")
-	MaxTurns        int    // max tool call rounds (default: 10)
-	Registry        *tools.Registry
-	ProjectDir      string
+	CacheSafeParams     CacheSafeParams
+	ForkMessages        []anthropic.MessageParam // fork's own messages (only these differ → cache HIT)
+	CanUseTool          CanUseToolFn
+	MaxTokens           int
+	QuerySource         string // tracking label (e.g., "session_memory")
+	MaxTurns            int    // max tool call rounds (default: 10)
+	Registry            *tools.Registry
+	ProjectDir          string
+	SkipParentMessages  bool // skip CacheSafeParams.Messages (for lightweight forks like session memory)
 }
 
 // ─── ForkedAgentResult ───────────────────────────────────────────────────────
@@ -84,10 +85,16 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 		cfg.MaxTokens = 4096
 	}
 
-	// Combine parent messages with fork messages
-	allMessages := make([]anthropic.MessageParam, len(cfg.CacheSafeParams.Messages)+len(cfg.ForkMessages))
-	copy(allMessages, cfg.CacheSafeParams.Messages)
-	copy(allMessages[len(cfg.CacheSafeParams.Messages):], cfg.ForkMessages)
+	// Combine parent messages with fork messages (skip parent if requested)
+	var allMessages []anthropic.MessageParam
+	if cfg.SkipParentMessages {
+		allMessages = make([]anthropic.MessageParam, len(cfg.ForkMessages))
+		copy(allMessages, cfg.ForkMessages)
+	} else {
+		allMessages = make([]anthropic.MessageParam, len(cfg.CacheSafeParams.Messages)+len(cfg.ForkMessages))
+		copy(allMessages, cfg.CacheSafeParams.Messages)
+		copy(allMessages[len(cfg.CacheSafeParams.Messages):], cfg.ForkMessages)
+	}
 
 	params := anthropic.MessageNewParams{
 		Model:     cfg.CacheSafeParams.Model,
@@ -111,7 +118,12 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 		cancel()
 
 		if err != nil {
-			if retryErr := retryForkedCall(&params); retryErr != nil {
+			errMsg := err.Error()
+			cr := classifyError(errMsg, 0, 0)
+			if !cr.Retryable {
+				return nil, fmt.Errorf("forked agent API error (non-retryable %s): %w", cr.Class, err)
+			}
+			if retryErr := retryForkedCall(&params, cr); retryErr != nil {
 				return nil, fmt.Errorf("forked agent API error: %w", retryErr)
 			}
 			// Retry succeeded, re-parse response
@@ -257,12 +269,19 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 }
 
 // retryForkedCall retries the API call with backoff on transient errors.
-func retryForkedCall(params *anthropic.MessageNewParams) error {
+// It respects the error classification: non-retryable errors return immediately,
+// rate limits use RetryAfter duration, others use exponential backoff with jitter.
+func retryForkedCall(params *anthropic.MessageNewParams, cr ClassifyResult) error {
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		delay := time.Duration(1<<uint(attempt)) * time.Second
-		// Add jitter
-		delay += time.Duration(rand.Int63n(int64(delay / 2)))
+		var delay time.Duration
+		if cr.RetryAfter > 0 {
+			delay = cr.RetryAfter
+		} else {
+			delay = time.Duration(1<<uint(attempt)) * time.Second
+			// Add jitter
+			delay += time.Duration(rand.Int63n(int64(delay / 2)))
+		}
 		time.Sleep(delay)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -273,6 +292,12 @@ func retryForkedCall(params *anthropic.MessageNewParams) error {
 		if err == nil {
 			return nil
 		}
+		// Re-classify on each retry attempt in case error type changes
+		newCr := classifyError(err.Error(), 0, 0)
+		if !newCr.Retryable {
+			return fmt.Errorf("non-retryable error on retry (%s): %w", newCr.Class, err)
+		}
+		cr = newCr
 	}
 	return fmt.Errorf("forked agent API call failed after %d retries", maxRetries)
 }

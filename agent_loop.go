@@ -1160,7 +1160,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 		// This matches upstream's extractSessionMemory hook pattern.
 		if a.extractionState != nil && a.config.SessionMemory != nil {
 			currentTokens := int64(a.context.EstimatedTokens())
-			if a.extractionState.ShouldExtract(currentTokens, len(toolCalls)) {
+			if a.extractionState.ShouldExtract(currentTokens, len(toolCalls) > 0) {
 				go a.runSessionMemoryExtraction()
 			}
 		}
@@ -4240,19 +4240,24 @@ func (a *AgentLoop) runSessionMemoryExtraction() {
 
 	// Run forked agent
 	cfg := ForkedAgentConfig{
-		CacheSafeParams: cacheParams,
-		ForkMessages:    forkMessages,
-		CanUseTool:     createMemoryFileCanUseTool(memoryPath),
-		MaxTokens:      8192,
-		QuerySource:    "session_memory",
-		MaxTurns:       5,
-		Registry:       a.registry,
-		ProjectDir:     a.config.ProjectDir,
+		CacheSafeParams:    cacheParams,
+		ForkMessages:       forkMessages,
+		CanUseTool:         createMemoryFileCanUseTool(memoryPath),
+		MaxTokens:          8192,
+		QuerySource:        "session_memory",
+		MaxTurns:           5,
+		Registry:           a.registry,
+		ProjectDir:         a.config.ProjectDir,
+		SkipParentMessages: true,
 	}
 
 	_, err := RunForkedAgent(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[session-memory] extraction error: %v\n", err)
+		// Clear in-progress flag on error so SM-compact does not block forever.
+		if a.extractionState != nil {
+			a.extractionState.MarkExtracted(int64(a.context.EstimatedTokens()))
+		}
 		return
 	}
 

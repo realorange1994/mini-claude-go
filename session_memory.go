@@ -945,7 +945,8 @@ func NewExtractionState() *ExtractionState {
 }
 
 // ShouldExtract checks if the extraction thresholds have been met.
-func (es *ExtractionState) ShouldExtract(currentTokens int64, toolCallsSinceLast int) bool {
+// Matches upstream: token threshold AND (tool call threshold OR no tool calls in last turn).
+func (es *ExtractionState) ShouldExtract(currentTokens int64, hasToolCallsInLastTurn bool) bool {
 	es.mu.Lock()
 	defer es.mu.Unlock()
 
@@ -957,7 +958,9 @@ func (es *ExtractionState) ShouldExtract(currentTokens int64, toolCallsSinceLast
 	}
 
 	tokensSinceLast := currentTokens - es.tokensAtLastExtract
-	if tokensSinceLast >= int64(minimumTokensBetweenUpdate) && toolCallsSinceLast >= toolCallsBetweenUpdates {
+	hasMetTokenThreshold := tokensSinceLast >= int64(minimumTokensBetweenUpdate)
+	hasMetToolCallThreshold := es.toolCallsSinceLast >= toolCallsBetweenUpdates
+	if hasMetTokenThreshold && (hasMetToolCallThreshold || !hasToolCallsInLastTurn) {
 		return true
 	}
 	return false
