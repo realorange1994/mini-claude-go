@@ -4253,6 +4253,7 @@ func (a *AgentLoop) runSessionMemoryExtraction() {
 		Registry:           a.registry,
 		ProjectDir:         a.config.ProjectDir,
 		SkipParentMessages: true,
+		Client:             a.client,
 	}
 
 	_, err := RunForkedAgent(cfg)

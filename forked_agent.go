@@ -53,7 +53,8 @@ type ForkedAgentConfig struct {
 	MaxTurns            int    // max tool call rounds (default: 10)
 	Registry            *tools.Registry
 	ProjectDir          string
-	SkipParentMessages  bool // skip CacheSafeParams.Messages (for lightweight forks like session memory)
+	SkipParentMessages  bool           // skip CacheSafeParams.Messages (for lightweight forks like session memory)
+	Client              anthropic.Client // reuse parent's client (same auth, base URL, HTTP client)
 }
 
 // ─── ForkedAgentResult ───────────────────────────────────────────────────────
@@ -113,7 +114,7 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		client := createForkedClient()
+		client := cfg.Client
 		resp, err := client.Messages.New(ctx, params)
 		cancel()
 
@@ -123,7 +124,7 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 			if !cr.Retryable {
 				return nil, fmt.Errorf("forked agent API error (non-retryable %s): %w", cr.Class, err)
 			}
-			if retryErr := retryForkedCall(&params, cr); retryErr != nil {
+			if retryErr := retryForkedCall(&params, cr, cfg.Client); retryErr != nil {
 				return nil, fmt.Errorf("forked agent API error: %w", retryErr)
 			}
 			// Retry succeeded, re-parse response
@@ -271,7 +272,7 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 // retryForkedCall retries the API call with backoff on transient errors.
 // It respects the error classification: non-retryable errors return immediately,
 // rate limits use RetryAfter duration, others use exponential backoff with jitter.
-func retryForkedCall(params *anthropic.MessageNewParams, cr ClassifyResult) error {
+func retryForkedCall(params *anthropic.MessageNewParams, cr ClassifyResult, client anthropic.Client) error {
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		var delay time.Duration
@@ -285,7 +286,6 @@ func retryForkedCall(params *anthropic.MessageNewParams, cr ClassifyResult) erro
 		time.Sleep(delay)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		client := createForkedClient()
 		_, err := client.Messages.New(ctx, *params)
 		cancel()
 
