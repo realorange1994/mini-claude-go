@@ -576,9 +576,12 @@ func (sm *SessionMemory) formatForTemplateLocked() string {
 	sb.WriteString("_What are the important system components? How do they work/fit together?_\n")
 	sb.WriteString("\n")
 
-	// Learnings
+	// Learnings (use preference entries)
 	sb.WriteString("# Learnings\n")
 	sb.WriteString("_What has worked well? What has not? What to avoid? Do not duplicate items from other sections._\n")
+	for _, item := range sectionContent["preference"] {
+		sb.WriteString("- " + item + "\n")
+	}
 	sb.WriteString("\n")
 
 	// Key Results
@@ -613,7 +616,7 @@ func (sm *SessionMemory) parseMarkdownEntries(data string) []MemoryEntry {
 	var entries []MemoryEntry
 	lines := strings.Split(data, "\n")
 	var currentCategory string
-	var lastTimestamp time.Time
+	lastTimestamp := time.Now() // default for entries without explicit timestamp
 
 	for _, line := range lines {
 		// Structured template section (upstream format): # Section Title

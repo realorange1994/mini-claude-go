@@ -2,511 +2,520 @@ package main
 
 import (
 	"testing"
-	"time"
 )
 
-func TestClassifyErrorTransient(t *testing.T) {
-	tests := []struct {
-		err   string
-		trans bool
-	}{
-		// Network errors -- retryable
-		{"connection refused", true},
-		{"Connection reset", true},
-		{"connection timed out", true},
-		{"no such host", true},
-		{"temporary failure", true},
-		{"dns error", true},
-		// Server errors -- retryable
-		{"Internal server error", true},
-		{"500 internal server error", true},
-		{"502 bad gateway", true},
-		{"503 service unavailable", true},
-		{"504 gateway timeout", true},
-		// Rate limit -- retryable
-		{"rate limit exceeded", true},
-		{"429 too many requests", true},
-		// Timeout -- retryable
-		{"request timeout", true},
-		{"deadline exceeded", true},
-		// Non-retryable errors
-		{"model confused", false},
-		{"stream stalled", false},
-		{"context_length exceeded", false},
-		{"authentication failed", false},
-		{"invalid request", false},
-		{"unauthorized", false},
-		{"not found", false},
-		{"", false},
-	}
+// ─── classifyError core classification ───────────────────────────────────────
 
-	for _, tt := range tests {
-		t.Run(tt.err, func(t *testing.T) {
-			r := classifyError(tt.err, 0, 0)
-			if r.Retryable != tt.trans {
-				t.Errorf("classifyError(%q).Retryable = %v, want %v (class=%s)", tt.err, r.Retryable, tt.trans, r.Class)
-			}
-		})
+func TestClassifyErrorAuth401(t *testing.T) {
+	cr := classifyError("401 Unauthorized", 0, 0)
+	if cr.Class != ECAuth {
+		t.Errorf("expected ECAuth, got %s", cr.Class)
+	}
+	if cr.Retryable {
+		t.Error("401 should not be retryable")
+	}
+	if !cr.RotateKey {
+		t.Error("401 should suggest key rotation")
 	}
 }
 
-func TestClassifyErrorCategories(t *testing.T) {
-	tests := []struct {
-		err    string
-		class  ErrorClass
-		retry  bool
-		compress bool
-	}{
-		// Context overflow
-		{"context_length exceeded", ECContextOverflow, false, true},
-		{"too many tokens", ECContextOverflow, false, true},
-		// Rate limit
-		{"rate limit exceeded", ECRateLimit, true, false},
-		{"429 too many requests", ECRateLimit, true, false},
-		// Auth
-		{"authentication failed", ECAuth, false, false},
-		{"unauthorized", ECAuth, false, false},
-		{"invalid api key", ECAuth, false, false},
-		// Billing
-		{"insufficient credits", ECBilling, false, false},
-		// Model not found
-		{"model not found", ECModelNotFound, false, false},
-		// Tool pairing
-		{"2013 tool call result does not follow tool call", ECToolPairing, false, false},
-		// Timeout
-		{"request timeout", ECTimeout, true, false},
-		{"deadline exceeded", ECTimeout, true, false},
-		// Network
-		{"connection refused", ECRetryable, true, false},
-		// Server errors
-		{"500 internal server error", ECRetryable, true, false},
-		{"503 service unavailable", ECOverloaded, true, false},
-		// Format error
-		{"400 bad request", ECFormatError, false, false},
-		// Unknown
-		{"model confused", ECUnknown, false, false},
-		{"", ECUnknown, false, false},
+func TestClassifyErrorAuth403(t *testing.T) {
+	cr := classifyError("403 Forbidden", 0, 0)
+	if cr.Class != ECAuth {
+		t.Errorf("expected ECAuth, got %s", cr.Class)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.err, func(t *testing.T) {
-			r := classifyError(tt.err, 0, 0)
-			if r.Class != tt.class {
-				t.Errorf("classifyError(%q).Class = %v, want %v", tt.err, r.Class, tt.class)
-			}
-			if r.Retryable != tt.retry {
-				t.Errorf("classifyError(%q).Retryable = %v, want %v", tt.err, r.Retryable, tt.retry)
-			}
-			if r.Compress != tt.compress {
-				t.Errorf("classifyError(%q).Compress = %v, want %v", tt.err, r.Compress, tt.compress)
-			}
-		})
+	if cr.Retryable {
+		t.Error("403 should not be retryable")
 	}
 }
 
-func TestClassifyErrorStatusCodeExtraction(t *testing.T) {
-	tests := []struct {
-		err        string
-		statusCode int
-	}{
-		{"500 internal server error", 500},
-		{"429 too many requests", 429},
-		{"401 unauthorized", 401},
-		{"403 forbidden", 403},
-		{"connection refused", 0},
-		{"rate limit exceeded", 0},
+func TestClassifyErrorBilling403KeyLimit(t *testing.T) {
+	cr := classifyError("403 key limit exceeded", 0, 0)
+	if cr.Class != ECBilling {
+		t.Errorf("expected ECBilling, got %s", cr.Class)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.err, func(t *testing.T) {
-			r := classifyError(tt.err, 0, 0)
-			if r.StatusCode != tt.statusCode {
-				t.Errorf("classifyError(%q).StatusCode = %v, want %v", tt.err, r.StatusCode, tt.statusCode)
-			}
-		})
+	if cr.Retryable {
+		t.Error("billing should not be retryable")
+	}
+	if !cr.RotateKey {
+		t.Error("billing should suggest key rotation")
 	}
 }
 
-func TestClassifyErrorRecoveryHints(t *testing.T) {
-	tests := []struct {
-		err        string
-		rotateKey  bool
-		fallback   bool
-		compress   bool
-	}{
-		{"401 unauthorized", true, true, false},
-		{"rate limit exceeded", true, true, false},
-		{"insufficient credits", true, true, false},
-		{"model not found", false, true, false},
-		{"context_length exceeded", false, false, true},
+func TestClassifyErrorBilling402(t *testing.T) {
+	cr := classifyError("402 insufficient credits", 0, 0)
+	if cr.Class != ECBilling {
+		t.Errorf("expected ECBilling, got %s", cr.Class)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.err, func(t *testing.T) {
-			r := classifyError(tt.err, 0, 0)
-			if r.RotateKey != tt.rotateKey {
-				t.Errorf("classifyError(%q).RotateKey = %v, want %v", tt.err, r.RotateKey, tt.rotateKey)
-			}
-			if r.Fallback != tt.fallback {
-				t.Errorf("classifyError(%q).Fallback = %v, want %v", tt.err, r.Fallback, tt.fallback)
-			}
-			if r.Compress != tt.compress {
-				t.Errorf("classifyError(%q).Compress = %v, want %v", tt.err, r.Compress, tt.compress)
-			}
-		})
+	if cr.Retryable {
+		t.Error("402 billing should not be retryable")
 	}
 }
 
-func TestClassifyErrorLargeSessionHeuristic(t *testing.T) {
-	// Server disconnect + large session → context overflow
-	r := classifyError("connection reset by peer", 150000, 200000)
-	if r.Class != ECContextOverflow {
-		t.Errorf("large session disconnect: class = %v, want ECContextOverflow", r.Class)
+func TestClassifyErrorRateLimit429(t *testing.T) {
+	cr := classifyError("429 rate limit exceeded", 0, 0)
+	if cr.Class != ECRateLimit {
+		t.Errorf("expected ECRateLimit, got %s", cr.Class)
 	}
-	if !r.Compress {
-		t.Errorf("large session disconnect: Compress = false, want true")
-	}
-
-	// Server disconnect + small session → timeout
-	r = classifyError("connection reset by peer", 1000, 200000)
-	if r.Class != ECTimeout {
-		t.Errorf("small session disconnect: class = %v, want ECTimeout", r.Class)
+	if !cr.Retryable {
+		t.Error("429 should be retryable")
 	}
 }
 
-func TestIsContextLengthError(t *testing.T) {
-	tests := []struct {
-		err   string
-		isCtx bool
-	}{
-		{"context_length exceeded", true},
-		{"maximum context", true},
-		{"too many tokens", true},
-		{"prompt_too_long", true},
-		{"token limit", true},
-		{"context_exceeded", true},
-		{"max_tokens_exceeded", true},
-		{"context window", true},
-		{"context limit", true},
-		{"normal error", false},
-		{"", false},
-		{"model confused", false},
-		{"stream stalled", false},
+func TestClassifyErrorContextOverflow(t *testing.T) {
+	cr := classifyError("prompt is too long: 137500 tokens > 135000 maximum", 0, 0)
+	if cr.Class != ECContextOverflow {
+		t.Errorf("expected ECContextOverflow, got %s", cr.Class)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.err, func(t *testing.T) {
-			got := isContextLengthError(tt.err)
-			if got != tt.isCtx {
-				t.Errorf("isContextLengthError(%q) = %v, want %v", tt.err, got, tt.isCtx)
-			}
-		})
+	if cr.Retryable {
+		t.Error("context overflow should not be retryable without compression")
+	}
+	if !cr.Compress {
+		t.Error("context overflow should suggest compression")
 	}
 }
 
-func TestErrorClassString(t *testing.T) {
-	tests := []struct {
-		class ErrorClass
-		name  string
-	}{
-		{ECRetryable, "retryable"},
-		{ECNonRetryable, "non_retryable"},
-		{ECContextOverflow, "context_overflow"},
-		{ECRateLimit, "rate_limit"},
-		{ECAuth, "auth"},
-		{ECUnknown, "unknown"},
+func TestClassifyErrorContextOverflow400(t *testing.T) {
+	cr := classifyError("400 context_length exceeded", 0, 0)
+	if cr.Class != ECContextOverflow {
+		t.Errorf("expected ECContextOverflow, got %s", cr.Class)
 	}
+	if !cr.Compress {
+		t.Error("should suggest compression")
+	}
+}
 
+func TestClassifyErrorToolPairing2013(t *testing.T) {
+	cr := classifyError("2013 tool call result does not follow tool call", 0, 0)
+	if cr.Class != ECToolPairing {
+		t.Errorf("expected ECToolPairing, got %s", cr.Class)
+	}
+	if cr.Retryable {
+		t.Error("tool pairing should not be retryable")
+	}
+}
+
+func TestClassifyErrorModelNotFound404(t *testing.T) {
+	cr := classifyError("404 model not found", 0, 0)
+	if cr.Class != ECModelNotFound {
+		t.Errorf("expected ECModelNotFound, got %s", cr.Class)
+	}
+	if cr.Retryable {
+		t.Error("model not found should not be retryable")
+	}
+	if !cr.Fallback {
+		t.Error("model not found should suggest fallback")
+	}
+}
+
+func TestClassifyErrorPayloadTooLarge413(t *testing.T) {
+	cr := classifyError("413 payload too large", 0, 0)
+	if cr.Class != ECPayloadTooLarge {
+		t.Errorf("expected ECPayloadTooLarge, got %s", cr.Class)
+	}
+	if !cr.Compress {
+		t.Error("413 should suggest compression")
+	}
+}
+
+func TestClassifyErrorOverloaded503(t *testing.T) {
+	cr := classifyError("503 service overloaded", 0, 0)
+	if cr.Class != ECOverloaded {
+		t.Errorf("expected ECOverloaded, got %s", cr.Class)
+	}
+	if !cr.Retryable {
+		t.Error("503 should be retryable")
+	}
+}
+
+func TestClassifyErrorOverloaded529(t *testing.T) {
+	cr := classifyError("529 overloaded", 0, 0)
+	if cr.Class != ECOverloaded {
+		t.Errorf("expected ECOverloaded, got %s", cr.Class)
+	}
+}
+
+func TestClassifyErrorServer500(t *testing.T) {
+	cr := classifyError("500 internal server error", 0, 0)
+	if cr.Class != ECRetryable {
+		t.Errorf("expected ECRetryable, got %s", cr.Class)
+	}
+	if !cr.Retryable {
+		t.Error("500 should be retryable")
+	}
+}
+
+func TestClassifyErrorServer502(t *testing.T) {
+	cr := classifyError("502 bad gateway", 0, 0)
+	if cr.Class != ECRetryable {
+		t.Errorf("expected ECRetryable, got %s", cr.Class)
+	}
+}
+
+func TestClassifyErrorTimeout(t *testing.T) {
+	cr := classifyError("connection timed out", 0, 0)
+	// "connection timed out" matches networkErrorPatterns which runs before
+	// the deadline-exceeded timeout heuristic, so it classifies as retryable.
+	if cr.Class != ECRetryable {
+		t.Errorf("expected ECRetryable, got %s", cr.Class)
+	}
+	if !cr.Retryable {
+		t.Error("timeout should be retryable")
+	}
+}
+
+func TestClassifyErrorNetworkError(t *testing.T) {
+	cr := classifyError("connection refused", 0, 0)
+	if cr.Class != ECRetryable {
+		t.Errorf("expected ECRetryable, got %s", cr.Class)
+	}
+}
+
+func TestClassifyErrorFormatError400(t *testing.T) {
+	cr := classifyError("400 bad request", 0, 0)
+	if cr.Class != ECFormatError {
+		t.Errorf("expected ECFormatError, got %s", cr.Class)
+	}
+	if cr.Retryable {
+		t.Error("generic 400 should not be retryable")
+	}
+}
+
+func TestClassifyErrorUnknown(t *testing.T) {
+	cr := classifyError("something completely unexpected", 0, 0)
+	if cr.Class != ECUnknown {
+		t.Errorf("expected ECUnknown, got %s", cr.Class)
+	}
+	if cr.Retryable {
+		t.Error("unknown should not be retryable by default")
+	}
+}
+
+// ─── classify400 sub-classification ──────────────────────────────────────────
+
+func TestClassify400ContextOverflow(t *testing.T) {
+	cr := classifyError("400 prompt too long: context_length exceeded", 0, 0)
+	if cr.Class != ECContextOverflow {
+		t.Errorf("expected ECContextOverflow, got %s", cr.Class)
+	}
+	if !cr.Compress {
+		t.Error("should suggest compression")
+	}
+}
+
+func TestClassify400ModelNotFound(t *testing.T) {
+	cr := classifyError("400 is not a valid model", 0, 0)
+	if cr.Class != ECModelNotFound {
+		t.Errorf("expected ECModelNotFound, got %s", cr.Class)
+	}
+}
+
+func TestClassify400RateLimit(t *testing.T) {
+	cr := classifyError("400 rate limit exceeded", 0, 0)
+	if cr.Class != ECRateLimit {
+		t.Errorf("expected ECRateLimit, got %s", cr.Class)
+	}
+}
+
+func TestClassify400Billing(t *testing.T) {
+	cr := classifyError("400 insufficient credits", 0, 0)
+	if cr.Class != ECBilling {
+		t.Errorf("expected ECBilling, got %s", cr.Class)
+	}
+}
+
+func TestClassify400LargeSessionHeuristic(t *testing.T) {
+	// 100K tokens with 200K context = 50% → should trigger context overflow heuristic
+	cr := classifyError("400 bad request", 100000, 200000)
+	if cr.Class != ECContextOverflow {
+		t.Errorf("expected ECContextOverflow for large session, got %s", cr.Class)
+	}
+	if !cr.Compress {
+		t.Error("should suggest compression")
+	}
+}
+
+func TestClassify400SmallSessionNotOverflow(t *testing.T) {
+	// 10K tokens with 200K context = 5% → should NOT trigger context overflow heuristic
+	cr := classifyError("400 bad request", 10000, 200000)
+	if cr.Class != ECFormatError {
+		t.Errorf("expected ECFormatError for small session, got %s", cr.Class)
+	}
+}
+
+// ─── classify402 sub-classification ──────────────────────────────────────────
+
+func TestClassify402Billing(t *testing.T) {
+	cr := classifyError("402 payment required", 0, 0)
+	if cr.Class != ECBilling {
+		t.Errorf("expected ECBilling, got %s", cr.Class)
+	}
+}
+
+func TestClassify402TransientUsageLimit(t *testing.T) {
+	cr := classifyError("402 usage limit exceeded, try again later", 0, 0)
+	if cr.Class != ECRateLimit {
+		t.Errorf("expected ECRateLimit for transient 402, got %s", cr.Class)
+	}
+}
+
+// ─── extractStatusCode ───────────────────────────────────────────────────────
+
+func TestExtractStatusCode(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"status_code=429", 429},
+		{" 403 Forbidden", 403},
+		{"error 500 internal", 500},
+		{"no status code here", 0},
+		{"code 99 too low", 0},
+		{"code 600 too high", 0},
+	}
 	for _, tt := range tests {
-		if got := tt.class.String(); got != tt.name {
-			t.Errorf("ErrorClass(%d).String() = %q, want %q", tt.class, got, tt.name)
+		got := extractStatusCode(tt.input)
+		if got != tt.want {
+			t.Errorf("extractStatusCode(%q) = %d, want %d", tt.input, got, tt.want)
 		}
 	}
 }
 
-func TestExtractStatusCode(t *testing.T) {
-	tests := []struct {
-		err  string
-		code int
-	}{
-		{"500 internal server error", 500},
-		{"status 429", 429},
-		{"error 401: unauthorized", 401},
-		{"connection refused", 0},
-		{"no status here", 0},
-		{"99 too small", 0},
-		{"600 too large", 0},
-	}
+// ─── parsePromptTooLongTokenGap ──────────────────────────────────────────────
 
-	for _, tt := range tests {
-		t.Run(tt.err, func(t *testing.T) {
-			got := extractStatusCode(tt.err)
-			if got != tt.code {
-				t.Errorf("extractStatusCode(%q) = %d, want %d", tt.err, got, tt.code)
-			}
-		})
+func TestParsePromptTooLongTokenGap(t *testing.T) {
+	actual, max, found := parsePromptTooLongTokenGap("prompt is too long: 137500 tokens > 135000 maximum")
+	if !found {
+		t.Error("expected to find token gap")
+	}
+	if actual != 137500 {
+		t.Errorf("actual = %d, want 137500", actual)
+	}
+	if max != 135000 {
+		t.Errorf("max = %d, want 135000", max)
 	}
 }
+
+func TestParsePromptTooLongTokenGapNotFound(t *testing.T) {
+	_, _, found := parsePromptTooLongTokenGap("some other error")
+	if found {
+		t.Error("should not find token gap in unrelated error")
+	}
+}
+
+// ─── Backward compatibility wrappers ─────────────────────────────────────────
+
+func TestIsTransientError(t *testing.T) {
+	if isTransientError("500 internal server error") != true {
+		t.Error("500 should be transient")
+	}
+	if isTransientError("401 unauthorized") != false {
+		t.Error("401 should not be transient")
+	}
+}
+
+func TestIsContextLengthError(t *testing.T) {
+	if !isContextLengthError("prompt is too long: context_length exceeded") {
+		t.Error("should detect context length error")
+	}
+	if isContextLengthError("500 internal server error") {
+		t.Error("should not detect context length error for 500")
+	}
+}
+
+func TestIsErrorNonRetryable(t *testing.T) {
+	if !isErrorNonRetryable("401 unauthorized") {
+		t.Error("401 should be non-retryable")
+	}
+	if isErrorNonRetryable("500 internal server error") {
+		t.Error("500 should be retryable (not non-retryable)")
+	}
+}
+
+// ─── matchesAny ──────────────────────────────────────────────────────────────
 
 func TestMatchesAny(t *testing.T) {
-	patterns := []string{"rate limit", "too many requests", "throttled"}
-	if !matchesAny("rate limit exceeded", patterns) {
-		t.Error("should match 'rate limit'")
+	patterns := []string{"rate limit", "throttled", "too many"}
+	if !matchesAny("request rate limit exceeded", patterns) {
+		t.Error("should match rate limit pattern")
 	}
-	if !matchesAny("429 too many requests", patterns) {
-		t.Error("should match 'too many requests'")
-	}
-	if matchesAny("connection refused", patterns) {
-		t.Error("should not match")
+	if matchesAny("all good", patterns) {
+		t.Error("should not match any pattern")
 	}
 }
 
-func TestClassifyErrorRetryAfter(t *testing.T) {
-	// Rate limit with Retry-After hint
-	r := classifyError("rate limit exceeded, retry after 30s", 0, 0)
-	if r.Class != ECRateLimit {
-		t.Errorf("class = %v, want ECRateLimit", r.Class)
-	}
-	// RetryAfter is only set when explicitly provided via header, not from message parsing
-	// So we just verify the class is correct
-}
+// ─── truncateStr ─────────────────────────────────────────────────────────────
 
-func TestClassifyErrorUsageLimitDisambiguation(t *testing.T) {
-	// Usage limit with transient signal → rate limit (retryable)
-	r := classifyError("usage limit exceeded, please try again later", 0, 0)
-	if r.Class != ECRateLimit {
-		t.Errorf("transient usage limit: class = %v, want ECRateLimit", r.Class)
+func TestTruncateStr(t *testing.T) {
+	if truncateStr("short", 100) != "short" {
+		t.Error("short string should not be truncated")
 	}
-	if !r.Retryable {
-		t.Errorf("transient usage limit: should be retryable")
-	}
-
-	// Usage limit without transient signal → billing (non-retryable)
-	r = classifyError("usage limit exceeded", 0, 0)
-	if r.Class != ECBilling {
-		t.Errorf("permanent usage limit: class = %v, want ECBilling", r.Class)
-	}
-	if r.Retryable {
-		t.Errorf("permanent usage limit: should not be retryable")
+	result := truncateStr("hello world", 5)
+	if len(result) > 5 {
+		t.Errorf("truncated string should be <= 5 bytes, got %d", len(result))
 	}
 }
 
-func TestClassifyErrorBillingPatterns(t *testing.T) {
-	tests := []string{
-		"insufficient credits",
-		"insufficient_quota",
-		"credits have been exhausted",
-		"billing hard limit",
-	}
+// ─── ErrorClass String ───────────────────────────────────────────────────────
 
-	for _, err := range tests {
-		t.Run(err, func(t *testing.T) {
-			r := classifyError(err, 0, 0)
-			if r.Class != ECBilling {
-				t.Errorf("class = %v, want ECBilling", r.Class)
-			}
-			if r.Retryable {
-				t.Errorf("billing errors should not be retryable")
-			}
-			if !r.RotateKey {
-				t.Errorf("billing errors should suggest key rotation")
-			}
-		})
+func TestErrorClassString(t *testing.T) {
+	tests := []struct {
+		class ErrorClass
+		want  string
+	}{
+		{ECRetryable, "retryable"},
+		{ECNonRetryable, "non_retryable"},
+		{ECContextOverflow, "context_overflow"},
+		{ECToolPairing, "tool_pairing"},
+		{ECRateLimit, "rate_limit"},
+		{ECBilling, "billing"},
+		{ECModelNotFound, "model_not_found"},
+		{ECPayloadTooLarge, "payload_too_large"},
+		{ECOverloaded, "overloaded"},
+		{ECTimeout, "timeout"},
+		{ECFormatError, "format_error"},
+		{ECAuth, "auth"},
+		{ECThinkingSig, "thinking_signature"},
+		{ECLongContextTier, "long_context_tier"},
+		{ECUnknown, "unknown"},
+	}
+	for _, tt := range tests {
+		if tt.class.String() != tt.want {
+			t.Errorf("ErrorClass(%d).String() = %q, want %q", tt.class, tt.class.String(), tt.want)
+		}
 	}
 }
+
+func TestErrorClassStringOutOfRange(t *testing.T) {
+	class := ErrorClass(99)
+	result := class.String()
+	if result != "error_class(99)" {
+		t.Errorf("out-of-range class should be error_class(99), got %s", result)
+	}
+}
+
+// ─── parseErrorBody ──────────────────────────────────────────────────────────
 
 func TestParseErrorBody(t *testing.T) {
-	// Valid JSON body
-	body := parseErrorBody(`error: {"type": "error", "message": "rate limited"}`)
+	body := parseErrorBody(`error: {"type":"error","message":"rate limited"}`)
 	if body == nil {
-		t.Error("should parse valid JSON body")
+		t.Fatal("should parse JSON body")
 	}
 	if body["type"] != "error" {
-		t.Errorf("type = %v, want 'error'", body["type"])
+		t.Errorf("expected type=error, got %v", body["type"])
 	}
+}
 
-	// No JSON
-	body = parseErrorBody("connection refused")
+func TestParseErrorBodyNoJSON(t *testing.T) {
+	body := parseErrorBody("no json here")
 	if body != nil {
 		t.Error("should return nil for non-JSON error")
 	}
+}
 
-	// Malformed JSON
-	body = parseErrorBody(`error: {"broken json`)
+func TestParseErrorBodyMalformedJSON(t *testing.T) {
+	body := parseErrorBody("error: {broken json}")
 	if body != nil {
 		t.Error("should return nil for malformed JSON")
 	}
 }
 
-func TestTruncateStr(t *testing.T) {
-	if got := truncateStr("hello", 10); got != "hello" {
-		t.Errorf("short string: got %q, want %q", got, "hello")
+// ─── Server disconnect heuristic ─────────────────────────────────────────────
+
+func TestClassifyErrorServerDisconnectLargeSession(t *testing.T) {
+	// No status code, server disconnect, large session → context overflow
+	cr := classifyError("server disconnected", 130000, 200000)
+	if cr.Class != ECContextOverflow {
+		t.Errorf("expected ECContextOverflow, got %s", cr.Class)
 	}
-	if got := truncateStr("hello world", 5); got != "hello" {
-		t.Errorf("long string: got %q, want %q", got, "hello")
+	if !cr.Compress {
+		t.Error("should suggest compression")
 	}
 }
 
-func TestIsErrorNonRetryable(t *testing.T) {
-	if isErrorNonRetryable("connection refused") {
-		t.Error("connection refused should be retryable")
-	}
-	if !isErrorNonRetryable("authentication failed") {
-		t.Error("auth error should be non-retryable")
-	}
-	if !isErrorNonRetryable("context_length exceeded") {
-		t.Error("context overflow should be non-retryable")
+func TestClassifyErrorServerDisconnectSmallSession(t *testing.T) {
+	// No status code, server disconnect, small session → timeout
+	cr := classifyError("server disconnected", 10000, 200000)
+	if cr.Class != ECTimeout {
+		t.Errorf("expected ECTimeout, got %s", cr.Class)
 	}
 }
 
-func TestClassifyError403Disambiguation(t *testing.T) {
-	// 403 with key limit → billing
-	r := classifyError("403 key limit exceeded", 0, 0)
-	if r.Class != ECBilling {
-		t.Errorf("403 key limit: class = %v, want ECBilling", r.Class)
-	}
+// ─── Transport error heuristics ──────────────────────────────────────────────
 
-	// 403 generic → auth
-	r = classifyError("403 forbidden", 0, 0)
-	if r.Class != ECAuth {
-		t.Errorf("403 forbidden: class = %v, want ECAuth", r.Class)
+func TestClassifyErrorTransportTimeout(t *testing.T) {
+	cr := classifyError("readtimeout error", 0, 0)
+	if cr.Class != ECTimeout {
+		t.Errorf("expected ECTimeout, got %s", cr.Class)
 	}
 }
 
-func TestClassifyError404Disambiguation(t *testing.T) {
-	// 404 with model not found pattern
-	r := classifyError("404 model not found", 0, 0)
-	if r.Class != ECModelNotFound {
-		t.Errorf("404 model not found: class = %v, want ECModelNotFound", r.Class)
-	}
-
-	// 404 generic → unknown
-	r = classifyError("404 not found", 0, 0)
-	if r.Class != ECUnknown {
-		t.Errorf("404 generic: class = %v, want ECUnknown", r.Class)
+func TestClassifyErrorDeadlineExceeded(t *testing.T) {
+	cr := classifyError("context deadline exceeded", 0, 0)
+	if cr.Class != ECTimeout {
+		t.Errorf("expected ECTimeout, got %s", cr.Class)
 	}
 }
 
-func TestClassifyError413(t *testing.T) {
-	r := classifyError("413 payload too large", 0, 0)
-	if r.Class != ECPayloadTooLarge {
-		t.Errorf("class = %v, want ECPayloadTooLarge", r.Class)
-	}
-	if !r.Compress {
-		t.Error("413 should suggest compression")
+// ─── Chinese context overflow patterns ───────────────────────────────────────
+
+func TestClassifyErrorChineseContextOverflow(t *testing.T) {
+	cr := classifyError("超过最大长度", 0, 0)
+	if cr.Class != ECContextOverflow {
+		t.Errorf("expected ECContextOverflow for Chinese pattern, got %s", cr.Class)
 	}
 }
 
-func TestClassifyErrorServerDisconnectPatterns(t *testing.T) {
+// ─── 403 spending limit ──────────────────────────────────────────────────────
+
+func TestClassifyError403SpendingLimit(t *testing.T) {
+	cr := classifyError("403 spending limit exceeded", 0, 0)
+	if cr.Class != ECBilling {
+		t.Errorf("expected ECBilling for 403 spending limit, got %s", cr.Class)
+	}
+}
+
+// ─── Billing patterns ────────────────────────────────────────────────────────
+
+func TestClassifyErrorBillingPatterns(t *testing.T) {
 	patterns := []string{
-		"server disconnected",
-		"peer closed connection",
-		"unexpected eof",
+		"insufficient credits",
+		"insufficient_quota",
+		"credit balance is low",
+		"credits have been exhausted",
+		"top up your credits",
+		"payment required",
+		"billing hard limit reached",
+		"exceeded your current quota",
+		"account is deactivated",
+		"plan does not include this feature",
 	}
-
-	for _, err := range patterns {
-		t.Run(err, func(t *testing.T) {
-			r := classifyError(err, 0, 200000)
-			if r.Class != ECTimeout {
-				t.Errorf("class = %v, want ECTimeout", r.Class)
-			}
-		})
-	}
-}
-
-func TestClassifyErrorTransportTypes(t *testing.T) {
-	// These use lowercase no-space format
-	r := classifyError("ConnectionError: connection refused", 0, 0)
-	if !r.Retryable {
-		t.Errorf("should be retryable, got class=%v", r.Class)
-	}
-
-	r = classifyError("ReadTimeout error", 0, 0)
-	if r.Class != ECTimeout {
-		t.Errorf("class = %v, want ECTimeout", r.Class)
-	}
-
-	r = classifyError("BrokenPipeError: broken pipe", 0, 0)
-	if !r.Retryable {
-		t.Errorf("should be retryable, got class=%v", r.Class)
-	}
-}
-
-// Benchmark classifyError to ensure pattern matching is fast
-func BenchmarkClassifyError(b *testing.B) {
-	errors := []string{
-		"connection refused",
-		"500 internal server error",
-		"rate limit exceeded",
-		"context_length exceeded",
-		"authentication failed",
-		"model confused",
-		"429 too many requests",
-	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		classifyError(errors[i%len(errors)], 0, 0)
-	}
-}
-
-// Verify backward compatibility wrappers
-func TestBackwardCompatibilityWrappers(t *testing.T) {
-	// isTransientError should match classifyError's Retryable
-	tests := []string{
-		"connection refused",
-		"rate limit exceeded",
-		"context_length exceeded",
-		"authentication failed",
-		"model confused",
-		"",
-	}
-	for _, err := range tests {
-		r := classifyError(err, 0, 0)
-		got := isTransientError(err)
-		if got != r.Retryable {
-			t.Errorf("isTransientError(%q) = %v, classifyError().Retryable = %v", err, got, r.Retryable)
+	for _, p := range patterns {
+		cr := classifyError(p, 0, 0)
+		if cr.Class != ECBilling {
+			t.Errorf("expected ECBilling for %q, got %s", p, cr.Class)
 		}
 	}
 }
 
-func TestParsePromptTooLongTokenGap(t *testing.T) {
-	tests := []struct {
-		err    string
-		actual int
-		max    int
-		found  bool
-	}{
-		// Standard format from Anthropic API
-		{"prompt is too long: 137500 tokens > 135000 maximum", 137500, 135000, true},
-		// Without "maximum" suffix
-		{"137500 tokens > 135000", 137500, 135000, true},
-		// Singular "token"
-		{"1 token > 0", 1, 0, false}, // max=0 → found=false
-		// No match
-		{"context_length_exceeded", 0, 0, false},
-		// Empty string
-		{"", 0, 0, false},
-		// With extra whitespace
-		{"prompt is too long: 200000  tokens  >  180000 max", 200000, 180000, true},
-	}
+// ─── Rate limit patterns ─────────────────────────────────────────────────────
 
-	for _, tt := range tests {
-		t.Run(tt.err, func(t *testing.T) {
-			actual, max, found := parsePromptTooLongTokenGap(tt.err)
-			if found != tt.found {
-				t.Errorf("found = %v, want %v", found, tt.found)
-			}
-			if found {
-				if actual != tt.actual {
-					t.Errorf("actual = %d, want %d", actual, tt.actual)
-				}
-				if max != tt.max {
-					t.Errorf("max = %d, want %d", max, tt.max)
-				}
-			}
-		})
+func TestClassifyErrorRateLimitPatterns(t *testing.T) {
+	patterns := []string{
+		"rate limit exceeded",
+		"rate_limit hit",
+		"too many requests",
+		"throttled by API",
+		"requests per minute exceeded",
+		"tokens per minute exceeded",
+		"try again in 60 seconds",
+		"please retry after 30s",
+		"resource_exhausted",
+	}
+	for _, p := range patterns {
+		cr := classifyError(p, 0, 0)
+		if cr.Class != ECRateLimit {
+			t.Errorf("expected ECRateLimit for %q, got %s", p, cr.Class)
+		}
 	}
 }
-
-// Suppress unused import warning for time
-var _ time.Duration

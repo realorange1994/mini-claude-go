@@ -742,12 +742,14 @@ func TestBuildMessagesWithAttachment(t *testing.T) {
 	ctx.AddAttachment("[Post-compact file recovery: main.go]\n```\npackage main\n```")
 
 	messages := ctx.BuildMessages()
-	if len(messages) != 2 {
-		t.Errorf("expected 2 messages, got %d", len(messages))
+	// Both entries are user-role and get merged into a single message
+	// by the consecutive same-role merge step.
+	if len(messages) != 1 {
+		t.Errorf("expected 1 merged message, got %d", len(messages))
 	}
-	// Attachment should be a user-role message with text content
-	if messages[1].Role != anthropic.MessageParamRoleUser {
-		t.Errorf("expected attachment message to be user role")
+	// The merged message should contain both the user text and attachment
+	if messages[0].Role != anthropic.MessageParamRoleUser {
+		t.Errorf("expected merged message to be user role")
 	}
 }
 
@@ -756,5 +758,201 @@ func TestAttachmentContentSealedInterface(t *testing.T) {
 	content = AttachmentContent("test attachment")
 	if _, ok := content.(AttachmentContent); !ok {
 		t.Error("AttachmentContent should implement EntryContent")
+	}
+}
+
+// ─── Incremental compaction (summarized flag) ────────────────────────────────
+
+func TestKeepRecentMessagesAdaptiveSkipsSummarized(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Add entries: some already summarized, some not
+	ctx.AddUserMessage("old summarized 1")
+	ctx.entries[0].summarized = true
+	ctx.AddAssistantText("old summarized response 1")
+	ctx.entries[1].summarized = true
+	ctx.AddUserMessage("old summarized 2")
+	ctx.entries[2].summarized = true
+	ctx.AddUserMessage("new not summarized 1")
+	ctx.AddAssistantText("new response 1")
+	ctx.AddUserMessage("new not summarized 2")
+
+	// Add compact boundary
+	ctx.AddCompactBoundary(CompactTriggerAuto, 1000)
+	ctx.AddSummary("Summary of old content")
+
+	// Keep recent: should skip summarized entries and only keep new ones
+	ctx.KeepRecentMessagesAdaptive(100, 2, 10000)
+
+	// Verify that summarized entries were skipped
+	messages := ctx.BuildMessages()
+	// Should contain: summary + new entries (not summarized ones)
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if block.OfText != nil {
+				text := block.OfText.Text
+				if strings.Contains(text, "old summarized") {
+					t.Errorf("summarized entries should not appear in messages: %q", text)
+				}
+			}
+		}
+	}
+}
+
+func TestKeepRecentMessagesAdaptiveMarksKeptAsSummarized(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("entry A")
+	ctx.AddAssistantText("response A")
+	ctx.AddUserMessage("entry B")
+	ctx.AddAssistantText("response B")
+	ctx.AddUserMessage("entry C")
+
+	ctx.AddCompactBoundary(CompactTriggerAuto, 1000)
+	ctx.AddSummary("Summary")
+
+	// Keep recent messages
+	ctx.KeepRecentMessagesAdaptive(100, 2, 10000)
+
+	// Check that kept entries are marked as summarized
+	summarizedCount := 0
+	for _, entry := range ctx.entries {
+		if entry.summarized {
+			summarizedCount++
+		}
+	}
+	if summarizedCount == 0 {
+		t.Error("kept entries should be marked as summarized for incremental compaction")
+	}
+}
+
+func TestKeepRecentMessagesAdaptiveIncrementalCompact(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// First compaction: summarize entries A-D, keep E-F
+	ctx.AddUserMessage("entry A")
+	ctx.AddAssistantText("response A")
+	ctx.AddUserMessage("entry B")
+	ctx.AddAssistantText("response B")
+	ctx.AddUserMessage("entry C")
+	ctx.AddAssistantText("response C")
+	ctx.AddUserMessage("entry D")
+	ctx.AddAssistantText("response D")
+	ctx.AddUserMessage("entry E")
+	ctx.AddAssistantText("response E")
+	ctx.AddUserMessage("entry F")
+
+	ctx.AddCompactBoundary(CompactTriggerAuto, 1000)
+	ctx.AddSummary("First summary")
+
+	ctx.KeepRecentMessagesAdaptive(100, 2, 10000)
+
+	// KeepRecentMessagesAdaptive appends kept entries after the boundary
+	// and marks them as summarized=true. Check that entries after boundary
+	// are marked as summarized.
+	boundaryIdx := -1
+	for i := len(ctx.entries) - 1; i >= 0; i-- {
+		if _, ok := ctx.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+	if boundaryIdx < 0 {
+		t.Fatal("expected a compact boundary")
+	}
+
+	// Entries after boundary+summary should be marked as summarized
+	summarizedAfter := 0
+	for i := boundaryIdx + 1; i < len(ctx.entries); i++ {
+		if ctx.entries[i].summarized {
+			summarizedAfter++
+		}
+	}
+	if summarizedAfter == 0 {
+		t.Error("entries after boundary should be marked as summarized")
+	}
+
+	// Now add more entries after first compaction
+	ctx.AddUserMessage("entry G")
+	ctx.AddAssistantText("response G")
+	ctx.AddUserMessage("entry H")
+
+	// Second compaction: should skip already-summarized entries after boundary
+	ctx.AddCompactBoundary(CompactTriggerAuto, 500)
+	ctx.AddSummary("Second summary")
+	ctx.KeepRecentMessagesAdaptive(100, 2, 10000)
+
+	// Verify second compaction skipped summarized entries
+	boundaryIdx2 := -1
+	for i := len(ctx.entries) - 1; i >= 0; i-- {
+		if _, ok := ctx.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx2 = i
+			break
+		}
+	}
+	skippedSummarized := 0
+	for i := boundaryIdx2 - 1; i >= 0; i-- {
+		if ctx.entries[i].summarized {
+			skippedSummarized++
+		}
+	}
+	if skippedSummarized == 0 {
+		t.Error("second compaction should find some already-summarized entries to skip")
+	}
+}
+
+func TestConversationEntrySummarizedField(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("test")
+	if ctx.entries[0].summarized {
+		t.Error("new entries should not be summarized by default")
+	}
+
+	ctx.entries[0].summarized = true
+	if !ctx.entries[0].summarized {
+		t.Error("should be able to set summarized flag")
+	}
+}
+
+func TestBuildMessagesSameRoleMerge(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("text A")
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "call_1", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "result"}},
+		}},
+	})
+
+	messages := ctx.BuildMessages()
+	// Both are user-role, should be merged into one message
+	if len(messages) != 1 {
+		t.Errorf("expected 1 merged message, got %d", len(messages))
+	}
+	if messages[0].Role != anthropic.MessageParamRoleUser {
+		t.Errorf("expected user role, got %v", messages[0].Role)
+	}
+	// Should contain both text and tool_result blocks
+	hasText := false
+	hasToolResult := false
+	for _, block := range messages[0].Content {
+		if block.OfText != nil {
+			hasText = true
+		}
+		if block.OfToolResult != nil {
+			hasToolResult = true
+		}
+	}
+	if !hasText {
+		t.Error("merged message should contain text block")
+	}
+	if !hasToolResult {
+		t.Error("merged message should contain tool_result block")
 	}
 }
