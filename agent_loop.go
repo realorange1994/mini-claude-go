@@ -312,6 +312,7 @@ type AgentLoop struct {
 	totalOutputTokens        atomic.Int64               // cumulative output tokens across all turns
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
 	extractionState          *ExtractionState           // session memory extraction threshold tracking
+	hooks                    *HookManager              // compact pre/post hook handlers
 }
 
 // recordTokenUsage accumulates API token usage into the agent's running totals.
@@ -1291,33 +1292,37 @@ func (a *AgentLoop) ForceCompact() {
 	preCompactMessages := a.context.BuildMessages()
 	preCompactToolCalls := a.extractRecentToolCallsForSummary(5)
 
+	// Execute pre-compact hooks before any compaction action.
+	var preCompactInst string
+	if a.hooks != nil {
+		hookInput := PreCompactInput{Trigger: HookTriggerManual, CustomInstructions: ""}
+		if hookResult, err := a.hooks.ExecutePreCompactHooks(hookInput); err == nil {
+			preCompactInst = hookResult.CustomInstructions
+		}
+	}
+
 	// Try normal compaction first (may skip if not needed)
 	preTokens := a.context.EstimatedTokens()
 	if a.context.CompactContext() {
-		// CompactContext replaces entries with compressed messages but does NOT add
-		// a boundary marker. Without one, BuildMessages never clears the buffer,
-		// so the compressed messages are appended to a growing list and the model
-		// sees the full conversation anyway — compaction is effectively a no-op.
-		// Add boundary + summary so BuildMessages resets at the boundary.
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 
 		// Build structured summary matching upstream's getCompactUserSummaryMessage format.
 		summaryContent := a.buildCompactSummaryMessage(preTokens, preCompactMessages, preCompactToolCalls)
+		if preCompactInst != "" {
+			summaryContent += "\n\n## Custom instructions for this compaction:\n" + preCompactInst
+		}
 		a.context.AddSummary(summaryContent)
 
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
 		}
 		a.InjectRunningAgentStatus()
-		// Post-compact recovery: re-inject recently-read files so the model
-		// can still edit them without "file has not been read" errors.
-		recoveredPaths := a.PostCompactRecovery()
+		recoveredPaths := a.PostCompactRecovery(HookTriggerManual, summaryContent)
 		if a.toolStateTracker != nil {
 			for _, path := range recoveredPaths {
 				a.toolStateTracker.MarkFileFresh(path)
 			}
 		}
-		// RunPostCompactCleanup (in PostCompactRecovery) handles ClearConclusions + MarkDirty
 		return
 	}
 
@@ -1326,26 +1331,23 @@ func (a *AgentLoop) ForceCompact() {
 	a.context.TruncateHistory()
 	after := len(a.context.Entries())
 	if after < before {
-		// Inject boundary + continuation so the model knows to resume, not re-execute.
-		// Without this, the model sees truncated history with no directive and
-		// often re-executes already-completed work.
 		preTokens := a.context.EstimatedTokens()
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 		summaryContent := a.buildCompactSummaryMessage(preTokens, preCompactMessages, preCompactToolCalls)
+		if preCompactInst != "" {
+			summaryContent += "\n\n## Custom instructions for this compaction:\n" + preCompactInst
+		}
 		a.context.AddSummary(summaryContent)
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
 		}
 		a.InjectRunningAgentStatus()
-		// Post-compact recovery after truncation. PostCompactRecovery includes
-		// RunPostCompactCleanup internally (ClearConclusions, MarkDirty, ResetPostCompact).
-		recoveredPaths := a.PostCompactRecovery()
+		recoveredPaths := a.PostCompactRecovery(HookTriggerManual, summaryContent)
 		if a.toolStateTracker != nil {
 			for _, path := range recoveredPaths {
 				a.toolStateTracker.MarkFileFresh(path)
 			}
 		}
-		// MarkDirty is handled by RunPostCompactCleanup
 		fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
 	} else {
 		fmt.Printf("[compact] No compaction needed (%d entries)\n", before)
@@ -1421,7 +1423,7 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 
 	// Post-compact recovery: re-inject critical context after partial compact.
 	// PostCompactRecovery includes RunPostCompactCleanup internally.
-	recoveredPaths := a.PostCompactRecovery()
+	recoveredPaths := a.PostCompactRecovery(HookTriggerManual, result.Summary)
 	if a.toolStateTracker != nil {
 		for _, path := range recoveredPaths {
 			a.toolStateTracker.MarkFileFresh(path)
@@ -2795,15 +2797,14 @@ func collectDiscoveredToolNames(ctx *ConversationContext) []string {
 // This prevents the model from losing awareness of files it was working on
 // and skills it was using, reducing wasted turns re-reading them.
 // Returns the list of recovered file paths (for deduplication in AddHistorySnip).
-func (a *AgentLoop) PostCompactRecovery() []string {
-	if !a.config.PostCompactRecoverFiles {
-		return nil
-	}
-
+// trigger and compactSummary are passed to post-compact hooks.
+func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary string) []string {
+	// File content recovery — optional, skipped when PostCompactRecoverFiles is false.
+	// All other recovery steps (tools, agents, todo, session memory) always run.
 	var recoveredPaths []string
 
-	// --- File content recovery ---
-	if a.registry != nil {
+	// --- File content recovery (optional) ---
+	if a.config.PostCompactRecoverFiles && a.registry != nil {
 		maxFiles := a.config.PostCompactMaxFiles
 		if maxFiles <= 0 {
 			maxFiles = 5
@@ -3016,9 +3017,37 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 	}
 
+	// --- Post-compact hooks ---
+	// Execute registered post-compact hooks. These can inject additional content
+	// into the prompt or display user messages. Matches upstream's executePostCompactHooks.
+	if a.hooks != nil {
+		hookInput := PostCompactInput{
+			Trigger:        trigger,
+			CompactSummary: compactSummary,
+			RecoveredFiles: recoveredPaths,
+		}
+		hookResult, hookErr := a.hooks.ExecutePostCompactHooks(hookInput)
+		if hookErr != nil {
+			a.out("[hook] PostCompact error: %v\n", hookErr)
+		}
+		if hookResult.UserMessage != "" {
+			a.out("%s\n", strings.TrimPrefix(hookResult.UserMessage, "\n"))
+		}
+		if hookResult.Attachment != "" {
+			a.context.AddAttachment(hookResult.Attachment)
+		}
+	}
+
 	// --- Post-compact cleanup ---
 	// Clear caches and tracking state that were invalidated by compaction.
 	// This matches upstream's runPostCompactCleanup() in postCompactCleanup.ts.
+
+	// Re-inject the in-memory todo list into the system prompt so the model
+	// sees its task list. The in-memory TodoList survives compaction; this
+	// ensures the reminder is always included after compaction, regardless
+	// of which recovery steps ran above.
+	a.injectTodoReminder()
+
 	a.RunPostCompactCleanup()
 
 	return recoveredPaths
@@ -3477,6 +3506,25 @@ func buildTaskRecoveryAttachment(ctx *ConversationContext) string {
 	return sb.String()
 }
 
+// injectTodoReminder re-injects the in-memory todo list into the system prompt.
+// Called after compaction when the system prompt is rebuilt but the todo reminder
+// wasn't included. The TodoList survives compaction in memory; this just ensures
+// it's visible to the model. Skips if the reminder is already present to avoid
+// duplicate injection (can happen when compaction runs mid-turn after the
+// per-turn injection at line ~979).
+func (a *AgentLoop) injectTodoReminder() {
+	reminder := a.todoList.BuildReminder()
+	if reminder == "" {
+		return
+	}
+	fullReminder := reminder + "\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work."
+	currentPrompt := a.context.SystemPrompt()
+	if strings.Contains(currentPrompt, fullReminder) {
+		return // Already present — skip to avoid duplication
+	}
+	a.context.SetSystemPrompt(currentPrompt + "\n\n" + fullReminder)
+}
+
 // buildPostCompactAgentAnnouncement re-announces active and completed-but-unretrieved
 // background sub-agents after compaction. Matches upstream's createAsyncAgentAttachmentsIfNeeded
 // which includes all agents with retrieved==false (running + completed but not yet collected).
@@ -3736,7 +3784,7 @@ func (a *AgentLoop) tryCompaction() {
 			}
 
 			// Post-compact recovery: re-inject recently read files
-			recoveredPaths := a.PostCompactRecovery()
+			recoveredPaths := a.PostCompactRecovery(HookTriggerAuto, summaryContent)
 			if a.toolStateTracker != nil {
 				for _, path := range recoveredPaths {
 					a.toolStateTracker.MarkFileFresh(path)
@@ -3762,6 +3810,19 @@ func (a *AgentLoop) tryCompaction() {
 			a.compactor.SetPostCompactTokens(postCompactTokens)
 		}
 		return
+	}
+
+	// Execute pre-compact hooks before any compaction action.
+	// Hooks can inject custom instructions that affect the compaction summary.
+	var preCompactInst string
+	if a.hooks != nil {
+		hookInput := PreCompactInput{
+			Trigger:          HookTriggerAuto,
+			CustomInstructions: "",
+		}
+		if hookResult, err := a.hooks.ExecutePreCompactHooks(hookInput); err == nil {
+			preCompactInst = hookResult.CustomInstructions
+		}
 	}
 
 	// Phase 1: SM-compact — use session memory as summary instead of calling LLM API.
@@ -3797,7 +3858,7 @@ func (a *AgentLoop) tryCompaction() {
 		}
 
 		if smContent != "" {
-			a.trySMCompact(smContent)
+			a.trySMCompact(smContent, preCompactInst)
 			// Mark system prompt dirty after compaction
 			if a.config.cachedPrompt != nil {
 				a.config.cachedPrompt.MarkDirty()
@@ -3807,7 +3868,7 @@ func (a *AgentLoop) tryCompaction() {
 	}
 
 	// Phase 2: LLM-driven compaction (existing path)
-	a.tryLLMCompaction()
+	a.tryLLMCompaction(preCompactInst)
 
 	// Mark system prompt dirty after compaction
 	if a.config.cachedPrompt != nil {
@@ -3818,7 +3879,7 @@ func (a *AgentLoop) tryCompaction() {
 // trySMCompact performs compaction using session memory as the summary,
 // skipping the LLM API call entirely. Inspired by the official Claude Code
 // SM-compact mechanism (sessionMemoryCompact.ts).
-func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
+func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst string) {
 	messages := a.context.BuildMessages()
 	preTokens := estimateMessageParamsTokens(messages)
 
@@ -3880,6 +3941,9 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 		summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
 	}
 	summaryContent += "\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+	if preCompactInst != "" {
+		summaryContent += "\n\n## Custom instructions for this compaction:\n" + preCompactInst
+	}
 
 	a.out("\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
 		preTokens, EstimateTokens(summaryContent)+6)
@@ -3915,7 +3979,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	a.context.FixRoleAlternation()
 
 	// Phase 3: Post-compact recovery — re-inject critical context
-	recoveredPaths := a.PostCompactRecovery()
+	recoveredPaths := a.PostCompactRecovery(HookTriggerSM, summaryContent)
 
 	// Phase 3b: Inject running agent status so model doesn't spawn duplicates
 	a.InjectRunningAgentStatus()
@@ -3945,7 +4009,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 		// Undo SM-compact and fall back to LLM compaction.
 		// tryLLMCompaction will re-check ShouldCompact and may skip if tokens
 		// are too low, which is the correct behavior (context pressure is gone).
-		a.tryLLMCompaction()
+		a.tryLLMCompaction("")
 		return
 	}
 
@@ -3961,7 +4025,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 
 // tryLLMCompaction performs LLM-driven compaction (the existing path).
 // Returns true if compaction was performed.
-func (a *AgentLoop) tryLLMCompaction() {
+func (a *AgentLoop) tryLLMCompaction(preCompactInst string) {
 	messages := a.context.BuildMessages()
 	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL, a.context.SystemPrompt(), a.TranscriptPath())
 	if performed && summary != "" {
@@ -3991,6 +4055,9 @@ func (a *AgentLoop) tryLLMCompaction() {
 			},
 		)
 		a.context.AddSummary(summary)
+		if preCompactInst != "" {
+			a.context.AddSummary("\n\n## Custom instructions for this compaction:\n" + preCompactInst)
+		}
 
 		// Persist compaction boundary and summary to transcript for resume support.
 		// Without this, --resume replays the full un-compacted history.
@@ -4022,7 +4089,7 @@ func (a *AgentLoop) tryLLMCompaction() {
 		a.context.FixRoleAlternation()
 
 		// Phase 3: Post-compact recovery — re-inject critical context
-		recoveredPaths := a.PostCompactRecovery()
+		recoveredPaths := a.PostCompactRecovery(HookTriggerAuto, summary)
 
 		// Phase 3b: Inject running agent status so model doesn't spawn duplicates
 		a.InjectRunningAgentStatus()

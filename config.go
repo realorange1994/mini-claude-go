@@ -93,6 +93,8 @@ type Config struct {
 	// Used by RunPostCompactCleanup to guard main-thread-only state clears — subagents
 	// share module-level state and must not clobber the main thread's caches.
 	querySource string
+	// HookManager holds registered compact hooks (pre/post compact).
+	Hooks *HookManager
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -324,6 +326,7 @@ func DefaultConfig() Config {
 		AutoDenialLimit:         3,
 		MaxOutputTokens:         16384,
 		EscalatedMaxOutputTokens: 64000,
+		Hooks:                  NewHookManager(),
 	}
 }
 
