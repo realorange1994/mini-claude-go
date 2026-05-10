@@ -795,30 +795,18 @@ func (sm *SessionMemory) writeAllEntriesLocked() error {
 		content = ""
 	}
 
-	// Use file locking to prevent concurrent write corruption.
-	// Open existing file for read+write, acquire exclusive lock, write, unlock.
-	// If file doesn't exist, create it first.
-	f, err := os.OpenFile(sm.filePath, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		return fmt.Errorf("open memory file: %w", err)
+	// Atomic write: write to temp file in same directory, then rename.
+	// This avoids locking issues on Windows (syscall.LockFileEx crashes on Go 1.23+)
+	// and is safe for single-process access.
+	tmpPath := sm.filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write memory file tmp: %w", err)
 	}
-
-	// Acquire exclusive lock (blocking)
-	if err := lockFile(f); err != nil {
-		f.Close()
-		return fmt.Errorf("lock memory file: %w", err)
+	// Rename is atomic on Windows when src and dst are on same volume.
+	if err := os.Rename(tmpPath, sm.filePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename memory file: %w", err)
 	}
-
-	// Write with exclusive lock held
-	if err := os.WriteFile(sm.filePath, []byte(content), 0644); err != nil {
-		unlockFile(f)
-		f.Close()
-		return fmt.Errorf("write memory file: %w", err)
-	}
-
-	// Unlock and close
-	unlockFile(f)
-	f.Close()
 	return nil
 }
 
@@ -850,18 +838,6 @@ func (sm *SessionMemory) StartFlushLoop() {
 func (sm *SessionMemory) Stop() {
 	close(sm.stopCh)
 	sm.wg.Wait()
-}
-
-// ─── File Locking ─────────────────────────────────────────────────────────────
-
-// lockFile acquires an exclusive advisory lock on the given file handle.
-// Uses syscall.LockFileEx on Windows. On non-Windows platforms, this is a no-op.
-func lockFile(f *os.File) error {
-	return lockFileEx(f, true)
-}
-
-func unlockFile(f *os.File) error {
-	return unlockFileEx(f, true)
 }
 
 // ─── Forked Agent Extraction ─────────────────────────────────────────────────
