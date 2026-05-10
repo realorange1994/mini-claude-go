@@ -634,6 +634,10 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		}
 	}
 
+	// Initialize prevTurnTokens from the rebuilt context so reactive compact
+	// doesn't trigger a false positive on the first resumed turn.
+	agent.prevTurnTokens = agent.context.EstimatedTokens()
+
 	return agent, nil
 }
 
