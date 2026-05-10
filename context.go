@@ -508,7 +508,21 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 
 		messages = append(messages, msg)
 	}
-	return messages
+
+	// Merge consecutive same-role messages (API requires strict alternation).
+	// This handles cases where FixRoleAlternation couldn't merge due to
+	// type mismatches (e.g., ToolResultContent + TextContent both user role).
+	// The API allows a single user message to contain mixed text and tool_result blocks.
+	merged := make([]anthropic.MessageParam, 0, len(messages))
+	for _, msg := range messages {
+		if len(merged) > 0 && merged[len(merged)-1].Role == msg.Role {
+			merged[len(merged)-1].Content = append(merged[len(merged)-1].Content, msg.Content...)
+		} else {
+			merged = append(merged, msg)
+		}
+	}
+
+	return merged
 }
 
 // must hold c.mu write lock
