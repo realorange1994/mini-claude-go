@@ -1675,40 +1675,12 @@ func EstimateMessageTokensSmart(msg anthropic.MessageParam) int {
 	return total
 }
 
-// ─── Three-pass pre-pruning ──────────────────────────────────────────────────
-
-// PruneToolCallInfo stores info about a tool call for pre-pruning.
-type PruneToolCallInfo struct {
-	ToolName string
-	Args     any
-}
-
-// PruneToolCallIndex maps tool_use_id -> PruneToolCallInfo
-type PruneToolCallIndex map[string]PruneToolCallInfo
-
-// buildToolCallIndex extracts tool call info from assistant messages.
-func buildToolCallIndex(messages []anthropic.MessageParam) PruneToolCallIndex {
-	index := make(PruneToolCallIndex)
-	for _, msg := range messages {
-		for _, block := range msg.Content {
-			if block.OfToolUse != nil {
-				index[block.OfToolUse.ID] = PruneToolCallInfo{
-					ToolName: block.OfToolUse.Name,
-					Args:     block.OfToolUse.Input,
-				}
-			}
-		}
-	}
-	return index
-}
-
-// pruneToolResults performs 3-pass pre-pruning on messages before LLM compaction.
+// pruneToolResults performs 2-pass pre-pruning on messages before LLM compaction.
 // Returns a modified copy of messages with:
 //
 //	Pass 1: Deduplicate identical tool results (FNV-1a hash)
-//	Pass 2: Summarize old tool results beyond tail protection
-//	Pass 3: Truncate large tool_call arguments
-func pruneToolResults(messages []anthropic.MessageParam, tailBudget int) []anthropic.MessageParam {
+//	Pass 2: Truncate large tool_call arguments
+func pruneToolResults(messages []anthropic.MessageParam, _ int) []anthropic.MessageParam {
 	if len(messages) == 0 {
 		return messages
 	}
@@ -1719,17 +1691,7 @@ func pruneToolResults(messages []anthropic.MessageParam, tailBudget int) []anthr
 	// Pass 1: Deduplicate tool results
 	result = dedupToolResults(result)
 
-	// Pass 2: REMOVED summarizeOldToolResults — it replaced tool result content
-	// with one-line summaries before the LLM compaction call, meaning the LLM
-	// never saw the full content and couldn't generate an accurate summary.
-	// This was the root cause of "micro-compact memory loss" where tool results
-	// were permanently lost. Upstream avoids this by using cache_edits to delete
-	// tool results server-side without modifying local messages, and uses a system
-	// prompt section ("summarize_tool_results") instructing the model to write down
-	// important information before results are cleared.
-	// NOTE: dedupToolResults is still useful for removing exact duplicates.
-
-	// Pass 3: Truncate large tool_call arguments
+	// Pass 2: Truncate large tool_call arguments
 	result = truncateLargeToolArgs(result, 2000) // 2000 char limit per arg
 
 	return result
@@ -1784,57 +1746,43 @@ func hashToolResultContent(result *anthropic.ToolResultBlockParam) string {
 	return fmt.Sprintf("%08x", h)
 }
 
-// summarizeOldToolResults replaces old tool results with one-line summaries.
-func summarizeOldToolResults(messages []anthropic.MessageParam, index PruneToolCallIndex, tailBudget int) []anthropic.MessageParam {
-	// Find tail cut point by token budget
-	cutPoint := findTailCutByTokens(messages, tailBudget)
-
-	for i := 0; i < cutPoint && i < len(messages); i++ {
-		for j := range messages[i].Content {
-			block := &messages[i].Content[j]
-			if block.OfToolResult == nil {
-				continue
-			}
-			toolUseID := block.OfToolResult.ToolUseID
-			info, exists := index[toolUseID]
-			if !exists {
-				continue
-			}
-			// Generate one-line summary
-			summary := generateToolResultSummary(info.ToolName, block.OfToolResult)
-			block.OfToolResult.Content = []anthropic.ToolResultBlockParamContentUnion{
-				{OfText: &anthropic.TextBlockParam{Text: summary}},
-			}
-		}
-	}
+// summarizeOldToolResults was a pre-compaction hook that replaced old tool result
+// content with one-line summaries. This caused information loss: the LLM compaction
+// call never saw the actual tool results and generated inaccurate summaries.
+//
+// The correct approach (upstream) is to use cache_edits in the API request body to
+// clear tool results server-side without modifying local state. The Go implementation
+// uses CachedMicrocompactTracker + injectCacheEdits for this.
+//
+// This function is kept as a stub for future use if cache_edits is unavailable.
+// Currently it is NOT called from pruneToolResults.
+func summarizeOldToolResults(messages []anthropic.MessageParam, tailBudget int) []anthropic.MessageParam {
+	// NO-OP: upstream uses cache_edits instead of local content replacement.
+	// The cache_edits approach clears tool results server-side during the API call,
+	// preserving the local message state for correctness while reducing prompt size.
 	return messages
 }
 
-// generateToolResultSummary creates a one-line summary for a tool result.
+// generateToolResultSummary is unused since summarizeOldToolResults is a NO-OP.
+// Kept for reference: it would create brief summaries of tool results for LLM context.
 func generateToolResultSummary(toolName string, result *anthropic.ToolResultBlockParam) string {
-	// Extract content text
 	var contentText string
 	for _, c := range result.Content {
 		if c.OfText != nil {
 			contentText += c.OfText.Text
 		}
 	}
-
 	lines := strings.Count(contentText, "\n") + 1
 	isErr := result.IsError.Valid() && result.IsError.Value
-
 	status := "ok"
 	if isErr {
 		status = "error"
 	}
-
-	// Truncate content for summary
 	preview := contentText
 	if len(preview) > 100 {
 		preview = preview[:100] + "..."
 	}
 	preview = strings.ReplaceAll(preview, "\n", " ")
-
 	return fmt.Sprintf("[%s] -> %s, %d lines output", toolName, status, lines)
 }
 
