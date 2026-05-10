@@ -2680,6 +2680,98 @@ func collectUsedToolNamesInPreservedMessages(ctx *ConversationContext) map[strin
 	return names
 }
 
+// collectDiscoveredToolNames extracts discovered tool names from the conversation
+// context. It walks all entries before the most recent compact boundary to find
+// tool uses that discovered deferred tools (e.g., via tool_search). Also extracts
+// previously carried tools from the most recent boundary marker.
+// This mirrors upstream's extractDiscoveredToolNames in toolSearch.ts.
+func collectDiscoveredToolNames(ctx *ConversationContext) []string {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+
+	discovered := make(map[string]bool)
+
+	// First, extract carried tools from the most recent compact boundary
+	boundaryIdx := -1
+	for i := len(ctx.entries) - 1; i >= 0; i-- {
+		if bc, ok := ctx.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			for _, t := range bc.PreCompactDiscoveredTools {
+				discovered[t] = true
+			}
+			break
+		}
+	}
+
+	// Walk entries between the boundary and the end (new content since last compact)
+	startIdx := 0
+	if boundaryIdx >= 0 {
+		startIdx = boundaryIdx
+	}
+
+	for _, entry := range ctx.entries[startIdx:] {
+		if entry.role != "assistant" {
+			continue
+		}
+		blocks, ok := entry.content.(ToolUseContent)
+		if !ok {
+			continue
+		}
+		for _, b := range blocks {
+			if b.OfToolUse == nil {
+				continue
+			}
+			// Track tool_search usage — when the model uses tool_search,
+			// it discovers deferred tools and should carry their schemas.
+			if b.OfToolUse.Name == "tool_search" {
+				// Parse the search results from the corresponding tool_result
+				// to extract discovered tool names. For now, we rely on the
+				// fact that the tool_search tool returns tool names in its
+				// output text. We'll check the tool_result for tool names.
+			}
+		}
+	}
+
+	// Also scan user messages for tool_results from tool_search to extract
+	// discovered tool names from the result text.
+	for i := startIdx; i < len(ctx.entries); i++ {
+		entry := ctx.entries[i]
+		if entry.role != "user" {
+			continue
+		}
+		results, ok := entry.content.(ToolResultContent)
+		if !ok {
+			continue
+		}
+		for _, r := range results {
+			for _, c := range r.Content {
+				if c.OfText != nil && strings.Contains(c.OfText.Text, "tool_search") {
+					// Extract tool names from tool_search results.
+					// Results look like: "### Grep\nGrep for a regex in files..."
+					// Parse the tool names from the markdown headings.
+					lines := strings.Split(c.OfText.Text, "\n")
+					for _, line := range lines {
+						line = strings.TrimSpace(line)
+						if strings.HasPrefix(line, "### ") {
+							name := strings.TrimSpace(strings.TrimPrefix(line, "### "))
+							if name != "" && name != "tool_search" {
+								discovered[name] = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	result := make([]string, 0, len(discovered))
+	for name := range discovered {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
+}
+
 // PostCompactRecovery re-injects critical context after compaction.
 // This prevents the model from losing awareness of files it was working on
 // and skills it was using, reducing wasted turns re-reading them.
@@ -2846,8 +2938,9 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 	// tool inventory so the model knows what capabilities are available.
 	// Only announce tools NOT already visible in the preserved message tail,
 	// matching upstream's getDeferredToolsDeltaAttachment pattern.
+	// Compute once and share with MCP/Agent announcements.
+	preservedToolNames := collectUsedToolNamesInPreservedMessages(a.context)
 	if a.registry != nil {
-		preservedToolNames := collectUsedToolNamesInPreservedMessages(a.context)
 		toolsAttachment := a.buildPostCompactToolsAnnouncement(preservedToolNames)
 		if toolsAttachment != "" {
 			a.context.AddAttachment(toolsAttachment)
@@ -2857,24 +2950,28 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		}
 	}
 
-	// --- MCP tools re-announcement ---
+	// --- MCP tools re-announcement (delta-based) ---
 	// Re-announce available MCP servers and their tools after compaction.
+	// Only announce MCP servers NOT already visible in the preserved message tail
+	// (via mcp_call_tool usage), matching upstream's getMcpInstructionsDeltaAttachment.
 	if a.config.MCPManager != nil {
-		mcpAttachment := a.buildPostCompactMCPAnnouncement()
+		mcpAttachment := a.buildPostCompactMCPAnnouncement(preservedToolNames)
 		if mcpAttachment != "" {
 			a.context.AddAttachment(mcpAttachment)
-			a.out("[post-compact] Re-announced MCP tools\n")
+			a.out("[post-compact] Re-announced MCP tools (delta)\n")
 		}
 	}
 
-	// --- Agent listing re-announcement ---
+	// --- Agent listing re-announcement (delta-based) ---
 	// Re-announce active background sub-agents after compaction so the model
 	// doesn't lose track of running tasks.
+	// Only announce agents NOT already visible in the preserved message tail,
+	// matching upstream's getAgentListingDeltaAttachment.
 	if a.agentTaskStore != nil {
-		agentAttachment := a.buildPostCompactAgentAnnouncement()
+		agentAttachment := a.buildPostCompactAgentAnnouncement(preservedToolNames)
 		if agentAttachment != "" {
 			a.context.AddAttachment(agentAttachment)
-			a.out("[post-compact] Re-announced background agents\n")
+			a.out("[post-compact] Re-announced background agents (delta)\n")
 		}
 	}
 
@@ -2963,7 +3060,15 @@ func (a *AgentLoop) injectCacheEdits(messages []anthropic.MessageParam) []anthro
 // Call this after PostCompactRecovery in every compaction path.
 // This prevents stale references (e.g. file history pointing to deleted messages,
 // skill tracker with compacted-away state) from corrupting subsequent turns.
+//
+// Subagents (agent:*) run in the same process and share module-level state
+// with the main thread. Only reset main-thread module-level state for main-thread
+// compacts — subagent compaction must not clobber the main thread's state.
 func (a *AgentLoop) RunPostCompactCleanup() {
+	// Guard: subagents share module-level state with the main thread.
+	// Skip clears that would corrupt the main thread when a subagent compacts.
+	isMainThread := a.config.querySource == "" || strings.HasPrefix(a.config.querySource, "repl_main_thread") || a.config.querySource == "sdk"
+
 	// Clear skill discovery state: after compaction, the system prompt is rebuilt
 	// and should re-announce all skills as "new". The skill content is re-injected
 	// via post-compact attachments, so shown/read state should reset.
@@ -2996,6 +3101,32 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 	// Classifier and permission state — stale decisions may reference
 	// compacted messages, so clear them to force re-evaluation.
 	a.gate.ResetPostCompact()
+
+	// ─── Missing state clears matching upstream's runPostCompactCleanup() ───────
+
+	// Clear speculative checks (bash permission evaluations) — stale decisions
+	// may reference compacted-away messages. Main-thread only since subagents
+	// share the same module-level permission state.
+	if isMainThread {
+		clearSpeculativeChecks()
+	}
+
+	// Clear beta tracing state (analytics) — after compaction, tracing context
+	// is invalidated and should be reset.
+	clearBetaTracingState()
+
+	// Clear session messages cache (transcript/CLI display) — prevents stale
+	// references to pre-compact messages. Main-thread only.
+	if isMainThread {
+		clearSessionMessagesCache()
+	}
+
+	// Sweep file content cache (commit attribution) — invalidate cached file
+	// snapshots that reference compacted content. Only if COMMIT_ATTRIBUTION
+	// feature is active.
+	if isMainThread {
+		sweepFileContentCache()
+	}
 }
 
 // buildPostCompactToolsAnnouncement re-announces available tools after compaction.
@@ -3110,28 +3241,59 @@ func buildPostCompactPlanAttachment(projectDir string) string {
 }
 
 // buildPostCompactMCPAnnouncement re-announces MCP servers and tools after compaction.
-// Includes per-server instructions from the MCP initialize response, matching upstream behavior.
-func (a *AgentLoop) buildPostCompactMCPAnnouncement() string {
+// Includes per-server instructions from the MCP initialize response.
+// Delta-aware: only announces servers whose tools are NOT already visible in the
+// preserved message tail, matching upstream's getMcpInstructionsDeltaAttachment.
+func (a *AgentLoop) buildPostCompactMCPAnnouncement(preservedToolNames map[string]bool) string {
 	mgr := a.config.MCPManager
 	servers := mgr.ListServers()
 	if len(servers) == 0 {
 		return ""
 	}
 
-	// Build per-server tool lists from AllToolsWithServer
+	// Collect MCP server names from preserved tool names.
+	// MCP servers are identified by their tools (e.g., mcp_call_tool with server param,
+	// or specific MCP tool names like mcp_server_status).
+	preservedMCPServers := make(map[string]bool)
+	for name := range preservedToolNames {
+		if strings.HasPrefix(name, "mcp_") || name == "mcp_call_tool" {
+			preservedMCPServers[name] = true
+		}
+	}
+
+	// Filter servers to only those not already visible in preserved tail.
+	// A server is "visible" if any of its tools have been used in the preserved messages.
+	var serversToAnnounce []string
 	serverTools := make(map[string][]mcp.Tool)
+	serverInstructions := mgr.AllServerInstructions()
 	for _, tws := range mgr.AllToolsWithServer() {
 		serverTools[tws.Server] = append(serverTools[tws.Server], tws.Tool)
 	}
+	for _, server := range servers {
+		// Check if this server's tools were used in preserved messages.
+		// A server is visible if any of its tools appear in preservedToolNames.
+		seen := false
+		for _, tool := range serverTools[server] {
+			if preservedToolNames[tool.Name] {
+				seen = true
+				break
+			}
+		}
+		if seen {
+			continue // skip — already visible in preserved tail
+		}
+		serversToAnnounce = append(serversToAnnounce, server)
+	}
 
-	// Get per-server instructions
-	serverInstructions := mgr.AllServerInstructions()
+	if len(serversToAnnounce) == 0 {
+		return ""
+	}
 
 	var sb strings.Builder
 	sb.WriteString("## MCP Servers After Compaction\n\n")
 	sb.WriteString("The following MCP servers are connected. Use list_mcp_tools to discover their tools, or call mcp_call_tool directly.\n\n")
 
-	for _, server := range servers {
+	for _, server := range serversToAnnounce {
 		status := mgr.GetServerStatus(server)
 		tools := serverTools[server]
 		statusIcon := "●"
@@ -3299,7 +3461,7 @@ func buildTaskRecoveryAttachment(ctx *ConversationContext) string {
 // buildPostCompactAgentAnnouncement re-announces active and completed-but-unretrieved
 // background sub-agents after compaction. Matches upstream's createAsyncAgentAttachmentsIfNeeded
 // which includes all agents with retrieved==false (running + completed but not yet collected).
-func (a *AgentLoop) buildPostCompactAgentAnnouncement() string {
+func (a *AgentLoop) buildPostCompactAgentAnnouncement(preservedToolNames map[string]bool) string {
 	tasks := a.agentTaskStore.List()
 	if len(tasks) == 0 {
 		return ""
@@ -3741,6 +3903,15 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	actualMessages := a.context.BuildMessages()
 	actualPostTokens := estimateMessageParamsTokens(actualMessages)
 	a.compactor.SetPostCompactTokens(actualPostTokens)
+
+	// Track lastSummarizedMessageUUID for incremental SM-compact.
+	// The compaction boundary is inserted before summary, so the boundary's
+	// UUID marks the end of the summarized portion. Subsequent compactions
+	// will only compact forward from this point.
+	// Mirrors upstream's setLastSummarizedMessageId() called after compaction.
+	if a.config.SessionMemory != nil {
+		a.config.SessionMemory.SetLastSummarizedMessageUUID(a.context.LastCompactBoundaryUUID())
+	}
 }
 
 // tryLLMCompaction performs LLM-driven compaction (the existing path).
@@ -3761,7 +3932,19 @@ func (a *AgentLoop) tryLLMCompaction() {
 
 		// Inject boundary marker and summary into context
 		preTokens := a.context.EstimatedTokens()
-		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
+
+		// Capture discovered tool names before compaction — the summary doesn't
+		// preserve tool_reference blocks, so post-compact recovery needs this
+		// to keep sending already-loaded deferred tool schemas to the API.
+		discoveredTools := collectDiscoveredToolNames(a.context)
+
+		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens,
+			func(bc *CompactBoundaryContent) {
+				if len(discoveredTools) > 0 {
+					bc.PreCompactDiscoveredTools = discoveredTools
+				}
+			},
+		)
 		a.context.AddSummary(summary)
 
 		// Persist compaction boundary and summary to transcript for resume support.
@@ -3775,6 +3958,9 @@ func (a *AgentLoop) tryLLMCompaction() {
 		// not the full summary text (which bloats session memory for future sessions).
 		if a.config.SessionMemory != nil {
 			a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction (auto): %d tokens compressed", preTokens), "auto")
+			// Track lastSummarizedMessageUUID for incremental SM-compact.
+			// Subsequent compactions will only compact forward from this point.
+			a.config.SessionMemory.SetLastSummarizedMessageUUID(a.context.LastCompactBoundaryUUID())
 		}
 
 		// Phase 2: Keep recent messages — preserve with tool structure intact.

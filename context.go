@@ -49,7 +49,24 @@ type CompactBoundaryContent struct {
 	PreCompactTokens  int
 	// UUID uniquely identifies this compact boundary. Used by the transcript,
 	// session storage, and QueryEngine to reference specific compaction events.
-	UUID              string
+	UUID string
+	// PreCompactDiscoveredTools carries loaded deferred tool schema names at
+	// compact time. The summary doesn't preserve tool_reference blocks, so the
+	// post-compact schema filter needs this to keep sending already-loaded
+	// deferred tool schemas to the API. Matches upstream's compactMetadata.preCompactDiscoveredTools.
+	PreCompactDiscoveredTools []string
+	// PreservedSegment tracks the UUIDs of the first and last kept messages
+	// for chain relinking after partial compaction. Matches upstream's
+	// compactMetadata.preservedSegment (headUuid, anchorUuid, tailUuid).
+	PreservedSegment *PreservedSegment
+}
+
+// PreservedSegment tracks UUIDs for message chain relinking after partial compaction.
+// The loader uses this to patch head→anchor and anchor's-other-children→tail.
+type PreservedSegment struct {
+	HeadUUID   string // UUID of the first kept message
+	AnchorUUID string // UUID of the message immediately before kept[0] in the desired chain
+	TailUUID   string // UUID of the last kept message
 }
 
 func (CompactBoundaryContent) entryContent() {}
@@ -421,11 +438,33 @@ func (c *ConversationContext) AddToolResults(results []anthropic.ToolResultBlock
 }
 
 // BuildMessages converts entries to []anthropic.MessageParam for the API.
+// Compact boundaries are handled by skipping entries before the last boundary.
+// This avoids the shared-array-overwrite bug that messages=messages[:0] causes
+// when there are entries after the boundary (the first append after [:0] overwrites
+// array[0], the system prompt, which subsequent appends then continue to overwrite).
 func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	messages := make([]anthropic.MessageParam, 0, len(c.entries))
-	for _, entry := range c.entries {
+
+	// Find the last compact boundary. Entries at or after this point are preserved;
+	// everything before is dropped. This is the key mechanism that makes compaction
+	// actually reduce token usage — without this reset, old messages would still be
+	// included and compaction would be a no-op.
+	boundaryIdx := -1
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+
+	startIdx := 0
+	if boundaryIdx >= 0 {
+		startIdx = boundaryIdx
+	}
+
+	messages := make([]anthropic.MessageParam, 0, len(c.entries)-startIdx)
+	for _, entry := range c.entries[startIdx:] {
 		msg := anthropic.MessageParam{Role: anthropic.MessageParamRole(entry.role)}
 
 		switch v := entry.content.(type) {
@@ -442,12 +481,8 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 			}
 			msg.Content = blocks
 		case CompactBoundaryContent:
-			// Compact boundary: discard all messages before this point.
-			// Only the summary + messages after the boundary are sent to the API.
-			// This is the key mechanism that makes compaction actually reduce
-			// token usage — without this reset, old messages would still be
-			// included and compaction would be a no-op.
-			messages = messages[:0]
+			// The boundary itself is not sent to the API — it serves as the
+			// cutoff marker. The API doesn't understand compact boundaries.
 			continue
 		case SummaryContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
@@ -765,16 +800,34 @@ func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]
 }
 
 // AddCompactBoundary inserts a system-role text marker for LLM compaction.
-func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preCompactTokens int) {
+// LastCompactBoundaryUUID returns the UUID of the most recently added compact
+// boundary. Returns "" if no boundary exists.
+func (c *ConversationContext) LastCompactBoundaryUUID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if bc, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+			return bc.UUID
+		}
+	}
+	return ""
+}
+
+func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preCompactTokens int, opts ...func(*CompactBoundaryContent)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	content := CompactBoundaryContent{
+		Trigger:          trigger,
+		PreCompactTokens: preCompactTokens,
+		UUID:             generateUUID(),
+	}
+	// Apply optional configuration functions (for preCompactDiscoveredTools, preservedSegment)
+	for _, opt := range opts {
+		opt(&content)
+	}
 	c.entries = append(c.entries, conversationEntry{
-		role: "system",
-		content: CompactBoundaryContent{
-			Trigger:          trigger,
-			PreCompactTokens: preCompactTokens,
-			UUID:             generateUUID(),
-		},
+		role:    "system",
+		content: content,
 	})
 }
 

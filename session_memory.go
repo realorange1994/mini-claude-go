@@ -122,6 +122,12 @@ type SessionMemory struct {
 	wg         sync.WaitGroup
 	maxEntries int
 	onAdd      func() // optional callback invoked when a note is added
+	// LastSummarizedMessageUUID tracks the UUID of the most recent message that
+	// has been summarized by session memory extraction. This enables incremental
+	// SM-compact: subsequent compactions only compact forward from this point,
+	// avoiding redundant re-summarization of already-summarized content.
+	// Mirrors upstream's lastSummarizedMessageId in sessionMemoryUtils.ts.
+	LastSummarizedMessageUUID string
 }
 
 // NewSessionMemory creates a new SessionMemory for the given project.
@@ -307,6 +313,23 @@ func (sm *SessionMemory) FormatForPrompt() string {
 	}
 
 	return sb.String()
+}
+
+// GetLastSummarizedMessageUUID returns the UUID of the most recently summarized
+// message for incremental SM-compact. Returns "" if no compaction has occurred.
+func (s *SessionMemory) GetLastSummarizedMessageUUID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LastSummarizedMessageUUID
+}
+
+// SetLastSummarizedMessageUUID sets the UUID of the most recently summarized
+// message for incremental SM-compact.
+func (s *SessionMemory) SetLastSummarizedMessageUUID(uuid string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastSummarizedMessageUUID = uuid
+	s.dirty = true
 }
 
 // FormatForPromptCompact formats memory entries for injection after compaction.
