@@ -808,20 +808,24 @@ func (a *AgentLoop) TranscriptPath() string {
 // extractConclusions scans assistant text for stated conclusions and records them.
 // This helps the agent remember key findings across turns without relying on
 // its own unreliable extraction from the conversation history.
+// Pre-compiled conclusion extraction patterns. These capture concrete facts
+// from assistant text that are worth preserving across compaction.
+// Patterns focus on task progress and semantic conclusions, not just code structure.
+var conclusionPatterns = []*regexp.Regexp{
+	// Code structure conclusions
+	regexp.MustCompile(`(?i)(?:defined in|defined at)\s+([^\s.,]+)`),
+	regexp.MustCompile(`(?i)(?:returns?|yields?)\s+([^\s.,]+)`),
+	regexp.MustCompile(`(?i)(?:uses?|calls?)\s+([^\s.,]+)\s+for\s+`),
+	regexp.MustCompile(`(?i)(?:is defined as|is an?)\s+([^\s.,]+)`),
+	// Task progress conclusions
+	regexp.MustCompile(`(?i)(?:completed|finished|done with)\s+(.{10,80})`),
+	regexp.MustCompile(`(?i)(?:the root cause|the bug|the issue)\s+(?:was|is)\s+(.{10,80})`),
+	regexp.MustCompile(`(?i)(?:the fix|the solution)\s+(?:was|is)\s+(.{10,80})`),
+	regexp.MustCompile(`(?i)(?:next step|proceed with|continue with)\s+(.{10,80})`),
+}
+
 func (a *AgentLoop) extractConclusions(text string) {
-	// Patterns that signal a concrete conclusion was reached
-	patterns := []string{
-		// "defined in <file>", "defined at <file:line>"
-		`(?i)(?:defined in|defined at)\s+([^\s.,]+)`,
-		// "returns <type>" or "yields <type>" at end of a sentence
-		`(?i)(?:returns?|yields?)\s+([^\s.,]+)`,
-		// "uses <name> for" or "calls <name>"
-		`(?i)(?:uses?|calls?)\s+([^\s.,]+)\s+for\s+`,
-		// "is defined as" or "is a struct"
-		`(?i)(?:is defined as|is an?)\s+([^\s.,]+)`,
-	}
-	for _, pat := range patterns {
-		re := regexp.MustCompile(pat)
+	for _, re := range conclusionPatterns {
 		matches := re.FindAllStringSubmatch(text, -1)
 		for _, m := range matches {
 			if len(m) > 1 && len(m[1]) > 3 {
@@ -3551,22 +3555,25 @@ func (a *AgentLoop) tryCompaction() {
 				for _, path := range recoveredPaths {
 					a.toolStateTracker.MarkFileFresh(path)
 				}
-				if len(recoveredPaths) == 0 {
-					if a.config.SessionMemory != nil {
-						a.config.SessionMemory.SaveConclusions(a.toolStateTracker.GetConclusions())
-					}
-					a.toolStateTracker.ClearConclusions()
-				}
+				// NOTE: RunPostCompactCleanup() (called from PostCompactRecovery above)
+				// already saves conclusions to session memory and clears them.
+				// Do NOT save/clear conclusions here to avoid double-operation.
 			}
 
-			// Keep recent messages — preserve actual message objects with tool structure intact
-			keepCount := a.config.PostCompactHistorySnipCount
-			if keepCount <= 0 {
-				keepCount = 8
-			}
-			a.context.KeepRecentMessages(keepCount)
+			// Keep recent messages — preserve actual message objects with tool structure intact.
+			// Use adaptive token-based calculation matching SM-compact (10K min, 5 text msgs, 40K max)
+			// instead of fixed count. Fixed count is too small for large tool results and too
+			// large for small text messages.
+			a.context.KeepRecentMessagesAdaptive(10_000, 5, 40_000)
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
+
+			// Calculate post-compact token count for cooldown tracking.
+			// Without this, postCompactTokens stays 0 and the cooldown check never activates,
+			// causing the next turn to immediately try compaction again even if it just ran.
+			postCompactMessages := a.context.BuildMessages()
+			postCompactTokens := estimateMessageParamsTokens(postCompactMessages)
+			a.compactor.SetPostCompactTokens(postCompactTokens)
 		}
 		return
 	}
@@ -3772,14 +3779,10 @@ func (a *AgentLoop) tryLLMCompaction() {
 
 		// Phase 2: Keep recent messages — preserve with tool structure intact.
 		// Run BEFORE post-compact recovery so attachments appear AFTER kept messages.
-		// KeepRecentMessages keeps the original ToolUseContent/ToolResultContent blocks, not
-		// text conversions. Also adjusts backwards to preserve tool_use/tool_result pairing.
-		// This matches upstream's messagesToKeep mechanism.
-		keepCount := a.config.PostCompactHistorySnipCount
-		if keepCount <= 0 {
-			keepCount = 8
-		}
-		a.context.KeepRecentMessages(keepCount)
+		// Use adaptive token-based calculation (10K min, 5 text msgs, 40K max)
+		// matching SM-compact path. Fixed count is too small for large tool results
+		// and too large for small text messages.
+		a.context.KeepRecentMessagesAdaptive(10_000, 5, 40_000)
 
 		// Fix message structure after KeepRecentMessages: remove orphaned tool_results
 		// (whose tool_use was in the summarized portion) and merge consecutive same-role
@@ -3794,15 +3797,15 @@ func (a *AgentLoop) tryLLMCompaction() {
 		a.InjectRunningAgentStatus()
 
 		// Mark recovered files as fresh (content is back in context).
+		// NOTE: RunPostCompactCleanup() (called from PostCompactRecovery above)
+		// already saves conclusions to session memory and clears them.
+		// The outer conditional that checked len(recoveredPaths) was removed —
+		// conclusions should ALWAYS be saved before clearing, regardless of
+		// whether files were recovered (conclusions contain semantic knowledge
+		// that file content doesn't capture, like "the bug was in line 42").
 		if a.toolStateTracker != nil {
 			for _, path := range recoveredPaths {
 				a.toolStateTracker.MarkFileFresh(path)
-			}
-			if len(recoveredPaths) == 0 {
-				if a.config.SessionMemory != nil {
-					a.config.SessionMemory.SaveConclusions(a.toolStateTracker.GetConclusions())
-				}
-				a.toolStateTracker.ClearConclusions()
 			}
 		}
 

@@ -349,13 +349,11 @@ func (sm *SessionMemory) FormatForPromptCompact() string {
 		sectionHeader := fmt.Sprintf("### %s\n", cat)
 		sb.WriteString(sectionHeader)
 		sectionUsed := len(sectionHeader)
-		overflowed := false
 
 		for _, e := range entries {
 			line := fmt.Sprintf("- %s\n", e.Content)
 			lineLen := len(line)
 			if totalUsed+lineLen > totalBudget {
-				overflowed = true
 				break
 			}
 			// Per-section budget check (keep section under maxSectionChars)
@@ -367,7 +365,6 @@ func (sm *SessionMemory) FormatForPromptCompact() string {
 					sb.WriteString(truncated)
 					sb.WriteString("  [... truncated ...]\n")
 				}
-				overflowed = true
 				break
 			}
 			sb.WriteString(line)
@@ -375,10 +372,8 @@ func (sm *SessionMemory) FormatForPromptCompact() string {
 			totalUsed += lineLen
 		}
 
-		if overflowed && cat != categories[len(categories)-1] {
-			// If we overflowed but have more sections, add a truncation marker
-			// only if we're NOT on the last section (to avoid redundant marker)
-		}
+		// Per-section truncation already added a marker at the section boundary.
+		// Total budget overflow (totalUsed > totalBudget) is checked at line 357.
 		sb.WriteString("\n")
 	}
 
