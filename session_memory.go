@@ -502,7 +502,12 @@ func flushSessionSectionForCompact(header string, lines []string, maxCharsPerSec
 func (sm *SessionMemory) FormatForTemplate() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	return sm.formatForTemplateLocked()
+}
 
+// formatForTemplateLocked formats session memory as the 10-section template.
+// Caller must hold sm.mu (read or write lock).
+func (sm *SessionMemory) formatForTemplateLocked() string {
 	if len(sm.entries) == 0 {
 		return defaultSessionMemoryTemplate
 	}
@@ -766,34 +771,10 @@ func (sm *SessionMemory) writeAllEntriesLocked() error {
 		return fmt.Errorf("create memory dir: %w", err)
 	}
 
-	// Group by category
-	groups := make(map[string][]MemoryEntry)
-	var categories []string
-	for _, e := range sm.entries {
-		if _, ok := groups[e.Category]; !ok {
-			categories = append(categories, e.Category)
-		}
-		groups[e.Category] = append(groups[e.Category], e)
-	}
-	sort.Strings(categories)
-
-	var sb strings.Builder
-	for i, cat := range categories {
-		if i > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString(fmt.Sprintf("### %s\n", cat))
-		for _, e := range groups[cat] {
-			sb.WriteString(fmt.Sprintf("<!-- %s -->\n", e.Timestamp.Format(time.RFC3339)))
-			sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
-		}
-	}
-
-	content := sb.String()
-	if content == "" {
-		// No entries — write empty file (don't delete it, preserve it as marker)
-		content = ""
-	}
+	// Write in the 10-section template format (matching what the forked agent
+	// sees/edits and what compaction reads). This ensures the disk file is the
+	// single source of truth, matching upstream's behavior.
+	content := sm.formatForTemplateLocked()
 
 	// Atomic write: write to temp file in same directory, then rename.
 	// This avoids locking issues on Windows (syscall.LockFileEx crashes on Go 1.23+)

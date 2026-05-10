@@ -280,8 +280,9 @@ func (t *ToolStateTracker) BuildSessionStateNote() string {
 
 // conversationEntry represents a single entry in the conversation history.
 type conversationEntry struct {
-	role    string // "user" or "assistant" (or "system" for boundary markers)
-	content EntryContent
+	role       string // "user" or "assistant" (or "system" for boundary markers)
+	content    EntryContent
+	summarized bool // true if this entry was already included in a previous compaction summary
 }
 
 // ConversationContext manages the conversation message history and system prompt.
@@ -290,7 +291,8 @@ type ConversationContext struct {
 	config                 Config
 	entries                []conversationEntry
 	systemPrompt           string
-	lastSummarizedIndex    int // index of last entry included in summary/compact (-1 = none)
+	lastSummarizedIndex    int    // index of last entry included in summary/compact (-1 = none)
+	compactedEntryCount    int    // entries already summarized by previous compaction (skip on next compact)
 	lastAssistantTime      time.Time // timestamp of last assistant message added; used for time-based microcompact
 }
 
@@ -1043,7 +1045,10 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 		return
 	}
 
-	// Walk backward from boundary, collecting entries until token/min constraints are met
+	// Walk backward from boundary, collecting entries until token/min constraints are met.
+	// Entries marked as summarized (already included in a previous compaction summary)
+	// are skipped — this matches upstream's incremental SM-compact behavior using
+	// lastSummarizedMessageId to avoid redundant re-summarization.
 	var keptEntries []conversationEntry
 	keptStartIdx := -1 // lowest index in c.entries that was kept
 	accumTokens := 0
@@ -1051,6 +1056,9 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 
 	for i := boundaryIdx - 1; i >= 0; i-- {
 		entry := c.entries[i]
+		if entry.summarized {
+			continue // already included in a previous compaction summary
+		}
 		switch entry.content.(type) {
 		case CompactBoundaryContent, SummaryContent, AttachmentContent:
 			continue // skip meta entries
@@ -1095,6 +1103,23 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 	// Entries before this index were summarized/compacted.
 	if keptStartIdx >= 0 {
 		c.lastSummarizedIndex = keptStartIdx
+	}
+
+	// Update compactedEntryCount: how many entries before the boundary were
+	// already summarized (for incremental compaction on next round).
+	compactedCount := 0
+	for i := 0; i < boundaryIdx; i++ {
+		switch c.entries[i].content.(type) {
+		case CompactBoundaryContent, SummaryContent, AttachmentContent:
+		default:
+			compactedCount++
+		}
+	}
+	c.compactedEntryCount = compactedCount
+
+	// Mark kept entries as summarized so they won't be re-summarized on next compaction.
+	for i := range keptEntries {
+		keptEntries[i].summarized = true
 	}
 
 	// Append the kept entries after the boundary+summary as preserved messages

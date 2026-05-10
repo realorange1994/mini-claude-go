@@ -174,7 +174,6 @@ const systemPromptTemplateDynamic = `
 %s
 %s
 %s
-%s
 
 ## Session-specific guidance
 - If you do not understand why the user has denied a tool call, ask them for clarification.
@@ -237,13 +236,8 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 		projectSection = "## Project Instructions (from CLAUDE.md)\n\n" + projectInstructions
 	}
 
-	// Inject session memory
-	var memorySection string
-	if sessionMemory != nil {
-		if mem := sessionMemory.FormatForPrompt(); mem != "" {
-			memorySection = mem
-		}
-	}
+	// Session memory is NOT injected into the system prompt during normal conversation.
+	// It is only used during compaction as a user message (SM-compact), matching upstream's behavior.
 
 	// Build skills section
 	var skillsSection string
@@ -353,8 +347,8 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 	gitCtx := tools.GetGitContext()
 	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, gitCtx, toolList)
 
-	// Build dynamic part (permission mode, project instructions, memory, skills)
-	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection, 5)
+	// Build dynamic part (permission mode, project instructions, skills)
+	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection, 5)
 
 	// Combine with boundary
 	return staticPart + "\n" + SYSTEM_PROMPT_STATIC_BOUNDARY + "\n" + dynamicPart
@@ -504,7 +498,7 @@ func buildStaticPart(registry *tools.Registry, modelName string) (string, uint64
 	return staticPart, hash
 }
 
-// buildDynamicPart constructs the dynamic portion of the system prompt (permission mode, project instructions, memory, skills).
+// buildDynamicPart constructs the dynamic portion of the system prompt (permission mode, project instructions, skills).
 func buildDynamicPart(permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker, sessionMemory *SessionMemory) string {
 	modeDesc := modeDescriptions[permissionMode]
 
@@ -514,12 +508,8 @@ func buildDynamicPart(permissionMode, projectDir string, skillLoader *skills.Loa
 		projectSection = "## Project Instructions (from CLAUDE.md)\n\n" + projectInstructions
 	}
 
-	var memorySection string
-	if sessionMemory != nil {
-		if mem := sessionMemory.FormatForPrompt(); mem != "" {
-			memorySection = mem
-		}
-	}
+	// Session memory is NOT injected into the system prompt during normal conversation.
+	// It is only used during compaction as a user message (SM-compact), matching upstream's behavior.
 
 	var skillsSection string
 	if skillLoader != nil {
@@ -606,7 +596,7 @@ func buildDynamicPart(permissionMode, projectDir string, skillLoader *skills.Loa
 		}
 	}
 
-	return fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, memorySection, skillsSection, 5)
+	return fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection, 5)
 }
 
 // fnvHash computes a fast FNV-1a hash of a string for content-addressable caching.
