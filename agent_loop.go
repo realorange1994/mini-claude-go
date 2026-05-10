@@ -311,6 +311,7 @@ type AgentLoop struct {
 	totalInputTokens         atomic.Int64               // cumulative input tokens across all turns
 	totalOutputTokens        atomic.Int64               // cumulative output tokens across all turns
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
+	extractionState          *ExtractionState           // session memory extraction threshold tracking
 }
 
 // recordTokenUsage accumulates API token usage into the agent's running totals.
@@ -409,6 +410,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		toolStateTracker:  NewToolStateTracker(),
 		todoList:          tools.NewTodoList(),
 		cachedMC:          NewCachedMicrocompactTracker(),
+		extractionState:   NewExtractionState(),
 	}
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
@@ -559,6 +561,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		toolStateTracker:  NewToolStateTracker(),
 		todoList:          tools.NewTodoList(),
 		cachedMC:          NewCachedMicrocompactTracker(),
+		extractionState:   NewExtractionState(),
 	}
 
 	// Restore skill state from transcript entries so skillTracker reflects
@@ -1137,6 +1140,23 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		a.executeToolCallsConcurrent(toolCalls)
+
+		// Increment extraction tracking for tool calls used this turn
+		if a.extractionState != nil && len(toolCalls) > 0 {
+			for range toolCalls {
+				a.extractionState.IncrementToolCall()
+			}
+		}
+
+		// Session memory extraction: check if thresholds are met and run
+		// forked agent to update session_memory.md with LLM extraction.
+		// This matches upstream's extractSessionMemory hook pattern.
+		if a.extractionState != nil && a.config.SessionMemory != nil {
+			currentTokens := int64(a.context.EstimatedTokens())
+			if a.extractionState.ShouldExtract(currentTokens, len(toolCalls)) {
+				go a.runSessionMemoryExtraction()
+			}
+		}
 
 		// Update tool state tracker after tool execution
 		if a.toolStateTracker != nil {
@@ -3788,4 +3808,69 @@ func (h *CollectHandler) AsMessageContent() []anthropic.ContentBlockUnion {
 // StreamAdapter.Process takes a *ssestream.Stream directly
 func (sa *StreamAdapter) ProcessStream(stream *ssestream.Stream[anthropic.MessageStreamEventUnion]) error {
 	return sa.Process(stream, nil)
+}
+
+// runSessionMemoryExtraction runs a forked agent to update session_memory.md.
+// It captures the parent's cache-safe params and uses a restricted canUseTool
+// (only edit_file on the session memory file). Runs asynchronously in a goroutine.
+func (a *AgentLoop) runSessionMemoryExtraction() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "[session-memory] extraction panic: %v\n", r)
+		}
+	}()
+
+	sm := a.config.SessionMemory
+	if sm == nil {
+		return
+	}
+
+	// Capture cache-safe params from the current state
+	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages)
+	cacheParams := CaptureCacheSafeParams(
+		a.context.SystemPrompt(),
+		a.config.Model,
+		a.registry,
+		messages,
+	)
+
+	// Read current session memory content
+	memoryPath := filepath.Join(a.config.ProjectDir, ".claude", "session_memory.md")
+	currentContent, _ := os.ReadFile(memoryPath)
+	if len(currentContent) == 0 {
+		currentContent = []byte(defaultSessionMemoryTemplate)
+	}
+
+	// Build the extraction prompt
+	prompt := sessionMemoryUpdatePrompt(memoryPath, string(currentContent))
+	forkMessages := []anthropic.MessageParam{
+		anthropic.MessageParam{
+			Role:    anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: prompt}}},
+		},
+	}
+
+	// Run forked agent
+	cfg := ForkedAgentConfig{
+		CacheSafeParams: cacheParams,
+		ForkMessages:    forkMessages,
+		CanUseTool:     createMemoryFileCanUseTool(memoryPath),
+		MaxTokens:      8192,
+		QuerySource:    "session_memory",
+		MaxTurns:       5,
+		Registry:       a.registry,
+		ProjectDir:     a.config.ProjectDir,
+	}
+
+	_, err := RunForkedAgent(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[session-memory] extraction error: %v\n", err)
+		return
+	}
+
+	// Mark extraction complete and record token count
+	if a.extractionState != nil {
+		a.extractionState.MarkExtracted(int64(a.context.EstimatedTokens()))
+	}
 }

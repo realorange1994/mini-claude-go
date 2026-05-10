@@ -76,7 +76,7 @@ func (t *AgentTool) InputSchema() map[string]any {
 			},
 			"model": map[string]any{
 				"type":        "string",
-				"enum":        []string{"sonnet", "opus", "haiku"},
+				"enum":        []any{"sonnet", "opus", "haiku"},
 				"description": "Optional model override for this agent. Takes precedence over the agent definition's model. If omitted, inherits from the parent.",
 			},
 			"run_in_background": map[string]any{

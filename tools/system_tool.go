@@ -25,7 +25,7 @@ func (*SystemTool) InputSchema() map[string]any {
 			"operation": map[string]any{
 				"type":        "string",
 				"description": "System operation: info (full overview), uname, df, free, top, uptime, who, w, hostname, arch",
-				"enum":        []string{"info", "uname", "df", "free", "top", "uptime", "who", "w", "hostname", "arch"},
+				"enum":        []any{"info", "uname", "df", "free", "top", "uptime", "who", "w", "hostname", "arch"},
 			},
 			"flags": map[string]any{
 				"type":        "string",

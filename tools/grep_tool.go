@@ -61,7 +61,7 @@ func (*GrepTool) InputSchema() map[string]any {
 			},
 			"output_mode": map[string]any{
 				"type":        "string",
-				"enum":        []string{"content", "files_with_matches", "count"},
+				"enum":        []any{"content", "files_with_matches", "count"},
 				"description": "Output mode (default: files_with_matches): 'content' shows matching lines, 'files_with_matches' shows file paths, 'count' shows per-file match counts.",
 			},
 			"-B": map[string]any{

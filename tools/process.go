@@ -21,7 +21,7 @@ func (*ProcessTool) InputSchema() map[string]any {
 			"operation": map[string]any{
 				"type":        "string",
 				"description": "Operation: list, kill, pkill, pgrep, top, pstree",
-				"enum":        []string{"list", "kill", "pkill", "pgrep", "top", "pstree"},
+				"enum":        []any{"list", "kill", "pkill", "pgrep", "top", "pstree"},
 			},
 			"pid": map[string]any{
 				"type":        "integer",

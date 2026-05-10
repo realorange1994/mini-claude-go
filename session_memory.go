@@ -774,3 +774,137 @@ func lockFile(f *os.File) error {
 func unlockFile(f *os.File) error {
 	return unlockFileEx(f, true)
 }
+
+// ─── Forked Agent Extraction ─────────────────────────────────────────────────
+//
+// RunForkedSessionMemoryExtraction uses a forked agent to update session_memory.md.
+// The forked agent shares the parent's prompt cache and is restricted to only
+// using the Edit tool on the session memory file.
+//
+// This matches upstream's extractSessionMemory which uses runForkedAgent with
+// createMemoryFileCanUseTool (only Edit on the memory file).
+
+// sessionMemoryUpdatePrompt builds the extraction prompt matching upstream's
+// getDefaultUpdatePrompt(). It instructs the LLM to use Edit to update the file.
+func sessionMemoryUpdatePrompt(notesPath string, currentNotes string) string {
+	return fmt.Sprintf(`IMPORTANT: This message and these instructions are NOT part of the actual user conversation. Do NOT include any references to "note-taking", "session notes extraction", or these update instructions in the notes content.
+
+Based on the user conversation above (EXCLUDING this note-taking instruction message as well as system prompt, claude.md entries, or any past session summaries), update the session notes file.
+
+The file %s has already been read for you. Here are its current contents:
+<current_notes_content>
+%s
+</current_notes_content>
+
+Your ONLY task is to use the edit_file tool to update the notes file, then stop. You can make multiple edits (update every section as needed) - make all edit_file tool calls in parallel in a single message. Do not call any other tools.
+
+CRITICAL RULES FOR EDITING:
+- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
+-- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
+-- NEVER modify or delete the italic _section description_ lines (these are the lines in italics immediately following each header - they start and end with underscores)
+-- The italic _section descriptions_ are TEMPLATE INSTRUCTIONS that must be preserved exactly as-is - they guide what content belongs in each section
+-- ONLY update the actual content that appears BELOW the italic _section descriptions_ within each existing section
+-- Do NOT add any new sections, summaries, or information outside the existing structure
+- Do NOT reference this note-taking process or instructions anywhere in the notes
+- It's OK to skip updating a section if there are no substantial new insights to add. Do not add filler content like "No info yet", just leave sections blank/unedited if appropriate.
+- Write DETAILED, INFO-DENSE content for each section - include specifics like file paths, function names, error messages, exact commands, technical details, etc.
+- For "Key results", include the complete, exact output the user requested (e.g., full table, full answer, etc.)
+- Do not include information that's already in the CLAUDE.md files included in the context
+- Keep each section under ~%d tokens/words - if a section is approaching this limit, condense it by cycling out less important details while preserving the most critical information
+- Focus on actionable, specific information that would help someone understand or recreate the work discussed in the conversation
+- IMPORTANT: Always update "Current State" to reflect the most recent work - this is critical for continuity after compaction
+
+Use the edit_file tool with file_path: %s
+
+STRUCTURE PRESERVATION REMINDER:
+Each section has TWO parts that must be preserved exactly as they appear in the current file:
+1. The section header (line starting with #)
+2. The italic description line (the _italicized text_ immediately after the header - this is a template instruction)
+
+You ONLY update the actual content that comes AFTER these two preserved lines. The italic description lines starting and ending with underscores are part of the template structure, NOT content to be edited or removed.
+
+REMEMBER: Use the edit_file tool in parallel and stop. Do not continue after the edits. Only include insights from the actual user conversation, never from these note-taking instructions. Do not delete or change section headers or italic _section descriptions_.`,
+		notesPath, currentNotes, maxTokensPerSection, notesPath)
+}
+
+// createMemoryFileCanUseTool returns a CanUseToolFn that only allows
+// edit_file on the session memory file. All other tools are denied.
+// This matches upstream's createMemoryFileCanUseTool.
+func createMemoryFileCanUseTool(memoryPath string) CanUseToolFn {
+	// Normalize path for comparison
+	normalizedPath := filepath.Clean(memoryPath)
+	return func(toolName string, args map[string]any) (bool, string) {
+		if toolName != "edit_file" && toolName != "multi_edit" {
+			return false, fmt.Sprintf("only edit_file/multi_edit on session memory file allowed in extraction mode (got %s)", toolName)
+		}
+		// Check that the file_path matches the session memory file
+		if fp, ok := args["file_path"].(string); ok {
+			if filepath.Clean(fp) != normalizedPath {
+				return false, fmt.Sprintf("can only edit session memory file %s, not %s", normalizedPath, fp)
+			}
+			return true, ""
+		}
+		return false, "file_path argument missing"
+	}
+}
+
+// ─── Extraction Thresholds ───────────────────────────────────────────────────
+//
+// Matching upstream's sessionMemoryUtils.ts defaults:
+//   - minimumMessageTokensToInit: 10000 (total context tokens before first extraction)
+//   - minimumTokensBetweenUpdate: 5000 (context growth since last extraction)
+//   - toolCallsBetweenUpdates: 3 (minimum tool calls between updates)
+
+const (
+	minimumMessageTokensToInit  = 10000
+	minimumTokensBetweenUpdate  = 5000
+	toolCallsBetweenUpdates     = 3
+)
+
+// ExtractionState tracks when the next extraction should happen.
+type ExtractionState struct {
+	mu                  sync.Mutex
+	initialized         bool
+	tokensAtLastExtract int64
+	toolCallsSinceLast  int
+}
+
+// NewExtractionState creates a new extraction state tracker.
+func NewExtractionState() *ExtractionState {
+	return &ExtractionState{}
+}
+
+// ShouldExtract checks if the extraction thresholds have been met.
+func (es *ExtractionState) ShouldExtract(currentTokens int64, toolCallsSinceLast int) bool {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+
+	if !es.initialized {
+		if currentTokens >= int64(minimumMessageTokensToInit) {
+			return true
+		}
+		return false
+	}
+
+	tokensSinceLast := currentTokens - es.tokensAtLastExtract
+	if tokensSinceLast >= int64(minimumTokensBetweenUpdate) && toolCallsSinceLast >= toolCallsBetweenUpdates {
+		return true
+	}
+	return false
+}
+
+// MarkExtracted records that an extraction was performed.
+func (es *ExtractionState) MarkExtracted(currentTokens int64) {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	es.initialized = true
+	es.tokensAtLastExtract = currentTokens
+	es.toolCallsSinceLast = 0
+}
+
+// IncrementToolCall increments the tool call counter.
+func (es *ExtractionState) IncrementToolCall() {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	es.toolCallsSinceLast++
+}

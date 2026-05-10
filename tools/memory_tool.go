@@ -32,7 +32,7 @@ func (t *MemoryAddTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"category": map[string]any{
 				"type":        "string",
-				"enum":        []string{"preference", "decision", "state", "reference"},
+				"enum":        []any{"preference", "decision", "state", "reference"},
 				"description": "Category of the memory note",
 			},
 			"content": map[string]any{

@@ -22,7 +22,7 @@ func (*FileOpsTool) InputSchema() map[string]any {
 			"operation": map[string]any{
 				"type":        "string",
 				"description": "Operation: mkdir, rm, rmrf, mv, cp, cpdir, chmod, ln",
-				"enum":        []string{"mkdir", "rm", "rmrf", "mv", "cp", "cpdir", "chmod", "ln"},
+				"enum":        []any{"mkdir", "rm", "rmrf", "mv", "cp", "cpdir", "chmod", "ln"},
 			},
 			"path": map[string]any{
 				"type":        "string",

@@ -22,12 +22,12 @@ func (*TerminalTool) InputSchema() map[string]any {
 			"manager": map[string]any{
 				"type":        "string",
 				"description": "Terminal manager: tmux (default) or screen",
-				"enum":        []string{"tmux", "screen"},
+				"enum":        []any{"tmux", "screen"},
 			},
 			"operation": map[string]any{
 				"type":        "string",
 				"description": "Operation: list, new, detach, attach, send, kill, rename",
-				"enum":        []string{"list", "new", "detach", "attach", "send", "kill", "rename"},
+				"enum":        []any{"list", "new", "detach", "attach", "send", "kill", "rename"},
 			},
 			"session": map[string]any{
 				"type":        "string",

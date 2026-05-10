@@ -25,7 +25,7 @@ func (t *AgentListTool) InputSchema() map[string]any {
 			"status": map[string]any{
 				"type":        "string",
 				"description": "Filter by status: pending, running, completed, failed, killed",
-				"enum":        []string{"pending", "running", "completed", "failed", "killed"},
+				"enum":        []any{"pending", "running", "completed", "failed", "killed"},
 			},
 		},
 	}
