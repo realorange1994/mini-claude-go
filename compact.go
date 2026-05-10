@@ -2616,6 +2616,44 @@ func stripImages(messages []anthropic.MessageParam) []anthropic.MessageParam {
 
 // ─── Cached Microcompact (cache_edits API) ───────────────────────────────────
 
+// compactableToolNames is the set of tool names whose results should be
+// deleted via cache_edits during micro-compaction. These are read/search/web/
+// edit tools where the raw output is large and not needed for context after
+// the turn passes. Matches upstream's COMPACTABLE_TOOLS set.
+// Tools like git, memory, skill, list_dir, etc. are NOT compacted because
+// their results contain structural information the model may need later.
+var compactableToolNames = map[string]bool{
+	"read_file":  true,
+	"exec":       true,
+	"edit_file":  true,
+	"write_file": true,
+	"multi_edit": true,
+	"grep":       true,
+	"glob":       true,
+	"web_fetch":  true,
+	"web_search": true,
+}
+
+// collectCompactableToolIds walks API messages and returns tool_use IDs whose
+// tool name is in compactableToolNames, in encounter order. Matches upstream's
+// collectCompactableToolIds.
+func collectCompactableToolIds(messages []anthropic.MessageParam) []string {
+	var ids []string
+	for _, msg := range messages {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, block := range msg.Content {
+			if block.OfToolUse != nil && block.OfToolUse.ID != "" {
+				if compactableToolNames[block.OfToolUse.Name] {
+					ids = append(ids, block.OfToolUse.ID)
+				}
+			}
+		}
+	}
+	return ids
+}
+
 type CachedMicrocompactTracker struct {
 	mu              sync.Mutex
 	registeredTools map[string]bool
@@ -2624,6 +2662,11 @@ type CachedMicrocompactTracker struct {
 	pinnedEdits     []any
 	maxTools        int
 	keepRecent      int
+	// toolsSentToAPI is set to true after a successful API call that included
+	// cache_edits. Prevents issuing another cache_edits on the next turn until
+	// the server has processed the current one (matching upstream's
+	// markToolsSentToAPI / toolsSentToAPI pattern).
+	toolsSentToAPI bool
 }
 
 func NewCachedMicrocompactTracker() *CachedMicrocompactTracker {
@@ -2636,8 +2679,12 @@ func NewCachedMicrocompactTracker() *CachedMicrocompactTracker {
 }
 
 // RegisterToolUse records a tool_use_id for cache_edits tracking.
+// Only registers if the tool name is in compactableToolNames.
 // Called after each API response containing tool_use blocks.
+// Use RegisterToolUseWithName when you have the tool name available.
 func (t *CachedMicrocompactTracker) RegisterToolUse(toolUseID string) {
+	// Backward-compat: register without name filtering.
+	// Prefer RegisterCompactableToolUse with name for new code.
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.registeredTools[toolUseID] {
@@ -2646,12 +2693,72 @@ func (t *CachedMicrocompactTracker) RegisterToolUse(toolUseID string) {
 	}
 }
 
+// RegisterCompactableToolUse records a tool_use_id only if its name matches
+// compactableToolNames. This matches upstream's cached MC registration
+// behavior which filters by COMPACTABLE_TOOLS set.
+func (t *CachedMicrocompactTracker) RegisterCompactableToolUse(toolUseID string, toolName string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !compactableToolNames[toolName] {
+		return
+	}
+	if !t.registeredTools[toolUseID] {
+		t.registeredTools[toolUseID] = true
+		t.toolOrder = append(t.toolOrder, toolUseID)
+	}
+}
+
+// RegisterCompactableToolIDsFromMessages scans messages for tool_use blocks
+// and registers only those whose names are in compactableToolNames.
+// Called before the API call to pre-populate the tracker with compactable
+// tool IDs from the current conversation context.
+func (t *CachedMicrocompactTracker) RegisterCompactableToolIDsFromMessages(messages []anthropic.MessageParam) {
+	ids := collectCompactableToolIds(messages)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, id := range ids {
+		if !t.registeredTools[id] {
+			t.registeredTools[id] = true
+			t.toolOrder = append(t.toolOrder, id)
+		}
+	}
+}
+
+// MarkSentToAPI flags that cache_edits were included in the last API request.
+// This prevents issuing another cache_edits until the server has processed
+// the current one (matching upstream's markToolsSentToAPI).
+func (t *CachedMicrocompactTracker) MarkSentToAPI() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.toolsSentToAPI = true
+}
+
+// HasPendingEdits returns true if there are deletions queued but not yet sent.
+func (t *CachedMicrocompactTracker) HasPendingEdits() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var activeCount int
+	for _, id := range t.toolOrder {
+		if !t.deletedRefs[id] {
+			activeCount++
+		}
+	}
+	return activeCount > t.maxTools
+}
+
 // GetCacheEditsBlock returns a cache_edits block if the threshold is exceeded.
 // Deletes all but the most recent `keepRecent` tool results.
-// Returns nil if fewer than maxTools compactable tools exist.
+// Returns nil if fewer than maxTools compactable tools exist, or if tools
+// were already sent to the API this turn (prevents double-sending).
 func (t *CachedMicrocompactTracker) GetCacheEditsBlock() map[string]any {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Skip if tools were already sent to API this turn — the server is
+	// processing the deletion and we shouldn't re-issue until it completes.
+	if t.toolsSentToAPI {
+		return nil
+	}
 
 	var compactable []string
 	for _, id := range t.toolOrder {
@@ -2692,6 +2799,16 @@ func (t *CachedMicrocompactTracker) Reset() {
 	t.toolOrder = nil
 	t.deletedRefs = make(map[string]bool)
 	t.pinnedEdits = nil
+	t.toolsSentToAPI = false
+}
+
+// ResetForTimeBasedMC resets the cached MC state after a time-based
+// microcompact fires. The time-based path content-cleared tool results and
+// invalidated the server cache, so cached-MC state would reference non-
+// existent server entries. Reset it to prevent stale cache_edit attempts.
+// This matches upstream's resetMicrocompactState call after time-based MC.
+func (t *CachedMicrocompactTracker) ResetForTimeBasedMC() {
+	t.Reset()
 }
 
 // ─── Post-compact cleanup stubs matching upstream's runPostCompactCleanup() ─────

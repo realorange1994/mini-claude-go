@@ -956,6 +956,11 @@ type ExtractionState struct {
 	initialized         bool
 	tokensAtLastExtract int64
 	toolCallsSinceLast  int
+	// extractionInProgress is set to true when a goroutine extraction is running
+	// and false when it completes. SM-compact waits for this to be false before
+	// proceeding, so it uses the freshest session memory content.
+	extractionInProgress bool
+	extractionStartedAt  time.Time // timestamp when extraction started (for staleness check)
 }
 
 // NewExtractionState creates a new extraction state tracker.
@@ -989,6 +994,7 @@ func (es *ExtractionState) MarkExtracted(currentTokens int64) {
 	es.initialized = true
 	es.tokensAtLastExtract = currentTokens
 	es.toolCallsSinceLast = 0
+	es.extractionInProgress = false
 }
 
 // IncrementToolCall increments the tool call counter.
@@ -996,4 +1002,41 @@ func (es *ExtractionState) IncrementToolCall() {
 	es.mu.Lock()
 	defer es.mu.Unlock()
 	es.toolCallsSinceLast++
+}
+
+// MarkExtractionInProgress signals that extraction has started.
+func (es *ExtractionState) MarkExtractionInProgress() {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	es.extractionInProgress = true
+	es.extractionStartedAt = time.Now()
+}
+
+// WaitForExtraction waits (with timeout) for any in-progress extraction to
+// complete. Returns immediately if extraction is stale (> 60s old, assumed abandoned).
+// Returns true if extraction completed, false if timed out.
+// This matches upstream's waitForSessionMemoryExtraction().
+func (es *ExtractionState) WaitForExtraction(timeout time.Duration) bool {
+	const checkInterval = 1 * time.Second
+	const staleThreshold = 60 * time.Second
+	deadline := time.Now().Add(timeout)
+	for {
+		es.mu.Lock()
+		if !es.extractionInProgress {
+			es.mu.Unlock()
+			return true
+		}
+		// If extraction is stale (> 60s old), don't wait — assume it crashed.
+		// Matching upstream's EXTRACTION_STALE_THRESHOLD_MS = 60000.
+		if time.Since(es.extractionStartedAt) > staleThreshold {
+			es.mu.Unlock()
+			return true
+		}
+		es.mu.Unlock()
+
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(checkInterval)
+	}
 }

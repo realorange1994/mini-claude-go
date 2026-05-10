@@ -1524,6 +1524,8 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			// Rebuild messages from repaired entries so the fix takes effect
 			messages = a.context.BuildMessages()
 			messages = NormalizeAPIMessages(messages)
+			// Re-inject cache_edits after rebuild (matching the initial call above).
+			messages = a.injectCacheEdits(messages)
 			params.Messages = messages
 			continue
 		}
@@ -1830,12 +1832,19 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
-			// Register tool_use IDs for cache_edits tracking
+			// Register compactable tool_use IDs for cache_edits tracking.
+			// Only compactable tools (read/exec/edit/grep/glob/web) are tracked.
 			for _, call := range toolCalls {
 				if id, ok := call["id"].(string); ok {
-					a.cachedMC.RegisterToolUse(id)
+					if name, ok := call["name"].(string); ok {
+						a.cachedMC.RegisterCompactableToolUse(id, name)
+					} else {
+						a.cachedMC.RegisterToolUse(id)
+					}
 				}
 			}
+			// Mark that cache_edits were included in this API call (prevents double-send).
+			a.cachedMC.MarkSentToAPI()
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
@@ -1896,12 +1905,19 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
-			// Register tool_use IDs for cache_edits tracking
+			// Register compactable tool_use IDs for cache_edits tracking.
+			// Only compactable tools (read/exec/edit/grep/glob/web) are tracked.
 			for _, call := range toolCalls {
 				if id, ok := call["id"].(string); ok {
-					a.cachedMC.RegisterToolUse(id)
+					if name, ok := call["name"].(string); ok {
+						a.cachedMC.RegisterCompactableToolUse(id, name)
+					} else {
+						a.cachedMC.RegisterToolUse(id)
+					}
 				}
 			}
+			// Mark that cache_edits were included in this API call (prevents double-send).
+			a.cachedMC.MarkSentToAPI()
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
@@ -1934,6 +1950,8 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			// Rebuild messages from repaired entries so the fix takes effect
 			rebuilt := a.context.BuildMessages()
 			rebuilt = NormalizeAPIMessages(rebuilt)
+			// Re-inject cache_edits after rebuild.
+			rebuilt = a.injectCacheEdits(rebuilt)
 			params.Messages = rebuilt
 			consecutive500s = 0
 			continue
@@ -1944,6 +1962,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			strings.Contains(errMsg, "stream stalled") ||
 			isContextLengthError(errMsg) {
 			return nil, nil, err
+
 		}
 
 		// Track consecutive 500 errors as a heuristic for context overflow.
@@ -3666,6 +3685,11 @@ func (a *AgentLoop) tryCompaction() {
 		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
 		if cleared > 0 {
 			a.out("\n[micro-compact] Cleared %d old tool results\n", cleared)
+			// Time-based microcompact content-clears tool results and invalidates the
+			// server prompt cache. The cached MC state would reference non-existent
+			// server entries, so reset it to prevent stale cache_edit attempts.
+			// This matches upstream's resetMicrocompactState() after time-based MC.
+			a.cachedMC.ResetForTimeBasedMC()
 			// NOTE: do NOT call toolStateTracker.OnCompaction() here.
 			// Micro-compact clears OLD tool results (beyond keepRecent threshold) by
 			// replacing their text with placeholders. This is lightweight text replacement,
@@ -3748,6 +3772,13 @@ func (a *AgentLoop) tryCompaction() {
 	// matches upstream's getSessionMemoryContent() behavior and provides much richer
 	// context for post-compact recovery.
 	if a.config.SessionMemory != nil {
+		// Wait for any in-progress session memory extraction to complete.
+		// Matching upstream's waitForSessionMemoryExtraction() in trySessionMemoryCompaction.
+		// If extraction is stale (>60s old) or timed out, proceed anyway.
+		if a.extractionState != nil {
+			a.extractionState.WaitForExtraction(15 * time.Second)
+		}
+
 		var smContent string
 
 		// Try reading the actual session_memory.md file (structured 10-section template)
@@ -4080,8 +4111,18 @@ func (a *AgentLoop) runSessionMemoryExtraction() {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "[session-memory] extraction panic: %v\n", r)
+			// Clear in-progress flag even on panic
+			if a.extractionState != nil {
+				a.extractionState.MarkExtracted(int64(a.context.EstimatedTokens()))
+			}
 		}
 	}()
+
+	// Mark extraction as in-progress so SM-compact can wait for it.
+	// This matches upstream's waitForSessionMemoryExtraction pattern.
+	if a.extractionState != nil {
+		a.extractionState.MarkExtractionInProgress()
+	}
 
 	sm := a.config.SessionMemory
 	if sm == nil {

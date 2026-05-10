@@ -1203,22 +1203,7 @@ func adjustForToolPairing(preBoundary []conversationEntry, kept []conversationEn
 	return kept
 }
 
-// compactableToolNames is the set of tool names whose results should be cleared
-// during micro-compaction. These are read/search/web/write tools where the raw
-// output is large and not needed for context after the turn passes.
-// Tools like git, memory, skill, list_dir, etc. are NOT compacted because their
-// results contain structural information the model may need later.
-var compactableToolNames = map[string]bool{
-	"read_file":    true,
-	"exec":         true,
-	"edit_file":    true,
-	"write_file":   true,
-	"multi_edit":   true,
-	"grep":         true,
-	"glob":         true,
-	"web_fetch":    true,
-	"web_search":   true,
-}
+// compactableToolNames is defined in compact.go (shared across package main).
 
 // MicroCompactEntries clears content of old tool results beyond the keepRecent
 // window. Operates directly on conversation entries (no serialization round-trip).
