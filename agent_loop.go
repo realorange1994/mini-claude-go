@@ -412,6 +412,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		todoList:          tools.NewTodoList(),
 		cachedMC:          NewCachedMicrocompactTracker(),
 		extractionState:   NewExtractionState(),
+		hooks:             cfg.Hooks,
 	}
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
@@ -563,7 +564,8 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		todoList:          tools.NewTodoList(),
 		cachedMC:          NewCachedMicrocompactTracker(),
 		extractionState:   NewExtractionState(),
-	}
+				hooks:             cfg.Hooks,
+		}
 
 	// Restore skill state from transcript entries so skillTracker reflects
 	// which skills were already read in this session. This ensures skills

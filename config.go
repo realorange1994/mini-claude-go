@@ -254,6 +254,7 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 		}
 	}
 	cfg.MCPManager = mcpMgr
+	cfg.Hooks = NewHookManager()
 
 	// Initialize skill loader -- check binary directory first, then workspace
 	loader := skills.NewLoader(projectDir)
