@@ -407,6 +407,77 @@ func LoadSessionMemoryTemplate() string {
 	return defaultSessionMemoryTemplate
 }
 
+// IsSessionMemoryTemplateOnly checks if the given content is essentially just the
+// default template (no user-written content). This is used to detect whether
+// session memory has actual extracted content or is just the empty template.
+// Matches upstream's isSessionMemoryEmpty() in prompts.ts.
+func IsSessionMemoryTemplateOnly(content string) bool {
+	return strings.TrimSpace(content) == strings.TrimSpace(defaultSessionMemoryTemplate)
+}
+
+// truncateSessionMemoryForCompact truncates session memory sections for inclusion
+// in a compact summary. Used when session memory is too large to fit in the
+// post-compact token budget. Matches upstream's truncateSessionMemoryForCompact
+// in prompts.ts.
+//
+// Per-section truncation keeps section headers intact while limiting content.
+// maxTokens is the maximum token budget for the entire session memory content
+// (upstream uses 40,000 for SM-compact).
+func truncateSessionMemoryForCompact(content string, maxTokens int) string {
+	const maxSectionTokens = 2000 // per-section limit matching FormatForPromptCompact
+	const maxCharsPerSection = maxSectionTokens * 4
+
+	lines := strings.Split(content, "\n")
+	var outputLines []string
+	var currentSectionLines []string
+	currentSectionHeader := ""
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "# ") {
+			// Flush previous section
+			outputLines = append(outputLines, flushSessionSectionForCompact(currentSectionHeader, currentSectionLines, maxCharsPerSection)...)
+			currentSectionHeader = line
+			currentSectionLines = nil
+		} else {
+			currentSectionLines = append(currentSectionLines, line)
+		}
+	}
+	// Flush last section
+	outputLines = append(outputLines, flushSessionSectionForCompact(currentSectionHeader, currentSectionLines, maxCharsPerSection)...)
+
+	truncated := strings.Join(outputLines, "\n")
+
+	// Global truncation: if still over budget, truncate at the end
+	if EstimateTokens(truncated) > maxTokens {
+		overallLimit := maxTokens * 4
+		if len(truncated) > overallLimit {
+			truncated = truncated[:overallLimit]
+			if idx := strings.LastIndex(truncated, "\n"); idx > 0 {
+				truncated = truncated[:idx]
+			}
+			truncated += "\n\n[... session memory truncated for length. Read the full session memory file for details ...]"
+		}
+	}
+	return truncated
+}
+
+func flushSessionSectionForCompact(header string, lines []string, maxCharsPerSection int) []string {
+	if header == "" {
+		return lines
+	}
+	result := []string{header}
+	charCount := 0
+	for _, line := range lines {
+		if charCount+len(line)+1 > maxCharsPerSection {
+			result = append(result, "\n[... section truncated for length ...]")
+			return result
+		}
+		result = append(result, line)
+		charCount += len(line) + 1
+	}
+	return result
+}
+
 // FormatForTemplate returns the current session memory formatted as a markdown
 // file, preserving the template structure (headers and descriptions).
 // Uses the structured template format matching upstream.

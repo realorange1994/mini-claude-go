@@ -2633,6 +2633,49 @@ func collectReadToolFilePaths(ctx *ConversationContext) map[string]bool {
 	return paths
 }
 
+// collectUsedToolNamesInPreservedMessages walks the preserved message entries (those
+// after the most recent CompactBoundaryContent) and collects tool names from
+// tool_use blocks. This lets post-compact recovery only re-announce tools that
+// aren't already visible in the preserved tail, avoiding redundant repetition.
+func collectUsedToolNamesInPreservedMessages(ctx *ConversationContext) map[string]bool {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+
+	// Find entries after the most recent CompactBoundaryContent
+	boundaryIdx := -1
+	for i := len(ctx.entries) - 1; i >= 0; i-- {
+		if _, ok := ctx.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+	if boundaryIdx < 0 {
+		// No compact boundary found yet — all messages are preserved.
+		// Return all tool names since none are "after" anything special.
+		return nil
+	}
+
+	preserved := ctx.entries[boundaryIdx+1:]
+	names := make(map[string]bool)
+
+	for _, entry := range preserved {
+		if entry.role != "assistant" {
+			continue
+		}
+		blocks, ok := entry.content.(ToolUseContent)
+		if !ok {
+			continue
+		}
+		for _, b := range blocks {
+			if b.OfToolUse != nil && b.OfToolUse.Name != "" {
+				names[b.OfToolUse.Name] = true
+			}
+		}
+	}
+
+	return names
+}
+
 // PostCompactRecovery re-injects critical context after compaction.
 // This prevents the model from losing awareness of files it was working on
 // and skills it was using, reducing wasted turns re-reading them.
@@ -2794,15 +2837,19 @@ func (a *AgentLoop) PostCompactRecovery() []string {
 		a.out("[post-compact] Plan mode reminder injected\n")
 	}
 
-	// --- Tools re-announcement ---
+	// --- Tools re-announcement (delta-based) ---
 	// After compaction the model loses all tool-use history. Re-announce the
-	// full tool inventory so the model knows what capabilities are available.
-	// MCP tools and skill tools are listed separately since they're dynamic.
+	// tool inventory so the model knows what capabilities are available.
+	// Only announce tools NOT already visible in the preserved message tail,
+	// matching upstream's getDeferredToolsDeltaAttachment pattern.
 	if a.registry != nil {
-		toolsAttachment := a.buildPostCompactToolsAnnouncement()
+		preservedToolNames := collectUsedToolNamesInPreservedMessages(a.context)
+		toolsAttachment := a.buildPostCompactToolsAnnouncement(preservedToolNames)
 		if toolsAttachment != "" {
 			a.context.AddAttachment(toolsAttachment)
-			a.out("[post-compact] Re-announced tool inventory\n")
+			a.out("[post-compact] Re-announced tool inventory (delta)\n")
+		} else {
+			a.out("[post-compact] All tools already visible in preserved tail, skipping re-announcement\n")
 		}
 	}
 
@@ -2947,19 +2994,26 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 	a.gate.ResetPostCompact()
 }
 
-// buildPostCompactToolsAnnouncement re-announces all available tools after compaction.
-// The model loses tool-use history during compaction; this reminds it of what tools exist.
-func (a *AgentLoop) buildPostCompactToolsAnnouncement() string {
+// buildPostCompactToolsAnnouncement re-announces available tools after compaction.
+// Only tools NOT already visible in the preserved message tail are announced,
+// avoiding redundant re-injection. The model loses tool-use history during
+// compaction; this reminds it of tools it hasn't used in the preserved tail.
+func (a *AgentLoop) buildPostCompactToolsAnnouncement(preservedToolNames map[string]bool) string {
 	var sb strings.Builder
 	sb.WriteString("## Tools Available After Compaction\n\n")
 	sb.WriteString("The following tools are available. Use them as needed.\n\n")
 
-	// Native tools (non-MCP, non-skill)
+	// Collect native, MCP, and skill tools, skipping those already visible
+	// in the preserved message tail (to avoid redundant re-announcement).
 	var nativeTools []string
 	var mcpTools []string
 	var skillTools []string
 	for _, t := range a.registry.AllTools() {
 		name := t.Name()
+		// Skip tools already used in the preserved message tail
+		if preservedToolNames != nil && preservedToolNames[name] {
+			continue
+		}
 		desc := t.Description()
 		entry := fmt.Sprintf("- **%s**: %s", name, desc)
 		switch name {
@@ -2994,7 +3048,12 @@ func (a *AgentLoop) buildPostCompactToolsAnnouncement() string {
 		sb.WriteString("\n")
 	}
 
-	return strings.TrimRight(sb.String(), "\n")
+	result := strings.TrimRight(sb.String(), "\n")
+	// If all tools were already visible, return empty to skip the attachment
+	if strings.HasSuffix(result, "Use them as needed.\n\n") {
+		return ""
+	}
+	return result
 }
 
 // buildPostCompactPlanAttachment reads the most recent plan file from .claude/plan/
@@ -3515,9 +3574,30 @@ func (a *AgentLoop) tryCompaction() {
 	// Phase 1: SM-compact — use session memory as summary instead of calling LLM API.
 	// This is the preferred path when memory is available: saves an LLM API call
 	// and leverages incrementally collected session memory as the context summary.
+	// Uses the full structured session_memory.md content (10-section template) rather
+	// than the flattened FormatForPromptCompact output — the structured template
+	// matches upstream's getSessionMemoryContent() behavior and provides much richer
+	// context for post-compact recovery.
 	if a.config.SessionMemory != nil {
-		if memContent := a.config.SessionMemory.FormatForPromptCompact(); memContent != "" {
-			a.trySMCompact(memContent)
+		var smContent string
+
+		// Try reading the actual session_memory.md file (structured 10-section template)
+		memoryPath := filepath.Join(a.config.ProjectDir, ".claude", "session_memory.md")
+		if data, err := os.ReadFile(memoryPath); err == nil {
+			content := strings.TrimSpace(string(data))
+			// Only use if content has actual user-written content (not just the template)
+			if content != "" && !IsSessionMemoryTemplateOnly(content) {
+				smContent = content
+			}
+		}
+
+		// Fall back to the flattened FormatForPromptCompact if file doesn't exist or is empty
+		if smContent == "" {
+			smContent = a.config.SessionMemory.FormatForPromptCompact()
+		}
+
+		if smContent != "" {
+			a.trySMCompact(smContent)
 			// Mark system prompt dirty after compaction
 			if a.config.cachedPrompt != nil {
 				a.config.cachedPrompt.MarkDirty()
@@ -3582,20 +3662,14 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	// Format the session memory as a compact summary
 	// Cap session memory content at ~40K tokens to prevent context overflow.
 	// Matches upstream's DEFAULT_SM_COMPACT_CONFIG.maxTokens = 40_000.
+	// Uses per-section truncation (truncateSessionMemoryForCompact) to preserve
+	// section headers while truncating oversized sections.
 	const maxSessionMemoryTokens = 40_000
 	smTokens := EstimateTokens(sessionMemoryContent)
 	smContentForSummary := sessionMemoryContent
 	if smTokens > maxSessionMemoryTokens {
-		charLimit := maxSessionMemoryTokens * 4
-		runes := []rune(sessionMemoryContent)
-		if len(runes) > charLimit {
-			truncated := string(runes[:charLimit])
-			if nlIdx := strings.LastIndex(truncated, "\n"); nlIdx > charLimit/2 {
-				truncated = truncated[:nlIdx]
-			}
-			smContentForSummary = truncated + "\n\n[... session memory truncated for length. Read the full session memory file for details ...]"
-			a.out("\n[sm-compact] Session memory truncated: %d tokens -> %d token limit\n", smTokens, maxSessionMemoryTokens)
-		}
+		smContentForSummary = truncateSessionMemoryForCompact(sessionMemoryContent, maxSessionMemoryTokens)
+		a.out("\n[sm-compact] Session memory truncated: %d tokens -> %d token limit\n", smTokens, maxSessionMemoryTokens)
 	}
 
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
