@@ -2346,10 +2346,14 @@ func entriesToSummaryText(entries []conversationEntry) string {
 // existing entriesToSummaryText works on internal conversationEntry slices.
 // Used by SM-compact and fallback paths to inject structured metadata into summaries.
 func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) string {
-	var sb strings.Builder
-	turnCount := 0
-	toolCallCount := 0
-	filesMentioned := make(map[string]bool)
+	// First pass: collect structured data
+	var userMessages []string
+	var toolCalls []map[string]any // name, args
+	var fileOperations []string    // "read: path" or "write: path"
+	var filesMentioned []string
+	totalToolCalls := 0
+	totalToolResults := 0
+	errorCount := 0
 
 	for _, msg := range messages {
 		role := string(msg.Role)
@@ -2357,7 +2361,7 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 			if block.OfText != nil {
 				text := block.OfText.Text
 				if role == "user" {
-					// Skip tool_result user messages (they have structured content)
+					// Skip tool_result user messages
 					isToolResult := false
 					for _, b := range msg.Content {
 						if b.OfToolResult != nil {
@@ -2366,63 +2370,112 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 						}
 					}
 					if !isToolResult {
-						turnCount++
 						preview := text
-						if len(preview) > 200 {
-							preview = preview[:200] + "..."
+						if len(preview) > 300 {
+							preview = preview[:300] + "..."
 						}
-						sb.WriteString(fmt.Sprintf("User: %s\n", preview))
+						userMessages = append(userMessages, preview)
 					}
-				} else if role == "assistant" {
-					preview := text
-					if len(preview) > 200 {
-						preview = preview[:200] + "..."
-					}
-					sb.WriteString(fmt.Sprintf("Assistant: %s\n", preview))
 				}
 			}
 			if block.OfToolUse != nil {
-				toolCallCount++
+				totalToolCalls++
 				name := block.OfToolUse.Name
-				// Extract file paths from tool arguments
+				args := make(map[string]any)
 				if m, ok := block.OfToolUse.Input.(map[string]any); ok {
+					args = m
+					// Extract file paths
 					if path, ok := m["path"].(string); ok {
-						filesMentioned[path] = true
+						filesMentioned = append(filesMentioned, path)
+						fileOperations = append(fileOperations, fmt.Sprintf("used %s on: %s", name, path))
 					} else if path, ok := m["file_path"].(string); ok {
-						filesMentioned[path] = true
+						filesMentioned = append(filesMentioned, path)
+						fileOperations = append(fileOperations, fmt.Sprintf("used %s on: %s", name, path))
 					}
 				}
-				sb.WriteString(fmt.Sprintf("[tool call: %s]\n", name))
+				toolCalls = append(toolCalls, map[string]any{
+					"name": name,
+					"args": args,
+				})
 			}
 			if block.OfToolResult != nil {
+				totalToolResults++
 				for _, tc := range block.OfToolResult.Content {
 					if tc.OfText != nil {
-						text := tc.OfText.Text
-						lines := strings.Count(text, "\n")
-						preview := text
-						if len(preview) > 100 {
-							preview = preview[:100] + "..."
+						if strings.Contains(tc.OfText.Text, "Error") || strings.Contains(tc.OfText.Text, "error") {
+							errorCount++
 						}
-						sb.WriteString(fmt.Sprintf("[tool result: %d lines] %s\n", lines+1, preview))
 					}
 				}
 			}
 		}
 	}
 
-	// Append summary statistics
-	var summary strings.Builder
-	summary.WriteString(fmt.Sprintf("Summary of %d conversation turns with %d tool calls.\n", turnCount, toolCallCount))
+	// Deduplicate files
+	filesMentioned = uniqueStrings(filesMentioned)
+
+	// Build narrative summary
+	var sb strings.Builder
+
+	// Overview paragraph
+	sb.WriteString(fmt.Sprintf("The conversation had %d turns with %d tool calls and %d tool results.\n", len(userMessages), totalToolCalls, totalToolResults))
+
 	if len(filesMentioned) > 0 {
-		files := make([]string, 0, len(filesMentioned))
-		for f := range filesMentioned {
-			files = append(files, f)
-		}
-		summary.WriteString(fmt.Sprintf("Files mentioned: %s\n", strings.Join(files, ", ")))
+		sb.WriteString(fmt.Sprintf("Files referenced: %s\n\n", strings.Join(filesMentioned, ", ")))
 	}
-	summary.WriteString("---\n")
-	summary.WriteString(sb.String())
-	return summary.String()
+
+	// User requests
+	if len(userMessages) > 0 {
+		sb.WriteString("## User Requests\n")
+		for i, msg := range userMessages {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, msg))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Tool activity summary
+	if totalToolCalls > 0 {
+		sb.WriteString("## Tool Activity\n")
+		// Group tool calls by name
+		toolCounts := make(map[string]int)
+		for _, tc := range toolCalls {
+			if name, ok := tc["name"].(string); ok {
+				toolCounts[name]++
+			}
+		}
+		sb.WriteString("Tools used (count per tool):\n")
+		for name, count := range toolCounts {
+			sb.WriteString(fmt.Sprintf("- %s: %d times\n", name, count))
+		}
+		if errorCount > 0 {
+			sb.WriteString(fmt.Sprintf("\nEncountered %d error(s) during tool execution.\n", errorCount))
+		}
+		sb.WriteString("\n")
+	}
+
+	// File operations
+	if len(fileOperations) > 0 {
+		sb.WriteString("## File Operations\n")
+		for _, op := range fileOperations {
+			sb.WriteString("- " + op + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// uniqueStrings returns a deduplicated slice preserving first-occurrence order.
+func uniqueStrings(ss []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 // ─── Reactive Compaction ─────────────────────────────────────────────────────
