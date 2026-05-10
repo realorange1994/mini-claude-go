@@ -3935,6 +3935,20 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string) {
 	actualPostTokens := estimateMessageParamsTokens(actualMessages)
 	a.compactor.SetPostCompactTokens(actualPostTokens)
 
+	// Post-compact threshold check: if SM-compact didn't reduce tokens below
+	// the autocompact threshold, fall back to LLM compaction. This matches
+	// upstream's autoCompactThreshold check in trySessionMemoryCompaction.
+	compactThreshold := a.compactor.CompactThreshold()
+	if actualPostTokens >= compactThreshold {
+		a.out("\n[sm-compact] Post-compact tokens (%d) still above threshold (%d), falling back to LLM compaction\n",
+			actualPostTokens, compactThreshold)
+		// Undo SM-compact and fall back to LLM compaction.
+		// tryLLMCompaction will re-check ShouldCompact and may skip if tokens
+		// are too low, which is the correct behavior (context pressure is gone).
+		a.tryLLMCompaction()
+		return
+	}
+
 	// Track lastSummarizedMessageUUID for incremental SM-compact.
 	// The compaction boundary is inserted before summary, so the boundary's
 	// UUID marks the end of the summarized portion. Subsequent compactions

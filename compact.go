@@ -1314,7 +1314,7 @@ func (c *Compactor) SetPostCompactTokens(tokens int) {
 // ShouldCompact checks if compaction is needed based on token count and cooldown.
 func (c *Compactor) ShouldCompact(messages []anthropic.MessageParam) bool {
 	tokens := estimateMessageParamsTokens(messages)
-	threshold := int(float64(c.maxTokens) * c.compactThreshold)
+	threshold := c.CompactThreshold()
 	if tokens < threshold {
 		return false
 	}
@@ -1326,6 +1326,13 @@ func (c *Compactor) ShouldCompact(messages []anthropic.MessageParam) bool {
 		}
 	}
 	return true
+}
+
+// CompactThreshold returns the token count at which compaction should trigger.
+func (c *Compactor) CompactThreshold() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return int(float64(c.maxTokens) * c.compactThreshold)
 }
 
 // Compact performs LLM-driven compaction, falling back to truncation on failure.
