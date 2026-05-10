@@ -2367,9 +2367,10 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 	var toolCalls []map[string]any // name, args
 	var fileOperations []string    // "read: path" or "write: path"
 	var filesMentioned []string
+	var errorMessages []string     // full error text (first 10)
+	var editOperations []string    // edit details: "edited path: old_string -> new_string"
 	totalToolCalls := 0
 	totalToolResults := 0
-	errorCount := 0
 
 	for _, msg := range messages {
 		role := string(msg.Role)
@@ -2387,8 +2388,8 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 					}
 					if !isToolResult {
 						preview := text
-						if len(preview) > 300 {
-							preview = preview[:300] + "..."
+						if len(preview) > 1000 {
+							preview = preview[:1000] + "..."
 						}
 						userMessages = append(userMessages, preview)
 					}
@@ -2408,6 +2409,26 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 						filesMentioned = append(filesMentioned, path)
 						fileOperations = append(fileOperations, fmt.Sprintf("used %s on: %s", name, path))
 					}
+					// Capture edit/write operation details
+					if name == "edit_file" || name == "write_file" || name == "multi_edit_file" {
+						pathStr := ""
+						if p, ok := m["path"].(string); ok {
+							pathStr = p
+						} else if p, ok := m["file_path"].(string); ok {
+							pathStr = p
+						}
+						if pathStr != "" {
+							if oldStr, ok := m["old_string"].(string); ok && len(oldStr) > 0 {
+								preview := oldStr
+								if len(preview) > 100 {
+									preview = preview[:100] + "..."
+								}
+								editOperations = append(editOperations, fmt.Sprintf("%s %s: replaced \"%s\"", name, pathStr, preview))
+							} else {
+								editOperations = append(editOperations, fmt.Sprintf("%s %s: full rewrite", name, pathStr))
+							}
+						}
+					}
 				}
 				toolCalls = append(toolCalls, map[string]any{
 					"name": name,
@@ -2418,8 +2439,16 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 				totalToolResults++
 				for _, tc := range block.OfToolResult.Content {
 					if tc.OfText != nil {
-						if strings.Contains(tc.OfText.Text, "Error") || strings.Contains(tc.OfText.Text, "error") {
-							errorCount++
+						text := tc.OfText.Text
+						if strings.Contains(text, "Error") || strings.Contains(text, "error") {
+							// Collect full error text (up to 10 errors)
+							if len(errorMessages) < 10 {
+								errPreview := text
+								if len(errPreview) > 200 {
+									errPreview = errPreview[:200] + "..."
+								}
+								errorMessages = append(errorMessages, errPreview)
+							}
 						}
 					}
 				}
@@ -2463,8 +2492,12 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 		for name, count := range toolCounts {
 			sb.WriteString(fmt.Sprintf("- %s: %d times\n", name, count))
 		}
-		if errorCount > 0 {
-			sb.WriteString(fmt.Sprintf("\nEncountered %d error(s) during tool execution.\n", errorCount))
+		if len(errorMessages) > 0 {
+			sb.WriteString(fmt.Sprintf("\nEncountered %d error(s) during tool execution:\n", len(errorMessages)))
+			for i, errMsg := range errorMessages {
+				sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, errMsg))
+			}
+			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
 	}
@@ -2473,6 +2506,15 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 	if len(fileOperations) > 0 {
 		sb.WriteString("## File Operations\n")
 		for _, op := range fileOperations {
+			sb.WriteString("- " + op + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// Edit details — what was changed in each file
+	if len(editOperations) > 0 {
+		sb.WriteString("## File Edits\n")
+		for _, op := range editOperations {
 			sb.WriteString("- " + op + "\n")
 		}
 		sb.WriteString("\n")

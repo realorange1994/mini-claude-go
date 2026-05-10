@@ -67,8 +67,11 @@ func TestDefaultConfigDefaults(t *testing.T) {
 		t.Errorf("expected PostCompactMaxFiles=5, got %d", cfg.PostCompactMaxFiles)
 	}
 	// Token-based budgets
-	if cfg.PostCompactMaxFileTokens != 12500 {
-		t.Errorf("expected PostCompactMaxFileTokens=12500, got %d", cfg.PostCompactMaxFileTokens)
+	if cfg.PostCompactMaxFileTokens != 50000 {
+		t.Errorf("expected PostCompactMaxFileTokens=50000, got %d", cfg.PostCompactMaxFileTokens)
+	}
+	if cfg.PostCompactMaxTokensPerFile != 5000 {
+		t.Errorf("expected PostCompactMaxTokensPerFile=5000, got %d", cfg.PostCompactMaxTokensPerFile)
 	}
 	if cfg.PostCompactMaxSkillTokens != 1250 {
 		t.Errorf("expected PostCompactMaxSkillTokens=1250, got %d", cfg.PostCompactMaxSkillTokens)

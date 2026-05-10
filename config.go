@@ -54,7 +54,8 @@ type Config struct {
 	PostCompactMaxSkillChars   int // legacy char-based budget (deprecated, use PostCompactMaxSkillTokens)
 	PostCompactMaxTotalSkillChars int // legacy char-based budget (deprecated, use PostCompactMaxTotalSkillTokens)
 	// Token-based budgets for post-compact recovery (upstream uses tokens, not chars)
-	PostCompactMaxFileTokens       int // default 12500 (~50K chars / 4)
+	PostCompactMaxFileTokens       int // default 50000 (matches upstream POST_COMPACT_TOKEN_BUDGET)
+	PostCompactMaxTokensPerFile    int // default 5000 (matches upstream POST_COMPACT_MAX_TOKENS_PER_FILE)
 	PostCompactMaxSkillTokens      int // default 1250 (~5K chars / 4)
 	PostCompactMaxTotalSkillTokens int // default 6250 (~25K chars / 4)
 	PostCompactHistorySnipCount   int
@@ -312,7 +313,8 @@ func DefaultConfig() Config {
 		PostCompactMaxSkillChars:      5000,  // legacy, use PostCompactMaxSkillTokens
 		PostCompactMaxTotalSkillChars: 25000, // legacy, use PostCompactMaxTotalSkillTokens
 		// Token-based budgets (upstream-compatible)
-		PostCompactMaxFileTokens:       12500, // ~50K chars at 4 chars/token
+		PostCompactMaxFileTokens:       50000, // matches upstream POST_COMPACT_TOKEN_BUDGET
+		PostCompactMaxTokensPerFile:    5000,  // matches upstream POST_COMPACT_MAX_TOKENS_PER_FILE
 		PostCompactMaxSkillTokens:      1250,  // ~5K chars at 4 chars/token
 		PostCompactMaxTotalSkillTokens: 6250,  // ~25K chars at 4 chars/token
 		PostCompactHistorySnipCount:   3,

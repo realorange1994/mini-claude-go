@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"os"
 	"testing"
 )
 
@@ -375,5 +376,65 @@ func TestExecuteWithContextFallback(t *testing.T) {
 	})
 	if result.IsError {
 		t.Errorf("unexpected error: %s", result.Output)
+	}
+}
+
+// ─── GetCachedFileContent ─────────────────────────────────────────────────────
+
+func TestGetCachedFileContent(t *testing.T) {
+	r := NewRegistry()
+
+	// Create a temp file to register
+	tmpFile, err := os.CreateTemp("", "cached_content_test_*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := "package main\n\nfunc main() {}\n"
+	if _, err := tmpFile.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	// Before marking: should return empty
+	if cached := r.GetCachedFileContent(tmpFile.Name()); cached != "" {
+		t.Errorf("expected empty content before mark, got %q", cached)
+	}
+
+	// Mark with content
+	r.MarkFileReadWithContent(tmpFile.Name(), content)
+
+	// After marking: should return the cached content
+	cached := r.GetCachedFileContent(tmpFile.Name())
+	if cached != content {
+		t.Errorf("expected %q, got %q", content, cached)
+	}
+
+	// Non-existent path: should return empty
+	if cached := r.GetCachedFileContent("/nonexistent/path.go"); cached != "" {
+		t.Errorf("expected empty for non-existent path, got %q", cached)
+	}
+}
+
+func TestGetCachedFileContentNoContent(t *testing.T) {
+	r := NewRegistry()
+
+	// Create a temp file
+	tmpFile, err := os.CreateTemp("", "cached_content_nodata_*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	tmpFile.WriteString("package main\n")
+	tmpFile.Close()
+
+	// Mark without content (just MarkFileRead, not MarkFileReadWithContent)
+	r.MarkFileRead(tmpFile.Name())
+
+	// Should return empty since no content was cached
+	if cached := r.GetCachedFileContent(tmpFile.Name()); cached != "" {
+		t.Errorf("expected empty for MarkFileRead without content, got %q", cached)
 	}
 }

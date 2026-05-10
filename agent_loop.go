@@ -824,11 +824,23 @@ var conclusionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(?:returns?|yields?)\s+([^\s.,]+)`),
 	regexp.MustCompile(`(?i)(?:uses?|calls?)\s+([^\s.,]+)\s+for\s+`),
 	regexp.MustCompile(`(?i)(?:is defined as|is an?)\s+([^\s.,]+)`),
+	// File/function semantic conclusions
+	regexp.MustCompile(`(?i)(?:the file|file)\s+([^\s]+)\s+(?:contains|has|defines)\s+(.{10,80})`),
+	regexp.MustCompile(`(?i)(?:the function|func)\s+([^\s(]+)\s+(?:does|implements|handles)\s+(.{10,80})`),
+	regexp.MustCompile(`(?i)([^\s]+)\s+depends\s+on\s+([^\s]+)`),
 	// Task progress conclusions
 	regexp.MustCompile(`(?i)(?:completed|finished|done with)\s+(.{10,80})`),
-	regexp.MustCompile(`(?i)(?:the root cause|the bug|the issue)\s+(?:was|is)\s+(.{10,80})`),
-	regexp.MustCompile(`(?i)(?:the fix|the solution)\s+(?:was|is)\s+(.{10,80})`),
+	regexp.MustCompile(`(?i)(?:we need to|must|should)\s+(.{10,80})`),
 	regexp.MustCompile(`(?i)(?:next step|proceed with|continue with)\s+(.{10,80})`),
+	// Bug/fix conclusions
+	regexp.MustCompile(`(?i)(?:the root cause|the bug|the issue)\s+(?:was|is|in|at)\s+(.{10,80})`),
+	regexp.MustCompile(`(?i)(?:the fix|the solution|fix|workaround)\s+(?:was|is|to)\s+(.{10,80})`),
+	// Error conclusions
+	regexp.MustCompile(`(?i)(?:error|failed|failure)[: ]\s*(.{10,120})`),
+	// Discovery conclusions
+	regexp.MustCompile(`(?i)(?:found|discovered|identified)\s+(?:that\s+)?(.{10,80})`),
+	regexp.MustCompile(`(?i)(?:the result|output|value)\s+(?:is|was)\s+(.{10,80})`),
+	regexp.MustCompile(`(?i)(?:note|important|key|critical)[: ]\s*(.{10,80})`),
 }
 
 func (a *AgentLoop) extractConclusions(text string) {
@@ -2810,6 +2822,10 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 	var recoveredPaths []string
 
 	// --- File content recovery (optional) ---
+	// Implements upstream's snapshot-then-clear pattern:
+	// 1. Snapshot all cached file content from registry.filesRead BEFORE compaction clears it
+	// 2. After compaction, re-inject the most recently accessed files as attachments
+	// 3. Prefer cached content (what the model saw) over disk re-read (may have changed)
 	if a.config.PostCompactRecoverFiles && a.registry != nil {
 		maxFiles := a.config.PostCompactMaxFiles
 		if maxFiles <= 0 {
@@ -2824,6 +2840,11 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 				maxFileChars = 50000
 			}
 			maxFileTokens = maxFileChars / 4
+		}
+		// Per-file token cap (matches upstream POST_COMPACT_MAX_TOKENS_PER_FILE = 5000)
+		maxTokensPerFile := a.config.PostCompactMaxTokensPerFile
+		if maxTokensPerFile <= 0 {
+			maxTokensPerFile = 5000
 		}
 
 		// Collect file paths already visible in preserved messages (after boundary).
@@ -2852,25 +2873,34 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 				continue
 			}
 
-			data, err := os.ReadFile(realPath)
-			if err != nil {
-				continue // file may have been deleted
+			// Snapshot-then-clear pattern: prefer cached content from registry
+			// (what the model actually saw) over disk re-read.
+			// This matches upstream's generateFileAttachment using readFileState.content.
+			var content string
+			if cached := a.registry.GetCachedFileContent(path); cached != "" {
+				content = cached
+			} else {
+				// Fallback: re-read from disk if no cached content
+				data, err := os.ReadFile(realPath)
+				if err != nil {
+					continue // file may have been deleted
+				}
+				content = string(data)
 			}
 
-			content := string(data)
+			// Per-file token truncation (matches upstream POST_COMPACT_MAX_TOKENS_PER_FILE)
 			contentTokens := EstimateTokens(content)
+			if contentTokens > maxTokensPerFile {
+				charLimit := maxTokensPerFile * 4
+				if charLimit < len(content) {
+					content = content[:charLimit] + "\n... [truncated for compaction; use Read to get full content]"
+					contentTokens = EstimateTokens(content)
+				}
+			}
+
+			// Total budget check (matches upstream POST_COMPACT_TOKEN_BUDGET = 50000)
 			if totalTokens+contentTokens > maxFileTokens {
-				// Truncate to fit budget — estimate how many chars fit in remaining tokens
-				remainingTokens := maxFileTokens - totalTokens
-				if remainingTokens < 50 {
-					break
-				}
-				// Approximate char limit from remaining tokens
-				remainingChars := remainingTokens * 4
-				if remainingChars < len(content) {
-					content = content[:remainingChars] + "\n... [truncated]"
-				}
-				contentTokens = EstimateTokens(content)
+				break
 			}
 
 			attachment := fmt.Sprintf("[Post-compact file recovery: %s]\n```\n%s\n```", path, content)
@@ -3584,6 +3614,71 @@ func (a *AgentLoop) buildPostCompactAgentAnnouncement(preservedToolNames map[str
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// buildPreCompactFileSnapshot generates a snapshot of recently read files' content
+// from the registry's cache, for injection into the compaction summary.
+// This matches upstream's post-compact file attachment restoration, but embedded
+// directly in the summary text for the non-LLM compact path.
+//
+// Parameters match upstream defaults:
+//   - maxFiles: maximum number of files to include (upstream POST_COMPACT_MAX_FILES_TO_RESTORE = 5, but we use more for the summary)
+//   - maxTokensPerFile: per-file token cap (upstream POST_COMPACT_MAX_TOKENS_PER_FILE = 5000)
+//   - maxTotalTokens: total token budget (upstream POST_COMPACT_TOKEN_BUDGET = 50000)
+func (a *AgentLoop) buildPreCompactFileSnapshot(maxFiles int, maxTokensPerFile int, maxTotalTokens int) string {
+	if a.registry == nil {
+		return ""
+	}
+
+	// Collect all recently read files sorted by recency
+	type fileEntry struct {
+		path    string
+		content string
+		tokens  int
+	}
+	var entries []fileEntry
+	for _, path := range a.registry.GetRecentlyReadFiles(maxFiles) {
+		cached := a.registry.GetCachedFileContent(path)
+		if cached == "" {
+			continue
+		}
+		tokens := EstimateTokens(cached)
+		if tokens > maxTokensPerFile {
+			charLimit := maxTokensPerFile * 4
+			if charLimit < len(cached) {
+				truncated := cached[:charLimit] + "\n... [truncated for compaction; use Read to get full content]"
+				tokens = EstimateTokens(truncated)
+				entries = append(entries, fileEntry{path: path, content: truncated, tokens: tokens})
+			} else {
+				entries = append(entries, fileEntry{path: path, content: cached, tokens: tokens})
+			}
+		} else {
+			entries = append(entries, fileEntry{path: path, content: cached, tokens: tokens})
+		}
+	}
+
+	if len(entries) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	totalTokens := 0
+	fileCount := 0
+	sb.WriteString("## File Contents at Compaction Time\n")
+	for _, e := range entries {
+		if totalTokens+e.tokens > maxTotalTokens {
+			break
+		}
+		sb.WriteString(fmt.Sprintf("\n### %s\n```go\n%s\n```", e.path, e.content))
+		totalTokens += e.tokens
+		fileCount++
+	}
+
+	if fileCount == 0 {
+		return ""
+	}
+	sb.WriteString(fmt.Sprintf("\n\n[Snapshot of %d recently read files, ~%d tokens]\n", fileCount, totalTokens))
+	return sb.String()
+}
+
 // buildCompactSummaryMessage generates a structured summary message for the non-LLM
 // compact path, matching upstream's getCompactUserSummaryMessage format.
 // It uses toolStateTracker conclusions and recent tool calls to tell the model
@@ -3609,6 +3704,16 @@ func (a *AgentLoop) buildCompactSummaryMessage(preTokens int, messages []anthrop
 	if structuredMeta != "" {
 		sb.WriteString("\n## Structured context from compacted messages:\n")
 		sb.WriteString(structuredMeta)
+	}
+
+	// Inject file content snapshot — the model's most recently read files with
+	// their actual content at read time. This is the key anti-amnesia mechanism
+	// matching upstream's post-compact file attachment restoration.
+	// Uses registry cached content (what the model saw) not disk re-read.
+	fileSnapshot := a.buildPreCompactFileSnapshot(10, 5000, 50000)
+	if fileSnapshot != "" {
+		sb.WriteString("\n")
+		sb.WriteString(fileSnapshot)
 	}
 
 	// Include toolStateTracker conclusions if available (what the agent claimed was done).
@@ -3926,6 +4031,13 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 		structuredMeta = "\n\n## Structured context from compacted messages:\n" + structuredMeta
 	}
 
+	// Inject file content snapshot — same as the non-LLM path, ensuring the model
+	// sees actual file contents at compaction time, not just file paths.
+	fileSnapshot := a.buildPreCompactFileSnapshot(10, 5000, 50000)
+	if fileSnapshot != "" {
+		fileSnapshot = "\n" + fileSnapshot
+	}
+
 	// Format the session memory as a compact summary
 	// Cap session memory content at ~40K tokens to prevent context overflow.
 	// Matches upstream's DEFAULT_SM_COMPACT_CONFIG.maxTokens = 40_000.
@@ -3942,7 +4054,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
 	// Match upstream's getCompactUserSummaryMessage: add transcript path for
 	// detail recovery, recentMessagesPreserved notice, and continuation instruction.
-	summaryContent := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + boundaryText + "\n\n" + smContentForSummary + structuredMeta
+	summaryContent := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + boundaryText + "\n\n" + smContentForSummary + structuredMeta + fileSnapshot
 	if tp := a.TranscriptPath(); tp != "" {
 		summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
 	}

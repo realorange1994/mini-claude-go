@@ -362,6 +362,20 @@ func (r *Registry) CheckFileRead(path string) (fileReadInfo, bool) {
 	return info, ok
 }
 
+// GetCachedFileContent returns the cached content for a previously read file.
+// Returns empty string if the file hasn't been read or has no cached content.
+// Used by post-compact recovery to inject file content that the model saw
+// at read time, matching upstream's readFileState.content pattern.
+func (r *Registry) GetCachedFileContent(path string) string {
+	r.mu.RLock()
+	info, ok := r.filesRead[canonicalPath(path)]
+	r.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return info.content
+}
+
 // CheckFileStale returns an error message if the file was modified since last read.
 // Returns empty string if the file is safe to edit.
 func (r *Registry) CheckFileStale(path string) string {
