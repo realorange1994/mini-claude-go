@@ -1993,13 +1993,13 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		is500 := strings.Contains(errMsg, " 500 ") || strings.Contains(errMsg, "500 Internal Server Error")
 		if is500 {
 			consecutive500s++
-			if consecutive500s >= 3 {
+			if consecutive500s >= 5 {
 				a.out("\n[WARN] Consecutive 500 errors detected (context overflow likely), triggering compaction...\n")
 				a.context.TruncateHistory()
 				return nil, nil, fmt.Errorf("context_length_exceeded")
 			}
 			// Transient 500: retry
-			a.out("\n[WARN] Transient 500 during non-streaming (attempt %d/%d): %v\n", consecutive500s, 3, err)
+			a.out("\n[WARN] Transient 500 during non-streaming (attempt %d/%d): %v\n", consecutive500s, 5, err)
 			continue
 		}
 		consecutive500s = 0
