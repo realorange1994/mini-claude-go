@@ -303,11 +303,29 @@ func NewConversationContext(cfg Config) *ConversationContext {
 
 // EstimatedTokens returns a content-type-aware token estimate with 4/3 safety margin.
 // Uses DetectContentType + EstimateContentTokens for more accurate estimation than chars/4.
+// Only counts entries after the most recent compact boundary — entries before the
+// boundary are not sent to the API (BuildMessages skips them), so counting them
+// would inflate the estimate and cause false compaction triggers on resume.
 func (c *ConversationContext) EstimatedTokens() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
+	// Find the most recent compact boundary — same logic as BuildMessages()
+	boundaryIdx := -1
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+
+	startIdx := 0
+	if boundaryIdx >= 0 {
+		startIdx = boundaryIdx
+	}
+
 	rawTotal := 0
-	for _, entry := range c.entries {
+	for _, entry := range c.entries[startIdx:] {
 		switch v := entry.content.(type) {
 		case TextContent:
 			ct := DetectContentType(string(v))
