@@ -280,6 +280,12 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 
 	// Return found if any config was loaded
 	if cfg.APIKey != "" || cfg.Model != "" || len(mcpMgr.ListServers()) > 0 {
+		// Resolve model alias (e.g. "sonnet" → "claude-sonnet-4-20250514")
+		if cfg.Model != "" {
+			if resolved, ok := ResolveModelAlias(cfg.Model); ok {
+				cfg.Model = resolved
+			}
+		}
 		return cfg, true
 	}
 	return cfg, false

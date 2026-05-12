@@ -90,6 +90,13 @@ func main() {
 	cfg.PermissionMode = PermissionMode(*mode)
 	cfg.MaxTurns = *maxTurns
 
+	// Resolve model alias (e.g. "sonnet" → "claude-sonnet-4-20250514")
+	if cfg.Model != "" {
+		if resolved, ok := ResolveModelAlias(cfg.Model); ok {
+			cfg.Model = resolved
+		}
+	}
+
 	// Validate: model is required
 	if cfg.Model == "" {
 		fmt.Fprintln(os.Stderr, "[!] No model specified. Set it via --model flag, ANTHROPIC_MODEL env, or model in .claude/settings.json")
