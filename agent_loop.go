@@ -979,6 +979,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 	// Expand @ context references (e.g., @file:main.go, @diff)
 	cwd, _ := os.Getwd()
+
+	// Hook: PreUserMessage — allows hooks to inspect/modify incoming user message
+	if a.hooks != nil {
+		a.hooks.ExecuteGenericHooksQuiet(HookPreUserMessage, map[string]interface{}{
+			"message": userMessage,
+		})
+	}
+
 	var contextWindow int
 	if a.modelCapabilities != nil {
 		contextWindow = int(a.modelCapabilities.GetContextWindow(a.config.Model))
@@ -1002,6 +1010,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 	if a.transcript != nil {
 		_ = a.transcript.WriteUser(userMessage)
 	}
+
+	// Hook: PostUserMessage — after user message is added to context
+	if a.hooks != nil {
+		a.hooks.ExecuteGenericHooksQuiet(HookPostUserMessage, map[string]interface{}{
+			"message": userMessage,
+		})
+	}
+
 	var finalText string
 
 	// Recovery state (mirrors ggbot's State machine)
@@ -1036,6 +1052,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		// Check for interrupt at the start of each turn
 		if a.IsInterrupted() {
+			// Hook: OnAbort — when the agent is interrupted
+			if a.hooks != nil {
+				a.hooks.ExecuteGenericHooksQuiet(HookOnAbort, map[string]interface{}{
+					"reason": "interrupt_at_turn_start",
+				})
+			}
 			a.out("\n[WARN] Interrupted by user.\n")
 			a.SetInterrupted(false) // reset for next request
 			return finalText
@@ -1100,16 +1122,48 @@ func (a *AgentLoop) Run(userMessage string) string {
 		var textParts []string
 		var err error
 
+		// Hook: PreAPICall — before each API call
+		if a.hooks != nil {
+			a.hooks.ExecuteGenericHooksQuiet(HookPreAPICall, map[string]interface{}{
+				"model": a.config.Model,
+				"stream": a.useStream,
+			})
+		}
+
 		// Streaming vs non-streaming decision
 		if a.useStream {
 			toolCalls, textParts, err = a.callWithRetryAndFallback()
 		} else {
 			toolCalls, textParts, err = a.callWithNonStreamingOnly()
 		}
+
+		// Hook: PostAPICall — after each API call (success or failure)
+		if a.hooks != nil {
+			a.hooks.ExecuteGenericHooksQuiet(HookPostAPICall, map[string]interface{}{
+				"model":  a.config.Model,
+				"stream": a.useStream,
+				"error":  err,
+			})
+		}
 		if err != nil {
 			errMsg := err.Error()
+
+			// Hook: OnError — when an API error occurs (with death spiral prevention)
+			if a.hooks != nil {
+				a.hooks.ExecuteGenericHooksQuiet(HookOnError, map[string]interface{}{
+					"error": errMsg,
+					"model": a.config.Model,
+				})
+			}
+
 			// User interrupt -- return immediately
 			if strings.Contains(errMsg, "interrupted by user") {
+				// Hook: OnAbort — when the agent is interrupted
+				if a.hooks != nil {
+					a.hooks.ExecuteGenericHooksQuiet(HookOnAbort, map[string]interface{}{
+						"reason": "user_interrupt",
+					})
+				}
 				a.out("\n[WARN] Interrupted.\n")
 				return finalText
 			}
@@ -1343,6 +1397,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		// Check for interrupt after tool execution
 		if a.IsInterrupted() {
+			// Hook: OnAbort — when the agent is interrupted after tool execution
+			if a.hooks != nil {
+				a.hooks.ExecuteGenericHooksQuiet(HookOnAbort, map[string]interface{}{
+					"reason": "interrupt_after_tool",
+				})
+			}
 			a.out("\n[WARN] Interrupted by user.\n")
 			a.SetInterrupted(false)
 			return finalText
