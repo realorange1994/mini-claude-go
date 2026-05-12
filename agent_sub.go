@@ -302,6 +302,16 @@ func (a *AgentLoop) SpawnSubAgent(
 ) (agentID string, result string, errText string, outputFile string, toolsUsed int, durationMs int64) {
 	start := time.Now()
 
+	// Hook: OnSubagent — when a sub-agent is started (matches upstream's SubagentStart hook)
+	if a.hooks != nil {
+		a.hooks.ExecuteGenericHooksQuiet(HookOnSubagent, map[string]interface{}{
+			"task_id":         description,
+			"subagent_type":   subagentType,
+			"inherit_context": inheritContext,
+			"model":           model,
+		})
+	}
+
 	// Convert string subagentType to AgentType
 	agentType := ParseAgentType(subagentType)
 
@@ -344,6 +354,14 @@ func (a *AgentLoop) SpawnSubAgent(
 	forkUserMessage := ""
 	if isForkMode {
 		forkUserMessage = fmt.Sprintf("%s\n%s\n</fork_directive>", forkBoilerplate, prompt)
+
+		// Hook: OnFork — when a session is forked with inherited context
+		if a.hooks != nil {
+			a.hooks.ExecuteGenericHooksQuiet(HookOnFork, map[string]interface{}{
+				"task_id":         description,
+				"parent_entries":  len(parentEntries),
+			})
+		}
 	}
 
 	// For sync mode, run directly in the current goroutine

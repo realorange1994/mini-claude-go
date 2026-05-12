@@ -181,7 +181,7 @@ func TestValidateToolPairingKeepsValid(t *testing.T) {
 	}
 }
 
-func TestValidateToolPairingRemovesOrphan(t *testing.T) {
+func TestValidateToolPairingBackfillsOrphan(t *testing.T) {
 	cfg := DefaultConfig()
 	ctx := NewConversationContext(cfg)
 
@@ -199,9 +199,17 @@ func TestValidateToolPairingRemovesOrphan(t *testing.T) {
 		t.Fatalf("expected 4 entries before validation, got %d", len(ctx.entries))
 	}
 	ctx.ValidateToolPairing()
-	// Orphaned tool_result message should be removed
-	if len(ctx.entries) != 3 {
-		t.Errorf("expected 3 entries (orphan removed), got %d", len(ctx.entries))
+	// Orphaned tool_result should be backfilled with a synthetic tool_use,
+	// so we get: user, assistant(synth_tool_use), user(tool_result), assistant("Response"), user("Next")
+	if len(ctx.entries) != 5 {
+		t.Errorf("expected 5 entries (orphan backfilled with synthetic tool_use), got %d", len(ctx.entries))
+		for i, e := range ctx.entries {
+			t.Logf("  entry %d: role=%s", i, e.role)
+		}
+	}
+	// The synthetic tool_use should have the original tool_use_id
+	if ctx.entries[1].role != "assistant" {
+		t.Errorf("expected entry 1 to be assistant (synthetic tool_use), got %s", ctx.entries[1].role)
 	}
 }
 

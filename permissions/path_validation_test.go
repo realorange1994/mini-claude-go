@@ -3,6 +3,7 @@ package permissions
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -50,21 +51,61 @@ func TestIsInternalReadablePathProjectsDir(t *testing.T) {
 }
 
 func TestIsInternalReadablePathToolResults(t *testing.T) {
-	// Tool results dir contains "tool-results" in path
-	if !IsInternalReadablePath("/some/tool-results/file") {
-		t.Error("tool-results path should be internal readable")
+	// Tool results must be under ~/.claude/projects/*/tool-results/
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	projPath := filepath.Join(home, ".claude", "projects", "test", "tool-results", "file")
+	if !IsInternalReadablePath(projPath) {
+		t.Error("tool-results path under projects should be internal readable")
+	}
+}
+
+func TestIsInternalReadablePathToolResultsRejectsFake(t *testing.T) {
+	// A path that merely contains "tool-results" as a substring should NOT match
+	if IsInternalReadablePath("/some/tool-results-evil/file") {
+		t.Error("fake tool-results path should not be internal readable")
 	}
 }
 
 func TestIsInternalReadablePathBundledSkills(t *testing.T) {
-	if !IsInternalReadablePath("/tmp/bundled-skills/skill1") {
-		t.Error("bundled-skills path should be internal readable")
+	// Bundled skills must be under /tmp/claude-*/bundled-skills/
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(os.TempDir(), "claude-abc", "bundled-skills", "skill1")
+		if !IsInternalReadablePath(path) {
+			t.Error("bundled-skills path under claude temp should be internal readable")
+		}
+	} else {
+		if !IsInternalReadablePath("/tmp/claude-abc/bundled-skills/skill1") {
+			t.Error("bundled-skills path under /tmp/claude- should be internal readable")
+		}
+	}
+}
+
+func TestIsInternalReadablePathBundledSkillsRejectsFake(t *testing.T) {
+	// A path that merely contains "bundled-skills" outside /tmp/claude- should NOT match
+	if IsInternalReadablePath("/home/user/bundled-skills/skill1") {
+		t.Error("bundled-skills outside /tmp/claude- should not be internal readable")
 	}
 }
 
 func TestIsInternalReadablePathSessionMemory(t *testing.T) {
-	if !IsInternalReadablePath("/some/session-memory/file") {
-		t.Error("session-memory path should be internal readable")
+	// Session memory must be under ~/.claude/projects/*/session-memory/
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	projPath := filepath.Join(home, ".claude", "projects", "test", "session-memory", "file")
+	if !IsInternalReadablePath(projPath) {
+		t.Error("session-memory path under projects should be internal readable")
+	}
+}
+
+func TestIsInternalReadablePathSessionMemoryRejectsFake(t *testing.T) {
+	// A path that merely contains "session-memory" as a substring should NOT match
+	if IsInternalReadablePath("/some/session-memory-evil/file") {
+		t.Error("fake session-memory path should not be internal readable")
 	}
 }
 
@@ -101,10 +142,12 @@ func TestIsPlanFileNonMD(t *testing.T) {
 // ─── isInScratchpadDir ──────────────────────────────────────────────────────
 
 func TestIsInScratchpadDir(t *testing.T) {
-	tmp := os.TempDir()
-	path := filepath.Join(tmp, "scratchpad", "file.txt")
-	if !isInScratchpadDir(path) {
-		t.Error("scratchpad path should be detected")
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only: Windows temp paths need drive letter handling")
+	}
+	// Scratchpad must be under a claude-* temp directory
+	if !isInScratchpadDir("/tmp/claude-123/session/scratchpad/file.txt") {
+		t.Error("scratchpad under claude-* should be detected")
 	}
 }
 
@@ -117,8 +160,13 @@ func TestIsInScratchpadDirNo(t *testing.T) {
 // ─── isInSessionMemoryDir ───────────────────────────────────────────────────
 
 func TestIsInSessionMemoryDir(t *testing.T) {
-	if !isInSessionMemoryDir("/path/to/session-memory/file") {
-		t.Error("should detect session-memory dir")
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	path := filepath.Join(home, ".claude", "projects", "test", "session-memory", "file")
+	if !isInSessionMemoryDir(path) {
+		t.Error("should detect session-memory dir under projects")
 	}
 }
 
@@ -131,16 +179,25 @@ func TestIsInSessionMemoryDirNo(t *testing.T) {
 // ─── isInToolResultsDir ─────────────────────────────────────────────────────
 
 func TestIsInToolResultsDir(t *testing.T) {
-	if !isInToolResultsDir("/path/to/tool-results/file") {
-		t.Error("should detect tool-results dir")
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	path := filepath.Join(home, ".claude", "projects", "test", "tool-results", "file")
+	if !isInToolResultsDir(path) {
+		t.Error("should detect tool-results dir under projects")
 	}
 }
 
 // ─── isInBundledSkillsDir ───────────────────────────────────────────────────
 
 func TestIsInBundledSkillsDir(t *testing.T) {
-	if !isInBundledSkillsDir("/tmp/bundled-skills/skill1") {
-		t.Error("should detect bundled-skills dir")
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only: Windows temp paths need drive letter handling")
+	}
+	// Bundled skills must be under /tmp/claude-*/bundled-skills/
+	if !isInBundledSkillsDir("/tmp/claude-abc/bundled-skills/skill1") {
+		t.Error("should detect bundled-skills dir under /tmp/claude-")
 	}
 }
 
@@ -310,9 +367,14 @@ func TestValidateReadPathSuspicious(t *testing.T) {
 }
 
 func TestValidateReadPathInternal(t *testing.T) {
-	// Internal readable paths should be allowed
-	result := ValidateReadPath("/some/session-memory/file", nil)
+	// Internal readable paths must be under proper home directory structure
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	// Session memory must be under ~/.claude/projects/*/session-memory/
+	result := ValidateReadPath(filepath.Join(home, ".claude", "projects", "test", "session-memory", "file"), nil)
 	if !result.Allowed {
-		t.Error("internal readable path should be allowed")
+		t.Error("internal readable path under projects should be allowed")
 	}
 }

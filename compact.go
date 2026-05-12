@@ -1609,7 +1609,7 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 	defer cancel()
 
 	params := anthropic.MessageNewParams{
-		Model:     model,
+		Model:     GetModelForAPI(model),
 		MaxTokens: 20000,
 		System: []anthropic.TextBlockParam{
 			{Text: systemPrompt, CacheControl: anthropic.CacheControlEphemeralParam{}},

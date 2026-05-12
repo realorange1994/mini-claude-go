@@ -63,6 +63,9 @@ func TestHookEventConstants(t *testing.T) {
 	if HookPostToolUse != "post_tool_use" {
 		t.Errorf("HookPostToolUse = %q, want 'post_tool_use'", HookPostToolUse)
 	}
+	if HookStop != "stop" {
+		t.Errorf("HookStop = %q, want 'stop'", HookStop)
+	}
 }
 
 func TestHookEventCount(t *testing.T) {
@@ -75,9 +78,10 @@ func TestHookEventCount(t *testing.T) {
 		HookOnError, HookOnAbort,
 		HookOnNotification, HookOnSubagent, HookOnFork, HookOnResume,
 		HookPreToolUse, HookPostToolUse,
+		HookStop,
 	}
-	if len(allHooks) < 16 {
-		t.Errorf("expected at least 16 hook types, got %d", len(allHooks))
+	if len(allHooks) < 17 {
+		t.Errorf("expected at least 17 hook types, got %d", len(allHooks))
 	}
 }
 
@@ -1016,5 +1020,45 @@ func TestNewHookExecutor(t *testing.T) {
 	}
 	if e.errorDepth != 0 {
 		t.Errorf("errorDepth should be 0, got %d", e.errorDepth)
+	}
+}
+
+// ─── All hook events are invocable ──────────────────────────────────────────
+
+func TestAllHookEventsInvocable(t *testing.T) {
+	// Verify that all 17 defined HookEvent constants can be registered and
+	// executed through the generic hook system. This catches the case where
+	// a hook type is defined but never wired into the agent loop.
+	allHooks := []HookEvent{
+		HookPreCompact, HookPostCompact,
+		HookPreAPICall, HookPostAPICall,
+		HookPreUserMessage, HookPostUserMessage,
+		HookPreAssistantMessage, HookPostAssistantMessage,
+		HookOnError, HookOnAbort,
+		HookOnNotification, HookOnSubagent, HookOnFork, HookOnResume,
+		HookPreToolUse, HookPostToolUse,
+		HookStop,
+	}
+
+	for _, event := range allHooks {
+		t.Run(string(event), func(t *testing.T) {
+			hm := NewHookManager()
+			called := false
+			hm.RegisterGeneric(event, "test-hook", func(ctx context.Context, input HookInput) (HookOutput, error) {
+				called = true
+				return HookOutput{}, nil
+			}, 5*time.Second)
+
+			results, err := hm.ExecuteGenericHooks(event, nil)
+			if err != nil {
+				t.Errorf("ExecuteGenericHooks(%s) returned error: %v", event, err)
+			}
+			if len(results) != 1 {
+				t.Errorf("expected 1 result for %s, got %d", event, len(results))
+			}
+			if !called {
+				t.Errorf("handler for %s was not called", event)
+			}
+		})
 	}
 }

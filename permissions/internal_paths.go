@@ -7,11 +7,110 @@ import (
 	"strings"
 )
 
+// ─── Path safety utilities ────────────────────────────────────────────────────
+
+// hasPathPrefix checks whether abs starts with dir followed by a path separator.
+// This is the secure replacement for strings.Contains(abs, dir) which can be
+// fooled by paths like /home/user/my-.claude/projects/evil.
+//
+// It handles the edge case where abs == dir exactly (returns true),
+// and the case where abs starts with dir + separator (returns true).
+func hasPathPrefix(abs, dir string) bool {
+	if abs == dir {
+		return true
+	}
+	if !strings.HasPrefix(abs, dir) {
+		return false
+	}
+	// Check that the character after dir is a path separator
+	remainder := abs[len(dir):]
+	if len(remainder) == 0 {
+		return true
+	}
+	return remainder[0] == filepath.Separator || remainder[0] == '/' || remainder[0] == '\\'
+}
+
+// hasPathComponent checks whether abs contains a full path component matching comp.
+// This is the secure replacement for strings.Contains(abs, comp) which can match
+// substrings (e.g., "session-memory" matches "my-session-memory-evil").
+//
+// It checks that comp appears between path separators (or at start/end).
+// Handles both / and \ separators for cross-platform compatibility.
+func hasPathComponent(abs, comp string) bool {
+	fwdSep := "/" + comp + "/"
+	bwdSep := string(filepath.Separator) + comp + string(filepath.Separator)
+	// Check for /comp/ or \comp\
+	if strings.Contains(abs, fwdSep) || strings.Contains(abs, bwdSep) {
+		return true
+	}
+	// Check starts with comp/
+	if strings.HasPrefix(abs, comp+"/") || strings.HasPrefix(abs, comp+string(filepath.Separator)) {
+		return true
+	}
+	// Check ends with /comp
+	if strings.HasSuffix(abs, "/"+comp) || strings.HasSuffix(abs, string(filepath.Separator)+comp) {
+		return true
+	}
+	// Exact match
+	if abs == comp {
+		return true
+	}
+	return false
+}
+
+// hasSuspiciousColon checks for Windows Alternate Data Streams (ADS) colon
+// patterns that could be used for path traversal attacks.
+// On Windows, "file.txt:Zone.Identifier" is an ADS.
+// Drive letters like "C:" at position 1 are allowed.
+func hasSuspiciousColon(path string) bool {
+	// Allow drive letter colon at position 1 (e.g., "C:\")
+	if len(path) >= 2 && path[1] == ':' {
+		path = path[2:] // skip drive letter
+	}
+	return strings.Contains(path, ":")
+}
+
+// isSymlinkEscape checks whether a path resolves to a location outside the
+// expected parent directory via symlinks. Returns true if escape is detected
+// or if the path cannot be resolved.
+func isSymlinkEscape(path, parentDir string) bool {
+	// Resolve symlinks in the path
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		// If the path doesn't exist yet, try resolving the parent
+		parent := filepath.Dir(path)
+		resolvedParent, err := filepath.EvalSymlinks(parent)
+		if err != nil {
+			return true // can't resolve — treat as potential escape
+		}
+		resolved = filepath.Join(resolvedParent, filepath.Base(path))
+	}
+
+	// Resolve the parent directory
+	resolvedParent, err := filepath.EvalSymlinks(parentDir)
+	if err != nil {
+		return true // can't resolve parent — treat as potential escape
+	}
+
+	// Check that the resolved path is within the parent
+	if !hasPathPrefix(resolved, resolvedParent) {
+		return true
+	}
+	return false
+}
+
+// ─── Internal path checks ─────────────────────────────────────────────────────
+
 // IsInternalEditablePath checks if a path is Claude Code's internal editable path
 // that should bypass dangerous-directory checks. Matches upstream's
 // checkEditableInternalPath.
 func IsInternalEditablePath(path, cwd string) bool {
 	abs := resolvePath(path, cwd)
+
+	// Reject paths with suspicious colon (ADS attack on Windows/WSL)
+	if hasSuspiciousColon(abs) {
+		return false
+	}
 
 	// Plan files: ~/.claude/plans/*.md or {plansDir}/{planSlug}.md
 	if isPlanFile(abs) {
@@ -50,6 +149,11 @@ func IsInternalEditablePath(path, cwd string) bool {
 // Matches upstream's checkReadableInternalPath.
 func IsInternalReadablePath(path string) bool {
 	abs := resolvePath(path, "")
+
+	// Reject paths with suspicious colon (ADS attack on Windows/WSL)
+	if hasSuspiciousColon(abs) {
+		return false
+	}
 
 	// Session memory directory
 	if isInSessionMemoryDir(abs) {
@@ -113,7 +217,7 @@ func IsInternalReadablePath(path string) bool {
 func isPlanFile(abs string) bool {
 	if home := homeDir(); home != "" {
 		plansDir := filepath.Join(home, ".claude", "plans")
-		if strings.HasPrefix(abs, plansDir) && filepath.Ext(abs) == ".md" {
+		if hasPathPrefix(abs, plansDir) && filepath.Ext(abs) == ".md" {
 			return true
 		}
 	}
@@ -121,34 +225,34 @@ func isPlanFile(abs string) bool {
 }
 
 // isInScratchpadDir checks for scratchpad directory.
+// Pattern: {os.TempDir}/claude-{uid}/.../scratchpad/... (or /tmp/claude-{uid}/.../scratchpad/... on Unix).
 func isInScratchpadDir(abs string) bool {
-	if runtime.GOOS == "windows" {
-		tmp := os.TempDir()
-		if strings.HasPrefix(abs, tmp) && strings.Contains(abs, "scratchpad") {
-			return true
-		}
-	} else {
-		if strings.HasPrefix(abs, "/tmp/claude-") && strings.Contains(abs, "scratchpad") {
-			return true
+	tmp := os.TempDir()
+	if !hasPathPrefix(abs, tmp) {
+		// On Unix, also accept /tmp/ prefix
+		if runtime.GOOS != "windows" && !strings.HasPrefix(abs, "/tmp/") {
+			return false
 		}
 	}
-	return false
+	return hasPathComponent(abs, "scratchpad") && isInProjectTempDir(abs)
 }
 
 // isInJobsDir checks for template job directory under ~/.claude/jobs/.
 func isInJobsDir(abs string) bool {
 	if home := homeDir(); home != "" {
 		jobsDir := filepath.Join(home, ".claude", "jobs")
-		return strings.HasPrefix(abs, jobsDir)
+		return hasPathPrefix(abs, jobsDir)
 	}
 	return false
 }
 
 // isAgentMemoryPath checks for agent memory directory.
+// Must be under ~/.claude/projects/*/agent-memory/
 func isAgentMemoryPath(abs string) bool {
 	if home := homeDir(); home != "" {
-		if strings.Contains(abs, filepath.Join(".claude", "projects")) &&
-			strings.Contains(abs, "agent-memory") {
+		projectsDir := filepath.Join(home, ".claude", "projects")
+		// Must start with ~/.claude/projects/ and contain agent-memory as a path component
+		if hasPathPrefix(abs, projectsDir) && hasPathComponent(abs, "agent-memory") {
 			return true
 		}
 	}
@@ -159,7 +263,7 @@ func isAgentMemoryPath(abs string) bool {
 func isInAutoMemoryDir(abs string) bool {
 	if home := homeDir(); home != "" {
 		memoryDir := filepath.Join(home, ".claude", "auto-memory")
-		return strings.HasPrefix(abs, memoryDir)
+		return hasPathPrefix(abs, memoryDir)
 	}
 	return false
 }
@@ -175,38 +279,75 @@ func isLaunchConfig(abs, cwd string) bool {
 }
 
 // isInSessionMemoryDir checks for session memory directory.
+// Must be under ~/.claude/projects/*/session-memory/
 func isInSessionMemoryDir(abs string) bool {
-	return strings.Contains(abs, "session-memory")
+	if home := homeDir(); home != "" {
+		projectsDir := filepath.Join(home, ".claude", "projects")
+		// Must start with ~/.claude/projects/ and contain session-memory as a path component
+		if hasPathPrefix(abs, projectsDir) && hasPathComponent(abs, "session-memory") {
+			return true
+		}
+	}
+	return false
 }
 
 // isInProjectsDir checks for ~/.claude/projects/.
 func isInProjectsDir(abs string) bool {
 	if home := homeDir(); home != "" {
 		projDir := filepath.Join(home, ".claude", "projects")
-		return strings.HasPrefix(abs, projDir)
+		return hasPathPrefix(abs, projDir)
 	}
 	return false
 }
 
 // isInToolResultsDir checks for tool results directory.
+// Must be under ~/.claude/projects/*/tool-results/
 func isInToolResultsDir(abs string) bool {
-	return strings.Contains(abs, "tool-results")
+	if home := homeDir(); home != "" {
+		projectsDir := filepath.Join(home, ".claude", "projects")
+		// Must start with ~/.claude/projects/ and contain tool-results as a path component
+		if hasPathPrefix(abs, projectsDir) && hasPathComponent(abs, "tool-results") {
+			return true
+		}
+	}
+	return false
 }
 
 // isInProjectTempDir checks for project temp directory.
+// Pattern: {os.TempDir}/claude-{uid}/...
 func isInProjectTempDir(abs string) bool {
-	if runtime.GOOS == "windows" {
-		tmp := os.TempDir()
-		return strings.HasPrefix(abs, tmp) && strings.Contains(abs, "claude-")
+	tmp := os.TempDir()
+	if !hasPathPrefix(abs, tmp) {
+		return false
 	}
-	return strings.HasPrefix(abs, "/tmp/claude-")
+	// Check that the first component after temp dir starts with "claude-"
+	rest := abs[len(tmp):]
+	if len(rest) == 0 {
+		return false // just the temp dir itself
+	}
+	// Skip the leading separator
+	if rest[0] == filepath.Separator {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 {
+		return false
+	}
+	// Find the end of the first component (next separator or end of string)
+	i := strings.IndexFunc(rest, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if i > 0 {
+		return strings.HasPrefix(rest[:i], "claude-")
+	}
+	// No separator — the whole rest is one component
+	return strings.HasPrefix(rest, "claude-")
 }
 
 // isInTasksDir checks for ~/.claude/tasks/.
 func isInTasksDir(abs string) bool {
 	if home := homeDir(); home != "" {
 		tasksDir := filepath.Join(home, ".claude", "tasks")
-		return strings.HasPrefix(abs, tasksDir)
+		return hasPathPrefix(abs, tasksDir)
 	}
 	return false
 }
@@ -215,14 +356,24 @@ func isInTasksDir(abs string) bool {
 func isInTeamsDir(abs string) bool {
 	if home := homeDir(); home != "" {
 		teamsDir := filepath.Join(home, ".claude", "teams")
-		return strings.HasPrefix(abs, teamsDir)
+		return hasPathPrefix(abs, teamsDir)
 	}
 	return false
 }
 
 // isInBundledSkillsDir checks for bundled skills directory.
+// Must be under {os.TempDir}/claude-{uid}/bundled-skills/ (or /tmp/claude-{uid}/bundled-skills/ on Unix).
 func isInBundledSkillsDir(abs string) bool {
-	return strings.Contains(abs, "bundled-skills")
+	tmp := os.TempDir()
+	if !hasPathPrefix(abs, tmp) {
+		// On Unix, also accept /tmp/ prefix for non-standard tmp locations
+		if runtime.GOOS != "windows" && !strings.HasPrefix(abs, "/tmp/") {
+			return false
+		}
+	}
+	// Check that bundled-skills appears as a path component
+	// AND the path is under a claude-* directory
+	return hasPathComponent(abs, "bundled-skills") && isInProjectTempDir(abs)
 }
 
 // homeDir returns the user's home directory.

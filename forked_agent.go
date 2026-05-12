@@ -98,7 +98,7 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 	}
 
 	params := anthropic.MessageNewParams{
-		Model:     cfg.CacheSafeParams.Model,
+		Model:     GetModelForAPI(cfg.CacheSafeParams.Model),
 		MaxTokens: int64(cfg.MaxTokens),
 		Messages:  allMessages,
 		System: []anthropic.TextBlockParam{

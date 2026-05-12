@@ -73,6 +73,11 @@ func (b *IterationBudget) GraceCall() bool {
 	return !b.graceCalled.Swap(true)
 }
 
+// Consumed returns the number of iterations consumed so far.
+func (b *IterationBudget) Consumed() int {
+	return int(b.consumed.Load())
+}
+
 // registerAgentTool registers the AgentTool with this loop's SpawnFunc.
 func (a *AgentLoop) registerAgentTool() {
 	agentTool := &tools.AgentTool{
@@ -270,6 +275,14 @@ func (a *AgentLoop) InjectNotifications(notifications []string) {
 	if len(notifications) == 0 {
 		return
 	}
+
+	// Hook: OnNotification — when sub-agent completions are injected
+	if a.hooks != nil {
+		a.hooks.ExecuteGenericHooksQuiet(HookOnNotification, map[string]interface{}{
+			"notification_count": len(notifications),
+		})
+	}
+
 	var sb strings.Builder
 	sb.WriteString("[System: The following sub-agent tasks completed while you were waiting]\n\n")
 	for _, n := range notifications {
@@ -316,6 +329,10 @@ type AgentLoop struct {
 	todoList                 *tools.TodoList            // structured task list for TodoWrite tool
 	totalInputTokens         atomic.Int64               // cumulative input tokens across all turns
 	totalOutputTokens        atomic.Int64               // cumulative output tokens across all turns
+	lastAPIInputTokens       atomic.Int64               // exact input tokens from the most recent API response
+	lastAPIOutputTokens      atomic.Int64               // exact output tokens from the most recent API response
+	totalCacheCreationTokens atomic.Int64               // cumulative cache_creation_input_tokens
+	totalCacheReadTokens     atomic.Int64               // cumulative cache_read_input_tokens
 	costTracker              *CostTracker               // per-model USD cost tracking with session persistence
 	cacheBreakDetector       *CacheBreakDetector        // detects KV cache breaks between API calls
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
@@ -383,13 +400,49 @@ func (a *AgentLoop) recordTokenUsage(inputTokens, outputTokens int64) {
 func (a *AgentLoop) recordTokenUsageWithCache(inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int64) {
 	if inputTokens > 0 {
 		a.totalInputTokens.Add(inputTokens)
+		a.lastAPIInputTokens.Store(inputTokens)
 	}
 	if outputTokens > 0 {
 		a.totalOutputTokens.Add(outputTokens)
+		a.lastAPIOutputTokens.Store(outputTokens)
+	}
+	if cacheWriteTokens > 0 {
+		a.totalCacheCreationTokens.Add(cacheWriteTokens)
+	}
+	if cacheReadTokens > 0 {
+		a.totalCacheReadTokens.Add(cacheReadTokens)
 	}
 	if a.costTracker != nil {
 		a.costTracker.RecordUsage(a.config.Model, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens)
 	}
+}
+
+// RemainingTokenBudget returns the estimated remaining tokens in the context window.
+// Uses the exact input_tokens from the most recent API response if available,
+// otherwise falls back to EstimatedTokens().
+func (a *AgentLoop) RemainingTokenBudget() int {
+	var contextWindow int
+	if a.modelCapabilities != nil {
+		contextWindow = int(a.modelCapabilities.GetContextWindow(a.config.Model))
+	} else {
+		contextWindow = modelContextWindow(a.config.Model)
+	}
+	if contextWindow < 1 {
+		contextWindow = 200_000
+	}
+
+	lastAPI := a.lastAPIInputTokens.Load()
+	if lastAPI > 0 {
+		return contextWindow - int(lastAPI)
+	}
+	// Fallback to heuristic estimate
+	return contextWindow - a.context.EstimatedTokens()
+}
+
+// ExactContextTokens returns the exact token count from the most recent API response,
+// or 0 if no API call has been made yet.
+func (a *AgentLoop) ExactContextTokens() int64 {
+	return a.lastAPIInputTokens.Load()
 }
 
 // out writes formatted output to the agent's configured output writer.
@@ -435,6 +488,17 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	}
+
+	// Resolve model alias (may add [1m] suffix) and build beta headers
+	model := cfg.Model
+	if resolved, _ := ResolveModelAlias(model); resolved != "" {
+		model = resolved
+	}
+	// Add anthropic-beta headers for API features (prompt caching, 1M context, etc.)
+	betas := BuildBetaHeaders(model)
+	if len(betas) > 0 {
+		opts = append(opts, option.WithHeader("anthropic-beta", strings.Join(betas, ",")))
 	}
 
 	client := anthropic.NewClient(opts...)
@@ -584,6 +648,16 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
 
+	// Resolve model alias and add beta headers (same as NewAgentLoop)
+	model := cfg.Model
+	if resolved, _ := ResolveModelAlias(model); resolved != "" {
+		model = resolved
+	}
+	betas := BuildBetaHeaders(model)
+	if len(betas) > 0 {
+		opts = append(opts, option.WithHeader("anthropic-beta", strings.Join(betas, ",")))
+	}
+
 	client := anthropic.NewClient(opts...)
 
 	gate := NewPermissionGate(&cfg)
@@ -723,6 +797,15 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	// Initialize prevTurnTokens from the rebuilt context so reactive compact
 	// doesn't trigger a false positive on the first resumed turn.
 	agent.prevTurnTokens = agent.context.EstimatedTokens()
+
+	// Hook: OnResume — when a session is resumed from transcript
+	if agent.hooks != nil {
+		agent.hooks.ExecuteGenericHooksQuiet(HookOnResume, map[string]interface{}{
+			"transcript_path":   transcriptPath,
+			"restored_messages": len(entries),
+			"continue_session":  continueTranscript,
+		})
+	}
 
 	return agent, nil
 }
@@ -890,6 +973,25 @@ func (a *AgentLoop) IsStreaming() bool {
 	return a.useStream
 }
 
+// fireStopHook fires HookStop with session metadata. Call at every Run() exit point.
+func (a *AgentLoop) fireStopHook(reason string, turnsUsed int, interrupted bool) {
+	if a.hooks == nil {
+		return
+	}
+	a.hooks.ExecuteGenericHooksQuiet(HookStop, map[string]interface{}{
+		"reason":                       reason,
+		"model":                        a.config.Model,
+		"turns":                        turnsUsed,
+		"interrupted":                  interrupted,
+		"total_input_tokens":           a.totalInputTokens.Load(),
+		"total_output_tokens":          a.totalOutputTokens.Load(),
+		"last_api_input_tokens":        a.lastAPIInputTokens.Load(),
+		"total_cache_creation_tokens":  a.totalCacheCreationTokens.Load(),
+		"total_cache_read_tokens":      a.totalCacheReadTokens.Load(),
+		"remaining_token_budget":       a.RemainingTokenBudget(),
+	})
+}
+
 // TranscriptPath returns the path to the current transcript file.
 func (a *AgentLoop) TranscriptPath() string {
 	if a.transcript == nil {
@@ -1052,6 +1154,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			select {
 			case <-a.cancelCtx.Done():
 				a.out("\n[WARN] Cancelled by parent.\n")
+				a.fireStopHook("cancelled_by_parent", a.budget.Consumed(), false)
 				return finalText
 			default:
 			}
@@ -1067,6 +1170,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 			a.out("\n[WARN] Interrupted by user.\n")
 			a.SetInterrupted(false) // reset for next request
+			a.fireStopHook("interrupted", a.budget.Consumed(), true)
 			return finalText
 		}
 
@@ -1172,6 +1276,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 					})
 				}
 				a.out("\n[WARN] Interrupted.\n")
+				a.fireStopHook("interrupted", a.budget.Consumed(), true)
 				return finalText
 			}
 			// Model confusion -- echoed tool syntax as text; recover by retrying
@@ -1208,6 +1313,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
 					a.out("\n[ERR] Stream stalled after %d recovery attempts, giving up.\n", maxContextRecovery)
+					a.fireStopHook("stream_stalled", a.budget.Consumed(), false)
 					return finalText
 				}
 				if a.toolStateTracker != nil {
@@ -1228,6 +1334,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				contextErrors++
 				if contextErrors > maxContextRecovery {
 					a.out("\n[ERR] Context length exceeded after %d recovery attempts, giving up.\n", maxContextRecovery)
+					a.fireStopHook("context_length_exceeded", a.budget.Consumed(), false)
 					return finalText
 				}
 
@@ -1297,6 +1404,15 @@ func (a *AgentLoop) Run(userMessage string) string {
 			// Like Claude Code's stop hooks: the loop could continue here
 			// with additional checks (token budget, quality check, etc.)
 			// but for now we simply exit.
+
+			// Hook: PreAssistantMessage — before adding assistant text to context
+			if a.hooks != nil {
+				a.hooks.ExecuteGenericHooksQuiet(HookPreAssistantMessage, map[string]interface{}{
+					"has_tools": false,
+					"text_len":  len(finalText),
+				})
+			}
+
 			a.context.AddAssistantText(finalText)
 			if a.transcript != nil {
 				_ = a.transcript.WriteAssistant(finalText, a.config.Model)
@@ -1305,11 +1421,29 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if a.toolStateTracker != nil {
 				a.extractConclusions(finalText)
 			}
+
+			// Hook: PostAssistantMessage — after assistant text is fully processed
+			if a.hooks != nil {
+				a.hooks.ExecuteGenericHooksQuiet(HookPostAssistantMessage, map[string]interface{}{
+					"has_tools": false,
+					"text_len":  len(finalText),
+				})
+			}
+
 			break
 		}
 
 		// Reset empty response counter on successful tool call
 		consecutiveEmptyResponses = 0
+
+		// Hook: PreAssistantMessage — before adding assistant tool calls to context
+		if a.hooks != nil {
+			a.hooks.ExecuteGenericHooksQuiet(HookPreAssistantMessage, map[string]interface{}{
+				"has_tools":   true,
+				"tool_count":  len(toolCalls),
+				"text_len":    len(textParts),
+			})
+		}
 
 		a.context.AddAssistantToolCalls(toolCalls)
 
@@ -1378,6 +1512,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 		}
 
+		// Hook: PostAssistantMessage — after assistant tool calls are fully processed
+		if a.hooks != nil {
+			a.hooks.ExecuteGenericHooksQuiet(HookPostAssistantMessage, map[string]interface{}{
+				"has_tools":  true,
+				"tool_count": len(toolCalls),
+			})
+		}
+
 		// Between-turn drain: inject sub-agent completion notifications
 		// into the conversation context (matching Claude Code's query.ts
 		// between-turn drain pattern). This ensures the LLM sees
@@ -1412,6 +1554,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 			a.out("\n[WARN] Interrupted by user.\n")
 			a.SetInterrupted(false)
+			a.fireStopHook("interrupted", a.budget.Consumed(), true)
 			return finalText
 		}
 
@@ -1440,6 +1583,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 		_ = a.transcript.Flush()
 	}
 
+	a.fireStopHook("completed", a.budget.Consumed(), false)
 	return finalText
 }
 
@@ -1675,7 +1819,7 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	messages = a.injectCacheEdits(messages)
 
 	params := anthropic.MessageNewParams{
-		Model:     a.config.Model,
+		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
 		System: []anthropic.TextBlockParam{
@@ -1811,7 +1955,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 	messages = a.injectCacheEdits(messages)
 
 	params := anthropic.MessageNewParams{
-		Model:     a.config.Model,
+		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
 		System: []anthropic.TextBlockParam{
@@ -2049,7 +2193,7 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	messages := a.context.BuildMessages()
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 	params := anthropic.MessageNewParams{
-		Model:     a.config.Model,
+		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
 		System: []anthropic.TextBlockParam{
@@ -2075,7 +2219,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 	messages := a.context.BuildMessages()
 	messages = NormalizeAPIMessages(messages)
 	params := anthropic.MessageNewParams{
-		Model:     a.config.Model,
+		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
 		System: []anthropic.TextBlockParam{
@@ -2557,6 +2701,15 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		input = make(map[string]any)
 	}
 
+	// Hook: PreToolUse — before tool execution (matches upstream's PreToolUse hook)
+	if a.hooks != nil {
+		a.hooks.ExecuteGenericHooksQuiet(HookPreToolUse, map[string]interface{}{
+			"tool_name":  toolName,
+			"tool_use_id": toolUseID,
+			"input":      input,
+		})
+	}
+
 	// Coerce argument types to match schema
 	if tool, ok := a.registry.Get(toolName); ok {
 		tools.CoerceArguments(tool.InputSchema(), input)
@@ -2757,6 +2910,16 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	// Record result to transcript
 	if a.transcript != nil {
 		_ = a.transcript.WriteToolResult(toolUseID, toolName, output)
+	}
+
+	// Hook: PostToolUse — after tool execution (matches upstream's PostToolUse hook)
+	if a.hooks != nil {
+		a.hooks.ExecuteGenericHooksQuiet(HookPostToolUse, map[string]interface{}{
+			"tool_name":   toolName,
+			"tool_use_id": toolUseID,
+			"output":      output,
+			"is_error":    result.IsError,
+		})
 	}
 
 	return anthropic.ToolResultBlockParam{

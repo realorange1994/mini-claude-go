@@ -41,6 +41,9 @@ const (
 	// Tool lifecycle hooks
 	HookPreToolUse  HookEvent = "pre_tool_use"
 	HookPostToolUse HookEvent = "post_tool_use"
+
+	// Session lifecycle
+	HookStop HookEvent = "stop"
 )
 
 // ─── HookTrigger (existing) ───────────────────────────────────────────────────

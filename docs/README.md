@@ -16,8 +16,8 @@
 
 | # | File | Scope | Key Gaps |
 |---|------|-------|----------|
-| 01 | [categories/01-core-agent-loop.md](categories/01-core-agent-loop.md) | Agent loop, context, compaction, streaming | Tool pairing, role alternation, reactive compact, interrupt detection |
-| 02 | [categories/02-tools.md](categories/02-tools.md) | All tool implementations | Multi-edit, exec safety, git tool, agent orchestration, file history |
+| 01 | [categories/01-core-agent-loop.md](categories/01-core-agent-loop.md) | Agent loop, context, compaction, streaming | Tool pairing, role alternation, empty message filtering |
+| 02 | [categories/02-tools.md](categories/02-tools.md) | All tool implementations | Multi-edit, exec safety, git tool, agent orchestration |
 | 03 | [categories/03-system-prompt.md](categories/03-system-prompt.md) | System prompt, permissions, config | Hook types, skill pipeline, permission rules, settings hierarchy |
 | 04 | [categories/04-api-client.md](categories/04-api-client.md) | API client, beta headers, model mgmt | Provider routing, model aliases, cost tracking, cache economics |
 | 05 | [categories/05-services.md](categories/05-services.md) | OAuth, analytics, telemetry, settings | OAuth/PKCE, Otel/Sentry, GrowthBook flags, multi-source settings |
@@ -47,22 +47,53 @@ All data extracted from [diff_upstream/](../diff_upstream/) (32 分类文件, �
 
 缺失 > 简化 > Go增强 — Missing features are highest priority for parity.
 
+## Action Item Summary
+
+| Priority | Total | Done | New | Rework |
+|----------|-------|------|-----|--------|
+| P0 (CRITICAL) | 13 | 11 | 2 | 0 |
+| P1 (IMPORTANT) | 32 | 16 | 20 | 0 |
+| P2 (NICE-TO-HAVE) | 30 | 0 | 30 | 0 |
+| **Total** | **75** | **27** | **54** | **2** |
+
+## Audit Summary (Rounds 1-17)
+
+| Audit | Count | Items |
+|-------|-------|-------|
+| **PASS** | 7 | P0-6 (multi-edit match), P0-11 (stop hooks), P0-13 (permission path safety — precise prefix/component checks + ADS/symlink defense), P1-2 (reactive compaction), P1-4 (model aliases — full [1m] suffix + beta headers + GetModelForAPI), P1-5 (cache detection — category-based tracking with 12 change categories + weights), P1-6 (classifier — removed fabricated escapeContentInjection, added JSONL transcript + XML tags) |
+| **PARTIAL** | 10 | P0-1, P0-2, P0-3, P0-4, P0-5, P0-7, P0-8, P0-12, P1-1, P1-3, P1-7, P1-9, P1-10, P1-11, P1-12 |
+| **FAIL** | 0 | All FAIL items resolved: P1-4/P1-5 via R10/R11 reworks |
+| **Critical issues** | 0 | ApplyPinnedCacheEdits stub fixed (R10), 9 unused hook types wired (R17) |
+
 ## Engineering Progress
 
-| Round | Fix | Priority | Status |
-|-------|-----|----------|--------|
-| 1 | Tool pairing + role alternation + empty message filtering | P0 (CRITICAL) | ✅ Committed |
-| 2 | Multi-edit multiple match check | P0 | ✅ Committed |
-| 3 | Classifier fail-closed on parse errors | P0 (Security) | ✅ Committed |
-| 4 | Cache breakpoint 4→1 | P0 | ✅ Committed |
-| 5 | Cost tracking with per-model USD pricing | P1 | ✅ Committed |
-| 6 | Reactive compaction with token-gap parsing | P1 | ✅ Committed |
-| 7 | 529 model fallback + 429 subscriber gating | P1 | ✅ Committed |
-| 9 | Per-model context window | P0 | ✅ Committed |
-| 10 | Cache break detection + pinned edits | P1 | ✅ Committed |
-| 11 | Classifier improvements (injection protection, empty bypass, telemetry) | P1 | ✅ Committed |
-| 12 | Skill content pipeline (args, variables, paths, MCP discovery) | P1 | ✅ Committed |
-| 13 | Hook system expansion (2→16 types, timeout, death spiral) | P1 | ✅ Committed |
-| 14 | Normalization pipeline enhancements (attachments, images, PDF, virtual) | P1 | ✅ Committed |
-| 15 | Transcript DAG (UUID, parent chain, metadata, interrupt detection) | P1 | ✅ Committed |
-| 16 | Agent tool improvements (sync mode, naming, handoff, worktree, sidechain) | P1 | ✅ Committed |
+| Round | Fix | Priority | Audit | Status |
+|-------|-----|----------|-------|--------|
+| 1 | Tool pairing + role alternation + empty message filtering | P0 | PARTIAL | Committed |
+| 2 | Multi-edit multiple match check | P0 | PASS | Committed |
+| 3 | Classifier fail-closed on parse errors | P0 | PARTIAL | Committed |
+| 4 | Cache breakpoint 4→1 | P0 | PARTIAL | Committed |
+| 5 | Cost tracking with per-model USD pricing | P1 | PARTIAL | Committed |
+| 6 | Reactive compaction with token-gap parsing | P1 | PASS | Committed |
+| 7 | 529 model fallback + 429 subscriber gating | P1 | PARTIAL | Committed |
+| 8 | Model alias system with default model per tier | P1 | PASS | Committed |
+| 9 | Per-model context window | P0 | PARTIAL | Committed |
+| 10 | Cache break detection + pinned edits | P1 | PASS | Committed |
+| 11 | Classifier improvements (removed fabricated escapeContentInjection, added JSONL transcript + <transcript> tags) | P1 | PASS | Committed |
+| 12 | Skill content pipeline (args, variables, paths, MCP discovery) | P1 | PARTIAL | Committed |
+| 13 | Hook system expansion (2→16 types, timeout, death spiral) | P1 | PASS | Committed |
+| 14 | Normalization pipeline enhancements (attachments, images, PDF, virtual) | P1 | PARTIAL | Committed |
+| 15 | Transcript DAG (UUID, parent chain, metadata, interrupt detection) | P1 | PARTIAL | Committed |
+| 16 | Agent tool improvements (sync mode, naming, handoff, worktree, sidechain) | P1 | PARTIAL | Committed |
+| 17 | Hook wiring (8 unused hook types now invoked in agent loop) | P1 | PASS | Committed |
+| 18 | Stop hooks + permission path safety (HookStop at all Run() exit points; precise path checks with ADS/symlink defense) | P0 | PASS | Committed |
+
+## REPL Positioning
+
+Go miniClaudeCode is a **pure REPL CLI tool**, NOT a TUI. See [memory/go_repl_positioning.md](../../.claude/projects/E--workspace/memory/go_repl_positioning.md) for full positioning principles.
+
+| Aspect | Guideline |
+|--------|-----------|
+| Core logic (agent loop, compaction, permissions, cache, normalization) | Replicate upstream exactly |
+| REPL features (input handling, streaming display, notification) | Reference upstream, adapt for CLI |
+| TUI features (Bubble Tea, keybinding, vim mode, status bar) | Lowest priority — not engineering focus |

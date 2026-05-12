@@ -277,13 +277,82 @@ func FormatBoundaryCachedSystemPrompt(text string, ttl string) []map[string]any 
 // Cache Break Detection
 // ---------------------------------------------------------------------------
 
+// CacheChangeCategory represents a specific category of change that can break
+// the KV cache. Matches upstream's promptCacheBreakDetection.ts categories.
+type CacheChangeCategory string
+
+const (
+	CacheChangeToolResult     CacheChangeCategory = "tool_result"
+	CacheChangeThinking       CacheChangeCategory = "thinking"
+	CacheChangeImage          CacheChangeCategory = "image"
+	CacheChangePDF            CacheChangeCategory = "pdf"
+	CacheChangeAttachment     CacheChangeCategory = "attachment"
+	CacheChangeSystemPrompt   CacheChangeCategory = "system_prompt"
+	CacheChangeCompaction     CacheChangeCategory = "compaction"
+	CacheChangeEdit           CacheChangeCategory = "edit"
+	CacheChangeUserMessage    CacheChangeCategory = "user_message"
+	CacheChangeToolUse        CacheChangeCategory = "tool_use"
+	CacheChangeNormalization  CacheChangeCategory = "normalization"
+	CacheChangeOther          CacheChangeCategory = "other"
+)
+
+// cacheChangeWeight returns the expected token impact weight for a change category.
+// Matches upstream's per-category weights in promptCacheBreakDetection.ts.
+func cacheChangeWeight(cat CacheChangeCategory) int64 {
+	switch cat {
+	case CacheChangeCompaction:
+		return 50000 // compaction restructures the entire context
+	case CacheChangeSystemPrompt:
+		return 20000 // system prompt changes invalidate the prefix
+	case CacheChangeToolResult:
+		return 5000 // tool results vary in size
+	case CacheChangeThinking:
+		return 3000 // thinking blocks are moderate
+	case CacheChangeEdit:
+		return 3000 // file edits are moderate
+	case CacheChangeAttachment:
+		return 4000 // attachments can be large
+	case CacheChangePDF:
+		return 8000 // PDFs are typically large
+	case CacheChangeImage:
+		return 6000 // images are token-expensive
+	case CacheChangeUserMessage:
+		return 2000 // user messages are typically short
+	case CacheChangeToolUse:
+		return 1000 // tool use blocks are small
+	case CacheChangeNormalization:
+		return 500 // normalization changes are minor
+	default:
+		return 2000 // default weight
+	}
+}
+
 // CacheBreakDetector tracks cache read tokens between API calls to detect
-// when the KV cache has been broken (e.g., by message reordering, compaction,
-// or prompt changes that invalidate cached prefixes).
+// when the KV cache has been broken. Uses category-based tracking matching
+// upstream's promptCacheBreakDetection.ts (12+ change categories with weights).
 type CacheBreakDetector struct {
 	mu                  sync.Mutex
 	lastCacheReadTokens int64 // tokens read from cache in previous call
 	baselineSet         bool
+	pendingChanges      map[CacheChangeCategory]int // changes recorded since last API call
+	estimatedImpact     int64                       // estimated token impact of pending changes
+}
+
+// RecordChange records a change in a specific category. This should be called
+// whenever the message array is modified between API calls (e.g., adding a tool
+// result, editing a file, normalizing messages). Matches upstream's tracking
+// of specific change categories instead of a simple threshold heuristic.
+func (d *CacheBreakDetector) RecordChange(category CacheChangeCategory, count int) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.pendingChanges == nil {
+		d.pendingChanges = make(map[CacheChangeCategory]int)
+	}
+	d.pendingChanges[category] += count
+	d.estimatedImpact += cacheChangeWeight(category) * int64(count)
 }
 
 // UpdateBaseline records the cache read tokens after a successful API call.
@@ -296,17 +365,39 @@ func (d *CacheBreakDetector) UpdateBaseline(cacheReadTokens int64) {
 	defer d.mu.Unlock()
 	d.lastCacheReadTokens = cacheReadTokens
 	d.baselineSet = true
+	// Clear pending changes after baseline update
+	d.pendingChanges = nil
+	d.estimatedImpact = 0
 }
 
 // DetectBreak checks if there was a significant cache break between calls.
-// A break is detected when cache_read drops by more than 20% from baseline,
-// indicating the server could not reuse cached KV pages from the previous request.
+// Uses two methods:
+//  1. Category-based: if pending changes exceed a weight threshold, predict a break
+//  2. Token-based: if cache_read dropped by more than 20% from baseline
+//
+// Method 1 matches upstream's approach of tracking specific change categories.
+// Method 2 is kept as a fallback for cases where changes aren't explicitly recorded.
 func (d *CacheBreakDetector) DetectBreak(currentCacheReadTokens int64) bool {
 	if d == nil {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	// Method 1: Category-based prediction
+	// If we've recorded changes with significant estimated impact,
+	// predict a break even before seeing the API response.
+	// The threshold is based on the baseline — if estimated impact > 10% of baseline,
+	// a break is likely.
+	if d.baselineSet && d.lastCacheReadTokens > 0 && d.estimatedImpact > 0 {
+		categoryThreshold := d.lastCacheReadTokens / 10 // 10% of baseline
+		if d.estimatedImpact > categoryThreshold {
+			return true
+		}
+	}
+
+	// Method 2: Token-based fallback
+	// A break is detected when cache_read dropped by more than 20% from baseline.
 	if !d.baselineSet || d.lastCacheReadTokens == 0 {
 		return false
 	}
@@ -316,7 +407,7 @@ func (d *CacheBreakDetector) DetectBreak(currentCacheReadTokens int64) bool {
 }
 
 // ResetBaseline clears the baseline, e.g., after compaction invalidates all
-// cached prefixes.
+// cached prefixes. Also records the compaction change.
 func (d *CacheBreakDetector) ResetBaseline() {
 	if d == nil {
 		return
@@ -325,6 +416,8 @@ func (d *CacheBreakDetector) ResetBaseline() {
 	defer d.mu.Unlock()
 	d.baselineSet = false
 	d.lastCacheReadTokens = 0
+	d.pendingChanges = nil
+	d.estimatedImpact = 0
 }
 
 // ---------------------------------------------------------------------------
@@ -344,25 +437,43 @@ type PinnedCacheEdit struct {
 // in the message stream. For each pinned edit, it ensures the tool_result at that
 // position has cache_control set to preserve the KV cache prefix.
 //
-// Full implementation requires deeper integration with the message building pipeline.
-// Currently a placeholder that logs when pinned edits are applied.
+// Matches upstream's applyPinnedCacheEdits in cachedMicrocompact.ts:
+//  1. Find the message at the pinned position
+//  2. Search for tool_result blocks within that message
+//  3. Add cache_control: ephemeral to preserve the KV cache prefix
 func ApplyPinnedCacheEdits(messages []anthropic.MessageParam, edits []PinnedCacheEdit) []anthropic.MessageParam {
 	if len(edits) == 0 || len(messages) == 0 {
 		return messages
 	}
 
+	// Track which messages need modification to avoid unnecessary serialization
+	modified := false
+
 	for _, edit := range edits {
 		if edit.Position < 0 || edit.Position >= len(messages) {
-			fmt.Fprintf(os.Stderr, "[WARN] ApplyPinnedCacheEdits: position %d out of range (len=%d)\n",
-				edit.Position, len(messages))
 			continue
 		}
 
-		msg := &messages[edit.Position]
-		// Ensure the message has content that can receive cache_control.
-		// Full implementation would check for tool_result type and preserve
-		// the cache_reference field matching the original edit.
-		_ = msg // placeholder: real integration needs MessageParam mutation
+		msg := messages[edit.Position]
+
+		// Only process user messages (tool results are in user role)
+		if msg.Role != anthropic.MessageParamRoleUser {
+			continue
+		}
+
+		// Search for tool_result blocks matching the tool_use_id
+		for i := range msg.Content {
+			block := &msg.Content[i]
+			if block.OfToolResult != nil && block.OfToolResult.ToolUseID == edit.ToolUseID {
+				// Add cache_control to preserve this tool_result in KV cache
+				block.OfToolResult.CacheControl = anthropic.NewCacheControlEphemeralParam()
+				modified = true
+			}
+		}
+	}
+
+	if !modified {
+		return messages
 	}
 
 	return messages

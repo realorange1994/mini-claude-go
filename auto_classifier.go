@@ -770,7 +770,7 @@ func (c *AutoModeClassifier) callClassifier(
 // callStage1 makes the fast classification API call.
 func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc string) (ClassifierResult, error) {
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     c.model,
+		Model:     GetModelForAPI(c.model),
 		MaxTokens: stage1MaxTokens,
 		System: []anthropic.TextBlockParam{
 			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT, CacheControl: anthropic.CacheControlEphemeralParam{}},
@@ -835,7 +835,7 @@ func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc
 	stage2Prompt := userMsg + "\n\n## Analysis required:\nProvide a detailed security analysis of this action. Consider: is the action clearly requested by the user? Could it have unintended consequences? Does it modify the system state or download external code? Explain your reasoning step by step, then provide your verdict."
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:       c.model,
+		Model:       GetModelForAPI(c.model),
 		MaxTokens:   stage2MaxTokens,
 		Temperature: param.NewOpt(0.0),
 		System: []anthropic.TextBlockParam{

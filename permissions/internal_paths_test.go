@@ -269,3 +269,191 @@ func TestHomeDirUSERPROFILE(t *testing.T) {
 		t.Errorf("expected /test/home, got %q", home)
 	}
 }
+
+// ─── Path traversal attack prevention (security edge cases) ──────────────────
+
+func TestHasPathPrefixExactMatch(t *testing.T) {
+	if !hasPathPrefix("/home/user/.claude/projects", "/home/user/.claude/projects") {
+		t.Error("exact match should be accepted")
+	}
+}
+
+func TestHasPathPrefixWithSeparator(t *testing.T) {
+	if !hasPathPrefix("/home/user/.claude/projects/test", "/home/user/.claude/projects") {
+		t.Error("path with separator prefix should be accepted")
+	}
+}
+
+func TestHasPathPrefixSubstringAttack(t *testing.T) {
+	// my-.claude/projects/ should NOT match .claude/projects
+	if hasPathPrefix("/home/user/my-.claude/projects/evil", "/home/user/.claude/projects") {
+		t.Error("substring prefix attack should be rejected")
+	}
+}
+
+func TestHasPathPrefixDifferentBase(t *testing.T) {
+	if hasPathPrefix("/other/path/file", "/home/user/.claude/projects") {
+		t.Error("different base should be rejected")
+	}
+}
+
+func TestHasPathComponentAsComponent(t *testing.T) {
+	if !hasPathComponent("/home/user/.claude/projects/test/session-memory/file", "session-memory") {
+		t.Error("session-memory as path component should match")
+	}
+}
+
+func TestHasPathComponentSubstringAttack(t *testing.T) {
+	// my-session-memory-evil should NOT match session-memory
+	if hasPathComponent("/home/user/.claude/projects/test/my-session-memory-evil/file", "session-memory") {
+		t.Error("session-memory substring in other component should not match")
+	}
+}
+
+func TestHasPathComponentAtStart(t *testing.T) {
+	if !hasPathComponent("session-memory/file", "session-memory") {
+		t.Error("component at start should match")
+	}
+}
+
+func TestHasPathComponentAtEnd(t *testing.T) {
+	if !hasPathComponent("/path/to/session-memory", "session-memory") {
+		t.Error("component at end should match")
+	}
+}
+
+func TestHasPathComponentExact(t *testing.T) {
+	if !hasPathComponent("session-memory", "session-memory") {
+		t.Error("exact match should match")
+	}
+}
+
+// ─── ADS colon checks ────────────────────────────────────────────────────────
+
+func TestHasSuspiciousColonDriveLetter(t *testing.T) {
+	// Drive letter colon should be allowed
+	if hasSuspiciousColon("C:\\Users\\test\\file.txt") {
+		t.Error("drive letter colon should be allowed")
+	}
+}
+
+func TestHasSuspiciousColonADS(t *testing.T) {
+	// ADS colon should be rejected
+	if !hasSuspiciousColon("C:\\Users\\test\\file.txt:Zone.Identifier") {
+		t.Error("ADS colon after drive letter should be detected")
+	}
+}
+
+func TestHasSuspiciousColonUnixHidden(t *testing.T) {
+	if !hasSuspiciousColon("/home/user/.bashrc:hidden") {
+		t.Error("hidden ADS colon should be detected on Unix")
+	}
+}
+
+func TestHasSuspiciousColonNone(t *testing.T) {
+	if hasSuspiciousColon("/home/user/file.txt") {
+		t.Error("no colon should not be detected")
+	}
+}
+
+func TestInternalEditablePathRejectsADS(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	// A valid plan file path with ADS colon should be rejected
+	adsPath := filepath.Join(home, ".claude", "plans", "test.md:Zone.Identifier")
+	if IsInternalEditablePath(adsPath, "") {
+		t.Error("plan file with ADS should be rejected")
+	}
+}
+
+func TestInternalReadablePathRejectsADS(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	// A valid session memory path with ADS colon should be rejected
+	adsPath := filepath.Join(home, ".claude", "projects", "test", "session-memory", "file:Zone.Identifier")
+	if IsInternalReadablePath(adsPath) {
+		t.Error("session memory file with ADS should be rejected")
+	}
+}
+
+// ─── Symlink escape checks ───────────────────────────────────────────────────
+
+func TestSymlinkEscapeWithinParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only: Windows path handling differs")
+	}
+	// Create a temp dir without symlinks — should not be an escape
+	tmp := t.TempDir()
+	if isSymlinkEscape(tmp, tmp) {
+		t.Error("path within parent should not be escape")
+	}
+}
+
+func TestSymlinkEscapeNonexistentPath(t *testing.T) {
+	// A nonexistent path that can't be resolved is treated as potential escape
+	if !isSymlinkEscape("/nonexistent/path/that/does/not/exist", "/nonexistent") {
+		t.Error("nonexistent path should be treated as potential escape")
+	}
+}
+
+// ─── Path traversal rejection tests ──────────────────────────────────────────
+
+func TestAgentMemoryPathRejectsFakeProjects(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	// Path outside ~/.claude/projects that contains "agent-memory"
+	fakePath := filepath.Join(home, "documents", "agent-memory", "file.md")
+	if isAgentMemoryPath(fakePath) {
+		t.Error("agent-memory outside projects dir should be rejected")
+	}
+}
+
+func TestSessionMemoryRejectsSubstring(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	// my-session-memory-backup/ should not match
+	fakePath := filepath.Join(home, ".claude", "projects", "test", "my-session-memory-backup", "file")
+	if isInSessionMemoryDir(fakePath) {
+		t.Error("my-session-memory-backup should not match session-memory")
+	}
+}
+
+func TestToolResultsRejectsSubstring(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	// my-tool-results/ should not match
+	fakePath := filepath.Join(home, ".claude", "projects", "test", "my-tool-results", "file")
+	if isInToolResultsDir(fakePath) {
+		t.Error("my-tool-results should not match tool-results")
+	}
+}
+
+func TestBundledSkillsRejectsOutsideTemp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only")
+	}
+	// /home/user/bundled-skills/ should not match
+	if isInBundledSkillsDir("/home/user/bundled-skills/skill1") {
+		t.Error("bundled-skills outside /tmp/claude- should be rejected")
+	}
+}
+
+func TestProjectTempRejectsFakeClaude(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only")
+	}
+	// /tmp/my-claude-evil/ does not start with /tmp/claude-
+	if isInProjectTempDir("/tmp/my-claude-evil/file") {
+		t.Error("/tmp/my-claude-evil should not match /tmp/claude-*")
+	}
+}

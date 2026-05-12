@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 func TestApplyPromptCachingEmpty(t *testing.T) {
@@ -449,6 +451,135 @@ func TestCacheBreakDetectorSequence(t *testing.T) {
 	d.ResetBaseline()
 	if d.DetectBreak(0) {
 		t.Error("should not detect break after ResetBaseline")
+	}
+}
+
+func TestCacheBreakDetectorCategoryBased(t *testing.T) {
+	d := &CacheBreakDetector{}
+
+	// Set baseline
+	d.UpdateBaseline(100000)
+
+	// Record a small change — should not trigger (impact < 10% of baseline)
+	d.RecordChange(CacheChangeUserMessage, 1)
+	if d.DetectBreak(100000) {
+		t.Error("small change should not trigger category-based break detection")
+	}
+
+	// Update baseline to clear pending changes
+	d.UpdateBaseline(100000)
+
+	// Record a compaction change — should trigger (impact > 10% of baseline)
+	d.RecordChange(CacheChangeCompaction, 1)
+	// Compaction weight = 50000, baseline = 100000, threshold = 10000
+	// 50000 > 10000, so should detect break
+	if !d.DetectBreak(100000) {
+		t.Error("compaction change should trigger category-based break detection")
+	}
+
+	// Reset and test with accumulated changes
+	d.ResetBaseline()
+	d.UpdateBaseline(50000)
+
+	// Multiple tool results — 5 * 5000 = 25000 > 5000 (10% of 50000)
+	d.RecordChange(CacheChangeToolResult, 5)
+	if !d.DetectBreak(50000) {
+		t.Error("5 tool result changes should trigger category-based break detection")
+	}
+}
+
+func TestCacheBreakDetectorCategoryResetOnUpdate(t *testing.T) {
+	d := &CacheBreakDetector{}
+
+	d.UpdateBaseline(100000)
+	d.RecordChange(CacheChangeCompaction, 1)
+
+	// UpdateBaseline should clear pending changes
+	d.UpdateBaseline(90000)
+
+	if d.estimatedImpact != 0 {
+		t.Error("UpdateBaseline should clear estimated impact")
+	}
+	if len(d.pendingChanges) != 0 {
+		t.Error("UpdateBaseline should clear pending changes")
+	}
+}
+
+func TestCacheChangeWeights(t *testing.T) {
+	// Verify that category weights are reasonable
+	tests := []struct {
+		category CacheChangeCategory
+		minWeight int64
+	}{
+		{CacheChangeCompaction, 10000},
+		{CacheChangeSystemPrompt, 5000},
+		{CacheChangePDF, 1000},
+		{CacheChangeImage, 1000},
+		{CacheChangeToolResult, 1000},
+	}
+	for _, tt := range tests {
+		w := cacheChangeWeight(tt.category)
+		if w < tt.minWeight {
+			t.Errorf("weight for %s should be >= %d, got %d", tt.category, tt.minWeight, w)
+		}
+	}
+}
+
+func TestApplyPinnedCacheEditsReal(t *testing.T) {
+	// Create messages with tool_result blocks
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{
+					OfToolResult: &anthropic.ToolResultBlockParam{
+						ToolUseID: "toolu_123",
+						Content: []anthropic.ToolResultBlockParamContentUnion{
+							{OfText: &anthropic.TextBlockParam{Text: "file content"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	edits := []PinnedCacheEdit{
+		{ToolUseID: "toolu_123", Position: 0, Content: "file content"},
+	}
+
+	result := ApplyPinnedCacheEdits(msgs, edits)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+
+	// Verify cache_control was added
+	block := result[0].Content[0]
+	if block.OfToolResult == nil {
+		t.Fatal("expected tool_result block")
+	}
+	// The cache_control should be set (Type field should be "ephemeral")
+	cc := block.OfToolResult.CacheControl
+	// CacheControlEphemeralParam has a constant Type field set to "ephemeral"
+	// when constructed via NewCacheControlEphemeralParam()
+	// We can verify it was set by checking that the zero-value was replaced
+	// (the Type field is a constant that defaults to "ephemeral")
+	if cc.Type == "" {
+		t.Error("expected cache_control Type to be set on pinned tool_result")
+	}
+}
+
+func TestApplyPinnedCacheEditsEmpty(t *testing.T) {
+	// Empty edits or messages should return unchanged
+	msgs := []anthropic.MessageParam{{Role: anthropic.MessageParamRoleUser}}
+
+	result := ApplyPinnedCacheEdits(msgs, nil)
+	if len(result) != 1 {
+		t.Error("empty edits should return messages unchanged")
+	}
+
+	result = ApplyPinnedCacheEdits(nil, []PinnedCacheEdit{{ToolUseID: "x", Position: 0}})
+	if result != nil {
+		t.Error("nil messages with edits should return nil")
 	}
 }
 

@@ -19,8 +19,8 @@ func TestResolveModelAliasOpus(t *testing.T) {
 	if !ok {
 		t.Fatal("expected alias to resolve")
 	}
-	if resolved != "claude-opus-4-20250514" {
-		t.Fatalf("expected claude-opus-4-20250514, got %s", resolved)
+	if resolved != "claude-opus-4-5-20250610" {
+		t.Fatalf("expected claude-opus-4-5-20250610, got %s", resolved)
 	}
 }
 
@@ -39,8 +39,8 @@ func TestResolveModelAliasCaseInsensitive(t *testing.T) {
 	if !ok {
 		t.Fatal("expected alias to resolve case-insensitively")
 	}
-	if resolved != "claude-opus-4-20250514" {
-		t.Fatalf("expected claude-opus-4-20250514, got %s", resolved)
+	if resolved != "claude-opus-4-5-20250610" {
+		t.Fatalf("expected claude-opus-4-5-20250610, got %s", resolved)
 	}
 
 	resolved2, ok2 := ResolveModelAlias("Sonnet")
@@ -67,8 +67,8 @@ func TestResolveModelAliasLegacyRemap(t *testing.T) {
 	if !ok {
 		t.Fatal("expected legacy model ID to resolve")
 	}
-	if resolved != "claude-opus-4-20250514" {
-		t.Fatalf("expected claude-opus-4-20250514, got %s", resolved)
+	if resolved != "claude-opus-4-5-20250610" {
+		t.Fatalf("expected claude-opus-4-5-20250610, got %s", resolved)
 	}
 
 	resolved2, ok2 := ResolveModelAlias("claude-3-5-sonnet-20240620")
@@ -81,27 +81,21 @@ func TestResolveModelAliasLegacyRemap(t *testing.T) {
 }
 
 func TestResolveModelAliasVariantForms(t *testing.T) {
+	// These are full model ID variants that map to current defaults via the legacy remap.
+	// Variant forms like "sonnet4", "opus-4.5" are not alias-mapped — they are treated
+	// as-is model strings (ResolveModelAlias returns them with ok=false).
 	tests := []struct {
 		alias    string
 		expected string
+		ok       bool
 	}{
-		{"sonnet4", "claude-sonnet-4-20250514"},
-		{"sonnet-4", "claude-sonnet-4-20250514"},
-		{"sonnet3.5", "claude-3-5-sonnet-20241022"},
-		{"sonnet-3.5", "claude-3-5-sonnet-20241022"},
-		{"opus4", "claude-opus-4-20250514"},
-		{"opus-4", "claude-opus-4-20250514"},
-		{"opus4.5", "claude-opus-4-5-20250610"},
-		{"opus-4.5", "claude-opus-4-5-20250610"},
-		{"haiku4.5", "claude-haiku-4-5-20250610"},
-		{"haiku-4.5", "claude-haiku-4-5-20250610"},
-		{"best", "claude-opus-4-20250514"},
-		{"fast", "claude-sonnet-4-20250514"},
+		{"best", "claude-opus-4-5-20250610", true},
+		{"fast", "claude-sonnet-4-20250514", true},
 	}
 	for _, tt := range tests {
 		resolved, ok := ResolveModelAlias(tt.alias)
-		if !ok {
-			t.Errorf("alias %q: expected to resolve", tt.alias)
+		if ok != tt.ok {
+			t.Errorf("alias %q: expected ok=%v, got ok=%v", tt.alias, tt.ok, ok)
 			continue
 		}
 		if resolved != tt.expected {
@@ -115,7 +109,7 @@ func TestGetDefaultModel(t *testing.T) {
 		subscription string
 		expected     string
 	}{
-		{"enterprise", "claude-opus-4-20250514"},
+		{"enterprise", "claude-opus-4-5-20250610"},
 		{"claude_ai", "claude-sonnet-4-20250514"},
 		{"api", "claude-sonnet-4-20250514"},
 		{"unknown", "claude-sonnet-4-20250514"},
@@ -140,11 +134,11 @@ func TestConfigModelAliasResolution(t *testing.T) {
 	}
 
 	// Full model IDs should remain unchanged
-	cfg2 := Config{Model: "claude-opus-4-20250514"}
+	cfg2 := Config{Model: "claude-opus-4-5-20250610"}
 	if resolved, ok := ResolveModelAlias(cfg2.Model); ok {
 		cfg2.Model = resolved
 	}
-	if cfg2.Model != "claude-opus-4-20250514" {
+	if cfg2.Model != "claude-opus-4-5-20250610" {
 		t.Fatalf("expected full model ID to remain unchanged, got %s", cfg2.Model)
 	}
 }

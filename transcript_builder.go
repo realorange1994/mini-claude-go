@@ -3,29 +3,16 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// escapeContentInjection removes any JSON that could be forged by the assistant
-// to manipulate the classifier. It strips potential <classifier_decision> tags
-// and escapes embedded JSON that matches the classifier output schema.
-func escapeContentInjection(text string) string {
-	// Remove any content that looks like classifier manipulation
-	// Strip patterns like: {"action": "allow", ...}
-	text = regexp.MustCompile(`(?s)\{"action"\s*:\s*"allow|deny"`).ReplaceAllString(text, "[REDACTED_JSON]")
-	// Remove <classifier_decision>...</classifier_decision> tags
-	text = regexp.MustCompile(`(?s)<classifier_decision>.*?</classifier_decision>`).ReplaceAllString(text, "")
-	// Also strip decision/reason JSON that mimics classifier output schema
-	text = regexp.MustCompile(`(?s)\{"decision"\s*:\s*"allow|block"`).ReplaceAllString(text, "[REDACTED_JSON]")
-	return text
-}
-
 // BuildCompactTranscript builds a compact conversation transcript for the
 // auto mode classifier. It includes user messages and tool calls but NOT
 // assistant text (security requirement: agent must not influence classifier).
+// The transcript is wrapped in <transcript> XML tags, matching upstream's
+// buildTranscriptForClassifier() in yoloClassifier.ts:436.
 func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 	if maxMessages <= 0 {
 		maxMessages = 20
@@ -43,6 +30,7 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 	recent := entries[start:]
 
 	var sb strings.Builder
+	sb.WriteString("<transcript>\n")
 	for _, entry := range recent {
 		switch v := entry.content.(type) {
 		case TextContent:
@@ -51,16 +39,18 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 				if len(text) > 500 {
 					text = text[:500] + "..."
 				}
-				text = escapeContentInjection(text)
 				sb.WriteString(fmt.Sprintf("[User] %s\n", text))
 			}
 			// Skip assistant text (security: don't let agent influence classifier)
+			// This is the primary injection defense — matches upstream's
+			// yoloClassifier.ts:346-348: "Only include tool_use blocks --
+			// assistant text is model-authored and could be crafted to
+			// influence the classifier's decision."
 
 		case ToolUseContent:
 			for _, block := range v {
 				if block.OfToolUse != nil {
 					inputDesc := formatToolInputCompact(block.OfToolUse.Name, block.OfToolUse.Input)
-					inputDesc = escapeContentInjection(inputDesc)
 					sb.WriteString(fmt.Sprintf("[Tool: %s] %s\n", block.OfToolUse.Name, inputDesc))
 				}
 			}
@@ -71,7 +61,6 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 				if len(content) > 100 {
 					content = content[:100] + "..."
 				}
-				content = escapeContentInjection(content)
 				// Check if this is an AskUserQuestion result with user approval
 				if isAskUserApproval(content) {
 					sb.WriteString(fmt.Sprintf("[Result] USER EXPLICITLY APPROVED: %s\n", content))
@@ -83,8 +72,67 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 		// Skip CompactBoundaryContent, SummaryContent, AttachmentContent
 		}
 	}
+	sb.WriteString("</transcript>\n")
 
 	return sb.String()
+}
+
+// BuildJSONLTranscript builds a JSONL-format transcript for the auto mode
+// classifier. When JSONL mode is enabled (CLAUDE_CODE_JSONL_TRANSCRIPT=1 or
+// feature flag), each line is a JSON dict that safely serializes content,
+// preventing role-spoofing via injection. Matches upstream's JSONL path in
+// yoloClassifier.ts:378-426.
+func BuildJSONLTranscript(ctx *ConversationContext, maxMessages int) string {
+	if maxMessages <= 0 {
+		maxMessages = 20
+	}
+
+	entries := ctx.Entries()
+	if len(entries) == 0 {
+		return ""
+	}
+
+	start := len(entries) - maxMessages
+	if start < 0 {
+		start = 0
+	}
+	recent := entries[start:]
+
+	var lines []string
+	for _, entry := range recent {
+		switch v := entry.content.(type) {
+		case TextContent:
+			if entry.role == "user" {
+				text := string(v)
+				if len(text) > 500 {
+					text = text[:500] + "..."
+				}
+				line, _ := json.Marshal(map[string]string{"user": text})
+				lines = append(lines, string(line))
+			}
+
+		case ToolUseContent:
+			for _, block := range v {
+				if block.OfToolUse != nil {
+					inputDesc := formatToolInputCompact(block.OfToolUse.Name, block.OfToolUse.Input)
+					line, _ := json.Marshal(map[string]string{block.OfToolUse.Name: inputDesc})
+					lines = append(lines, string(line))
+				}
+			}
+
+		case ToolResultContent:
+			for _, r := range v {
+				content := extractToolResultText(r.Content)
+				if len(content) > 100 {
+					content = content[:100] + "..."
+				}
+				line, _ := json.Marshal(map[string]string{"result": content})
+				lines = append(lines, string(line))
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // extractToolResultText extracts plain text from tool result content blocks.

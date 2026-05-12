@@ -1465,6 +1465,38 @@ func LoadProjectInstructions(projectDir string) string {
 // 1. Orphaned tool_results: result references a tool_use that was removed → delete result
 // 2. Orphaned tool_uses: tool_use has no matching result (result was truncated) →
 //    insert stub result or delete the tool_use block
+// inferToolNameFromResult attempts to infer a tool name from an orphaned tool_result.
+// Since the original tool_use is missing, we use content heuristics to provide
+// a meaningful placeholder that preserves conversation context.
+func inferToolNameFromResult(r anthropic.ToolResultBlockParam) string {
+	// Check the content for clues about what tool was used
+	for _, c := range r.Content {
+		if c.OfText != nil {
+			text := c.OfText.Text
+			// Heuristics based on common tool output patterns
+			if strings.Contains(text, "lines") && strings.Contains(text, "───") {
+				return "read_file"
+			}
+			if strings.Contains(text, "$ ") || strings.Contains(text, "> ") {
+				return "bash"
+			}
+			if strings.Contains(text, "commit") || strings.Contains(text, "branch") {
+				return "git"
+			}
+			if strings.Contains(text, "Found") && strings.Contains(text, "match") {
+				return "grep"
+			}
+			if strings.Contains(text, "wrote") || strings.Contains(text, "modified") {
+				return "edit_file"
+			}
+			if strings.Contains(text, "directory") || strings.Contains(text, "files") {
+				return "list_directory"
+			}
+		}
+	}
+	return "unknown_tool"
+}
+
 // This prevents Anthropic API error 2013.
 // must hold c.mu write lock
 func (c *ConversationContext) ValidateToolPairing() {
@@ -1483,32 +1515,42 @@ func (c *ConversationContext) ValidateToolPairing() {
 		}
 	}
 
-	// Pass 2: Remove orphaned tool_results (those without matching tool_use).
-	// This is the critical fix for 2013 error: "tool call result does not follow tool call".
-	// We ONLY remove orphaned tool_results. We do NOT remove tool_use blocks without
-	// results (Pass 3 removed) — removing tool_use blocks while leaving tool_results
-	// in the API's view causes a worse structural mismatch.
+	// Pass 2: Backfill orphaned tool_results with synthetic tool_use blocks.
+	// When resuming a session, a tool execution may have completed before the
+	// session was interrupted, leaving a tool_result without a matching tool_use.
+	// Instead of discarding the result (losing context), we create a synthetic
+	// tool_use block with a descriptive placeholder and keep the original result.
 	resultIDs := make(map[string]bool)
+	// Collect all orphaned tool_results grouped by entry index
+	type orphanResult struct {
+		r   anthropic.ToolResultBlockParam
+		idx int
+	}
+	var allOrphans []orphanResult
+
 	for i, entry := range c.entries {
 		if entry.role == "user" {
 			if results, ok := entry.content.(ToolResultContent); ok {
-				var kept []anthropic.ToolResultBlockParam
+				var valid []anthropic.ToolResultBlockParam
 				for _, r := range results {
 					if callIDs[r.ToolUseID] {
-						kept = append(kept, r)
+						valid = append(valid, r)
 						resultIDs[r.ToolUseID] = true
+					} else {
+						allOrphans = append(allOrphans, orphanResult{r, i})
 					}
 				}
-				if len(kept) == 0 {
-					c.entries[i].content = nil // mark for removal
-				} else {
-					c.entries[i].content = ToolResultContent(kept)
+				if len(valid) == 0 && len(allOrphans) > 0 && allOrphans[0].idx == i {
+					// All results in this entry are orphaned
+					c.entries[i].content = nil
+				} else if len(valid) > 0 {
+					c.entries[i].content = ToolResultContent(valid)
 				}
 			}
 		}
 	}
 
-	// Remove nil entries (fully orphaned tool_result messages)
+	// Remove nil entries
 	compacted := make([]conversationEntry, 0, len(c.entries))
 	for _, e := range c.entries {
 		if e.content != nil {
@@ -1516,6 +1558,60 @@ func (c *ConversationContext) ValidateToolPairing() {
 		}
 	}
 	c.entries = compacted
+
+	// Inject synthetic tool_use blocks for orphaned tool_results
+	if len(allOrphans) > 0 {
+		// Rebuild callIDs after compaction
+		callIDsRebuild := make(map[string]bool)
+		for _, entry := range c.entries {
+			if entry.role == "assistant" {
+				if blocks, ok := entry.content.(ToolUseContent); ok {
+					for _, b := range blocks {
+						if b.OfToolUse != nil {
+							callIDsRebuild[b.OfToolUse.ID] = true
+						}
+					}
+				}
+			}
+		}
+
+		finalEntries := make([]conversationEntry, 0, len(c.entries))
+		for _, entry := range c.entries {
+			if entry.role == "user" {
+				if results, ok := entry.content.(ToolResultContent); ok {
+					var orphaned []anthropic.ToolResultBlockParam
+					for _, r := range results {
+						if !callIDsRebuild[r.ToolUseID] {
+							orphaned = append(orphaned, r)
+						}
+					}
+					if len(orphaned) > 0 {
+						// Create synthetic tool_use blocks for orphaned results
+						var synthBlocks []anthropic.ContentBlockParamUnion
+						for _, r := range orphaned {
+							toolName := inferToolNameFromResult(r)
+							synthBlocks = append(synthBlocks, anthropic.ContentBlockParamUnion{
+								OfToolUse: &anthropic.ToolUseBlockParam{
+									ID:    r.ToolUseID,
+									Name:  toolName,
+									Input: map[string]any{},
+								},
+							})
+						}
+						// Insert synthetic tool_use before the tool_result
+						finalEntries = append(finalEntries, conversationEntry{
+							role:    "assistant",
+							content: ToolUseContent(synthBlocks),
+						})
+					}
+					finalEntries = append(finalEntries, entry)
+					continue
+				}
+			}
+			finalEntries = append(finalEntries, entry)
+		}
+		c.entries = finalEntries
+	}
 
 	// Pass 3: Insert synthetic tool_results for tool_use blocks without matching results.
 	// After compaction, a tool_use block may survive in the kept tail while its
