@@ -45,6 +45,11 @@ func (*GlobTool) InputSchema() map[string]any {
 				"items":       map[string]any{"type": "string"},
 				"description": "Glob patterns to exclude (files/dirs matching any are skipped, e.g. ['*.test.go', 'vendor']).",
 			},
+			"type": map[string]any{
+				"type":        "string",
+				"description": "File type filter: 'file' (default, regular files only), 'dir' (directories only), 'all' (both files and dirs).",
+				"enum":        []string{"file", "dir", "all"},
+			},
 		},
 		"required": []string{"pattern"},
 	}
@@ -93,6 +98,12 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 		}
 	}
 
+	// Parse type filter (P2-11: glob type filter)
+	typeFilter, _ := params["type"].(string)
+	if typeFilter == "" {
+		typeFilter = "file"
+	}
+
 	// SECURITY: Skip filesystem operations for UNC paths to prevent NTLM credential leaks.
 	if isUncPath(dir) {
 		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", dirStr), IsError: true}
@@ -125,6 +136,13 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 					return filepath.SkipDir
 				}
 			}
+			// type filter: include dirs if "dir" or "all"
+			if typeFilter == "dir" || typeFilter == "all" {
+				matched, _ := doublestar.Match(pattern, rel)
+				if matched {
+					matches = append(matches, path)
+				}
+			}
 			return nil
 		}
 		for _, excl := range excludes {
@@ -134,6 +152,10 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 			if matched, _ := filepath.Match(excl, d.Name()); matched {
 				return nil
 			}
+		}
+		// type filter: include files if "file" or "all"
+		if typeFilter != "file" && typeFilter != "all" {
+			return nil
 		}
 		matched, _ := doublestar.Match(pattern, rel)
 		if matched {
