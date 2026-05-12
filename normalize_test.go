@@ -114,7 +114,11 @@ func TestNormalizeAPIMessagesNil(t *testing.T) {
 }
 
 func TestNormalizeAPIMessagesAssistantToolUse(t *testing.T) {
-	// Create an assistant message with a tool_use block whose input keys are unsorted
+	// Create an assistant message with a tool_use block whose input keys are unsorted.
+	// After normalization pipeline:
+	// 1. EnforceRoleAlternation: prepends synthetic user (first msg is assistant)
+	// 2. EnsureToolResultPairing: appends synthetic user (orphan tool_use gets tool_result)
+	// 3. FilterEmptyMessages: keeps everything (assistant has tool_use, not empty)
 	msg := anthropic.MessageParam{
 		Role: anthropic.MessageParamRoleAssistant,
 		Content: []anthropic.ContentBlockParamUnion{
@@ -123,9 +127,9 @@ func TestNormalizeAPIMessagesAssistantToolUse(t *testing.T) {
 					ID:   "tool-1",
 					Name: "read_file",
 					Input: map[string]any{
-						"path":    "/tmp/test.go",
-						"offset":  10,
-						"limit":   50,
+						"path":   "/tmp/test.go",
+						"offset": 10,
+						"limit":  50,
 					},
 				},
 			},
@@ -133,12 +137,21 @@ func TestNormalizeAPIMessagesAssistantToolUse(t *testing.T) {
 	}
 
 	result := NormalizeAPIMessages([]anthropic.MessageParam{msg})
-	if len(result) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(result))
+	// 3 messages: synthetic user (prefix), assistant, synthetic user (tool_result)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(result))
 	}
 
-	// Check that tool_use input keys are now sorted
-	block := result[0].Content[0]
+	// First message should be synthetic user from role alternation
+	if result[0].Role != anthropic.MessageParamRoleUser {
+		t.Fatal("expected first message to be user (synthetic from alternation)")
+	}
+
+	// Second message should be the assistant with sorted tool_use keys
+	if result[1].Role != anthropic.MessageParamRoleAssistant {
+		t.Fatal("expected second message to be assistant")
+	}
+	block := result[1].Content[0]
 	if block.OfToolUse == nil {
 		t.Fatal("expected tool_use block")
 	}
@@ -151,11 +164,35 @@ func TestNormalizeAPIMessagesAssistantToolUse(t *testing.T) {
 	if got != want {
 		t.Errorf("tool_use input keys not sorted: got %q, want %q", got, want)
 	}
+
+	// Third message should be synthetic user with tool_result
+	if result[2].Role != anthropic.MessageParamRoleUser {
+		t.Fatal("expected third message to be user (synthetic from pairing)")
+	}
+	if result[2].Content[0].OfToolResult == nil {
+		t.Fatal("expected tool_result in third message")
+	}
+	if result[2].Content[0].OfToolResult.ToolUseID != "tool-1" {
+		t.Errorf("expected tool_result for tool-1, got %s", result[2].Content[0].OfToolResult.ToolUseID)
+	}
 }
 
 func TestNormalizeAPIMessagesUserToolResult(t *testing.T) {
-	// Create a user message with a tool_result containing excessive blank lines
-	msg := anthropic.MessageParam{
+	// Create a user message with a tool_result containing excessive blank lines.
+	// Include a matching assistant tool_use so the tool_result isn't stripped.
+	assistantMsg := anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleAssistant,
+		Content: []anthropic.ContentBlockParamUnion{
+			{
+				OfToolUse: &anthropic.ToolUseBlockParam{
+					ID:    "tool-1",
+					Name:  "read_file",
+					Input: map[string]any{},
+				},
+			},
+		},
+	}
+	userMsg := anthropic.MessageParam{
 		Role: anthropic.MessageParamRoleUser,
 		Content: []anthropic.ContentBlockParamUnion{
 			{
@@ -173,12 +210,15 @@ func TestNormalizeAPIMessagesUserToolResult(t *testing.T) {
 		},
 	}
 
-	result := NormalizeAPIMessages([]anthropic.MessageParam{msg})
-	if len(result) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(result))
+	result := NormalizeAPIMessages([]anthropic.MessageParam{assistantMsg, userMsg})
+	// 3 messages: synthetic user (alternation prepended since first was assistant),
+	// assistant with tool_use, user with tool_result
+	if len(result) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(result))
 	}
 
-	block := result[0].Content[0]
+	// User message is third (synthetic user, assistant, original user)
+	block := result[2].Content[0]
 	if block.OfToolResult == nil {
 		t.Fatal("expected tool_result block")
 	}
