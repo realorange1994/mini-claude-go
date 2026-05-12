@@ -107,6 +107,10 @@ type Client struct {
 	url        string
 	httpClient *http.Client
 	headers    map[string]string
+
+	// Reconnection settings (for stdio servers)
+	maxRetries int           // max reconnect attempts (0 = disabled)
+	retryDelay time.Duration // initial delay between reconnect attempts
 }
 
 func NewClient(name, command string, args []string, env map[string]string) *Client {
@@ -665,6 +669,67 @@ func (c *Client) Tools() []Tool {
 // Instructions returns the server's usage instructions from the initialize response.
 func (c *Client) Instructions() string {
 	return c.instructions
+}
+
+// Reconnect restarts the MCP server process and reinitializes the connection.
+// Uses exponential backoff if initial restart fails.
+func (c *Client) Reconnect(ctx context.Context) error {
+	if c.serverType != stdioServer {
+		return fmt.Errorf("reconnect only supported for stdio servers")
+	}
+
+	// Stop current connection
+	c.Stop()
+
+	retries := c.maxRetries
+	if retries == 0 {
+		retries = 3
+	}
+	delay := c.retryDelay
+	if delay == 0 {
+		delay = 500 * time.Millisecond
+	}
+
+	for attempt := 0; attempt <= retries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(delay)
+			delay *= 2 // exponential backoff
+		}
+		if err := c.Start(ctx); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("failed to reconnect MCP server %s after %d attempts", c.name, retries+1)
+}
+
+// CallWithReconnect wraps a CallWithReconnectFunc with exponential backoff reconnect on failure.
+func (c *Client) CallWithReconnect(ctx context.Context, call func() error) error {
+	err := call()
+	if err == nil {
+		return nil
+	}
+
+	// Only reconnect on transient errors (process died, pipe broken)
+	if !c.isTransientError(err) {
+		return err
+	}
+
+	if err := c.Reconnect(ctx); err != nil {
+		return err
+	}
+
+	return call()
+}
+
+// isTransientError checks if an error is likely to be recoverable via reconnection.
+func (c *Client) isTransientError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "write to closed") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "process already finished") ||
+		strings.Contains(msg, "unexpected EOF") ||
+		strings.Contains(msg, "i/o timeout")
 }
 
 // ListResources discovers available resources from this MCP server.

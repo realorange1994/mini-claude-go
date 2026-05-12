@@ -28,6 +28,19 @@ func main() {
 	resumeFile := flag.String("resume", "", "Resume from a transcript file path or 'last' for most recent")
 	flag.Parse()
 
+	// Check CLAUDE_CODE_PREFER_NON_STREAMING env var (overrides --stream flag)
+	if v := os.Getenv("CLAUDE_CODE_PREFER_NON_STREAMING"); v != "" && v != "0" && v != "false" {
+		*stream = false
+	}
+
+	// Parse CLAUDE_CODE_EFFORT_LEVEL and apply model/budget overrides
+	if v := os.Getenv("CLAUDE_CODE_EFFORT_LEVEL"); v == "fast" {
+		// Fast mode: override to a lighter model if not explicitly set
+		if *model == "" {
+			*model = "claude-sonnet-4-20250514"
+		}
+	}
+
 	// Change working directory if --dir is specified
 	// Normalize the path: filepath.FromSlash converts forward slashes to backslashes
 	// on Windows (no-op on Unix), and filepath.Clean handles . and .. elements.
@@ -115,6 +128,10 @@ func main() {
 	RegisterMCPAndSkills(registry, &cfg)
 	RegisterFileHistoryTools(registry, cfg.FileHistory)
 
+	// Initialize prompt history
+	sessionID := generateSessionID()
+	history := NewPromptHistory(sessionID)
+
 	// Initialize SessionMemory
 	if wd, err := os.Getwd(); err == nil {
 		sm := NewSessionMemory(wd)
@@ -192,10 +209,10 @@ func main() {
 	}
 
 	// Interactive REPL
-	runInteractive(agent)
+	runInteractive(agent, history, sessionID)
 }
 
-func runInteractive(agent *AgentLoop) {
+func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) {
 	// Track Ctrl+C timing for double-press exit (works during agent.Run too)
 	var lastCtrlC atomic.Int64 // stores UnixNano of last Ctrl+C
 
@@ -398,6 +415,10 @@ func runInteractive(agent *AgentLoop) {
 			}
 			continue
 		}
+		// Record prompt to history (P2-18: prompt history persistence)
+		if history != nil {
+			history.Record(userInput, sessionID)
+		}
 
 		// Check for exact command match -- only treat as command if the first
 		// word is a known command. Unknown /xxx is passed through as prompt text.
@@ -408,7 +429,7 @@ func runInteractive(agent *AgentLoop) {
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
-				cmd == "/doctor"
+				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/daemon" || cmd == "/errors"
 
 			if !isKnownCmd {
 				// Not a recognized command -- treat as normal prompt
@@ -450,6 +471,11 @@ func runInteractive(agent *AgentLoop) {
 					fmt.Println("  /quit           -- Exit")
 					fmt.Println("  /agents         -- Manage background agents")
 					fmt.Println("  /doctor         -- Run installation diagnostics")
+					fmt.Println("  /history        -- Show recent prompts")
+					fmt.Println("  /cleanup        -- Remove stale session files")
+					fmt.Println("  /branch         -- Create a conversation branch")
+					fmt.Println("  /daemon         -- Manage daemon mode (start/stop/status/submit)")
+					fmt.Println("  /errors         -- View error logs (recent/clear)")
 					continue
 				case "/compact":
 					agent.ForceCompact()
@@ -501,6 +527,25 @@ func runInteractive(agent *AgentLoop) {
 					continue
 				case "/doctor":
 					runDoctor(agent)
+					continue
+				case "/history":
+					handleHistory(history, parts[1:])
+					continue
+				case "/cleanup":
+					if wd, err := os.Getwd(); err == nil {
+						handleCleanup(wd, parts[1:])
+					}
+					continue
+				case "/branch":
+					if err := handleBranch(agent); err != nil {
+						fmt.Printf("Branch error: %v\n", err)
+					}
+					continue
+				case "/daemon":
+					handleDaemon(parts[1:])
+					continue
+				case "/errors":
+					handleErrors(parts[1:])
 					continue
 				}
 			}
@@ -917,4 +962,80 @@ func runDoctor(agent *AgentLoop) {
 	}
 
 	fmt.Println("==========================")
+}
+
+// generateSessionID creates a unique session identifier based on timestamp.
+func generateSessionID() string {
+	return time.Now().Format("20060102-150405")
+}
+
+// handleHistory handles the /history slash command.
+// Supports:
+//
+//	/history          - Show last 20 prompts
+//	/history N        - Show last N prompts
+//	/history clear    - Clear history file
+func handleHistory(history *PromptHistory, args []string) {
+	if history == nil {
+		fmt.Println("History not available.")
+		return
+	}
+
+	if len(args) > 0 && strings.ToLower(args[0]) == "clear" {
+		if err := os.Remove(history.filePath); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Error clearing history: %v\n", err)
+		} else {
+			fmt.Println("History cleared.")
+		}
+		return
+	}
+
+	n := 20
+	if len(args) > 0 {
+		if parsed, err := strconv.Atoi(args[0]); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+
+	entries := history.LoadRecent(n)
+	if len(entries) == 0 {
+		fmt.Println("No history found.")
+		return
+	}
+
+	fmt.Printf("\nRecent prompts (%d):\n", len(entries))
+	for i, e := range entries {
+		text := e.Text
+		if len(text) > 80 {
+			text = text[:77] + "..."
+		}
+		fmt.Printf("  %d. [%s] %s\n", i+1, e.Timestamp[11:16], text)
+	}
+}
+
+// handleBranch creates a conversation branch at the current point.
+// The branch saves the current conversation state and starts a new branch
+// so the user can explore an alternative path without losing the original.
+func handleBranch(agent *AgentLoop) error {
+	// Save current transcript as a branch point
+	branchName := fmt.Sprintf("branch-%s", time.Now().Format("150405"))
+	transcriptDir := filepath.Join(".claude", "branches")
+	os.MkdirAll(transcriptDir, 0o755)
+
+	branchFile := filepath.Join(transcriptDir, branchName+".jsonl")
+	// Copy current transcript to branch
+	srcFile := filepath.Join(".claude", "transcript.jsonl")
+	if _, err := os.Stat(srcFile); err == nil {
+		data, err := os.ReadFile(srcFile)
+		if err != nil {
+			return fmt.Errorf("failed to read transcript: %w", err)
+		}
+		if err := os.WriteFile(branchFile, data, 0o644); err != nil {
+			return fmt.Errorf("failed to write branch: %w", err)
+		}
+		fmt.Printf("Created branch: %s\n", branchName)
+	} else {
+		fmt.Println("No current transcript to branch from.")
+	}
+	return nil
 }

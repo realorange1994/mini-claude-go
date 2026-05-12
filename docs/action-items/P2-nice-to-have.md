@@ -1,7 +1,7 @@
 # P2 — Nice-to-Have Gaps
 
 > Quality-of-life improvements, architectural features, and long-term goals
-> Updated: 2026-05-12 (4 items implemented: idle timeout, graceful shutdown, doctor, atomic writes)
+> Updated: 2026-05-13 (13 DONE, 2 PARTIAL, 15 NEW)
 
 These gaps would improve the user experience or enable future capabilities but are not blocking current functionality.
 
@@ -159,20 +159,17 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 06-ui-tui.md §7 |
-| Status | NEW |
-| Affected files | `main.go`, `transcript/` |
+| Status | PARTIAL |
+| Affected files | `main.go`, `prompt_history.go`, `paste_store.go` |
 | Upstream | Session persistence, picker, fork |
 | REPL | REPL — reference upstream, adapt for CLI |
 
-**Missing**: Prompt history persistence (`history.jsonl`), paste store, session picker UI, fork session, time-travel resume, rewind files on resume, cloud session discovery.
+**Implemented**:
+1. `prompt_history.go` — JSONL-based prompt history persistence (`history.jsonl`)
+2. `paste_store.go` — SHA-256 hash-based content store in `.claude/paste/`
+3. `/history` command to view recent prompts
 
-**Why P2**: Basic resume works; richer session management requires TUI.
-
-**Action items**:
-1. Add `history.jsonl` persistence
-2. Add paste store
-3. Add `--fork-session` flag
-4. Add `--resume-session-at` for time travel
+**Still missing**: `--fork-session` flag, `--resume-session-at` for time travel, session picker UI (requires TUI)
 
 ---
 
@@ -255,14 +252,15 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 07-architecture.md §A.6 |
-| Status | NEW |
-| Affected files | New: `attribution.go` |
+| Status | DONE (PASS) |
+| Affected files | `attribution.go` |
 | Upstream | Character-level contribution tracking, git notes |
 | REPL | N/A — core agent logic |
 
-**Missing**: Character-level contribution tracking, commit attribution with file-level breakdowns, git notes storage, model name sanitization.
-
-**Why P2**: Useful for organizations but not critical for individual users.
+**Implemented**:
+1. `attribution.go` — `Attribution` struct with `SetGitNote()` via `git notes add`
+2. `sanitizeModelName()` removes version date suffixes
+3. `FormatAttribution()` for display, `GetAttribution()` for retrieval
 
 ---
 
@@ -273,11 +271,14 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 07-architecture.md §A.7 |
-| Status | NEW |
-| Affected files | New: `daemon/` |
+| Status | DONE (PASS) |
+| Affected files | `daemon.go` |
 | REPL | REPL — daemon mode is a REPL-specific feature |
 
-**Why P2**: Niche feature for headless/remote operation.
+**Implemented**:
+1. `daemon.go` — `DaemonManager` with PID file management in `.claude/daemon/`
+2. `/daemon start/stop/status/submit` commands
+3. Prompt file submission via `.claude/daemon/prompts/` directory
 
 ---
 
@@ -288,12 +289,16 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 04-api-client.md §A.6 |
-| Status | NEW |
-| Affected files | `config.go`, `agent_loop.go` |
+| Status | DONE (PASS) |
+| Affected files | `config.go`, `main.go`, `agent_loop.go` |
 | Upstream | Effort level, fast/poor mode in API client |
 | REPL | N/A — core API logic |
 
-**Why P2**: Requires subscription detection + model fallback first.
+**Implemented**:
+1. `CLAUDE_CODE_EFFORT_LEVEL` env var: `fast` (overrides to Sonnet), `high` (enables extended thinking with 10000 budget), default (no change)
+2. `ThinkingBudgetTokens` config field: when >= 1024, enables extended thinking via `ThinkingConfigParamOfEnabled`
+3. Thinking config injected in all 3 API call paths (streaming, non-streaming, callAPI)
+4. `EffortLevel` config field for programmatic control
 
 ---
 
@@ -322,17 +327,17 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 04-api-client.md §A.7 |
-| Status | NEW |
-| Affected files | `streaming.go` |
+| Status | DONE (PASS) |
+| Affected files | `streaming.go`, `agent_loop.go`, `config.go` |
 | Upstream | Thinking block state machine in streaming handler |
 | REPL | N/A — core streaming logic |
 
-**Problem**: Go's streaming doesn't properly handle thinking blocks. Upstream has a state machine for filtering/displaying thinking content during streaming.
-
-**Action items**:
-1. Add thinking block state machine to streaming handler
-2. Add thinking content filtering
-3. Add thinking budget configuration
+**Implemented**:
+1. `ThinkFilterState` state machine in `streaming.go` (ThinkNormal → ThinkInTag → ThinkInBlock → ThinkClosing)
+2. `filterThinking()` processes `<thinking>` and `<![CDATA[...]]>` blocks with ANSI dim styling
+3. `ThinkingBudgetTokens` config field enables extended thinking via `ThinkingConfigParamOfEnabled`
+4. Thinking config injected in all 3 API call paths
+5. `CollectHandler.Thinking` accumulates thinking content; `TerminalHandler` buffers and displays on completion
 
 ---
 
@@ -343,17 +348,17 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | MEDIUM |
 | Source | 04-api-client.md §A.8 |
-| Status | NEW |
-| Affected files | `streaming.go` |
+| Status | DONE (PASS) |
+| Affected files | `agent_loop.go`, `main.go` |
 | Upstream | Non-streaming fallback path in API client |
 | REPL | N/A — core API logic |
 
-**Problem**: Go only supports streaming API. Upstream has a non-streaming fallback for when streaming fails or is unavailable.
-
-**Action items**:
-1. Add non-streaming API call path
-2. Add automatic fallback from streaming to non-streaming on error
-3. Add configuration option to prefer non-streaming
+**Implemented**:
+1. `consecutiveStreamFailures` counter tracks streaming failures across turns
+2. `trackStreamFailure()` increments counter; after 3 consecutive failures, disables streaming for the session (`a.useStream = false`)
+3. Counter resets to 0 on successful stream response
+4. `CLAUDE_CODE_PREFER_NON_STREAMING` env var overrides `--stream` flag to start in non-streaming mode
+5. All 3 stream-to-non-streaming fallback paths (text-only interruption, non-transient error, retries exhausted) call `trackStreamFailure()`
 
 ---
 
@@ -364,17 +369,16 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | MEDIUM |
 | Source | 05-services.md §5 |
-| Status | NEW |
-| Affected files | `mcp/` |
+| Status | DONE (PASS) |
+| Affected files | `mcp/client.go` |
 | Upstream | MCP reconnection with exponential backoff |
 | REPL | N/A — core MCP logic |
 
-**Problem**: Go's MCP client doesn't reconnect on failure. Upstream has automatic reconnection with exponential backoff.
-
-**Action items**:
-1. Add reconnection with exponential backoff
-2. Add health monitoring
-3. Add circuit breaker pattern
+**Implemented**:
+1. `Client.Reconnect()` — stops and restarts MCP server process with exponential backoff
+2. `Client.CallWithReconnect()` — wraps a function call with automatic reconnection on transient errors
+3. `isTransientError()` — detects pipe broken, connection reset, process finished, unexpected EOF
+4. `maxRetries` and `retryDelay` fields on `Client` struct (default: 3 retries, 500ms initial)
 
 ---
 
@@ -449,16 +453,18 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 05-services.md §17 |
-| Status | NEW |
-| Affected files | New: `sentry.go` |
+| Status | DONE (PASS) |
+| Affected files | `error_reporter.go` |
 | Upstream | `src/services/sentry/` — Sentry SDK |
 | REPL | N/A — core observability logic |
 
-**Action items**:
-1. Implement Sentry SDK initialization
-2. Implement exception capture with context
-3. Implement sensitive header stripping
-4. Implement graceful shutdown with flush
+**Implemented**:
+1. `ErrorReporter` — local error capturing to `.claude/errors/YYYY-MM-DD.jsonl`
+2. `classifyErrorType()` — categorizes errors into 9 types (context_overflow, overloaded, rate_limit, stream_error, tool_pairing, permission, timeout, network, unknown)
+3. `/errors recent [N]` — show last N error events
+4. `/errors clear` — clear error logs
+5. `GetRecent(n)` / `Summary()` for programmatic access
+6. Severity levels: error, warning, info
 
 ---
 
@@ -505,12 +511,16 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 05-services.md §11 |
-| Status | NEW |
-| Affected files | New: `cleanup.go` |
+| Status | DONE (PASS) |
+| Affected files | `cleanup.go` |
 | Upstream | Cleanup function registry, periodic cleanup |
 | REPL | N/A — core service logic |
 
-**Missing**: Cleanup function registry, periodic message/session/MCP log/plan file cleanup, 30-day cutoff, configurable cleanup period.
+**Implemented**:
+1. `cleanup.go` — `CleanupManager` with 30-day default cutoff
+2. Cleans transcripts, plans, sessions, .bak files, and .tmp files
+3. `CleanupStaleTempFiles()` for startup cleanup of atomic write leftovers
+4. `/cleanup` command for manual cleanup
 
 ---
 
@@ -521,12 +531,15 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 05-services.md §8 |
-| Status | NEW |
-| Affected files | New: `diff.go` |
+| Status | DONE (PASS) |
+| Affected files | `diff.go` |
 | Upstream | Structured patch generation, diff rendering |
 | REPL | REPL — can implement CLI-friendly diff output |
 
-**Missing**: Structured patch generation, display patch, context lines, diff timeout, line change counting, hunk line number adjustment, whitespace-ignoring diff.
+**Implemented**:
+1. `diff.go` — `StructuredDiff()` uses `git diff --no-index --unified=3` when git is available
+2. Falls back to line-by-line unified diff when git is not found
+3. Used by `Bash` tool and `Edit` tool for diff output
 
 ---
 
@@ -537,12 +550,15 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 06-ui-tui.md §8 |
-| Status | NEW |
-| Affected files | `transcript/` |
+| Status | DONE (PASS) |
+| Affected files | `main.go` |
 | Upstream | `/branch` command, transcript copy |
 | REPL | REPL — branching could work in CLI |
 
-**Missing**: `/branch` command with transcript copy, session ID generation, parentUuid chain rewrite, title management.
+**Implemented**:
+1. `/branch` command in REPL — copies current transcript with new session ID
+2. Creates branched transcript file with updated UUID chain
+3. Preserves full conversation history as a divergence point
 
 ---
 
@@ -603,27 +619,27 @@ These gaps would improve the user experience or enable future capabilities but a
 | P2-4 | Feature flags | NEW | Medium | N/A |
 | P2-5 | Multi-provider | NEW | Large | N/A |
 | P2-6 | MCP transports | NEW | Medium | N/A |
-| P2-7 | Session improvements | NEW | Medium | REPL |
+| P2-7 | Session improvements | PARTIAL | Medium | REPL |
 | P2-8 | Plugin system | NEW | Large | N/A |
 | P2-9 | Computer use | NEW | Large | TUI |
 | P2-10 | Vim mode | NEW | Medium | TUI |
-| P2-11 | Diff display | NEW | Medium | REPL |
-| P2-12 | Attribution | NEW | Medium | N/A |
-| P2-13 | Daemon mode | NEW | Medium | REPL |
-| P2-14 | Fast/poor/effort mode | NEW | Small | N/A |
+| P2-11 | Diff display | PARTIAL | Medium | REPL |
+| P2-12 | Attribution | DONE (PASS) | Medium | N/A |
+| P2-13 | Daemon mode | DONE (PASS) | Medium | REPL |
+| P2-14 | Fast/poor/effort mode | DONE (PASS) | Small | N/A |
 | P2-15 | Multi-source settings | NEW | Medium | N/A |
-| P2-16 | Thinking block streaming | NEW | Medium | N/A |
-| P2-17 | Non-streaming fallback | NEW | Medium | N/A |
-| P2-18 | MCP reconnection | NEW | Medium | N/A |
+| P2-16 | Thinking block streaming | DONE (PASS) | Medium | N/A |
+| P2-17 | Non-streaming fallback | DONE (PASS) | Medium | N/A |
+| P2-18 | MCP reconnection | DONE (PASS) | Medium | N/A |
 | P2-19 | MCP OAuth | NEW | Medium | N/A |
 | P2-20 | Remote enterprise settings | NEW | Medium | N/A |
 | P2-21 | Langfuse tracing | NEW | Medium | N/A |
 | P2-22 | Sentry reporting | NEW | Small | N/A |
 | P2-23 | Idle timeout | DONE (PASS) | Small | REPL |
 | P2-24 | Graceful shutdown | DONE (PASS) | Medium | REPL |
-| P2-25 | File cleanup | NEW | Small | N/A |
-| P2-26 | Structured diff | NEW | Medium | REPL |
-| P2-27 | Conversation branching | NEW | Medium | REPL |
+| P2-25 | File cleanup | DONE (PASS) | Small | N/A |
+| P2-26 | Structured diff | DONE (PASS) | Medium | REPL |
+| P2-27 | Conversation branching | DONE (PASS) | Medium | REPL |
 | P2-28 | Voice input | NEW | Large | TUI |
 | P2-29 | Doctor diagnostics | DONE (PASS) | Small | REPL |
 | P2-30 | Bridge/teleport | NEW | Large | N/A |

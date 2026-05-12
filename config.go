@@ -101,6 +101,12 @@ type Config struct {
 	querySource string
 	// HookManager holds registered compact hooks (pre/post compact).
 	Hooks *HookManager
+	// ThinkingBudgetTokens enables extended thinking with a budget (min 1024).
+	// When > 0, the API request includes a thinking configuration.
+	ThinkingBudgetTokens int
+	// EffortLevel controls model selection for effort-based routing.
+	// Values: "" (default), "fast" (use cheaper/faster model), "high" (use premium model with thinking)
+	EffortLevel string
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.

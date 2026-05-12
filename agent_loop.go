@@ -342,6 +342,8 @@ type AgentLoop struct {
 	consecutiveContextErrors int                       // tracks consecutive context overflow errors for reactive compact
 	consecutive529Errors     int                       // tracks consecutive 529 overloaded errors for model fallback
 	modelCapabilities        *ModelCapabilitiesCache   // per-model context window and capability lookup
+	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
+	errorReporter              *ErrorReporter            // captures error events for analysis
 }
 
 // handle529Error processes a 529 Overloaded error. It increments the consecutive
@@ -359,6 +361,19 @@ func (a *AgentLoop) handle529Error() bool {
 		return false
 	}
 	return true
+}
+
+// trackStreamFailure increments the consecutive stream failure counter.
+// After 3 consecutive failures, it disables streaming for the rest of the session
+// and falls back to non-streaming API calls.
+func (a *AgentLoop) trackStreamFailure() {
+	a.consecutiveStreamFailures++
+	if a.consecutiveStreamFailures >= 3 {
+		a.out("\n[WARN] Streaming failed %d times consecutively — switching to non-streaming mode for this session\n",
+			a.consecutiveStreamFailures)
+		a.useStream = false
+		a.consecutiveStreamFailures = 0
+	}
 }
 
 // handle429Error determines whether a 429 rate-limit error should be retried
@@ -547,6 +562,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		extractionState:   NewExtractionState(),
 		hooks:             cfg.Hooks,
 		sonnetModel:       "claude-sonnet-4-20250514",
+		errorReporter:    NewErrorReporter(),
 	}
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
@@ -1290,6 +1306,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 		if err != nil {
 			errMsg := err.Error()
 
+			// Capture error in local reporter for later analysis
+			if a.errorReporter != nil {
+				a.errorReporter.CaptureError(errMsg, map[string]interface{}{
+					"model":  a.config.Model,
+					"stream": a.useStream,
+				})
+			}
+
 			// Hook: OnError — when an API error occurs (with death spiral prevention)
 			if a.hooks != nil {
 				a.hooks.ExecuteGenericHooksQuiet(HookOnError, map[string]interface{}{
@@ -1863,6 +1887,13 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		params.Tools = toolParams
 	}
 
+	// Extended thinking
+	if budget := a.config.ThinkingBudgetTokens; budget >= 1024 {
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
+	}
+
+	cacheMessageParams(&params) // Anthropic prompt caching (system_and_3)
+
 	const maxRetries = 9 // 1 attempt + 9 retries = 10 total
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -2007,6 +2038,11 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 		params.Tools = toolParams
 	}
 
+	// Extended thinking: enable if thinking budget is configured (min 1024 tokens)
+	if budget := a.config.ThinkingBudgetTokens; budget >= 1024 {
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
+	}
+
 	cacheMessageParams(&params) // Anthropic prompt caching (system_and_3)
 
 	// Persistent collect handler across retries (tracks partial delivery)
@@ -2028,8 +2064,9 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 
 		toolCalls, textParts, err := a.tryStreamOnce(params, collect, toolCallDoneCh, executor)
 		if err == nil {
-			// Success: reset consecutive 529 counter
+			// Success: reset consecutive 529 and stream failure counters
 			a.consecutive529Errors = 0
+			a.consecutiveStreamFailures = 0
 			return toolCalls, textParts, nil
 		}
 
@@ -2097,17 +2134,20 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 				// but we have what was collected so far. Fall back to non-streaming
 				// for a complete fresh response (matching Hermes outer retry pattern).
 				a.out("  [!] Stream interrupted after text output, falling back to non-streaming...\n")
+				a.trackStreamFailure()
 				return a.callWithNonStreamingFallback(params)
 			}
 		}
 
 		// Non-transient error during stream -> try non-streaming fallback
 		a.out("\n[WARN] Stream failed (%v), falling back to non-streaming...\n", err)
+		a.trackStreamFailure()
 		return a.callWithNonStreamingFallback(params)
 	}
 
 	// All stream retries exhausted -> try non-streaming fallback
 	a.out("\n[WARN] Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
+	a.trackStreamFailure()
 	return a.callWithNonStreamingFallback(params)
 }
 
@@ -2251,6 +2291,11 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 		params.Tools = toolParams
 	}
 	cacheMessageParams(&params) // Anthropic prompt caching (system_and_3)
+
+	// Extended thinking
+	if budget := a.config.ThinkingBudgetTokens; budget >= 1024 {
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
+	}
 	return params
 }
 
