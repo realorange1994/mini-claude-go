@@ -1242,8 +1242,39 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		// Streaming vs non-streaming decision
+		streamingExecDone := false // set true when streaming executor handled tool calls
 		if a.useStream {
-			toolCalls, textParts, err = a.callWithRetryAndFallback()
+			// Create streaming tool executor for pipelined tool execution.
+			// Tools start executing as their content blocks complete during streaming,
+			// overlapping with remaining stream processing.
+			toolCallDoneCh := make(chan int, 20)
+			executor := NewStreamingToolExecutor(a.registry, a.gate)
+
+			toolCalls, textParts, err = a.callWithRetryAndFallbackStreaming(toolCallDoneCh, executor)
+
+			// Close the channel to signal no more tool calls will arrive
+			close(toolCallDoneCh)
+
+			// If we got tool calls and have a streaming executor, wait for
+			// pipelined execution to complete instead of synchronous execution.
+			if len(toolCalls) > 0 && executor != nil {
+				streamingResults := executor.Wait(len(toolCalls))
+				if len(streamingResults) > 0 {
+					// Streaming executor completed all tool calls — use results directly
+					streamingExecDone = true
+					var toolResults []anthropic.ToolResultBlockParam
+					for _, sr := range streamingResults {
+						toolResults = append(toolResults, anthropic.ToolResultBlockParam{
+							ToolUseID: sr.toolUseID,
+							Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: sr.output}}},
+							IsError:   anthropic.Bool(sr.isError),
+						})
+					}
+					a.context.AddToolResults(toolResults)
+				}
+				// Fallback: if streaming executor didn't produce results,
+				// the traditional synchronous execution path below will handle it
+			}
 		} else {
 			toolCalls, textParts, err = a.callWithNonStreamingOnly()
 		}
@@ -1468,7 +1499,9 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 		}
 
-		a.executeToolCallsConcurrent(toolCalls)
+		if !streamingExecDone {
+				a.executeToolCallsConcurrent(toolCalls)
+			}
 
 		// Increment extraction tracking for tool calls used this turn
 		if a.extractionState != nil && len(toolCalls) > 0 {
@@ -1937,6 +1970,14 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 // Uses a persistent CollectHandler across retries to track deltas state
 // (matching Hermes-agent retry strategy).
 func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, error) {
+	return a.callWithRetryAndFallbackStreaming(nil, nil)
+}
+
+// callWithRetryAndFallbackStreaming is like callWithRetryAndFallback but supports
+// pipelined tool execution during streaming. When toolCallDoneCh and executor
+// are non-nil, tool calls start executing as their content blocks complete,
+// overlapping with remaining stream processing.
+func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, executor *StreamingToolExecutor) ([]map[string]any, []string, error) {
 	const maxStreamRetries = 9 // 1 attempt + 9 retries = 10 total
 
 	toolParams := a.buildToolParams()
@@ -1985,7 +2026,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 			time.Sleep(delay)
 		}
 
-		toolCalls, textParts, err := a.tryStreamOnce(params, collect)
+		toolCalls, textParts, err := a.tryStreamOnce(params, collect, toolCallDoneCh, executor)
 		if err == nil {
 			// Success: reset consecutive 529 counter
 			a.consecutive529Errors = 0
@@ -2072,7 +2113,7 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 // tryStreamOnce makes a single streaming attempt and returns the result.
 // `collect` is passed in (not created) so it persists across retries.
-func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *CollectHandler) ([]map[string]any, []string, error) {
+func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *CollectHandler, toolCallDoneCh chan int, executor *StreamingToolExecutor) ([]map[string]any, []string, error) {
 	ctx, cancel := a.interruptCtx(context.Background(), 300*time.Second)
 	defer cancel()
 
@@ -2094,6 +2135,12 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	isLocal := isLocalEndpoint(a.config.BaseURL)
 	estTokens := estimateMessageTokens(params.Messages)
 	adapter.WithStallTimeout(isLocal, estTokens)
+
+	// Set up streaming tool executor callback if provided
+	if toolCallDoneCh != nil && executor != nil {
+		collect.SetToolCallDoneCh(toolCallDoneCh)
+		executor.Start(toolCallDoneCh, &collect.ToolCalls)
+	}
 
 	stream := a.client.Messages.NewStreaming(ctx, params)
 	if err := adapter.Process(stream, cancel); err != nil {

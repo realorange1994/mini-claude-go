@@ -68,6 +68,11 @@ type CollectHandler struct {
 	ChunksCollect int
 	toolUseAsText bool // detects model echoing tool syntax as text
 	finishReason  string // captured from MessageDeltaEvent.stop_reason
+	// toolCallDoneCh is an optional channel that receives the index of a
+	// completed tool call when its content block finishes during streaming.
+	// This enables pipelined tool execution: tools start as their arguments
+	// are fully assembled, overlapping with remaining stream processing.
+	toolCallDoneCh chan int
 }
 
 // ToolCallInfo records a tool call assembled from streaming deltas.
@@ -123,6 +128,15 @@ func NewCollectHandler() *CollectHandler {
 	}
 }
 
+// SetToolCallDoneCh sets a channel that receives tool call indices when
+// their content blocks complete during streaming. Used for pipelined tool
+// execution — tools start as arguments are fully assembled.
+func (h *CollectHandler) SetToolCallDoneCh(ch chan int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.toolCallDoneCh = ch
+}
+
 // Handle consumes one chunk. Safe for concurrent use.
 func (h *CollectHandler) Handle(chunk StreamChunk) error {
 	h.mu.Lock()
@@ -171,7 +185,19 @@ func (h *CollectHandler) Handle(chunk StreamChunk) error {
 		// stream finished
 
 	case ChunkTypeBlockStop:
-		// content block finished -- no-op for collector
+		// Content block finished — if the last tool call just completed,
+		// notify the streaming tool executor so it can start pipelined execution.
+		if h.toolCallDoneCh != nil {
+			if n := len(h.ToolCalls); n > 0 {
+				// Emit the index of the just-completed tool call.
+				// Non-blocking send: if the channel is full, the executor
+				// will pick it up on the next event.
+				select {
+				case h.toolCallDoneCh <- n - 1:
+				default:
+				}
+			}
+		}
 	}
 
 	return nil
