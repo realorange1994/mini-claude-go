@@ -310,6 +310,7 @@ type AgentLoop struct {
 	todoList                 *tools.TodoList            // structured task list for TodoWrite tool
 	totalInputTokens         atomic.Int64               // cumulative input tokens across all turns
 	totalOutputTokens        atomic.Int64               // cumulative output tokens across all turns
+	costTracker              *CostTracker               // per-model USD cost tracking with session persistence
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
 	extractionState          *ExtractionState           // session memory extraction threshold tracking
 	hooks                    *HookManager              // compact pre/post hook handlers
@@ -323,6 +324,23 @@ func (a *AgentLoop) recordTokenUsage(inputTokens, outputTokens int64) {
 	}
 	if outputTokens > 0 {
 		a.totalOutputTokens.Add(outputTokens)
+	}
+	if a.costTracker != nil {
+		a.costTracker.RecordUsage(a.config.Model, inputTokens, outputTokens, 0, 0)
+	}
+}
+
+// recordTokenUsageWithCache accumulates API token usage including cache tokens
+// and records per-model USD cost.
+func (a *AgentLoop) recordTokenUsageWithCache(inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int64) {
+	if inputTokens > 0 {
+		a.totalInputTokens.Add(inputTokens)
+	}
+	if outputTokens > 0 {
+		a.totalOutputTokens.Add(outputTokens)
+	}
+	if a.costTracker != nil {
+		a.costTracker.RecordUsage(a.config.Model, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens)
 	}
 }
 
@@ -411,6 +429,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		toolStateTracker:  NewToolStateTracker(),
 		todoList:          tools.NewTodoList(),
 		cachedMC:          NewCachedMicrocompactTracker(),
+		costTracker:       NewCostTracker(),
 		extractionState:   NewExtractionState(),
 		hooks:             cfg.Hooks,
 	}
@@ -563,6 +582,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		toolStateTracker:  NewToolStateTracker(),
 		todoList:          tools.NewTodoList(),
 		cachedMC:          NewCachedMicrocompactTracker(),
+		costTracker:       NewCostTracker(),
 		extractionState:   NewExtractionState(),
 				hooks:             cfg.Hooks,
 		}
@@ -1293,6 +1313,16 @@ func (a *AgentLoop) Close() {
 	if a.transcript != nil {
 		_ = a.transcript.Close()
 	}
+
+	// Save and display cost summary at session end.
+	if a.costTracker != nil {
+		if tp := a.TranscriptPath(); tp != "" {
+			costPath := tp + ".cost.json"
+			_ = a.costTracker.SaveToFile(costPath)
+			a.out("\n[cost] Session cost saved to %s\n", costPath)
+		}
+		a.out("\n%s\n", a.costTracker.FormatCostDisplay())
+	}
 }
 
 // ForceCompact forces a context compaction (for /compact command).
@@ -1519,7 +1549,8 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		if err == nil {
 			// Accumulate token usage from this non-streaming response
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
-				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
+				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
+					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
 			}
 			return response, nil
 		}
@@ -1732,7 +1763,9 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 
 	// Accumulate token usage from this streaming response
 	if collect.Usage != nil {
-		a.recordTokenUsage(int64(collect.Usage.InputTokens), int64(collect.Usage.OutputTokens))
+		a.recordTokenUsageWithCache(
+			int64(collect.Usage.InputTokens), int64(collect.Usage.OutputTokens),
+			int64(collect.Usage.CacheWriteTokens), int64(collect.Usage.CacheReadTokens))
 	}
 
 	// Detect incomplete streams: if the stream produced no assistant message
@@ -1849,7 +1882,8 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		if err == nil {
 			// Accumulate token usage from this non-streaming response
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
-				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
+				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
+					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// Register compactable tool_use IDs for cache_edits tracking.
@@ -1922,7 +1956,8 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		if err == nil {
 			// Accumulate token usage from this non-streaming response
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
-				a.recordTokenUsage(response.Usage.InputTokens, response.Usage.OutputTokens)
+				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
+					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// Register compactable tool_use IDs for cache_edits tracking.
