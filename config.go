@@ -362,6 +362,7 @@ func DefaultRegistry() *tools.Registry {
 	r.Register(&tools.ProcessTool{})
 	r.Register(&tools.FileOpsTool{})
 	r.Register(&tools.GitTool{})
+	r.Register(tools.NewNotebookEditTool(r))
 	r.Register(&tools.SystemTool{})
 	r.Register(&tools.TerminalTool{})
 	// ToolSearchTool's Registry field is nil here; it is set by the agent loop
