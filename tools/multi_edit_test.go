@@ -93,3 +93,56 @@ func TestMultiEditMissingRequiredParams(t *testing.T) {
 		t.Error("expected error for missing required params")
 	}
 }
+
+func TestMultiEditMultipleMatchesWithoutReplaceAll(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "dup.go")
+	// File contains "func foo()" twice
+	os.WriteFile(fp, []byte("package main\n\nfunc foo() {}\n\nfunc foo() {}\n"), 0644)
+
+	tool := &MultiEditTool{}
+	result := tool.Execute(map[string]any{
+		"file_path": fp,
+		"edits": []any{
+			map[string]any{"old_string": "func foo()", "new_string": "func Foo()"},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for multiple matches without replace_all")
+	}
+	if !strings.Contains(result.Output, "multiple matches") {
+		t.Errorf("error should mention multiple matches, got: %s", result.Output)
+	}
+
+	// File should be unchanged (atomic rollback)
+	data, _ := os.ReadFile(fp)
+	if !strings.Contains(string(data), "func foo()") || strings.Count(string(data), "func foo()") != 2 {
+		t.Errorf("file should be unchanged after failed edit:\n%s", data)
+	}
+}
+
+func TestMultiEditMultipleMatchesWithReplaceAll(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "dup2.go")
+	// File contains "func foo()" twice
+	os.WriteFile(fp, []byte("package main\n\nfunc foo() {}\n\nfunc foo() {}\n"), 0644)
+
+	tool := &MultiEditTool{}
+	result := tool.Execute(map[string]any{
+		"file_path": fp,
+		"edits": []any{
+			map[string]any{"old_string": "func foo()", "new_string": "func Foo()", "replace_all": true},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+
+	data, _ := os.ReadFile(fp)
+	if strings.Contains(string(data), "func foo()") {
+		t.Errorf("all occurrences should be replaced, got:\n%s", data)
+	}
+	if strings.Count(string(data), "func Foo()") != 2 {
+		t.Errorf("expected 2 occurrences of Foo(), got:\n%s", data)
+	}
+}

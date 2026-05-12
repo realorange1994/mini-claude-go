@@ -206,6 +206,18 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 			}
 		}
 
+		// When replace_all is false, reject ambiguous edits where old_string
+		// matches multiple locations — upstream returns an error in this case.
+		if !e.replaceAll {
+			cnt := countOccurrences(content, e.old)
+			if cnt > 1 {
+				return ToolResult{
+					Output: fmt.Sprintf("Error: edit %d failed: old_string has multiple matches; set replace_all to true to replace all, or provide more context to uniquely identify the location", i+1),
+					IsError: true,
+				}
+			}
+		}
+
 		// Apply in test content
 		if e.replaceAll {
 			content = strings.ReplaceAll(content, e.old, e.new)
@@ -244,6 +256,23 @@ func findEditLocation(content, old string) int {
 		return strings.Index(content, trimmed)
 	}
 	return -1
+}
+
+// countOccurrences counts how many times substr appears in content.
+func countOccurrences(content, substr string) int {
+	if substr == "" {
+		return 0
+	}
+	count := 0
+	for {
+		idx := strings.Index(content, substr)
+		if idx < 0 {
+			break
+		}
+		count++
+		content = content[idx+len(substr):]
+	}
+	return count
 }
 
 // desanitize applies all known sanitization reversals to a string.
