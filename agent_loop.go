@@ -345,6 +345,7 @@ type AgentLoop struct {
 	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
 	errorReporter              *ErrorReporter            // captures error events for analysis
 	featureFlags               *FeatureFlagStore         // feature flag store
+	telemetry                  *TelemetryManager         // telemetry event tracking
 }
 
 // handle529Error processes a 529 Overloaded error. It increments the consecutive
@@ -565,6 +566,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		sonnetModel:       "claude-sonnet-4-20250514",
 		errorReporter:    NewErrorReporter(),
 		featureFlags:     NewFeatureFlagStore(),
+		telemetry:       NewTelemetryManager(),
 	}
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
@@ -738,6 +740,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		hooks:             cfg.Hooks,
 		errorReporter:    NewErrorReporter(),
 		featureFlags:     NewFeatureFlagStore(),
+		telemetry:       NewTelemetryManager(),
 	}
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()

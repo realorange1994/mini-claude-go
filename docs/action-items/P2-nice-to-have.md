@@ -1,7 +1,7 @@
 # P2 — Nice-to-Have Gaps
 
 > Quality-of-life improvements, architectural features, and long-term goals
-> Updated: 2026-05-13 (15 DONE, 1 PARTIAL, 14 NEW)
+> Updated: 2026-05-13 (16 DONE, 1 PARTIAL, 13 NEW)
 
 These gaps would improve the user experience or enable future capabilities but are not blocking current functionality.
 
@@ -65,20 +65,17 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 05-services.md §2 |
-| Status | NEW |
-| Affected files | New: `telemetry/` |
+| Status | DONE (PASS) |
+| Affected files | `telemetry.go` |
 | Upstream | OpenTelemetry, Sentry, Langfuse integrations |
 | REPL | N/A — core service logic |
 
-**Missing**: OpenTelemetry spans/events, Sentry error reporting, Langfuse LLM observability, session analytics, telemetry opt-out.
-
-**Why P2**: No production deployment yet; analytics can be deferred.
-
-**Action items**:
-1. Add OpenTelemetry SDK dependency
-2. Instrument API calls with spans
-3. Add error reporting pipeline
-4. Add opt-out via env var
+**Implemented**:
+1. `TelemetryManager` — JSONL-based event persistence in `.claude/telemetry/YYYY-MM-DD.jsonl`
+2. `RecordAPICall()`, `RecordToolCall()`, `RecordCompaction()` — high-level event recording
+3. `/telemetry recent [N]|enable|disable|clear` REPL command
+4. `CLAUDE_CODE_TELEMETRY_DISABLED` env var for opt-out
+5. `GetRecent(n)` / `Summary()` for programmatic access
 
 ---
 
@@ -617,7 +614,7 @@ These gaps would improve the user experience or enable future capabilities but a
 |---|-----|--------|--------|----------|
 | P2-1 | OAuth/PKCE | NEW | Large | N/A |
 | P2-2 | Basic TUI | NEW | Large | TUI |
-| P2-3 | Analytics | NEW | Medium | N/A |
+| P2-3 | Analytics | DONE (PASS) | Medium | N/A |
 | P2-4 | Feature flags | DONE (PASS) | Medium | N/A |
 | P2-5 | Multi-provider | NEW | Large | N/A |
 | P2-6 | MCP transports | NEW | Medium | N/A |
