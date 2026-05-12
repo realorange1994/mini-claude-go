@@ -90,6 +90,7 @@ All data extracted from [diff_upstream/](../diff_upstream/) (32 分类文件, �
 | 19 | Orphaned tool_result backfill + streaming tool executor (pipelined tool execution during streaming) | P0 | PARTIAL | Committed |
 | 20 | Error classification system (15-category enum with structured recovery hints) | P1 | PARTIAL | Committed |
 | 21 | MCP tool schema validation (ValidateSchema with type/enum/constraints) | P1 | PASS | Committed |
+| 22 | Notebook Edit Tool (cell-level replace/insert/delete, nbformat 4+, read-before-edit, 16 tests) | P1 | PASS | Committed |
 
 ## REPL Positioning
 
