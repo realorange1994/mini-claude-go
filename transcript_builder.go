@@ -3,10 +3,25 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// escapeContentInjection removes any JSON that could be forged by the assistant
+// to manipulate the classifier. It strips potential <classifier_decision> tags
+// and escapes embedded JSON that matches the classifier output schema.
+func escapeContentInjection(text string) string {
+	// Remove any content that looks like classifier manipulation
+	// Strip patterns like: {"action": "allow", ...}
+	text = regexp.MustCompile(`(?s)\{"action"\s*:\s*"allow|deny"`).ReplaceAllString(text, "[REDACTED_JSON]")
+	// Remove <classifier_decision>...</classifier_decision> tags
+	text = regexp.MustCompile(`(?s)<classifier_decision>.*?</classifier_decision>`).ReplaceAllString(text, "")
+	// Also strip decision/reason JSON that mimics classifier output schema
+	text = regexp.MustCompile(`(?s)\{"decision"\s*:\s*"allow|block"`).ReplaceAllString(text, "[REDACTED_JSON]")
+	return text
+}
 
 // BuildCompactTranscript builds a compact conversation transcript for the
 // auto mode classifier. It includes user messages and tool calls but NOT
@@ -36,6 +51,7 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 				if len(text) > 500 {
 					text = text[:500] + "..."
 				}
+				text = escapeContentInjection(text)
 				sb.WriteString(fmt.Sprintf("[User] %s\n", text))
 			}
 			// Skip assistant text (security: don't let agent influence classifier)
@@ -44,6 +60,7 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 			for _, block := range v {
 				if block.OfToolUse != nil {
 					inputDesc := formatToolInputCompact(block.OfToolUse.Name, block.OfToolUse.Input)
+					inputDesc = escapeContentInjection(inputDesc)
 					sb.WriteString(fmt.Sprintf("[Tool: %s] %s\n", block.OfToolUse.Name, inputDesc))
 				}
 			}
@@ -54,6 +71,7 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 				if len(content) > 100 {
 					content = content[:100] + "..."
 				}
+				content = escapeContentInjection(content)
 				// Check if this is an AskUserQuestion result with user approval
 				if isAskUserApproval(content) {
 					sb.WriteString(fmt.Sprintf("[Result] USER EXPLICITLY APPROVED: %s\n", content))

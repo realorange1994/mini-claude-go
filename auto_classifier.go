@@ -633,6 +633,12 @@ func (c *AutoModeClassifier) Classify(
 		return ClassifierResult{Allow: true, Reason: "whitelisted tool"}
 	}
 
+	// Empty action bypass: skip the expensive Stage 1 + Stage 2 calls
+	// when the input contains no actionable content for the classifier.
+	if !hasClassifierRelevantContent(toolName, toolInput) {
+		return ClassifierResult{Allow: true, Reason: "empty action bypass"}
+	}
+
 	// Check cache
 	cacheKey := c.cacheKey(toolName, toolInput)
 	if result, ok := c.getCached(cacheKey); ok {
@@ -675,6 +681,7 @@ func (c *AutoModeClassifier) callClassifier(
 	transcript string,
 ) ClassifierResult {
 	actionDesc := formatActionForClassifier(toolName, toolInput)
+	var metrics []ClassifierStageMetrics
 
 	userMsg := ""
 	if c.claudeMd != "" {
@@ -697,20 +704,67 @@ func (c *AutoModeClassifier) callClassifier(
 	defer cancel()
 
 	// Stage 1: fast classification
+	stage1Start := time.Now()
 	result, err := c.callStage1(ctx, userMsg, actionDesc)
+	stage1Duration := time.Since(stage1Start).Milliseconds()
+
+	m1 := ClassifierStageMetrics{
+		Stage:      1,
+		DurationMs: stage1Duration,
+	}
+	if err != nil {
+		m1.Error = err.Error()
+		m1.Result = "error"
+	} else if result.Allow {
+		m1.Result = "allow"
+	} else {
+		m1.Result = "deny"
+	}
+	metrics = append(metrics, m1)
+
 	if err != nil {
 		// Stage 1 API error — escalate to Stage 2 for reasoning
 		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 error (%s), escalating to Stage 2\n", err)
-		return c.callStage2(ctx, userMsg, actionDesc)
+		stage2Result := c.callStage2(ctx, userMsg, actionDesc)
+		stage2ResultMetric := ClassifierStageMetrics{
+			Stage:      2,
+			DurationMs: time.Since(stage1Start).Milliseconds() - stage1Duration,
+		}
+		if stage2Result.Allow {
+			stage2ResultMetric.Result = "allow"
+		} else {
+			stage2ResultMetric.Result = "deny"
+		}
+		metrics = append(metrics, stage2ResultMetric)
+		logClassifierMetrics(metrics)
+		return stage2Result
 	}
 	if result.Allow {
 		// Fast path: allowed by Stage 1
 		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 ALLOWED: %s (%s)\n", actionDesc, result.Reason)
+		logClassifierMetrics(metrics)
 		return result
 	}
 	// Stage 1 blocked — escalate to Stage 2 for thorough review
 	fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 blocked (%s), escalating to Stage 2\n", result.Reason)
-	return c.callStage2(ctx, userMsg, actionDesc)
+
+	stage2Start := time.Now()
+	stage2Result := c.callStage2(ctx, userMsg, actionDesc)
+	stage2Duration := time.Since(stage2Start).Milliseconds()
+
+	m2 := ClassifierStageMetrics{
+		Stage:      2,
+		DurationMs: stage2Duration,
+	}
+	if stage2Result.Allow {
+		m2.Result = "allow"
+	} else {
+		m2.Result = "deny"
+	}
+	metrics = append(metrics, m2)
+
+	logClassifierMetrics(metrics)
+	return stage2Result
 }
 
 // callStage1 makes the fast classification API call.
@@ -1194,5 +1248,100 @@ func (c *AutoModeClassifier) setCached(key string, result ClassifierResult) {
 	c.cache[key] = cacheEntry{
 		result:    result,
 		expiresAt: time.Now().Add(cacheTTL),
+	}
+}
+
+// ClassifierStageMetrics tracks telemetry for a single classifier stage.
+type ClassifierStageMetrics struct {
+	Stage        int    `json:"stage"`
+	DurationMs   int64  `json:"duration_ms"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	RequestID    string `json:"request_id"`
+	Result       string `json:"result"` // "allow" or "deny"
+	Error        string `json:"error,omitempty"`
+}
+
+// logClassifierMetrics prints per-stage telemetry to stderr.
+func logClassifierMetrics(metrics []ClassifierStageMetrics) {
+	if len(metrics) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[classifier-telemetry] ")
+	for _, m := range metrics {
+		fmt.Fprintf(os.Stderr, "stage=%d duration=%dms input=%d output=%d result=%s ", m.Stage, m.DurationMs, m.InputTokens, m.OutputTokens, m.Result)
+	}
+	fmt.Fprintln(os.Stderr)
+}
+
+// hasClassifierRelevantContent checks if the input contains meaningful content
+// for the permission classifier to analyze. If the input is empty or trivially
+// safe, the classifier is skipped and a fast "allow" is returned.
+func hasClassifierRelevantContent(toolName string, toolInput map[string]any) bool {
+	if toolInput == nil {
+		return false
+	}
+
+	switch toolName {
+	case "exec":
+		cmd, _ := toolInput["command"].(string)
+		if cmd == "" {
+			return false
+		}
+		// Check for dangerous patterns
+		dangerousPatterns := []string{"rm -rf", "sudo", "curl | sh", "wget | bash", "chmod 777", "chown", "dd if=", "mkfs", "format"}
+		for _, pattern := range dangerousPatterns {
+			if strings.Contains(strings.ToLower(cmd), strings.ToLower(pattern)) {
+				return true
+			}
+		}
+		// Simple read-only commands are safe to auto-allow
+		safePrefixes := []string{"ls ", "cat ", "head ", "tail ", "grep ", "find ", "pwd ", "echo ", "cd ", "dir ", "type "}
+		trimmed := strings.TrimSpace(cmd)
+		for _, prefix := range safePrefixes {
+			if strings.HasPrefix(trimmed, prefix) {
+				return false
+			}
+		}
+		// Exact match on bare commands
+		safeExact := []string{"ls", "pwd", "dir", "date", "whoami", "hostname", "uname"}
+		for _, safe := range safeExact {
+			if trimmed == safe {
+				return false
+			}
+		}
+		// Unknown command: process through classifier
+		return true
+
+	case "write_file", "edit_file", "multi_edit":
+		path, _ := toolInput["file_path"].(string)
+		if path == "" {
+			return false
+		}
+		return true
+
+	case "fileops":
+		op, _ := toolInput["operation"].(string)
+		if op == "" {
+			return false
+		}
+		return true
+
+	case "agent":
+		prompt, _ := toolInput["prompt"].(string)
+		desc, _ := toolInput["description"].(string)
+		if prompt == "" && desc == "" {
+			return false
+		}
+		return true
+
+	default:
+		// Check if any field has non-empty content
+		for _, v := range toolInput {
+			if s, ok := v.(string); ok && s != "" {
+				return true
+			}
+		}
+		return false
 	}
 }
