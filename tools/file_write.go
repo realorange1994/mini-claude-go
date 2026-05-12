@@ -110,5 +110,15 @@ func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	if w.registry != nil {
 		w.registry.MarkFileReadWithContent(fp, content)
 	}
-	return ToolResult{Output: fmt.Sprintf("Wrote %d chars to %s", len(content), fp)}
+
+	out := fmt.Sprintf("Wrote %d chars to %s", len(content), fp)
+	// Warn on large writes (P2-14: large file confirmation).
+	// Upstream asks user to confirm files > 1MB. In REPL mode, the model
+	// should present this warning to the user for confirmation.
+	const warnThreshold = 1024 * 1024 // 1MB
+	if len(content) > warnThreshold {
+		sizeMB := float64(len(content)) / (1024 * 1024)
+		out += fmt.Sprintf("\n[WARN] Large file written (%.1f MB). Confirm with the user before proceeding.", sizeMB)
+	}
+	return ToolResult{Output: out}
 }
