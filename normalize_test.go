@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 )
 
 func TestNormalizeWhitespace(t *testing.T) {
@@ -305,3 +306,928 @@ func BenchmarkSortMapKeys(b *testing.B) {
 
 // Suppress unused import warning
 var _ = sort.Strings
+
+// ============================================================================
+// Tests for P1-6a: StripVirtualMessages
+// ============================================================================
+
+func TestStripVirtualMessagesEmpty(t *testing.T) {
+	result := StripVirtualMessages(nil)
+	if len(result) != 0 {
+		t.Errorf("expected empty for nil input, got %d", len(result))
+	}
+	result = StripVirtualMessages([]anthropic.MessageParam{})
+	if len(result) != 0 {
+		t.Errorf("expected empty for empty input, got %d", len(result))
+	}
+}
+
+func TestStripVirtualMessagesVirtualOnly(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "[virtual]"}},
+			},
+		},
+	}
+	result := StripVirtualMessages(msgs)
+	if len(result) != 0 {
+		t.Errorf("expected 0 messages after stripping virtual, got %d", len(result))
+	}
+}
+
+func TestStripVirtualMessagesSystemOnly(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "[system]"}},
+			},
+		},
+	}
+	result := StripVirtualMessages(msgs)
+	if len(result) != 0 {
+		t.Errorf("expected 0 messages after stripping system, got %d", len(result))
+	}
+}
+
+func TestStripVirtualMessagesWhitespaceOnly(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "   "}},
+			},
+		},
+	}
+	result := StripVirtualMessages(msgs)
+	if len(result) != 0 {
+		t.Errorf("expected 0 messages after stripping whitespace-only, got %d", len(result))
+	}
+}
+
+func TestStripVirtualMessagesEmptyContent(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role:    anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{},
+		},
+	}
+	result := StripVirtualMessages(msgs)
+	if len(result) != 0 {
+		t.Errorf("expected 0 messages after stripping empty content, got %d", len(result))
+	}
+}
+
+func TestStripVirtualMessagesMixedVirtualBlocks(t *testing.T) {
+	// All text blocks are virtual markers → should be stripped
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "[virtual]"}},
+				{OfText: &anthropic.TextBlockParam{Text: "[system]"}},
+				{OfText: &anthropic.TextBlockParam{Text: ""}},
+			},
+		},
+	}
+	result := StripVirtualMessages(msgs)
+	if len(result) != 0 {
+		t.Errorf("expected 0 messages, got %d", len(result))
+	}
+}
+
+func TestStripVirtualMessagesKeepsRealContent(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Hello, this is real content"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "[virtual]"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Response"}},
+			},
+		},
+	}
+	result := StripVirtualMessages(msgs)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result))
+	}
+	if result[0].Content[0].OfText.Text != "Hello, this is real content" {
+		t.Errorf("expected first message to be kept, got %q", result[0].Content[0].OfText.Text)
+	}
+	if result[1].Role != anthropic.MessageParamRoleAssistant {
+		t.Errorf("expected second message to be assistant")
+	}
+}
+
+func TestStripVirtualMessagesKeepsNonTextBlocks(t *testing.T) {
+	// A user message with an image block should NOT be stripped even if
+	// it also has a [virtual] text block.
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "[virtual]"}},
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64ImageSourceParam{
+							Data:      "dGVzdA==",
+							MediaType: anthropic.Base64ImageSourceMediaTypeImagePNG,
+						},
+					},
+				}},
+			},
+		},
+	}
+	result := StripVirtualMessages(msgs)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message (has non-text block), got %d", len(result))
+	}
+}
+
+// ============================================================================
+// Tests for P1-6b: ReorderAttachmentsForAPI
+// ============================================================================
+
+func TestReorderAttachmentsEmpty(t *testing.T) {
+	result := ReorderAttachmentsForAPI(nil)
+	if len(result) != 0 {
+		t.Errorf("expected empty for nil input, got %d", len(result))
+	}
+}
+
+func TestReorderAttachmentsNoAttachments(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Hello"}},
+			},
+		},
+	}
+	result := ReorderAttachmentsForAPI(msgs)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+	if result[0].Content[0].OfText.Text != "Hello" {
+		t.Errorf("expected text block first, got %+v", result[0].Content[0])
+	}
+}
+
+func TestReorderAttachmentsImageAfterText(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Here's the image:"}},
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64ImageSourceParam{
+							Data:      "dGVzdA==",
+							MediaType: anthropic.Base64ImageSourceMediaTypeImagePNG,
+						},
+					},
+				}},
+			},
+		},
+	}
+	result := ReorderAttachmentsForAPI(msgs)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+	if len(result[0].Content) != 2 {
+		t.Fatalf("expected 2 content blocks, got %d", len(result[0].Content))
+	}
+	// Image should be first after reordering
+	if result[0].Content[0].OfImage == nil {
+		t.Error("expected image block first after reorder")
+	}
+	if result[0].Content[1].OfText == nil {
+		t.Error("expected text block second after reorder")
+	}
+}
+
+func TestReorderAttachmentsDocumentAfterToolResult(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool-1",
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "result"}},
+					},
+				}},
+				{OfDocument: &anthropic.DocumentBlockParam{
+					Source: anthropic.DocumentBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64PDFSourceParam{
+							Data: "dGVzdA==",
+						},
+					},
+				}},
+			},
+		},
+	}
+	result := ReorderAttachmentsForAPI(msgs)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+	// Document should be first after reordering
+	if result[0].Content[0].OfDocument == nil {
+		t.Error("expected document block first after reorder")
+	}
+	if result[0].Content[1].OfToolResult == nil {
+		t.Error("expected tool_result block second after reorder")
+	}
+}
+
+func TestReorderAttachmentsMultipleAttachments(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Text 1"}},
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/1.png"},
+					},
+				}},
+				{OfText: &anthropic.TextBlockParam{Text: "Text 2"}},
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/2.png"},
+					},
+				}},
+			},
+		},
+	}
+	result := ReorderAttachmentsForAPI(msgs)
+	if len(result[0].Content) != 4 {
+		t.Fatalf("expected 4 content blocks, got %d", len(result[0].Content))
+	}
+	// First two should be images (in original order), then two text blocks
+	if result[0].Content[0].OfImage == nil || result[0].Content[1].OfImage == nil {
+		t.Error("expected images first after reorder")
+	}
+	if result[0].Content[2].OfText == nil || result[0].Content[3].OfText == nil {
+		t.Error("expected text blocks after images after reorder")
+	}
+}
+
+func TestReorderAttachmentsAssistantUnchanged(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Response"}},
+			},
+		},
+	}
+	result := ReorderAttachmentsForAPI(msgs)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+	if result[0].Content[0].OfText.Text != "Response" {
+		t.Error("assistant message should be unchanged")
+	}
+}
+
+func TestReorderAttachmentsSingleBlockNoChange(t *testing.T) {
+	// Single content block — no reordering needed
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/img.png"},
+					},
+				}},
+			},
+		},
+	}
+	result := ReorderAttachmentsForAPI(msgs)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+	if result[0].Content[0].OfImage == nil {
+		t.Error("expected image block")
+	}
+}
+
+// ============================================================================
+// Tests for P1-6c: ValidateImagesForAPI
+// ============================================================================
+
+func TestValidateImagesEmpty(t *testing.T) {
+	msgs, reasons := ValidateImagesForAPI(nil)
+	if len(msgs) != 0 {
+		t.Errorf("expected empty for nil input, got %d", len(msgs))
+	}
+	if reasons != nil {
+		t.Errorf("expected nil reasons for nil input, got %v", reasons)
+	}
+}
+
+func TestValidateImagesValidBase64(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64ImageSourceParam{
+							Data:      "dGVzdA==",
+							MediaType: anthropic.Base64ImageSourceMediaTypeImagePNG,
+						},
+					},
+				}},
+			},
+		},
+	}
+	result, reasons := ValidateImagesForAPI(msgs)
+	if len(reasons) > 0 {
+		t.Errorf("expected no reasons for valid image, got %v", reasons)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+	if len(result[0].Content) != 1 {
+		t.Errorf("expected 1 content block, got %d", len(result[0].Content))
+	}
+}
+
+func TestValidateImagesValidURL(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/img.png"},
+					},
+				}},
+			},
+		},
+	}
+	result, reasons := ValidateImagesForAPI(msgs)
+	if len(reasons) > 0 {
+		t.Errorf("expected no reasons for valid URL image, got %v", reasons)
+	}
+	if len(result[0].Content) != 1 {
+		t.Errorf("expected 1 content block, got %d", len(result[0].Content))
+	}
+}
+
+func TestValidateImagesNoSource(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfImage: &anthropic.ImageBlockParam{}},
+			},
+		},
+	}
+	result, reasons := ValidateImagesForAPI(msgs)
+	if len(reasons) != 1 {
+		t.Fatalf("expected 1 reason, got %d: %v", len(reasons), reasons)
+	}
+	if len(result[0].Content) != 0 {
+		t.Errorf("expected 0 content blocks after removing invalid image, got %d", len(result[0].Content))
+	}
+}
+
+func TestValidateImagesEmptyBase64Data(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64ImageSourceParam{
+							Data:      "",
+							MediaType: anthropic.Base64ImageSourceMediaTypeImagePNG,
+						},
+					},
+				}},
+			},
+		},
+	}
+	result, reasons := ValidateImagesForAPI(msgs)
+	if len(reasons) != 1 {
+		t.Fatalf("expected 1 reason, got %d: %v", len(reasons), reasons)
+	}
+	if reasons[0] != "image base64 source has empty data" {
+		t.Errorf("unexpected reason: %s", reasons[0])
+	}
+	if len(result[0].Content) != 0 {
+		t.Errorf("expected 0 content blocks, got %d", len(result[0].Content))
+	}
+}
+
+func TestValidateImagesUnsupportedMediaType(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64ImageSourceParam{
+							Data:      "dGVzdA==",
+							MediaType: anthropic.Base64ImageSourceMediaType("image/bmp"),
+						},
+					},
+				}},
+			},
+		},
+	}
+	result, reasons := ValidateImagesForAPI(msgs)
+	if len(reasons) != 1 {
+		t.Fatalf("expected 1 reason, got %d: %v", len(reasons), reasons)
+	}
+	if len(result[0].Content) != 0 {
+		t.Errorf("expected 0 content blocks after removing unsupported media type, got %d", len(result[0].Content))
+	}
+}
+
+func TestValidateImagesEmptyURL(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfURL: &anthropic.URLImageSourceParam{URL: ""},
+					},
+				}},
+			},
+		},
+	}
+	result, reasons := ValidateImagesForAPI(msgs)
+	if len(reasons) != 1 {
+		t.Fatalf("expected 1 reason, got %d: %v", len(reasons), reasons)
+	}
+	if reasons[0] != "image URL source has empty url" {
+		t.Errorf("unexpected reason: %s", reasons[0])
+	}
+	if len(result[0].Content) != 0 {
+		t.Errorf("expected 0 content blocks, got %d", len(result[0].Content))
+	}
+}
+
+func TestValidateImagesMixed(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Check this image:"}},
+				{OfImage: &anthropic.ImageBlockParam{}}, // invalid: no source
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/valid.png"},
+					},
+				}},
+			},
+		},
+	}
+	result, reasons := ValidateImagesForAPI(msgs)
+	if len(reasons) != 1 {
+		t.Fatalf("expected 1 reason, got %d: %v", len(reasons), reasons)
+	}
+	if len(result[0].Content) != 2 {
+		t.Errorf("expected 2 content blocks (text + valid image), got %d", len(result[0].Content))
+	}
+	// First should be text, second should be valid image
+	if result[0].Content[0].OfText == nil {
+		t.Error("expected text block first")
+	}
+	if result[0].Content[1].OfImage == nil {
+		t.Error("expected valid image block second")
+	}
+}
+
+func TestValidateImagesAllSupportedMediaTypes(t *testing.T) {
+	mediaTypes := []anthropic.Base64ImageSourceMediaType{
+		anthropic.Base64ImageSourceMediaTypeImageJPEG,
+		anthropic.Base64ImageSourceMediaTypeImagePNG,
+		anthropic.Base64ImageSourceMediaTypeImageGIF,
+		anthropic.Base64ImageSourceMediaTypeImageWebP,
+	}
+	for _, mt := range mediaTypes {
+		msgs := []anthropic.MessageParam{
+			{
+				Role: anthropic.MessageParamRoleUser,
+				Content: []anthropic.ContentBlockParamUnion{
+					{OfImage: &anthropic.ImageBlockParam{
+						Source: anthropic.ImageBlockParamSourceUnion{
+							OfBase64: &anthropic.Base64ImageSourceParam{
+								Data:      "dGVzdA==",
+								MediaType: mt,
+							},
+						},
+					}},
+				},
+			},
+		}
+		result, reasons := ValidateImagesForAPI(msgs)
+		if len(reasons) != 0 {
+			t.Errorf("media type %s: expected no reasons, got %v", mt, reasons)
+		}
+		if len(result[0].Content) != 1 {
+			t.Errorf("media type %s: expected 1 content block, got %d", mt, len(result[0].Content))
+		}
+	}
+}
+
+func TestIsValidImageBlockNil(t *testing.T) {
+	valid, reason := isValidImageBlock(nil)
+	if valid {
+		t.Error("expected nil image block to be invalid")
+	}
+	if reason != "image block is nil" {
+		t.Errorf("unexpected reason: %s", reason)
+	}
+}
+
+// ============================================================================
+// Tests for P1-6d: StripImagesFromErrorToolResults
+// ============================================================================
+
+func TestStripImagesFromErrorToolResultsEmpty(t *testing.T) {
+	result := StripImagesFromErrorToolResults(nil)
+	if len(result) != 0 {
+		t.Errorf("expected empty for nil input, got %d", len(result))
+	}
+}
+
+func TestStripImagesFromErrorToolResultsNonError(t *testing.T) {
+	// Non-error tool_result should keep images
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool-1",
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "result"}},
+						{OfImage: &anthropic.ImageBlockParam{
+							Source: anthropic.ImageBlockParamSourceUnion{
+								OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/img.png"},
+							},
+						}},
+					},
+				}},
+			},
+		},
+	}
+	result := StripImagesFromErrorToolResults(msgs)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+	if len(result[0].Content[0].OfToolResult.Content) != 2 {
+		t.Errorf("expected 2 content blocks in non-error tool_result, got %d", len(result[0].Content[0].OfToolResult.Content))
+	}
+}
+
+func TestStripImagesFromErrorToolResultsErrorWithImage(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool-1",
+					IsError:   param.Opt[bool]{Value: true},
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "Error occurred"}},
+						{OfImage: &anthropic.ImageBlockParam{
+							Source: anthropic.ImageBlockParamSourceUnion{
+								OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/img.png"},
+							},
+						}},
+					},
+				}},
+			},
+		},
+	}
+	result := StripImagesFromErrorToolResults(msgs)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result))
+	}
+	tr := result[0].Content[0].OfToolResult
+	if len(tr.Content) != 1 {
+		t.Fatalf("expected 1 content block (text only), got %d", len(tr.Content))
+	}
+	if tr.Content[0].OfText == nil {
+		t.Error("expected text block to remain")
+	}
+	if tr.Content[0].OfText.Text != "Error occurred" {
+		t.Errorf("expected 'Error occurred', got %q", tr.Content[0].OfText.Text)
+	}
+}
+
+func TestStripImagesFromErrorToolResultsErrorWithDocument(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool-1",
+					IsError:   param.Opt[bool]{Value: true},
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "Error"}},
+						{OfDocument: &anthropic.DocumentBlockParam{
+							Source: anthropic.DocumentBlockParamSourceUnion{
+								OfBase64: &anthropic.Base64PDFSourceParam{Data: "dGVzdA=="},
+							},
+						}},
+					},
+				}},
+			},
+		},
+	}
+	result := StripImagesFromErrorToolResults(msgs)
+	tr := result[0].Content[0].OfToolResult
+	if len(tr.Content) != 1 {
+		t.Fatalf("expected 1 content block (text only), got %d", len(tr.Content))
+	}
+	if tr.Content[0].OfText == nil {
+		t.Error("expected text block to remain after document stripped")
+	}
+}
+
+func TestStripImagesFromErrorToolResultsPreservesNonErrorInSameMessage(t *testing.T) {
+	// Message with both error and non-error tool_results
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool-1",
+					IsError:   param.Opt[bool]{Value: true},
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "Error"}},
+						{OfImage: &anthropic.ImageBlockParam{
+							Source: anthropic.ImageBlockParamSourceUnion{
+								OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/err.png"},
+							},
+						}},
+					},
+				}},
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool-2",
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "Success"}},
+						{OfImage: &anthropic.ImageBlockParam{
+							Source: anthropic.ImageBlockParamSourceUnion{
+								OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/ok.png"},
+							},
+						}},
+					},
+				}},
+			},
+		},
+	}
+	result := StripImagesFromErrorToolResults(msgs)
+	// First tool_result (error) should have image stripped
+	tr1 := result[0].Content[0].OfToolResult
+	if len(tr1.Content) != 1 {
+		t.Errorf("expected 1 content block in error tool_result, got %d", len(tr1.Content))
+	}
+	// Second tool_result (non-error) should keep image
+	tr2 := result[0].Content[1].OfToolResult
+	if len(tr2.Content) != 2 {
+		t.Errorf("expected 2 content blocks in non-error tool_result, got %d", len(tr2.Content))
+	}
+}
+
+func TestStripImagesFromErrorToolResultsNoErrorToolResults(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Hello"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Hi"}},
+			},
+		},
+	}
+	result := StripImagesFromErrorToolResults(msgs)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result))
+	}
+}
+
+// ============================================================================
+// Integration tests for NormalizeAPIMessages with new pipeline stages
+// ============================================================================
+
+func TestNormalizeAPIMessagesStripsVirtualThenAlternates(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "[virtual]"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Hello"}},
+			},
+		},
+	}
+	result := NormalizeAPIMessages(msgs)
+	// Virtual message stripped → first is assistant → prepend synthetic user
+	// Result: synthetic user, assistant
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result))
+	}
+	if result[0].Role != anthropic.MessageParamRoleUser {
+		t.Error("expected first to be synthetic user")
+	}
+	if result[1].Role != anthropic.MessageParamRoleAssistant {
+		t.Error("expected second to be assistant")
+	}
+}
+
+func TestNormalizeAPIMessagesReordersAttachments(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "See image:"}},
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64ImageSourceParam{
+							Data:      "dGVzdA==",
+							MediaType: anthropic.Base64ImageSourceMediaTypeImagePNG,
+						},
+					},
+				}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "I see it"}},
+			},
+		},
+	}
+	result := NormalizeAPIMessages(msgs)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result))
+	}
+	// Image should be reordered to first position in user message
+	if result[0].Content[0].OfImage == nil {
+		t.Error("expected image block first after NormalizeAPIMessages reorder")
+	}
+	if result[0].Content[1].OfText == nil {
+		t.Error("expected text block second after NormalizeAPIMessages reorder")
+	}
+}
+
+func TestNormalizeAPIMessagesValidatesAndRemovesBadImages(t *testing.T) {
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfImage: &anthropic.ImageBlockParam{}}, // invalid: no source
+				{OfText: &anthropic.TextBlockParam{Text: "Check this"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "I can't see it"}},
+			},
+		},
+	}
+	result := NormalizeAPIMessages(msgs)
+	// Invalid image should be removed
+	userContent := result[0].Content
+	if len(userContent) != 1 {
+		t.Fatalf("expected 1 content block (text only), got %d", len(userContent))
+	}
+	if userContent[0].OfText == nil {
+		t.Error("expected text block to remain")
+	}
+}
+
+func TestNormalizeAPIMessagesStripsImagesFromErrorToolResults(t *testing.T) {
+	assistantMsg := anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleAssistant,
+		Content: []anthropic.ContentBlockParamUnion{
+			{OfToolUse: &anthropic.ToolUseBlockParam{
+				ID:    "tool-1",
+				Name:  "read_file",
+				Input: map[string]any{},
+			}},
+		},
+	}
+	userMsg := anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{
+			{OfToolResult: &anthropic.ToolResultBlockParam{
+				ToolUseID: "tool-1",
+				IsError:   param.Opt[bool]{Value: true},
+				Content: []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: "Error: file not found"}},
+					{OfImage: &anthropic.ImageBlockParam{
+						Source: anthropic.ImageBlockParamSourceUnion{
+							OfURL: &anthropic.URLImageSourceParam{URL: "https://example.com/screenshot.png"},
+						},
+					}},
+				},
+			}},
+		},
+	}
+	result := NormalizeAPIMessages([]anthropic.MessageParam{assistantMsg, userMsg})
+	// Find the user message with tool_result
+	for _, msg := range result {
+		if msg.Role == anthropic.MessageParamRoleUser {
+			for _, block := range msg.Content {
+				if block.OfToolResult != nil {
+					for _, c := range block.OfToolResult.Content {
+						if c.OfImage != nil {
+							t.Error("error tool_result should have images stripped")
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestNormalizeAPIMessagesFullPipelineOrder(t *testing.T) {
+	// Test that all pipeline stages work together correctly
+	msgs := []anthropic.MessageParam{
+		// Virtual message (should be stripped first)
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "[virtual]"}},
+			},
+		},
+		// User message with misplaced attachment and valid image
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "See image:"}},
+				{OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64ImageSourceParam{
+							Data:      "dGVzdA==",
+							MediaType: anthropic.Base64ImageSourceMediaTypeImageJPEG,
+						},
+					},
+				}},
+			},
+		},
+		// Assistant response
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "I see it"}},
+			},
+		},
+	}
+	result := NormalizeAPIMessages(msgs)
+
+	// After virtual stripping: [user, assistant]
+	// After role alternation: same (already alternating after virtual removed)
+	// After attachment reorder: image comes before text in first user message
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result))
+	}
+
+	// First message: user with image then text
+	if result[0].Role != anthropic.MessageParamRoleUser {
+		t.Error("expected first message to be user")
+	}
+	if result[0].Content[0].OfImage == nil {
+		t.Error("expected image block first (reordered)")
+	}
+	if result[0].Content[1].OfText == nil {
+		t.Error("expected text block second")
+	}
+
+	// Second message: assistant
+	if result[1].Role != anthropic.MessageParamRoleAssistant {
+		t.Error("expected second message to be assistant")
+	}
+}

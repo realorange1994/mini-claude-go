@@ -1,13 +1,17 @@
 // Package main provides API message normalization for KV cache reuse (Hermes-style).
 //
 // Normalizes API messages before sending to improve Anthropic prefix cache hit rate:
-// 1. Enforce role alternation (merge consecutive same-role messages)
-// 2. Ensure tool_use/tool_result pairing (fix orphans)
-// 3. Filter empty messages (remove whitespace-only assistant messages)
-// 4. Sort JSON keys in tool_call input by alphabetical order
-// 5. Normalize whitespace in tool_result content (collapse multiple blank lines)
-// 6. These normalizations make identical logical content produce identical API payloads,
-//    which is critical for Anthropic's prefix caching to work effectively.
+// 1. Strip virtual/internal messages (internal bookkeeping)
+// 2. Enforce role alternation (merge consecutive same-role messages)
+// 3. Ensure tool_use/tool_result pairing (fix orphans)
+// 4. Filter empty messages (remove whitespace-only assistant messages)
+// 5. Strip images from error tool_results (API requirement)
+// 6. Validate image blocks (remove invalid images)
+// 7. Reorder attachments (bubble image/document to message start)
+// 8. Sort JSON keys in tool_call input by alphabetical order
+// 9. Normalize whitespace in tool_result content (collapse multiple blank lines)
+// These normalizations make identical logical content produce identical API payloads,
+// which is critical for Anthropic's prefix caching to work effectively.
 package main
 
 import (
@@ -22,14 +26,22 @@ import (
 // NormalizeAPIMessages normalizes a list of API messages for KV cache reuse.
 // Returns a new slice with normalized messages.
 // The normalization order matters:
-//  1. EnforceRoleAlternation (establishes correct message order)
-//  2. EnsureToolResultPairing (fixes tool pairs)
-//  3. FilterEmptyMessages (cleans up empties)
-//  4. Existing normalizations (sort keys, whitespace)
+//  1. StripVirtualMessages (remove internal bookkeeping messages)
+//  2. EnforceRoleAlternation (establishes correct message order)
+//  3. EnsureToolResultPairing (fixes tool pairs)
+//  4. FilterEmptyMessages (cleans up empties)
+//  5. StripImagesFromErrorToolResults (strip images from error tool_results)
+//  6. ValidateImagesForAPI (remove invalid image blocks)
+//  7. ReorderAttachmentsForAPI (bubble attachments to message start)
+//  8. Existing normalizations (sort keys, whitespace)
 func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	messages = StripVirtualMessages(messages)
 	messages = EnforceRoleAlternation(messages)
 	messages = EnsureToolResultPairing(messages)
 	messages = FilterEmptyMessages(messages)
+	messages = StripImagesFromErrorToolResults(messages)
+	messages, _ = ValidateImagesForAPI(messages)
+	messages = ReorderAttachmentsForAPI(messages)
 
 	// Existing normalizations (sort keys, whitespace)
 	result := make([]anthropic.MessageParam, len(messages))
@@ -398,6 +410,248 @@ func stripTrailingThinking(msg anthropic.MessageParam) anthropic.MessageParam {
 	}
 
 	return msg
+}
+
+// ============================================================================
+// P1-6a: Virtual Message Stripping
+// ============================================================================
+
+// StripVirtualMessages removes messages that are marked as virtual/internal.
+// These are used for internal bookkeeping and should not reach the API.
+// A virtual message is a user message where every text block contains only
+// "[virtual]", "[system]", or is empty/whitespace-only.
+func StripVirtualMessages(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	var result []anthropic.MessageParam
+	for _, msg := range messages {
+		if msg.Role == anthropic.MessageParamRoleUser && isVirtualUserMessage(msg) {
+			continue
+		}
+		result = append(result, msg)
+	}
+	return result
+}
+
+// isVirtualUserMessage returns true if a user message is purely virtual/internal.
+// A message is virtual if all its content blocks are text blocks containing
+// only "[virtual]", "[system]", or whitespace.
+func isVirtualUserMessage(msg anthropic.MessageParam) bool {
+	if len(msg.Content) == 0 {
+		return true
+	}
+	for _, block := range msg.Content {
+		// Any non-text block means this is not a virtual message
+		if block.OfText == nil {
+			return false
+		}
+		text := strings.TrimSpace(block.OfText.Text)
+		if text != "" && text != "[virtual]" && text != "[system]" {
+			return false
+		}
+	}
+	return true
+}
+
+// ============================================================================
+// P1-6b: Attachment Reordering
+// ============================================================================
+
+// ReorderAttachmentsForAPI bubbles image/document blocks up to the beginning
+// of user messages. Upstream may place attachment blocks after text or
+// tool_result blocks, but the API expects them at the start. Attachments at
+// the end of messages can cause API issues.
+func ReorderAttachmentsForAPI(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	result := make([]anthropic.MessageParam, len(messages))
+	for i, msg := range messages {
+		if msg.Role != anthropic.MessageParamRoleUser || len(msg.Content) <= 1 {
+			result[i] = msg
+			continue
+		}
+
+		var attachments, others []anthropic.ContentBlockParamUnion
+		for _, block := range msg.Content {
+			if block.OfImage != nil || block.OfDocument != nil {
+				attachments = append(attachments, block)
+			} else {
+				others = append(others, block)
+			}
+		}
+
+		if len(attachments) == 0 {
+			result[i] = msg
+			continue
+		}
+
+		// Rebuild content: attachments first, then other blocks in original order
+		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+		newContent = append(newContent, attachments...)
+		newContent = append(newContent, others...)
+		result[i] = anthropic.MessageParam{
+			Role:    msg.Role,
+			Content: newContent,
+		}
+	}
+	return result
+}
+
+// ============================================================================
+// P1-6c: Image Validation
+// ============================================================================
+
+// supportedMediaTypes is the set of media types that the Anthropic API
+// accepts for image blocks.
+var supportedMediaTypes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// ValidateImagesForAPI removes invalid image blocks from messages.
+// Returns the cleaned messages and a list of reasons for each removed image.
+// An image block is invalid if:
+//   - It has no source data (neither base64 nor URL source is set)
+//   - For base64 source: media_type is missing or unsupported, or data is empty
+//   - For URL source: the URL is empty
+func ValidateImagesForAPI(messages []anthropic.MessageParam) ([]anthropic.MessageParam, []string) {
+	if len(messages) == 0 {
+		return messages, nil
+	}
+
+	var reasons []string
+	result := make([]anthropic.MessageParam, len(messages))
+
+	for i, msg := range messages {
+		var newContent []anthropic.ContentBlockParamUnion
+		for _, block := range msg.Content {
+			if block.OfImage != nil {
+				if valid, reason := isValidImageBlock(block.OfImage); !valid {
+					reasons = append(reasons, reason)
+					continue
+				}
+			}
+			newContent = append(newContent, block)
+		}
+
+		if len(newContent) == len(msg.Content) {
+			result[i] = msg
+		} else {
+			result[i] = anthropic.MessageParam{
+				Role:    msg.Role,
+				Content: newContent,
+			}
+		}
+	}
+
+	return result, reasons
+}
+
+// isValidImageBlock checks whether an image block has valid source data.
+// Returns (true, "") if valid, or (false, reason) if invalid.
+func isValidImageBlock(img *anthropic.ImageBlockParam) (bool, string) {
+	if img == nil {
+		return false, "image block is nil"
+	}
+
+	src := img.Source
+
+	// Check base64 source
+	if !param.IsOmitted(src.OfBase64) && src.OfBase64 != nil {
+		if src.OfBase64.Data == "" {
+			return false, "image base64 source has empty data"
+		}
+		mediaType := string(src.OfBase64.MediaType)
+		if mediaType == "" {
+			return false, "image base64 source has empty media_type"
+		}
+		if !supportedMediaTypes[mediaType] {
+			return false, "image base64 source has unsupported media_type: " + mediaType
+		}
+		return true, ""
+	}
+
+	// Check URL source
+	if !param.IsOmitted(src.OfURL) && src.OfURL != nil {
+		if src.OfURL.URL == "" {
+			return false, "image URL source has empty url"
+		}
+		return true, ""
+	}
+
+	// Neither source is set
+	return false, "image block has no source (neither base64 nor URL)"
+}
+
+// ============================================================================
+// P1-6d: Error Tool Result Image Stripping
+// ============================================================================
+
+// StripImagesFromErrorToolResults removes image/document blocks from tool_result
+// blocks that have is_error=true. The API does not accept images in error
+// tool_results — only text content is allowed.
+func StripImagesFromErrorToolResults(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	result := make([]anthropic.MessageParam, len(messages))
+	for i, msg := range messages {
+		hasErrorToolResult := false
+		for _, block := range msg.Content {
+			if block.OfToolResult != nil && block.OfToolResult.IsError.Valid() && block.OfToolResult.IsError.Value {
+				hasErrorToolResult = true
+				break
+			}
+		}
+
+		if !hasErrorToolResult {
+			result[i] = msg
+			continue
+		}
+
+		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+		for _, block := range msg.Content {
+			if block.OfToolResult != nil && block.OfToolResult.IsError.Valid() && block.OfToolResult.IsError.Value {
+				// Strip image/document from this error tool_result
+				filtered := stripImagesFromToolResultContent(block.OfToolResult)
+				newContent = append(newContent, anthropic.ContentBlockParamUnion{
+					OfToolResult: filtered,
+				})
+			} else {
+				newContent = append(newContent, block)
+			}
+		}
+		result[i] = anthropic.MessageParam{
+			Role:    msg.Role,
+			Content: newContent,
+		}
+	}
+	return result
+}
+
+// stripImagesFromToolResultContent removes image and document blocks from
+// a tool_result's content, keeping only text and other non-attachment blocks.
+func stripImagesFromToolResultContent(tr *anthropic.ToolResultBlockParam) *anthropic.ToolResultBlockParam {
+	var filtered []anthropic.ToolResultBlockParamContentUnion
+	for _, c := range tr.Content {
+		if c.OfImage != nil || c.OfDocument != nil {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	return &anthropic.ToolResultBlockParam{
+		ToolUseID:  tr.ToolUseID,
+		IsError:    tr.IsError,
+		CacheControl: tr.CacheControl,
+		Content:    filtered,
+	}
 }
 
 // ============================================================================
