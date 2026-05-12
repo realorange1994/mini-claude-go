@@ -264,31 +264,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-18: File Read Tool Enhancements
+## P1-18: File Read Tool Enhancements [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 02-tools.md §A.3 |
-| Status | NEW |
+| Round | 20 Committed (PARTIAL) |
 | Affected files | `tools/file_read.go` |
 | Upstream | `src/tools/read.ts` — image, PDF, notebook reading |
 | REPL | REPL-relevant — file reading is primary REPL interaction |
 
-**Problem**: Go's file read tool lacks:
-- Image reading support (upstream reads images as base64)
-- PDF reading support (upstream reads PDFs with page ranges)
-- Notebook reading support (upstream reads .ipynb with cell outputs)
-- Auto line number display
-- File size limit with helpful error message
-
-**Action items**:
-1. Add image reading (PNG, JPG, etc.) as base64 content blocks
-2. Add PDF reading with page range support
-3. Add .ipynb notebook reading with cell outputs
-4. Add file size limit (10MB) with helpful error
-5. Add line number display by default
+**Audit note**: File read already has: line range (offset+limit), file size limit (256KB), auto line number display (cat -n format), notebook reading (.ipynb), binary file detection (magic bytes), read dedup (FileUnchangedStub). **Remaining gap**: upstream supports image reading as base64 content blocks and PDF reading with page ranges — Go rejects images and PDFs with clear error messages. Adding image/PDF support would require image processing libraries or external tools.
 
 ---
 
@@ -308,30 +296,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-20: Grep/Glob Tool Alignment
+## P1-20: Grep/Glob Tool Alignment [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 02-tools.md §A.5 |
-| Status | NEW |
+| Round | 20 Committed (PARTIAL) |
 | Affected files | `tools/grep_tool.go`, `tools/glob_tool.go` |
 | Upstream | `src/tools/grep.ts`, `src/tools/glob.ts` — context lines, multiline, pagination |
 | REPL | REPL-relevant — search tools are primary REPL interaction |
 
-**Problem**: Go's search tools lack several upstream features:
-- Grep: no `-A`/`-B`/`-C` context lines, no multiline mode, no head_limit/offset pagination
-- Glob: no modification-time sorting, no file type filtering
-- Both: no `output_mode` parameter (content vs files_with_matches vs count)
-
-**Action items**:
-1. Add context line parameters to Grep (`-A`, `-B`, `-C`)
-2. Add multiline mode to Grep
-3. Add head_limit/offset pagination to both tools
-4. Add `output_mode` parameter (content, files_with_matches, count)
-5. Add modification-time sorting to Glob
-6. Add file type filtering to Glob
+**Audit note**: Grep has: `-A`/`-B`/`-C` context lines, multiline mode, `head_limit`/`offset` pagination, `output_mode` (content/files_with_matches/count), `type` language filter, `glob` file filter, `max_depth`, `max_filesize`, case-insensitive, fixed_strings. Glob has: modification-time sorting, `head_limit`, `excludes` patterns. **Remaining gap**: Glob lacks `type` parameter for file type filtering (upstream has this). Minor gap.
 
 ---
 
@@ -643,9 +620,9 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 | P1-15 | Non-LLM compaction metadata | — | DONE | Small | N/A |
 | P1-16 | Tool output structured format | PASS | DONE | Medium | N/A |
 | P1-17 | Exec tool safety | PASS | DONE | Medium | REPL |
-| P1-18 | File read enhancements | — | NEW | Medium | REPL |
+| P1-18 | File read enhancements | PARTIAL | DONE | Medium | REPL |
 | P1-19 | File write safety | PARTIAL | DONE | Small | REPL |
-| P1-20 | Grep/Glob alignment | — | NEW | Medium | REPL |
+| P1-20 | Grep/Glob alignment | PARTIAL | DONE | Medium | REPL |
 | P1-21 | Git tool enhancements | — | NEW | Medium | REPL |
 | P1-22 | Notebook edit tool | — | NEW | Medium | N/A |
 | P1-23 | System prompt dynamic sections | — | NEW | Medium | N/A |

@@ -52,7 +52,7 @@ All data extracted from [diff_upstream/](../diff_upstream/) (32 分类文件, �
 | Priority | Total | Done | New | Rework |
 |----------|-------|------|-----|--------|
 | P0 (CRITICAL) | 13 | 11 | 2 | 0 |
-| P1 (IMPORTANT) | 32 | 21 | 15 | 0 |
+| P1 (IMPORTANT) | 32 | 23 | 13 | 0 |
 | P2 (NICE-TO-HAVE) | 30 | 0 | 30 | 0 |
 | **Total** | **75** | **32** | **49** | **2** |
 
@@ -61,7 +61,7 @@ All data extracted from [diff_upstream/](../diff_upstream/) (32 分类文件, �
 | Audit | Count | Items |
 |-------|-------|-------|
 | **PASS** | 11 | P0-6 (multi-edit match), P0-10 (orphan backfill), P0-11 (stop hooks), P0-13 (permission path safety — precise prefix/component checks + ADS/symlink defense), P1-2 (reactive compaction), P1-4 (model aliases — full [1m] suffix + beta headers + GetModelForAPI), P1-5 (cache detection — category-based tracking with 12 change categories + weights), P1-6 (classifier — removed fabricated escapeContentInjection, added JSONL transcript + XML tags), P1-16 (tool output structured format), P1-17 (exec tool safety), P1-28 (error classification — 15-category enum + recovery hints) |
-| **PARTIAL** | 14 | P0-1, P0-2, P0-3, P0-4, P0-5, P0-7, P0-8, P0-9 (streaming executor), P0-12, P1-1, P1-3, P1-7, P1-9, P1-10, P1-11, P1-12, P1-19 (file write safety — missing large file confirmation), P1-26 (error classification — PARTIAL with P1-28 overlap) |
+| **PARTIAL** | 17 | P0-1, P0-2, P0-3, P0-4, P0-5, P0-7, P0-8, P0-9 (streaming executor), P0-12, P1-1, P1-3, P1-7, P1-9, P1-10, P1-11, P1-12, P1-18 (file read — missing image/PDF support), P1-19 (file write safety — missing large file confirmation), P1-20 (grep/glob — glob lacks type filter), P1-26 (error classification — PARTIAL with P1-28 overlap) |
 | **FAIL** | 0 | All FAIL items resolved: P1-4/P1-5 via R10/R11 reworks |
 | **Critical issues** | 0 | ApplyPinnedCacheEdits stub fixed (R10), 9 unused hook types wired (R17), P0-10 orphan backfill bug fixed (R19) |
 
