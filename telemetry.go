@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -108,6 +109,32 @@ func (t *TelemetryManager) RecordCompaction(method string, tokensBefore int64, t
 	})
 }
 
+// LoadFromFile reads today's JSONL log and populates the in-memory event list.
+func (t *TelemetryManager) LoadFromFile() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	day := time.Now().Format("2006-01-02")
+	filePath := filepath.Join(t.dir, day+".jsonl")
+	f, err := os.Open(filePath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var event TelemetryEvent
+		if err := json.Unmarshal([]byte(line), &event); err == nil {
+			t.events = append(t.events, event)
+		}
+	}
+}
+
 // GetRecent returns the last N events.
 func (t *TelemetryManager) GetRecent(n int) []TelemetryEvent {
 	t.mu.Lock()
@@ -141,6 +168,7 @@ func (t *TelemetryManager) SetEnabled(enabled bool) {
 // handleTelemetry handles the /telemetry slash command.
 func handleTelemetry(args []string) {
 	tm := NewTelemetryManager()
+	tm.LoadFromFile()
 
 	if len(args) == 0 {
 		summary := tm.Summary()

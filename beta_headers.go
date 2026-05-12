@@ -88,9 +88,17 @@ func FormatBetaHeader(betas []string) string {
 // GetModelForAPI strips the [1m] suffix from the model string for API calls.
 // The API doesn't accept [1m] in the model field — it's only used client-side
 // to determine context window and beta headers.
+// Preserves original case for direct model names (not aliases) so proxies
+// that are case-sensitive still work.
 // Upstream: model is stripped of [1m] before being sent to the API
 func GetModelForAPI(model string) string {
-	return strings.TrimSpace(strings.Replace(strings.ToLower(model), "[1m]", "", 1))
+	clean := strings.TrimSpace(strings.Replace(model, "[1m]", "", 1))
+	// Only lowercase known aliases; keep direct model names (like "M2.7") as-is
+	lower := strings.ToLower(clean)
+	if _, ok := modelAliasFamily[lower]; ok {
+		return lower
+	}
+	return clean
 }
 
 // isEnvTruthy checks if an environment variable is set to a truthy value.

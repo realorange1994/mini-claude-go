@@ -1858,6 +1858,7 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 }
 
 func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
+	apiStart := time.Now()
 	toolParams := a.buildToolParams()
 
 	// Try LLM compaction before sending to API -- but skip when reactive
@@ -1932,6 +1933,10 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 				// Update cache break detector baseline with current cache read tokens
 				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
 			}
+			// Record API call telemetry
+			if a.telemetry != nil {
+				a.telemetry.RecordAPICall(params.Model, false, time.Since(apiStart).Milliseconds(), int64(response.Usage.InputTokens), int64(response.Usage.OutputTokens), nil)
+			}
 			return response, nil
 		}
 
@@ -1996,6 +2001,9 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 
 		// Non-transient: give up
 		a.consecutive529Errors = 0
+		if a.telemetry != nil {
+			a.telemetry.RecordAPICall(params.Model, false, time.Since(apiStart).Milliseconds(), 0, 0, err)
+		}
 		return nil, err
 	}
 
@@ -2160,6 +2168,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 // tryStreamOnce makes a single streaming attempt and returns the result.
 // `collect` is passed in (not created) so it persists across retries.
 func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *CollectHandler, toolCallDoneCh chan int, executor *StreamingToolExecutor) ([]map[string]any, []string, error) {
+	streamStart := time.Now()
 	ctx, cancel := a.interruptCtx(context.Background(), 300*time.Second)
 	defer cancel()
 
@@ -2220,6 +2229,18 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		}
 		// Update cache break detector baseline with current cache read tokens
 		a.cacheBreakDetector.UpdateBaseline(int64(collect.Usage.CacheReadTokens))
+	}
+
+	// Record API call telemetry for streaming
+	if a.telemetry != nil {
+		var apiErr error
+		if len(collect.ToolCalls) == 0 && collect.Text == "" && collect.Thinking == "" && collect.finishReason == "" {
+			apiErr = fmt.Errorf("stream ended without receiving any events")
+		}
+		a.telemetry.RecordAPICall(params.Model, true, time.Since(streamStart).Milliseconds(),
+			func() int64 { if collect.Usage != nil { return int64(collect.Usage.InputTokens) }; return 0 }(),
+			func() int64 { if collect.Usage != nil { return int64(collect.Usage.OutputTokens) }; return 0 }(),
+			apiErr)
 	}
 
 	// Detect incomplete streams: if the stream produced no assistant message
@@ -2949,6 +2970,11 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}
 	}
 	elapsed := time.Since(start)
+
+	// Record tool call telemetry
+	if a.telemetry != nil {
+		a.telemetry.RecordToolCall(toolName, elapsed.Milliseconds(), result.IsError)
+	}
 
 	// NOTE: FileReadTool.Execute now handles MarkFileRead internally.
 	// The agent_loop.go call below was removed to avoid duplication

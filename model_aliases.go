@@ -118,7 +118,7 @@ func ResolveModelAlias(model string) (string, bool) {
 
 	// Not an alias — return as-is, preserving [1m] suffix if present
 	if has1m {
-		return modelStr + "[1m]", false
+		return strings.TrimSpace(regexp.MustCompile(`(?i)\[1m\]$`).ReplaceAllString(model, "")) + "[1m]", false
 	}
 	return model, false
 }
