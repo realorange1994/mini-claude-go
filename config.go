@@ -90,6 +90,11 @@ type Config struct {
 	// RuleStore holds permission rules loaded from settings files.
 	// May be nil if no settings files with permissions section are found.
 	RuleStore *permissions.RuleStore
+	// SubscriptionType identifies the subscriber tier for rate-limit gating.
+	// Values: "claude_ai", "enterprise", "api", "unknown" (default).
+	// "claude_ai" subscribers have hard usage limits; 429 retries are skipped.
+	// "enterprise"/"api" subscribers get retried with exponential backoff.
+	SubscriptionType string
 	// QuerySource identifies the source of the query (e.g., "repl_main_thread", "sdk", "agent:task-xxx").
 	// Used by RunPostCompactCleanup to guard main-thread-only state clears — subagents
 	// share module-level state and must not clobber the main thread's caches.

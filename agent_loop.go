@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -313,8 +314,47 @@ type AgentLoop struct {
 	costTracker              *CostTracker               // per-model USD cost tracking with session persistence
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
 	extractionState          *ExtractionState           // session memory extraction threshold tracking
+	sonnetModel              string                    // fallback model for 529 overload (defaults to claude-sonnet-4-20250514)
 	hooks                    *HookManager              // compact pre/post hook handlers
 	consecutiveContextErrors int                       // tracks consecutive context overflow errors for reactive compact
+	consecutive529Errors     int                       // tracks consecutive 529 overloaded errors for model fallback
+}
+
+// handle529Error processes a 529 Overloaded error. It increments the consecutive
+// 529 counter and triggers model fallback after 3 consecutive 529s.
+// Returns true if the caller should continue retrying, false if fallback was triggered.
+func (a *AgentLoop) handle529Error() bool {
+	a.consecutive529Errors++
+	if a.consecutive529Errors >= 3 {
+		originalModel := a.config.Model
+		fallbackModel := a.sonnetModel
+		a.out("\n[529 Overloaded] Falling back from %s to %s after %d consecutive 529 errors\n",
+			originalModel, fallbackModel, a.consecutive529Errors)
+		a.config.Model = fallbackModel
+		a.consecutive529Errors = 0
+		return false
+	}
+	return true
+}
+
+// handle429Error determines whether a 429 rate-limit error should be retried
+// based on the subscriber's tier. Returns true if the caller should retry.
+func (a *AgentLoop) handle429Error(errMsg string) bool {
+	isOverage := containsOverageSignal(errMsg)
+	if !shouldRetry429(a.config.SubscriptionType, isOverage) {
+		a.out("\n[429 Rate Limit] Subscription type %q -- skipping retry (usage limit hit)%s\n",
+			a.config.SubscriptionType, overageSuffix(isOverage))
+		return false
+	}
+	return true
+}
+
+// overageSuffix returns a parenthetical note if overage was detected.
+func overageSuffix(isOverage bool) string {
+	if isOverage {
+		return " (overage detected)"
+	}
+	return ""
 }
 
 // recordTokenUsage accumulates API token usage into the agent's running totals.
@@ -433,6 +473,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		costTracker:       NewCostTracker(),
 		extractionState:   NewExtractionState(),
 		hooks:             cfg.Hooks,
+		sonnetModel:       "claude-sonnet-4-20250514",
 	}
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
@@ -1051,6 +1092,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 				return finalText
 			}
 			// Model confusion -- echoed tool syntax as text; recover by retrying
+				// Model fallback triggered: continue with new model
+				var fbErr *FallbackTriggeredError
+				if errors.As(err, &fbErr) {
+					a.out("\n[Fallback] %v -- continuing with %s\n", fbErr, fbErr.FallbackModel)
+					continue
+				}
 			if strings.Contains(errMsg, "model confused") {
 				a.out("\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
@@ -1569,6 +1616,8 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		cancel()
 
 		if err == nil {
+			// Success: reset consecutive 529 counter
+			a.consecutive529Errors = 0
 			// Accumulate token usage from this non-streaming response
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
@@ -1610,12 +1659,34 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			return nil, err
 		}
 
+		// 529 Overloaded: track consecutive errors and trigger model fallback
+		if is529Error(errMsg) {
+			if !a.handle529Error() {
+				return nil, &FallbackTriggeredError{
+					OriginalModel:  a.config.Model,
+					FallbackModel:  a.sonnetModel,
+					Consecutive529: 3,
+				}
+			}
+			a.out("\n[WARN] 529 Overloaded during API call (%d/3): %v\n", a.consecutive529Errors, err)
+			continue
+		}
+
+		// 429 Rate limit: subscriber-aware gating
+		if classifyError(errMsg, 0, 0).Class == ECRateLimit {
+			if !a.handle429Error(errMsg) {
+				return nil, fmt.Errorf("rate limit: skipping retry for subscription type %q", a.config.SubscriptionType)
+			}
+		}
+
 		// Transient error: retry
+		a.consecutive529Errors = 0
 		if isTransientError(errMsg) {
 			continue
 		}
 
 		// Non-transient: give up
+		a.consecutive529Errors = 0
 		return nil, err
 	}
 
@@ -1677,6 +1748,8 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 
 		toolCalls, textParts, err := a.tryStreamOnce(params, collect)
 		if err == nil {
+			// Success: reset consecutive 529 counter
+			a.consecutive529Errors = 0
 			return toolCalls, textParts, nil
 		}
 
@@ -1700,6 +1773,27 @@ func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, erro
 		// User interrupted -- don't fall back to non-streaming, return immediately
 		if strings.Contains(errMsg, "interrupted by user") {
 			return nil, nil, err
+		}
+
+		// 529 Overloaded: track consecutive errors and trigger model fallback
+		if is529Error(errMsg) {
+			if !a.handle529Error() {
+				return nil, nil, &FallbackTriggeredError{
+					OriginalModel:  a.config.Model,
+					FallbackModel:  a.sonnetModel,
+					Consecutive529: 3,
+				}
+			}
+			a.out("\n[WARN] 529 Overloaded during stream (%d/3): %v\n", a.consecutive529Errors, err)
+			collect.ClearAll()
+			continue
+		}
+
+		// 429 Rate limit: subscriber-aware gating
+		if classifyError(errMsg, 0, 0).Class == ECRateLimit {
+			if !a.handle429Error(errMsg) {
+				return nil, nil, fmt.Errorf("rate limit: skipping retry for subscription type %q", a.config.SubscriptionType)
+			}
 		}
 
 		// Transient error (network, timeout, 5xx): decide retry strategy
@@ -1902,6 +1996,8 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		cancel()
 
 		if err == nil {
+			// Success: reset consecutive 529 counter
+			a.consecutive529Errors = 0
 			// Accumulate token usage from this non-streaming response
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
@@ -1945,9 +2041,29 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 			isContextLengthError(errMsg) {
 			return nil, nil, err
 		}
+		// 529 Overloaded: track consecutive errors and trigger model fallback
+		if is529Error(errMsg) {
+			if !a.handle529Error() {
+				return nil, nil, &FallbackTriggeredError{
+					OriginalModel:  a.config.Model,
+					FallbackModel:  a.sonnetModel,
+					Consecutive529: 3,
+				}
+			}
+			a.out("\n[WARN] 529 Overloaded during grace call (%d/3): %v\n", a.consecutive529Errors, err)
+			continue
+		}
+		// 429 Rate limit: subscriber-aware gating
+		if classifyError(errMsg, 0, 0).Class == ECRateLimit {
+			if !a.handle429Error(errMsg) {
+				return nil, nil, fmt.Errorf("rate limit: skipping retry for subscription type %q", a.config.SubscriptionType)
+			}
+		}
+		a.consecutive529Errors = 0
 		if isTransientError(errMsg) {
 			continue
 		}
+		a.consecutive529Errors = 0
 		return nil, nil, fmt.Errorf("final call error: %w", err)
 	}
 
@@ -1975,6 +2091,8 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		cancel()
 
 		if err == nil {
+			// Success: reset consecutive 529 counter
+			a.consecutive529Errors = 0
 			// Accumulate token usage from this non-streaming response
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
@@ -2082,13 +2200,35 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		}
 		a.consecutiveContextErrors = 0
 
+		// 529 Overloaded: track consecutive errors and trigger model fallback
+		if is529Error(errMsg) {
+			if !a.handle529Error() {
+				return nil, nil, &FallbackTriggeredError{
+					OriginalModel:  a.config.Model,
+					FallbackModel:  a.sonnetModel,
+					Consecutive529: 3,
+				}
+			}
+			a.out("\n[WARN] 529 Overloaded during non-streaming fallback (%d/3): %v\n", a.consecutive529Errors, err)
+			continue
+		}
+
+		// 429 Rate limit: subscriber-aware gating
+		if classifyError(errMsg, 0, 0).Class == ECRateLimit {
+			if !a.handle429Error(errMsg) {
+				return nil, nil, fmt.Errorf("rate limit: skipping retry for subscription type %q", a.config.SubscriptionType)
+			}
+		}
+
 		// Transient error: retry
+		a.consecutive529Errors = 0
 		if isTransientError(errMsg) {
 			a.out("\n[WARN] Transient error during non-streaming: %v\n", err)
 			continue
 		}
 
 		// Non-transient error: give up
+		a.consecutive529Errors = 0
 		return nil, nil, fmt.Errorf("stream fallback error: %w", err)
 	}
 

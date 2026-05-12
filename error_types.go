@@ -409,6 +409,18 @@ func truncateStr(s string, maxLen int) string {
 	return s[:maxLen]
 }
 
+// FallbackTriggeredError signals that automatic model fallback was triggered
+// after consecutive 529 (overloaded) errors.
+type FallbackTriggeredError struct {
+	OriginalModel  string
+	FallbackModel  string
+	Consecutive529 int
+}
+
+func (e *FallbackTriggeredError) Error() string {
+	return fmt.Sprintf("model fallback triggered: %s → %s after %d consecutive 529 errors", e.OriginalModel, e.FallbackModel, e.Consecutive529)
+}
+
 // parseErrorBody attempts to extract structured error info from the error message.
 func parseErrorBody(errMsg string) map[string]any {
 	// Try to find JSON object in error message
@@ -538,4 +550,33 @@ func parseMaxTokensContextOverflowError(err error) (overflowTokens int, found bo
 	}
 
 	return 0, false
+}
+
+// shouldRetry429 determines whether a 429 rate-limit error should be retried
+// based on the subscriber's tier. ClaudeAI subscribers have hard usage limits,
+// so retrying wastes time; enterprise/API subscribers can retry with backoff.
+func shouldRetry429(subscriptionType string, isOverage bool) bool {
+	switch subscriptionType {
+	case "claude_ai":
+		return false // Don't retry for ClaudeAI subscribers
+	case "enterprise", "api":
+		return true // Retry for enterprise/API subscribers
+	default:
+		return true // Default: retry
+	}
+}
+
+// is529Error checks whether an error message indicates a 529 Overloaded response.
+func is529Error(errMsg string) bool {
+	return strings.Contains(errMsg, " 529 ") ||
+		strings.Contains(errMsg, "HTTP 529") ||
+		strings.Contains(errMsg, "529 Overloaded")
+}
+
+// containsOverageSignal checks whether the error message or response headers
+// indicate the subscriber is over their usage limit (x-anthropic-overage: true).
+func containsOverageSignal(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	return strings.Contains(lower, "x-anthropic-overage") ||
+		strings.Contains(lower, "overage") && strings.Contains(lower, "true")
 }
