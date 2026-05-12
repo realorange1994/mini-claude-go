@@ -556,24 +556,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-31: MCP Tool Schema Validation
+## P1-31: MCP Tool Schema Validation [DONE — AUDIT: PASS]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 缺失 |
 | Severity | MEDIUM |
 | Source | 03-system-prompt.md §E.2 |
-| Status | NEW |
-| Affected files | `mcp/` |
+| Round | 21 Committed (PASS) |
+| Affected files | `mcp/schema.go`, `mcp/client.go`, `tools/mcp_tools.go` |
 | Upstream | MCP tool input schema validation |
 | REPL | N/A — core agent logic |
 
-**Problem**: Go doesn't validate MCP tool schemas against the JSON Schema spec. Upstream validates tool input schemas and provides helpful error messages when parameters don't match. This can cause silent failures or confusing errors.
-
-**Action items**:
-1. Add JSON Schema validation for MCP tool inputs
-2. Add helpful error messages for schema mismatches
-3. Add schema caching for performance
+**Audit note**: Implemented `ValidateSchema()` with validation for: required fields, property types (string, number, integer, boolean, array, object), nested objects, enum values, string constraints (minLength/maxLength), number constraints (minimum/maximum), array constraints (minItems/maxItems, item type validation). `Manager.FindTool()` added for tool lookup. Validation integrated into `MCPToolCaller.Execute()` — schema errors are caught before the tool call is made, returning helpful error messages to the agent.
 
 ---
 
@@ -633,7 +628,7 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 | P1-28 | Error classification system | PASS | DONE | Medium | N/A |
 | P1-29 | Context reference expansion | — | NEW | Medium | REPL |
 | P1-30 | File history snapshots | — | NEW | Medium | N/A |
-| P1-31 | MCP tool schema validation | — | NEW | Small | N/A |
+| P1-31 | MCP tool schema validation | PASS | DONE | Small | N/A |
 | P1-32 | Sub-agent context isolation | — | NEW | Medium | N/A |
 
 ## Audit Legend

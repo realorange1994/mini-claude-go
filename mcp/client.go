@@ -880,6 +880,22 @@ func (m *Manager) ListTools() []Tool {
 	return all
 }
 
+// FindTool returns the tool with the given name and its InputSchema.
+// Returns nil if no tool matches.
+func (m *Manager) FindTool(name string) *Tool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, client := range m.clients {
+		for _, tool := range client.tools {
+			if tool.Name == name {
+				return &tool
+			}
+		}
+	}
+	return nil
+}
+
 // ListServers returns list of registered server names.
 func (m *Manager) ListServers() []string {
 	m.mu.RLock()

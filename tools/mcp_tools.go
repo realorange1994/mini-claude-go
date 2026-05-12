@@ -157,8 +157,17 @@ func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: "Error: tool is required", IsError: true}
 	}
 
+	// Validate arguments against tool schema before calling
 	server, _ := params["server"].(string)
 	args, _ := params["arguments"].(map[string]any)
+
+	// Look up the tool schema for validation
+	if toolSchema := t.Manager.FindTool(toolName); toolSchema != nil && args != nil {
+		if err := mcp.ValidateSchema(args, toolSchema.InputSchema); err != nil {
+			return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+		}
+	}
+
 	callArgs := mcp.ToolCallArgs(args)
 
 	// Parse timeout (ms). Default: 30s, max: 600s, min: 1s.
