@@ -1,7 +1,7 @@
 # P2 — Nice-to-Have Gaps
 
 > Quality-of-life improvements, architectural features, and long-term goals
-> Updated: 2026-05-13 (14 DONE, 2 PARTIAL, 14 NEW)
+> Updated: 2026-05-13 (15 DONE, 1 PARTIAL, 14 NEW)
 
 These gaps would improve the user experience or enable future capabilities but are not blocking current functionality.
 
@@ -307,14 +307,18 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 03-system-prompt.md §B.3 |
-| Status | NEW |
-| Affected files | `config.go` |
+| Status | DONE (PASS) |
+| Affected files | `multi_settings.go` |
 | Upstream | 5-level settings hierarchy in config |
 | REPL | N/A — core config logic |
 
-**Missing**: 5-level settings hierarchy (defaults < global < project < worktree < session), settings merge with precedence, versioned settings migration, remote settings from API.
-
-**Why P2**: Current single-file config works for most use cases.
+**Implemented**:
+1. `MultiSourceSettings` — 5-level hierarchy (default < global < project < worktree < session)
+2. `Get(key)` / `GetString` / `GetInt` / `GetBool` — precedence-aware value resolution
+3. `SourceOf(key)` — shows which level provides the effective value
+4. `SetSession(key, value)` — runtime session-level overrides
+5. `Merged()` — fully merged settings map
+6. `/settings sources|get <key>|set <key> <value>` REPL command
 
 ---
 
@@ -625,7 +629,7 @@ These gaps would improve the user experience or enable future capabilities but a
 | P2-12 | Attribution | DONE (PASS) | Medium | N/A |
 | P2-13 | Daemon mode | DONE (PASS) | Medium | REPL |
 | P2-14 | Fast/poor/effort mode | DONE (PASS) | Small | N/A |
-| P2-15 | Multi-source settings | NEW | Medium | N/A |
+| P2-15 | Multi-source settings | DONE (PASS) | Medium | N/A |
 | P2-16 | Thinking block streaming | DONE (PASS) | Medium | N/A |
 | P2-17 | Non-streaming fallback | DONE (PASS) | Medium | N/A |
 | P2-18 | MCP reconnection | DONE (PASS) | Medium | N/A |

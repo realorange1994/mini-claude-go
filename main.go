@@ -429,7 +429,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
-				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/daemon" || cmd == "/errors" || cmd == "/feature"
+				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/daemon" || cmd == "/errors" || cmd == "/feature" || cmd == "/settings"
 
 			if !isKnownCmd {
 				// Not a recognized command -- treat as normal prompt
@@ -477,6 +477,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 					fmt.Println("  /daemon         -- Manage daemon mode (start/stop/status/submit)")
 					fmt.Println("  /errors         -- View error logs (recent/clear)")
 					fmt.Println("  /feature        -- Manage feature flags (list/enable/disable)")
+					fmt.Println("  /settings       -- View settings hierarchy (sources/get/set)")
 					continue
 				case "/compact":
 					agent.ForceCompact()
@@ -550,6 +551,9 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 					continue
 				case "/feature":
 					handleFeature(agent, parts[1:])
+					continue
+				case "/settings":
+					handleSettings(parts[1:])
 					continue
 				}
 			}

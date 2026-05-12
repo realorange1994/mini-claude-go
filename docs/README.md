@@ -53,8 +53,8 @@ All data extracted from [diff_upstream/](../diff_upstream/) (32 分类文件, �
 |----------|-------|------|-----|--------|
 | P0 (CRITICAL) | 13 | 13 | 0 | 0 |
 | P1 (IMPORTANT) | 32 | 32 | 0 | 0 |
-| P2 (NICE-TO-HAVE) | 30 | 14 | 14 | 0 |
-| **Total** | **75** | **59** | **0** | **0** |
+| P2 (NICE-TO-HAVE) | 30 | 15 | 14 | 0 |
+| **Total** | **75** | **60** | **0** | **0** |
 
 ## Audit Summary (Rounds 1-21)
 
