@@ -1,7 +1,7 @@
 # P2 — Nice-to-Have Gaps
 
 > Quality-of-life improvements, architectural features, and long-term goals
-> Updated: 2026-05-13 (16 DONE, 1 PARTIAL, 13 NEW)
+> Updated: 2026-05-13 (17 DONE, 2 PARTIAL, 11 NEW)
 
 These gaps would improve the user experience or enable future capabilities but are not blocking current functionality.
 
@@ -633,7 +633,7 @@ These gaps would improve the user experience or enable future capabilities but a
 | P2-19 | MCP OAuth | NEW | Medium | N/A |
 | P2-20 | Remote enterprise settings | NEW | Medium | N/A |
 | P2-21 | Langfuse tracing | NEW | Medium | N/A |
-| P2-22 | Sentry reporting | NEW | Small | N/A |
+| P2-22 | Sentry reporting | DONE (PASS) | Small | N/A |
 | P2-23 | Idle timeout | DONE (PASS) | Small | REPL |
 | P2-24 | Graceful shutdown | DONE (PASS) | Medium | REPL |
 | P2-25 | File cleanup | DONE (PASS) | Small | N/A |
