@@ -8,13 +8,50 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// ApplyPromptCaching applies Anthropic's system_and_3 caching strategy to API messages.
-// Places up to 4 cache_control breakpoints: system prompt + last 3 non-system messages.
+// CacheBreakpointConfig controls the KV cache breakpoint strategy.
+// Upstream Anthropic uses exactly 1 breakpoint at the last message for optimal
+// Mycro KV cache manager behavior.
+type CacheBreakpointConfig struct {
+	// MaxBreakpoints is the maximum number of cache breakpoints to place.
+	// Set to 1 to match upstream's optimal strategy.
+	MaxBreakpoints int
+	// SkipCacheWrite shifts the breakpoint from the last message to the
+	// second-to-last message, protecting the last position's KV pages.
+	// Use for fire-and-forget scenarios (forked agents, background tasks).
+	SkipCacheWrite bool
+}
+
+// DefaultCacheBreakpointConfig returns the default config matching upstream's
+// optimal KV cache strategy: exactly 1 breakpoint at the last message.
+func DefaultCacheBreakpointConfig() CacheBreakpointConfig {
+	return CacheBreakpointConfig{
+		MaxBreakpoints: 1,
+		SkipCacheWrite: false,
+	}
+}
+
+const (
+	// MaxCacheBreakpoints is the maximum number of cache breakpoints to place
+	// in the API message stream. Upstream Anthropic uses exactly 1 breakpoint
+	// at the last message, which is optimal for the Mycro KV cache manager.
+	MaxCacheBreakpoints = 1
+)
+
+// ApplyPromptCaching applies Anthropic's optimal caching strategy to API messages.
+// Places exactly 1 cache_control breakpoint at the last message (or second-to-last
+// when skipCacheWrite is true for fire-and-forget scenarios like forked agents).
 // Returns a new slice with cache_control breakpoints injected into the messages.
 //
-// This reduces input token costs by ~75% on multi-turn conversations by reusing
-// cached prefixes across API calls.
+// This reduces input token costs by reusing cached prefixes across API calls.
+// The single-breakpoint strategy matches upstream's Mycro KV cache manager,
+// which writes the cache at exactly one position per request.
 func ApplyPromptCaching(messages []map[string]any, ttl string) []map[string]any {
+	return ApplyPromptCachingWithConfig(messages, ttl, DefaultCacheBreakpointConfig())
+}
+
+// ApplyPromptCachingWithConfig applies prompt caching with explicit config.
+// This is the main entry point for cache breakpoint placement.
+func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg CacheBreakpointConfig) []map[string]any {
 	if len(messages) == 0 {
 		return messages
 	}
@@ -25,39 +62,48 @@ func ApplyPromptCaching(messages []map[string]any, ttl string) []map[string]any 
 		marker = map[string]any{"type": "ephemeral", "ttl": "1h"}
 	}
 
-	breakpointsUsed := 0
-
-	// 1. Cache the system prompt (first message if system role)
-	if role, _ := result[0]["role"].(string); role == "system" {
-		applyCacheMarker(result[0], marker)
-		breakpointsUsed++
+	maxBP := cfg.MaxBreakpoints
+	if maxBP <= 0 {
+		maxBP = MaxCacheBreakpoints
 	}
 
-	// 2. Cache the last N non-system messages (up to 4-total breakpoints)
-	remaining := 4 - breakpointsUsed
-	nonSysIndices := make([]int, 0)
-	for i := range result {
-		if role, _ := result[i]["role"].(string); role != "system" {
-			nonSysIndices = append(nonSysIndices, i)
+	// Determine the breakpoint position: last message, or second-to-last
+	// if skipCacheWrite is set (protects the last position's KV pages for
+	// fire-and-forget scenarios like forked agents / background tasks).
+	breakpointIdx := len(result) - 1
+	if cfg.SkipCacheWrite && len(result) >= 2 {
+		breakpointIdx = len(result) - 2
+	}
+
+	// Apply the single breakpoint at the determined position.
+	applyCacheMarker(result[breakpointIdx], marker)
+
+	// Also apply a breakpoint to the system prompt (first message if system role).
+	// The system prompt breakpoint is separate from the message breakpoints
+	// and counts as one of the total allowed breakpoints.
+	if breakpointIdx > 0 {
+		if role, _ := result[0]["role"].(string); role == "system" && maxBP >= 2 {
+			applyCacheMarker(result[0], marker)
 		}
-	}
-	if len(nonSysIndices) > remaining {
-		nonSysIndices = nonSysIndices[len(nonSysIndices)-remaining:]
-	}
-	for _, idx := range nonSysIndices {
-		applyCacheMarker(result[idx], marker)
 	}
 
 	return result
 }
 
 // applyCacheMarker adds cache_control to a single message, handling all formats.
+// For tool_result blocks that are cached, uses cache_reference instead of
+// tool_use_id, matching the upstream API field name.
 func applyCacheMarker(msg map[string]any, marker map[string]any) {
 	role, _ := msg["role"].(string)
 
 	// tool role: cache_control goes at message level
 	if role == "tool" {
 		msg["cache_control"] = marker
+		// Use cache_reference instead of tool_use_id for cached tool_result blocks
+		if toolUseID, ok := msg["tool_use_id"].(string); ok && toolUseID != "" {
+			msg["cache_reference"] = toolUseID
+			delete(msg, "tool_use_id")
+		}
 		return
 	}
 
@@ -85,11 +131,19 @@ func applyCacheMarker(msg map[string]any, marker map[string]any) {
 		return
 	}
 
-	// Array content -> add cache_control to last block
+	// Array content -> add cache_control to last block;
+	// for tool_result blocks, use cache_reference instead of tool_use_id
 	if arr, ok := content.([]any); ok && len(arr) > 0 {
 		last := arr[len(arr)-1]
 		if m, ok := last.(map[string]any); ok {
 			m["cache_control"] = marker
+			// For tool_result blocks, use cache_reference field
+			if blockType, _ := m["type"].(string); blockType == "tool_result" {
+				if toolUseID, ok := m["tool_use_id"].(string); ok && toolUseID != "" {
+					m["cache_reference"] = toolUseID
+					delete(m, "tool_use_id")
+				}
+			}
 		}
 	}
 }
