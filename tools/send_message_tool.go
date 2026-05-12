@@ -6,16 +6,22 @@ type SendMessageFunc func(agentID string, message string) (result string, errTex
 // GetStatusFunc is the callback for getting the status of a sub-agent.
 type GetStatusFunc func(agentID string) string
 
+// ResolveNameFunc is the callback for resolving an agent name to an agent ID.
+type ResolveNameFunc func(name string) string
+
 // SendMessageTool sends a message to a running sub-agent, or queries its status.
 type SendMessageTool struct {
 	SendMessageFunc SendMessageFunc
 	GetStatusFunc   GetStatusFunc
+	ResolveNameFunc ResolveNameFunc // for name -> agentID resolution
+	HandleStore     *AgentHandleStore
 }
 
 func (t *SendMessageTool) Name() string { return "send_message" }
 func (t *SendMessageTool) Description() string {
 	return "Send a message to a running sub-agent, or query its status. " +
-		"Use this to continue work on a background agent, ask for progress, or retrieve results."
+		"Use this to continue work on a background agent, ask for progress, or retrieve results. " +
+		"Agents can be addressed by ID or by name (if a name was provided when the agent was launched)."
 }
 
 func (t *SendMessageTool) InputSchema() map[string]any {
@@ -51,7 +57,20 @@ func (t *SendMessageTool) Execute(params map[string]any) ToolResult {
 
 	// Resolve agent_id from name if agent_id is not provided
 	if agentID == "" && name != "" {
-		agentID = name // name resolution happens in SendMessageFunc via resolveAgentID
+		// Try HandleStore first
+		if t.HandleStore != nil {
+			if handle, ok := t.HandleStore.Lookup(name); ok {
+				agentID = handle.TaskID
+			}
+		}
+		// Try ResolveNameFunc
+		if agentID == "" && t.ResolveNameFunc != nil {
+			agentID = t.ResolveNameFunc(name)
+		}
+		// Last resort: treat name as agent ID directly
+		if agentID == "" {
+			agentID = name
+		}
 	}
 
 	if agentID == "" {

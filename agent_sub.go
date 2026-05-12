@@ -285,7 +285,9 @@ type subAgentResult struct {
 }
 
 // SpawnSubAgent creates and runs a child AgentLoop with isolated context.
-// This is the callback wired to AgentTool.SpawnFunc.
+// This is the callback wired to AgentTool.SpawnFunc (async) and SpawnSyncFunc (sync).
+// When runInBackground is true, launches a goroutine and returns immediately.
+// When runInBackground is false, runs synchronously and returns the result directly.
 func (a *AgentLoop) SpawnSubAgent(
 	description string,
 	prompt string,
@@ -327,8 +329,6 @@ func (a *AgentLoop) SpawnSubAgent(
 		}
 	}
 
-	a.activeSubAgents.Add(1)
-
 	// Capture parent context for fork mode
 	var parentEntries []conversationEntry
 	var parentSystemPrompt string
@@ -346,7 +346,18 @@ func (a *AgentLoop) SpawnSubAgent(
 		forkUserMessage = fmt.Sprintf("%s\n%s\n</fork_directive>", forkBoilerplate, prompt)
 	}
 
-	// Create independent cancellable context for async sub-agent
+	// For sync mode, run directly in the current goroutine
+	if !runInBackground {
+		a.activeSubAgents.Add(1)
+		result, errText, outputFile, toolsUsed, durationMs = a.runChildAgentSync(
+			taskID, description, subagentType, prompt, forkUserMessage,
+			isForkMode, agentType, childCfg, childRegistry, parentSystemPrompt,
+			parentEntries, start,
+		)
+		return taskID, result, errText, outputFile, toolsUsed, durationMs
+	}
+
+	// Async mode: launch in background goroutine
 	asyncCtx, asyncCancel := context.WithCancel(context.Background())
 
 	// Store cancel func in task state for external cancellation via CancelSubAgent
@@ -370,6 +381,8 @@ func (a *AgentLoop) SpawnSubAgent(
 		bgTask.OutputFile = outputFilePath
 	}
 
+	a.activeSubAgents.Add(1)
+
 	// Launch background goroutine with independent cancellation
 	go func() {
 		defer a.activeSubAgents.Done()
@@ -391,6 +404,15 @@ func (a *AgentLoop) SpawnSubAgent(
 			}
 			if bgTask != nil {
 				bgTask.SetStatus(tools.TaskFailed)
+			}
+			// Update handle store on failure
+			if a.agentHandleStore != nil {
+				for _, h := range a.agentHandleStore.List() {
+					if h.TaskID == taskID {
+						a.agentHandleStore.Fail(h.Name, fmt.Sprintf("failed to create: %v", err))
+						break
+					}
+				}
 			}
 			a.EnqueueAgentNotification(taskID, "failed", "", "", "", 0, 0, 0)
 			return
@@ -472,6 +494,17 @@ func (a *AgentLoop) SpawnSubAgent(
 		if bgTask != nil {
 				bgTask.SetStatus(tools.TaskCompleted)
 		}
+
+		// Update handle store if this agent was named
+		if a.agentHandleStore != nil {
+			for _, h := range a.agentHandleStore.List() {
+				if h.TaskID == taskID {
+					a.agentHandleStore.Complete(h.Name, childResult)
+					break
+				}
+			}
+		}
+
 		a.EnqueueAgentNotification(taskID, "completed", childResult, childLoop.TranscriptPath(), outputFilePath, turnsUsed, int(childLoop.totalInputTokens.Load()+childLoop.totalOutputTokens.Load()), dur)
 	}()
 
@@ -756,6 +789,138 @@ func sharedSubAgentNotes() string {
 `
 }
 
+// runChildAgentSync runs a child agent loop synchronously (in the current goroutine)
+// and returns the result directly. This implements sync/foreground mode for sub-agents.
+func (a *AgentLoop) runChildAgentSync(
+	taskID, description, subagentType, prompt, forkUserMessage string,
+	isForkMode bool,
+	agentType AgentType,
+	childCfg Config,
+	childRegistry *tools.Registry,
+	parentSystemPrompt string,
+	parentEntries []conversationEntry,
+	start time.Time,
+) (result string, errText string, outputFile string, toolsUsed int, durationMs int64) {
+	defer a.activeSubAgents.Done()
+
+	// Mark as running in legacy task store
+	if a.taskStore != nil {
+		a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
+	}
+
+	// Create task in AgentTaskStore
+	var bgTask *tools.AgentTask
+	var outputFilePath string
+	var outputFileHandle *os.File
+	if a.agentTaskStore != nil {
+		bgTask = a.agentTaskStore.CreateWithID(taskID, description, subagentType, prompt, childCfg.Model)
+		bgTask.SetStatus(tools.TaskRunning)
+		outputFilePath = filepath.Join(".claude", "sub-agents", taskID+"_output.txt")
+		os.MkdirAll(filepath.Dir(outputFilePath), 0755)
+		outputFileHandle, _ = os.Create(outputFilePath)
+		bgTask.OutputFile = outputFilePath
+	}
+
+	// Create the child agent loop
+	childLoop, err := a.createChildAgentLoop(childCfg, childRegistry, agentType, parentSystemPrompt)
+	if err != nil {
+		if a.taskStore != nil {
+			a.taskStore.FailTask(taskID, fmt.Sprintf("failed to create: %v", err))
+		}
+		if bgTask != nil {
+			bgTask.SetStatus(tools.TaskFailed)
+		}
+		return "", fmt.Sprintf("failed to create child agent: %v", err), "", 0, time.Since(start).Milliseconds()
+	}
+	defer childLoop.Close()
+
+	// Set agentOutput
+	if bgTask != nil {
+		childLoop.agentOutput = &taskOutputWriter{task: bgTask, file: outputFileHandle}
+	} else {
+		childLoop.agentOutput = io.Discard
+	}
+
+	// Store transcript path
+	if a.taskStore != nil {
+		if task := a.taskStore.GetTask(taskID); task != nil {
+			task.SetTranscriptPath(childLoop.TranscriptPath())
+		}
+	}
+	if bgTask != nil {
+		bgTask.SetTranscriptPath(childLoop.TranscriptPath())
+	}
+
+	// Wire pending message drain
+	if bgTask != nil {
+		childLoop.drainPendingMessagesFunc = func() []string {
+			return bgTask.DrainPendingMessages()
+		}
+	}
+
+	// Apply fork mode with cloned entries
+	if isForkMode && len(parentEntries) > 0 {
+		filtered := filterEntriesForFork(parentEntries)
+		childLoop.context.mu.Lock()
+		for _, entry := range filtered {
+			childLoop.context.entries = append(childLoop.context.entries, entry)
+		}
+		childLoop.context.mu.Unlock()
+	}
+
+	// Determine user prompt
+	userPrompt := prompt
+	if isForkMode && forkUserMessage != "" {
+		userPrompt = forkUserMessage
+	}
+
+	// Run the child agent synchronously
+	childResult := childLoop.Run(userPrompt)
+
+	// If Run returned empty, try to recover partial results
+	if childResult == "" {
+		childResult = childLoop.getPartialResult()
+	}
+
+	// Capture final result
+	turnsUsed := int(childLoop.budget.consumed.Load())
+	dur := time.Since(start).Milliseconds()
+
+	if bgTask != nil {
+		bgTask.WriteOutput(childResult)
+		bgTask.SetToolsInfo(turnsUsed, dur)
+		bgTask.SetStatus(tools.TaskCompleted)
+	}
+
+	// Close the output file handle
+	if outputFileHandle != nil {
+		outputFileHandle.Close()
+	}
+
+	if a.taskStore != nil {
+		a.taskStore.CompleteTask(taskID, childResult, turnsUsed, dur)
+	}
+
+	// Update handle store if this agent was named
+	if a.agentHandleStore != nil {
+		// Try to find the handle by task ID
+		for _, h := range a.agentHandleStore.List() {
+			if h.TaskID == taskID {
+				a.agentHandleStore.Complete(h.Name, childResult)
+				break
+			}
+		}
+	}
+
+	// Run handoff classifier on the result before returning
+	safeResult, safe := tools.SanitizeHandoffOutput(childResult)
+	if !safe {
+		return safeResult, "", outputFilePath, turnsUsed, dur
+	}
+
+	return safeResult, "", outputFilePath, turnsUsed, dur
+}
+
 // createChildAgentLoop creates a new AgentLoop for a child, reusing the parent's
 // HTTP client and API configuration.
 // agentType: the type of sub-agent (affects system prompt construction)
@@ -885,36 +1050,41 @@ func (a *AgentLoop) cloneContextForFork(childLoop *AgentLoop) {
 }
 
 // SendMessageToSubAgent sends a message to a running sub-agent or returns its status.
+// If the agentID looks like a name (not a task ID), it is resolved via the handle store
+// or name registry first.
 func (a *AgentLoop) SendMessageToSubAgent(agentID string, message string) (string, string) {
+	// Resolve name to task ID
+	resolvedID := a.resolveAgentID(agentID)
+
 	// Try the new AgentTaskStore first
 	if a.agentTaskStore != nil {
-		if task := a.agentTaskStore.Get(agentID); task != nil {
+		if task := a.agentTaskStore.Get(resolvedID); task != nil {
 			if task.IsTerminal() {
 				return fmt.Sprintf("Agent %s has completed.\nStatus: %s\nResult: %s",
-					agentID, task.Status, task.GetOutput()), ""
+					resolvedID, task.Status, task.GetOutput()), ""
 			}
 			if message != "" {
 				task.AddPendingMessage(message)
-				return fmt.Sprintf("Message queued for agent %s", agentID), ""
+				return fmt.Sprintf("Message queued for agent %s", resolvedID), ""
 			}
-			return fmt.Sprintf("Agent %s is still running.\nStatus: %s", agentID, task.Status), ""
+			return fmt.Sprintf("Agent %s is still running.\nStatus: %s", resolvedID, task.Status), ""
 		}
 	}
 	// Fall back to legacy TaskStore
 	if a.taskStore != nil {
-		if task := a.taskStore.GetTask(agentID); task != nil {
+		if task := a.taskStore.GetTask(resolvedID); task != nil {
 			if task.IsTerminal() {
 				return fmt.Sprintf("Agent %s has completed.\nStatus: %d\nResult: %s",
-					agentID, task.Status, task.Result), ""
+					resolvedID, task.Status, task.Result), ""
 			}
 			if message != "" {
 				task.AddPendingMessage(message)
-				return fmt.Sprintf("Message queued for agent %s", agentID), ""
+				return fmt.Sprintf("Message queued for agent %s", resolvedID), ""
 			}
-			return fmt.Sprintf("Agent %s is still running.\nStatus: %d", agentID, task.Status), ""
+			return fmt.Sprintf("Agent %s is still running.\nStatus: %d", resolvedID, task.Status), ""
 		}
 	}
-	return "", fmt.Sprintf("agent %s not found", agentID)
+	return "", fmt.Sprintf("agent %s not found", resolvedID)
 }
 
 // GetSubAgentStatus returns the status of a sub-agent task.
@@ -1115,9 +1285,16 @@ func (a *AgentLoop) StopBackgroundTask(taskID string) error {
 }
 
 // resolveAgentID resolves a name or agent ID to an agent ID.
-// If the input matches a registered name, returns the corresponding agent ID.
-// Otherwise, returns the input as-is (assumed to be an agent ID directly).
+// If the input matches a registered name in agentNameRegistry or agentHandleStore,
+// returns the corresponding agent ID. Otherwise returns the input as-is.
 func (a *AgentLoop) resolveAgentID(nameOrID string) string {
+	// Check handle store first (named agents with proper handles)
+	if a.agentHandleStore != nil {
+		if handle, ok := a.agentHandleStore.Lookup(nameOrID); ok {
+			return handle.TaskID
+		}
+	}
+	// Fall back to legacy name registry
 	if a.agentNameRegistry != nil {
 		if agentID, ok := a.agentNameRegistry[nameOrID]; ok {
 			return agentID

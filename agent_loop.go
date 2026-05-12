@@ -76,7 +76,9 @@ func (b *IterationBudget) GraceCall() bool {
 // registerAgentTool registers the AgentTool with this loop's SpawnFunc.
 func (a *AgentLoop) registerAgentTool() {
 	agentTool := &tools.AgentTool{
-		SpawnFunc: a.SpawnSubAgent,
+		SpawnFunc:     a.SpawnSubAgent,
+		SpawnSyncFunc: a.SpawnSubAgent, // same callback; sync mode is controlled by the runInBackground flag
+		HandleStore:   a.agentHandleStore,
 	}
 	a.registry.Register(agentTool)
 }
@@ -86,6 +88,8 @@ func (a *AgentLoop) registerSendMessageTool() {
 	sendMsgTool := &tools.SendMessageTool{
 		SendMessageFunc: a.SendMessageToSubAgent,
 		GetStatusFunc:   a.GetSubAgentStatus,
+		ResolveNameFunc: a.resolveAgentID,
+		HandleStore:     a.agentHandleStore,
 	}
 	a.registry.Register(sendMsgTool)
 }
@@ -302,6 +306,7 @@ type AgentLoop struct {
 	notificationChan         chan string                // buffered channel for async task notifications
 	evictionDone             chan struct{}              // signals the eviction ticker goroutine to stop
 	agentNameRegistry        map[string]string          // maps short agent names to task IDs
+	agentHandleStore         *tools.AgentHandleStore    // named agent handle store for routing
 	cancelCtx                context.Context            // cancellable context for async sub-agents
 	cancelFunc               context.CancelFunc         // cancel function for async sub-agents
 	workTaskStore            *WorkTaskStore             // tracks LLM work items (TODO list)
@@ -467,6 +472,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		notificationChan:  make(chan string, 64),
 		evictionDone:      make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
+		agentHandleStore: tools.NewAgentHandleStore(),
 		workTaskStore:     NewWorkTaskStore(),
 		agentOutput:       os.Stderr,
 		toolStateTracker:  NewToolStateTracker(),
@@ -628,6 +634,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		notificationChan:  make(chan string, 64),
 		evictionDone:      make(chan struct{}),
 		agentNameRegistry: make(map[string]string),
+		agentHandleStore: tools.NewAgentHandleStore(),
 		workTaskStore:     NewWorkTaskStore(),
 		agentOutput:       os.Stderr,
 		toolStateTracker:  NewToolStateTracker(),

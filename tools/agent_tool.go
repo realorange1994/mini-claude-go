@@ -5,6 +5,14 @@ import (
 	"strings"
 )
 
+// AgentExecutionMode defines how a sub-agent is executed.
+type AgentExecutionMode string
+
+const (
+	AgentModeSync  AgentExecutionMode = "sync"  // foreground, blocks until done
+	AgentModeAsync AgentExecutionMode = "async" // background, returns immediately (default)
+)
+
 // AgentSpawnFunc is the callback function to spawn a child agent loop.
 // It returns (agentID, result, errText, outputFile, toolsUsed, durationMs).
 // For async launches, result/errText are empty and outputFile is the live output file path.
@@ -22,9 +30,16 @@ type AgentSpawnFunc func(
 	parentMessages []map[string]any,
 ) (agentID string, result string, errText string, outputFile string, toolsUsed int, durationMs int64)
 
+// AgentSpawnSyncFunc is the callback for synchronous (foreground) sub-agent execution.
+// It blocks until the sub-agent completes and returns the result directly.
+// Signature matches AgentSpawnFunc but runs in the calling goroutine.
+type AgentSpawnSyncFunc AgentSpawnFunc
+
 // AgentTool spawns a child agent to execute a specialized task.
 type AgentTool struct {
-	SpawnFunc AgentSpawnFunc
+	SpawnFunc     AgentSpawnFunc
+	SpawnSyncFunc AgentSpawnSyncFunc // for sync/foreground mode
+	HandleStore   *AgentHandleStore  // for named agent routing
 }
 
 func (t *AgentTool) Name() string { return "agent" }
@@ -32,7 +47,7 @@ func (t *AgentTool) Description() string {
 	return `Launch a sub-agent to handle a complex, multi-step task autonomously. ` +
 		`Use this tool (NOT mcp_call_tool or any MCP LLM tool) when the user wants to dispatch, delegate, or assign a task to a sub-agent. ` +
 		`Sub-agents have their own isolated conversation context and tool access. ` +
-		`Supports both synchronous (default) and asynchronous (run_in_background=true) execution.
+		`Supports both synchronous (mode="sync") and asynchronous (mode="async", default) execution.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path → use file_read instead
@@ -47,9 +62,11 @@ When TO use the Agent tool:
 - Full codebase-wide investigations (use Agent with a specific goal)
 - Tasks that require specialized sub-context that would benefit from fork mode (inherit parent context)
 
-The Agent tool creates autonomous sub-agents with their own context and tool access. Each sub-agent runs independently and returns results when complete.
+Execution modes:
+- mode="async" (default): agent runs in background; returns immediately with agent ID.
+- mode="sync": agent runs in foreground; blocks until complete and returns result directly.
 
-When launching a background agent (run_in_background=true):
+When launching a background agent (mode="async"):
 - The agent runs asynchronously; you will receive a notification when it completes.
 - Do NOT call task_output, Read, or Bash to check the agent's progress — this blocks your turn and defeats the purpose of background execution.
 - After launching, you know nothing about what the agent found. Never fabricate or predict agent results.
@@ -79,9 +96,18 @@ func (t *AgentTool) InputSchema() map[string]any {
 				"enum":        []any{"sonnet", "opus", "haiku"},
 				"description": "Optional model override for this agent. Takes precedence over the agent definition's model. If omitted, inherits from the parent.",
 			},
+			"mode": map[string]any{
+				"type":        "string",
+				"enum":        []any{"sync", "async"},
+				"description": `Execution mode: "sync" blocks until the agent completes and returns its result directly; "async" (default) launches the agent in the background and returns immediately with an agent ID.`,
+			},
+			"name": map[string]any{
+				"type":        "string",
+				"description": "Optional name for the agent, enabling routing via send_message. Must be a short alphanumeric identifier (max 32 chars, hyphens/underscores allowed).",
+			},
 			"run_in_background": map[string]any{
 				"type":        "boolean",
-				"description": "DEPRECATED — sub-agents always run in background. This parameter is ignored.",
+				"description": "DEPRECATED — use mode=\"async\" instead. This parameter is ignored.",
 			},
 			"allowed_tools": map[string]any{
 				"type":        "array",
@@ -103,7 +129,25 @@ func (t *AgentTool) InputSchema() map[string]any {
 			},
 			"timeout": map[string]any{
 				"type":        "integer",
-				"description": "Timeout in milliseconds (max 600000 / 10 minutes). Default: 600000 (10 minutes). Controls how long the parent waits before considering the agent timed out. The agent always runs in background regardless of timeout.",
+				"description": "Timeout in milliseconds (max 600000 / 10 minutes). Default: 600000 (10 minutes). For sync mode, the call blocks up to this duration. For async mode, the agent runs in background regardless.",
+			},
+			"worktree": map[string]any{
+				"type":        "object",
+				"description": "Worktree isolation settings (optional). When enabled, the sub-agent runs in a separate git worktree.",
+				"properties": map[string]any{
+					"enabled": map[string]any{
+						"type":        "boolean",
+						"description": "Enable worktree isolation for this agent.",
+					},
+					"name": map[string]any{
+						"type":        "string",
+						"description": "Custom name for the worktree (auto-generated if empty).",
+					},
+					"keep": map[string]any{
+						"type":        "boolean",
+						"description": "Keep the worktree after the agent completes (default: false, auto-removed).",
+					},
+				},
 			},
 		},
 	}
@@ -129,6 +173,16 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	disallowedTools := extractStringList(params["disallowed_tools"])
 	inheritContext, _ := params["inherit_context"].(bool)
 
+	// Extract mode: "sync" (foreground) or "async" (background, default)
+	modeStr, _ := params["mode"].(string)
+	mode := AgentExecutionMode(modeStr)
+	if mode == "" {
+		mode = AgentModeAsync
+	}
+
+	// Extract agent name for routing
+	agentName, _ := params["name"].(string)
+
 	// Extract max_turns — default to 200 for safety ceiling.
 	maxTurns, ok := params["max_turns"].(float64)
 	if !ok || maxTurns <= 0 {
@@ -138,12 +192,83 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	// Always disallow recursive agent spawning
 	disallowedTools = append(disallowedTools, "agent")
 
-	// Sub-agents always run in background — they must not block the main REPL.
-	// This matches Claude Code's behavior where all agent spawns are async.
+	// Sync mode: run in current goroutine, return result directly
+	if mode == AgentModeSync {
+		if t.SpawnSyncFunc == nil {
+			// Fall back to regular spawn func — it may handle sync internally
+			agentID, result, errText, _, toolsUsed, durationMs := t.SpawnFunc(
+				description, prompt, subagentType, model, false,
+				allowedTools, disallowedTools, inheritContext, int(maxTurns), nil,
+			)
+			if errText != "" {
+				return ToolResultError(fmt.Sprintf("sync agent failed: %s", errText))
+			}
+			// Run handoff classifier on the result
+			safeResult, safe := SanitizeHandoffOutput(result)
+			if !safe {
+				return ToolResultOK(fmt.Sprintf(
+					"Sync agent completed (handoff filtered).\n\n"+
+						"agentId: %s\n"+
+						"Status: completed (filtered)\n"+
+						"Description: %s\n"+
+						"Duration: %dms, Tools used: %d\n\n"+
+						"%s",
+					agentID, description, durationMs, toolsUsed, safeResult,
+				))
+			}
+			return ToolResultOK(formatAgentResult(safeResult, agentID, subagentType, toolsUsed, durationMs, false))
+		}
+
+		agentID, result, errText, _, toolsUsed, durationMs := t.SpawnSyncFunc(
+			description, prompt, subagentType, model, false,
+			allowedTools, disallowedTools, inheritContext, int(maxTurns), nil,
+		)
+		if errText != "" {
+			return ToolResultError(fmt.Sprintf("sync agent failed: %s", errText))
+		}
+		// Run handoff classifier on the result
+		safeResult, safe := SanitizeHandoffOutput(result)
+		if !safe {
+			return ToolResultOK(fmt.Sprintf(
+				"Sync agent completed (handoff filtered).\n\n"+
+					"agentId: %s\n"+
+					"Status: completed (filtered)\n"+
+					"Description: %s\n"+
+					"Duration: %dms, Tools used: %d\n\n"+
+					"%s",
+				agentID, description, durationMs, toolsUsed, safeResult,
+			))
+		}
+		return ToolResultOK(formatAgentResult(safeResult, agentID, subagentType, toolsUsed, durationMs, false))
+	}
+
+	// Async mode (default): run in background, return immediately with agent ID
+	// Register agent name if provided
+	if agentName != "" && t.HandleStore != nil {
+		// Validate agent name
+		if !isValidAgentName(agentName) {
+			return ToolResultError(fmt.Sprintf(
+				"invalid agent name %q: must be alphanumeric (max 32 chars, hyphens/underscores allowed)",
+				agentName))
+		}
+	}
+
 	agentID, _, _, outputFile, _, _ := t.SpawnFunc(
 		description, prompt, subagentType, model, true,
 		allowedTools, disallowedTools, inheritContext, int(maxTurns), nil,
 	)
+
+	// Register in handle store for named routing
+	if agentName != "" && t.HandleStore != nil {
+		done := make(chan struct{})
+		t.HandleStore.Register(agentName, &AgentHandle{
+			Name:   agentName,
+			TaskID: agentID,
+			Status: "running",
+			Done:   done,
+		})
+	}
+
 	return ToolResultOK(fmt.Sprintf(
 		"Agent launched in background.\n\n"+
 			"agentId: %s\n"+
@@ -156,6 +281,19 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 			"Briefly tell the user what you launched, then end your response. The notification will arrive in a separate turn.",
 		agentID, outputFile, description,
 	))
+}
+
+// isValidAgentName checks that the name is alphanumeric with hyphens/underscores, max 32 chars.
+func isValidAgentName(name string) bool {
+	if name == "" || len(name) > 32 {
+		return false
+	}
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // extractStringList converts an interface{} (from JSON array) to []string.
