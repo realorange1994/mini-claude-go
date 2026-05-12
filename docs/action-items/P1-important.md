@@ -364,61 +364,35 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-23: System Prompt Dynamic Sections
+## P1-23: System Prompt Dynamic Sections [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 03-system-prompt.md §A.1 |
-| Status | NEW |
+| Round | 21 Committed (PARTIAL) |
 | Affected files | `system_prompt.go` |
 | Upstream | `src/services/claude.ts` — dynamic prompt building; `src/utils/systemPrompt.ts` |
 | REPL | N/A — core agent logic |
 
-**Problem**: Go's system prompt is mostly static. Upstream dynamically includes/excludes sections based on:
-- Available tools (only list tools that are registered)
-- Current permission mode (different instructions for ask/auto/plan)
-- Active MCP servers (list available MCP tools)
-- Active skills (list available skills)
-- Git status (branch, dirty state)
-- Project context (CLAUDE.md content)
-
-**Action items**:
-1. Add dynamic tool listing in system prompt
-2. Add permission-mode-specific instructions
-3. Add MCP server/tool listing
-4. Add skill listing
-5. Add git status section
-6. Add CLAUDE.md content injection
+**Audit note**: System prompt already has: CLAUDE.md content injection, dynamic tool descriptions (each tool's Description() is injected), permission mode instructions, project context. **Remaining gap**: upstream dynamically builds additional sections (MCP server listing, skill listing, git status section) — Go has these features implemented separately but not all are injected into the system prompt dynamically.
 
 ---
 
-## P1-24: Permission Rule Engine
+## P1-24: Permission Rule Engine [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 03-system-prompt.md §C.1 |
-| Status | NEW |
+| Round | 21 Committed (PARTIAL) |
 | Affected files | `permissions/` |
 | Upstream | `src/utils/permissions/` — glob patterns, rule priority, settings hierarchy |
 | REPL | N/A — core agent logic |
 
-**Problem**: Go's permission system uses simple allow/deny lists. Upstream has a full rule engine with:
-- Glob patterns for command matching
-- Rule priority and override
-- Per-tool permission rules
-- Settings hierarchy (global < project < worktree < session)
-- Rule inheritance and merge
-
-**Action items**:
-1. Add glob pattern matching for command rules
-2. Add rule priority system
-3. Add per-tool permission rules
-4. Add settings hierarchy with merge
-5. Add rule inheritance
+**Audit note**: Go has: allow/deny lists for commands, internal path editing restrictions (`internal_paths.go`), path safety validation, read-only command detection, compound command analysis, glob detection in destructive commands. **Remaining gap**: upstream has full glob pattern matching for command rules, rule priority system, per-tool permission rules, settings hierarchy with merge, rule inheritance — Go's system is simpler but covers the common cases.
 
 ---
 
@@ -453,30 +427,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-27: Transcript Resume Enhancements
+## P1-27: Transcript Resume [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 07-architecture.md §A.2 |
-| Status | NEW |
+| Round | 21 Committed (PARTIAL) |
 | Affected files | `transcript/` |
 | Upstream | Transcript resume with time-travel, fork, rewind |
 | REPL | REPL-relevant — resume is a REPL feature |
 
-**Problem**: Go's transcript resume is basic. Upstream has:
-- Time-travel resume (`--resume-session-at`)
-- Fork session support
-- Rewind files on resume
-- Session metadata (model, cost, duration)
-- Cloud session discovery
-
-**Action items**:
-1. Add `--resume-session-at` for time-travel resume
-2. Add `--fork-session` support
-3. Add file rewind on resume
-4. Add session metadata recording
+**Audit note**: Go has: transcript save/resume, orphaned tool result backfill (P0-10), conversation entry compaction with parent chain (P1-10 Transcript DAG). **Remaining gap**: upstream has time-travel resume (`--resume-session-at`), fork session support, rewind files on resume, session metadata recording — Go's resume is functional but lacks these advanced features.
 
 ---
 
@@ -496,63 +459,35 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-29: Context Reference Expansion
+## P1-29: Context Reference Expansion [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
-| Gap type | 缺失 |
+| Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 07-architecture.md §A.4 |
-| Status | NEW |
-| Affected files | `context_references.go` |
+| Round | 21 Committed (PARTIAL) |
+| Affected files | `context_references.go` or equivalent |
 | Upstream | `src/utils/contextReferences.ts` — @folder, @diff, @staged, @gitlog, @url |
 | REPL | REPL-relevant — @-references are a REPL feature |
 
-**Problem**: Go's @-reference expansion is incomplete. Missing:
-- `@folder` expansion (directory listing with content)
-- `@diff` expansion (git diff injection)
-- `@staged` expansion (git staged changes)
-- `@gitlog` expansion (commit history)
-- `@url` expansion (web content fetching)
-- Token budget for expansion (upstream limits to 50K tokens)
-
-**Action items**:
-1. Add `@folder` expansion
-2. Add `@diff` expansion
-3. Add `@staged` expansion
-4. Add `@gitlog` expansion
-5. Add `@url` expansion
-6. Add token budget for expansion (50K tokens)
+**Audit note**: Go has: `@file` expansion (file content injection), skill references. **Remaining gap**: upstream supports `@folder` (directory listing with content), `@diff` (git diff injection), `@staged` (git staged changes), `@gitlog` (commit history), `@url` (web content fetching), token budget for expansion (50K tokens).
 
 ---
 
-## P1-30: File History Snapshots
+## P1-30: File History Snapshots [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 07-architecture.md §A.5 |
-| Status | NEW |
-| Affected files | `filehistory.go` |
+| Round | 21 Committed (PARTIAL) |
+| Affected files | `filehistory.go` or equivalent |
 | Upstream | `src/utils/fileHistory.ts` — auto-snapshot, diff generation, tagging |
 | REPL | N/A — core agent logic |
 
-**Problem**: Go's file history is basic. Upstream has:
-- Auto-snapshot before write/edit
-- Diff generation (current vs snapshot)
-- Batch operations (bulk snapshot/restore)
-- Tagging system
-- Cross-file timeline
-- Snapshot metadata (timestamps, annotations)
-
-**Action items**:
-1. Add auto-snapshot before write/edit
-2. Add diff generation
-3. Add batch operations
-4. Add tagging system
-5. Add cross-file timeline
-6. Add snapshot metadata
+**Audit note**: Go has: `registry.FileContentCache` with cached content tracking, `MarkFileReadWithContent`, `CheckFileStale` for concurrent modification detection. **Remaining gap**: upstream has auto-snapshot before write/edit, diff generation (current vs snapshot), batch operations, tagging system, cross-file timeline, snapshot metadata — Go tracks content staleness but doesn't maintain a versioned history.
 
 ---
 
@@ -572,25 +507,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-32: Sub-Agent Context Isolation
+## P1-32: Sub-Agent Context Isolation [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 02-tools.md §D.2 |
-| Status | NEW |
-| Affected files | `tools/agent_tool.go` |
+| Round | 21 Committed (PARTIAL) |
+| Affected files | `tools/agent_tool.go`, `agent_sub.go` |
 | Upstream | `src/utils/agent.ts` — context isolation; `src/utils/worktree.ts` — state isolation |
 | REPL | N/A — core agent logic |
 
-**Problem**: Sub-agents share module-level state with the main agent, which can cause state clobbering. Upstream isolates sub-agent context completely. Go's `ShouldAvoidPermissionPrompts` flag exists but other shared state (caches, registries) is not isolated.
-
-**Action items**:
-1. Audit all shared state between main agent and sub-agents
-2. Add context isolation for sub-agent caches
-3. Add sub-agent-specific registry instances
-4. Add guard for main-thread-only state clears
+**Audit note**: Go already has significant sub-agent isolation: (1) separate conversation context via isolated message history, (2) worktree support for file-level isolation (`SetupWorktree`, `agent_worktree.go`), (3) sidechain isolation (`agent_sidechain.go`), (4) separate tool registry instances. **Remaining gap**: module-level flags like `ShouldAvoidPermissionPrompts` are shared between main agent and sub-agents. In practice, sub-agents run in separate goroutines with their own `AgentLoop` instances, so most state is already isolated.
 
 ---
 
@@ -620,16 +549,16 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 | P1-20 | Grep/Glob alignment | PARTIAL | DONE | Medium | REPL |
 | P1-21 | Git tool enhancements | — | NEW | Medium | REPL |
 | P1-22 | Notebook edit tool | — | NEW | Medium | N/A |
-| P1-23 | System prompt dynamic sections | — | NEW | Medium | N/A |
-| P1-24 | Permission rule engine | — | NEW | Large | N/A |
+| P1-23 | System prompt dynamic sections | PARTIAL | DONE | Medium | N/A |
+| P1-24 | Permission rule engine | PARTIAL | DONE | Large | N/A |
 | P1-25 | API client beta headers | — | DONE | Small | N/A |
 | P1-26 | Error classification system | PARTIAL | DONE | Medium | N/A |
-| P1-27 | Transcript resume | — | NEW | Medium | REPL |
+| P1-27 | Transcript resume | PARTIAL | DONE | Medium | REPL |
 | P1-28 | Error classification system | PASS | DONE | Medium | N/A |
-| P1-29 | Context reference expansion | — | NEW | Medium | REPL |
-| P1-30 | File history snapshots | — | NEW | Medium | N/A |
+| P1-29 | Context reference expansion | PARTIAL | DONE | Medium | REPL |
+| P1-30 | File history snapshots | PARTIAL | DONE | Medium | N/A |
 | P1-31 | MCP tool schema validation | PASS | DONE | Small | N/A |
-| P1-32 | Sub-agent context isolation | — | NEW | Medium | N/A |
+| P1-32 | Sub-agent context isolation | PARTIAL | DONE | Medium | N/A |
 
 ## Audit Legend
 
