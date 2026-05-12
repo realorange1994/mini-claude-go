@@ -94,6 +94,7 @@ const (
 	DefaultKeepRounds = 3
 
 	// DefaultMaxContextTokens is the default max context window (Claude 200K).
+	// Used as a fallback when the model capabilities cache is unavailable.
 	DefaultMaxContextTokens = 200_000
 
 	// OmissionMarker is the format string for boundary markers.
@@ -1114,7 +1115,16 @@ New messages to incorporate:
 
 `
 
+// globalModelCaps is the process-wide model capabilities cache, set by the
+// agent loop on startup. When nil, modelContextWindow falls back to
+// suffix-based detection and 200K defaults.
+var globalModelCaps *ModelCapabilitiesCache
 
+// SetGlobalModelCapabilities sets the process-wide model capabilities cache.
+// Called once by the agent loop during initialization.
+func SetGlobalModelCapabilities(mc *ModelCapabilitiesCache) {
+	globalModelCaps = mc
+}
 
 // ContextWindowTracker tracks token usage against model-specific context windows.
 type ContextWindowTracker struct {
@@ -1133,9 +1143,15 @@ func NewContextWindowTracker(model string, threshold float64, buffer int) *Conte
 }
 
 // modelContextWindow returns the context window size for a model.
-// Supports [1m] suffix and known Sonnet 4 / Opus 4 models for 1M context.
-// Falls back to 200K for all other models.
+// Checks the global ModelCapabilitiesCache first (if initialized), then
+// falls back to suffix-based detection and 200K default.
 func modelContextWindow(model string) int {
+	// Priority 0: Global model capabilities cache (set by agent loop)
+	if globalModelCaps != nil {
+		if ctx := globalModelCaps.GetContextWindow(model); ctx > 0 {
+			return int(ctx)
+		}
+	}
 	lower := strings.ToLower(model)
 	// Priority 1: [1m] suffix — explicit 1M context request
 	if strings.Contains(lower, "[1m]") {
@@ -1299,6 +1315,13 @@ func NewCompactor() *Compactor {
 		llmCompactFailedCount: 0,
 		maxLLMCompactFailures: 3,
 	}
+}
+
+// SetMaxTokens sets the compactor's max token limit based on the model's context window.
+func (c *Compactor) SetMaxTokens(tokens int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.maxTokens = tokens
 }
 
 // SetPostCompactTokens updates the post-compact token count for cooldown.

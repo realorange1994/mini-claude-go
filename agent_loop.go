@@ -318,6 +318,7 @@ type AgentLoop struct {
 	hooks                    *HookManager              // compact pre/post hook handlers
 	consecutiveContextErrors int                       // tracks consecutive context overflow errors for reactive compact
 	consecutive529Errors     int                       // tracks consecutive 529 overloaded errors for model fallback
+	modelCapabilities        *ModelCapabilitiesCache   // per-model context window and capability lookup
 }
 
 // handle529Error processes a 529 Overloaded error. It increments the consecutive
@@ -475,6 +476,12 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		hooks:             cfg.Hooks,
 		sonnetModel:       "claude-sonnet-4-20250514",
 	}
+	// Initialize model capabilities cache and wire it globally
+	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
+	SetGlobalModelCapabilities(agent.modelCapabilities)
+	// Update compactor's max tokens based on model context window
+	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model)
+	agent.compactor.SetMaxTokens(int(contextWindow))
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 	// Fix gate to point to agent's config (not the local cfg copy)
@@ -626,8 +633,15 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		cachedMC:          NewCachedMicrocompactTracker(),
 		costTracker:       NewCostTracker(),
 		extractionState:   NewExtractionState(),
-				hooks:             cfg.Hooks,
-		}
+		hooks:             cfg.Hooks,
+	}
+
+	// Initialize model capabilities cache and wire it globally
+	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
+	SetGlobalModelCapabilities(agent.modelCapabilities)
+	// Update compactor's max tokens based on model context window
+	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model)
+	agent.compactor.SetMaxTokens(int(contextWindow))
 
 	// Restore skill state from transcript entries so skillTracker reflects
 	// which skills were already read in this session. This ensures skills
@@ -962,7 +976,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 	// Expand @ context references (e.g., @file:main.go, @diff)
 	cwd, _ := os.Getwd()
-	contextWindow := modelContextWindow(a.config.Model)
+	var contextWindow int
+	if a.modelCapabilities != nil {
+		contextWindow = int(a.modelCapabilities.GetContextWindow(a.config.Model))
+	} else {
+		contextWindow = modelContextWindow(a.config.Model)
+	}
 	if contextWindow < 1 {
 		contextWindow = 200_000
 	}
