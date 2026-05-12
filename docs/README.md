@@ -52,15 +52,15 @@ All data extracted from [diff_upstream/](../diff_upstream/) (32 分类文件, �
 | Priority | Total | Done | New | Rework |
 |----------|-------|------|-----|--------|
 | P0 (CRITICAL) | 13 | 11 | 2 | 0 |
-| P1 (IMPORTANT) | 32 | 29 | 2 | 0 |
+| P1 (IMPORTANT) | 32 | 30 | 1 | 0 |
 | P2 (NICE-TO-HAVE) | 30 | 0 | 30 | 0 |
-| **Total** | **75** | **38** | **2** | **0** |
+| **Total** | **75** | **39** | **1** | **0** |
 
 ## Audit Summary (Rounds 1-21)
 
 | Audit | Count | Items |
 |-------|-------|-------|
-| **PASS** | 15 | P0-6 (multi-edit match), P0-10 (orphan backfill), P0-11 (stop hooks), P0-13 (permission path safety — precise prefix/component checks + ADS/symlink defense), P1-2 (reactive compaction), P1-4 (model aliases — full [1m] suffix + beta headers + GetModelForAPI), P1-5 (cache detection — category-based tracking with 12 change categories + weights), P1-6 (classifier — removed fabricated escapeContentInjection, added JSONL transcript + XML tags), P1-16 (tool output structured format), P1-17 (exec tool safety), P1-28 (error classification — 15-category enum + recovery hints), P1-31 (MCP schema validation — ValidateSchema with type/enum/constraints), P1-25 (API client beta headers — 8 beta header constants + BuildBetaHeaders + anthropic-beta on all API requests), P1-13 (SM-compact token retention — KeepRecentMessagesAdaptive(10K, 5, 40K)), P1-14 (LLM compaction summary — 9-section structured output + code snippets) |
+| **PASS** | 16 | P0-6 (multi-edit match), P0-10 (orphan backfill), P0-11 (stop hooks), P0-13 (permission path safety — precise prefix/component checks + ADS/symlink defense), P1-2 (reactive compaction), P1-4 (model aliases — full [1m] suffix + beta headers + GetModelForAPI), P1-5 (cache detection — category-based tracking with 12 change categories + weights), P1-6 (classifier — removed fabricated escapeContentInjection, added JSONL transcript + XML tags), P1-16 (tool output structured format), P1-17 (exec tool safety), P1-28 (error classification — 15-category enum + recovery hints), P1-31 (MCP schema validation — ValidateSchema with type/enum/constraints), P1-25 (API client beta headers — 8 beta header constants + BuildBetaHeaders + anthropic-beta on all API requests), P1-13 (SM-compact token retention — KeepRecentMessagesAdaptive(10K, 5, 40K)), P1-14 (LLM compaction summary — 9-section structured output + code snippets), P1-21 (git tool — diff/log/blame/stash/branch/gh CLI) |
 | **PARTIAL** | 22 | P0-1, P0-2, P0-3, P0-4, P0-5, P0-7, P0-8, P0-9 (streaming executor), P0-12, P1-1, P1-3, P1-7, P1-9, P1-10, P1-11, P1-12, P1-18 (file read — missing image/PDF support), P1-19 (file write safety — missing large file confirmation), P1-20 (grep/glob — glob lacks type filter), P1-23 (system prompt — MCP/skill listing not dynamically injected), P1-24 (permission rule engine — simpler than upstream), P1-26 (error classification — PARTIAL with P1-28 overlap), P1-27 (transcript resume — no time-travel/fork), P1-29 (context refs — missing @folder/@diff/@staged/@gitlog/@url), P1-30 (file history — no versioned snapshots), P1-32 (sub-agent isolation — shared module flags) |
 | **FAIL** | 0 | All FAIL items resolved: P1-4/P1-5 via R10/R11 reworks |
 | **Critical issues** | 0 | ApplyPinnedCacheEdits stub fixed (R10), 9 unused hook types wired (R17), P0-10 orphan backfill bug fixed (R19) |

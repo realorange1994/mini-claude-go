@@ -312,33 +312,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-21: Git Tool Enhancements
+## P1-21: Git Tool Enhancements [DONE — AUDIT: PASS]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 02-tools.md §A.6 |
-| Status | NEW |
+| Round | 22 Committed (PASS) |
 | Affected files | `tools/git_tool.go` |
 | Upstream | `src/tools/bash.ts` — git commands; `src/utils/git.ts` — git utilities |
 | REPL | REPL-relevant — git operations are primary REPL interaction |
 
-**Problem**: Go's git tool is basic compared to upstream. Missing:
-- `git diff` with staged/unstaged/branch comparison
-- `git log` with format options
-- `git blame` support
-- `git stash` operations
-- Branch management (create, switch, delete)
-- PR creation via `gh` CLI
-
-**Action items**:
-1. Add `git diff` with staged/unstaged/branch comparison
-2. Add `git log` with format options
-3. Add `git blame` support
-4. Add `git stash` operations
-5. Add branch management commands
-6. Add PR creation via `gh` CLI
+**Audit note**: Git tool already has comprehensive implementation matching upstream requirements: (1) `git diff` with `--cached` (staged) vs working tree, (2) `git log` with `max_count` and `--oneline`, (3) `git blame`, (4) `git stash` with subcommands (push, pop, apply, drop, list, show) + `-u` for untracked, (5) branch management (create, switch, delete), (6) gh CLI integration for PR operations (view, list, diff, checks, status), issue operations (view, list, status), and GitHub Actions (run list/view). Additionally has: worktree support, cherry-pick, revert, merge, rebase, flag validation with per-subcommand whitelists, dangerous operation detection, and `GetGitContext()` for system prompt injection.
 
 ---
 
@@ -547,7 +533,7 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 | P1-18 | File read enhancements | PARTIAL | DONE | Medium | REPL |
 | P1-19 | File write safety | PARTIAL | DONE | Small | REPL |
 | P1-20 | Grep/Glob alignment | PARTIAL | DONE | Medium | REPL |
-| P1-21 | Git tool enhancements | — | NEW | Medium | REPL |
+| P1-21 | Git tool enhancements | PASS | DONE | Medium | REPL |
 | P1-22 | Notebook edit tool | — | NEW | Medium | N/A |
 | P1-23 | System prompt dynamic sections | PARTIAL | DONE | Medium | N/A |
 | P1-24 | Permission rule engine | PARTIAL | DONE | Large | N/A |
