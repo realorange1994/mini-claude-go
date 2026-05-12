@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -198,28 +199,59 @@ func runInteractive(agent *AgentLoop) {
 	// Track Ctrl+C timing for double-press exit (works during agent.Run too)
 	var lastCtrlC atomic.Int64 // stores UnixNano of last Ctrl+C
 
-	// Set up Ctrl+C signal handler
+	// Idle timeout: exit gracefully after inactivity.
+	// Controlled by CLAUDE_CODE_EXIT_AFTER_STOP_DELAY env var.
+	// Accepts duration strings like "5m", "30s", or milliseconds as plain number.
+	idleDelay := parseIdleTimeoutEnv()
+	idleTimerCh := make(chan struct{}, 1)
+	startIdleTimer := func() {
+		if idleDelay <= 0 {
+			return
+		}
+		time.AfterFunc(idleDelay, func() {
+			select {
+			case idleTimerCh <- struct{}{}:
+			default:
+			}
+		})
+	}
+
+	// Set up signal handler for Ctrl+C and termination signals
 	// The handler goroutine consumes signalCh; REPL select uses ctrlCh for
 	// Ctrl+C notification (avoids two goroutines competing on signalCh).
 	signalCh := make(chan os.Signal, 1)
 	ctrlCh := make(chan struct{}, 1)
-	signal.Notify(signalCh, syscall.SIGINT)
+	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
-		for range signalCh {
+		for sig := range signalCh {
 			now := time.Now().UnixNano()
 			prev := lastCtrlC.Load()
-			if prev != 0 && time.Duration(now-prev) < 2*time.Second {
-				// Double Ctrl+C within 2s -- exit immediately (clean up first)
+			if sig == syscall.SIGINT {
+				if prev != 0 && time.Duration(now-prev) < 2*time.Second {
+					// Double Ctrl+C within 2s -- exit immediately (clean up first)
+					printResumeHint(agent)
+					agent.Close()
+					os.Exit(0)
+				}
+				lastCtrlC.Store(now)
+				agent.SetInterrupted(true)
+				// Non-blocking notify to REPL select (may already be processing)
+				select {
+				case ctrlCh <- struct{}{}:
+				default:
+				}
+			} else {
+				// SIGTERM/SIGHUP -- graceful shutdown
 				printResumeHint(agent)
+				fmt.Fprintf(os.Stderr, "\n[idle] Received %v, shutting down gracefully.\n", sig)
 				agent.Close()
-				os.Exit(0)
-			}
-			lastCtrlC.Store(now)
-			agent.SetInterrupted(true)
-			// Non-blocking notify to REPL select (may already be processing)
-			select {
-			case ctrlCh <- struct{}{}:
-			default:
+				exitCode := 128
+				if sig == syscall.SIGTERM {
+					exitCode = 143
+				} else if sig == syscall.SIGHUP {
+					exitCode = 129
+				}
+				os.Exit(exitCode)
 			}
 		}
 	}()
@@ -302,6 +334,12 @@ func runInteractive(agent *AgentLoop) {
 		var line string
 		var isEOF bool
 		select {
+		case <-idleTimerCh:
+			// Idle timeout expired -- exit gracefully
+			printResumeHint(agent)
+			fmt.Fprintf(os.Stderr, "[idle] Exiting after %s of inactivity.\n", idleDelay)
+			agent.Close()
+			return
 		case <-ctrlCh:
 			// Ctrl+C while waiting for input at the ">" prompt.
 			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
@@ -369,7 +407,8 @@ func runInteractive(agent *AgentLoop) {
 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
-				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents"
+				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
+				cmd == "/doctor"
 
 			if !isKnownCmd {
 				// Not a recognized command -- treat as normal prompt
@@ -410,6 +449,7 @@ func runInteractive(agent *AgentLoop) {
 					fmt.Println("  /tools          -- List available tools")
 					fmt.Println("  /quit           -- Exit")
 					fmt.Println("  /agents         -- Manage background agents")
+					fmt.Println("  /doctor         -- Run installation diagnostics")
 					continue
 				case "/compact":
 					agent.ForceCompact()
@@ -459,6 +499,9 @@ func runInteractive(agent *AgentLoop) {
 				case "/agents":
 					handleAgentsCommand(agent, parts[1:])
 					continue
+				case "/doctor":
+					runDoctor(agent)
+					continue
 				}
 			}
 		}
@@ -466,6 +509,9 @@ func runInteractive(agent *AgentLoop) {
 		agent.SetInterrupted(false) // ensure clear before running
 		result := agent.Run(userInput)
 		agent.SetInterrupted(false) // clear after run
+
+		// Start idle timeout after agent finishes
+		startIdleTimer()
 
 		// Drain any stale Ctrl+C signal from the channel. When the user
 		// presses Ctrl+C to interrupt the agent, the signal handler sends
@@ -743,4 +789,132 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// parseIdleTimeoutEnv reads CLAUDE_CODE_EXIT_AFTER_STOP_DELAY env var.
+// Accepts: duration string ("5m", "30s") or milliseconds as plain number.
+// Returns 0 if unset or invalid (meaning idle timeout is disabled).
+func parseIdleTimeoutEnv() time.Duration {
+	val := os.Getenv("CLAUDE_CODE_EXIT_AFTER_STOP_DELAY")
+	if val == "" {
+		return 0
+	}
+	// Try as Go duration first (e.g. "5m", "30s")
+	if d, err := time.ParseDuration(val); err == nil {
+		return d
+	}
+	// Try as milliseconds (plain number, matching upstream)
+	if ms, err := strconv.ParseInt(val, 10, 64); err == nil && ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return 0
+}
+
+// runDoctor runs installation diagnostics.
+func runDoctor(agent *AgentLoop) {
+	fmt.Println("\n=== Doctor Diagnostics ===")
+
+	// Version
+	fmt.Printf("Version: %s\n", "miniClaudeCode (Go)")
+
+	// Model
+	fmt.Printf("Model: %s\n", agent.config.Model)
+
+	// API key configured
+	if agent.config.APIKey != "" {
+		masked := agent.config.APIKey[:4] + "..." + agent.config.APIKey[len(agent.config.APIKey)-4:]
+		fmt.Printf("API Key: configured (%s)\n", masked)
+	} else {
+		fmt.Println("API Key: NOT configured")
+	}
+
+	// Base URL
+	if agent.config.BaseURL != "" && agent.config.BaseURL != "https://api.anthropic.com" {
+		fmt.Printf("Base URL: %s (custom)\n", agent.config.BaseURL)
+	} else {
+		fmt.Println("Base URL: default (api.anthropic.com)")
+	}
+
+	// Permission mode
+	fmt.Printf("Permission Mode: %s\n", agent.config.PermissionMode)
+
+	// Ripgrep check
+	if _, err := exec.LookPath("rg"); err == nil {
+		fmt.Println("Ripgrep: found")
+	} else {
+		fmt.Println("Ripgrep: NOT found (grep fallback will be used)")
+	}
+
+	// Python check
+	if _, err := exec.LookPath("python3"); err == nil {
+		fmt.Println("Python: found (python3)")
+	} else if _, err := exec.LookPath("python"); err == nil {
+		fmt.Println("Python: found (python)")
+	} else {
+		fmt.Println("Python: NOT found")
+	}
+
+	// Node.js check
+	if _, err := exec.LookPath("node"); err == nil {
+		fmt.Println("Node.js: found")
+	} else {
+		fmt.Println("Node.js: NOT found")
+	}
+
+	// Git check
+	if _, err := exec.LookPath("git"); err == nil {
+		fmt.Println("Git: found")
+	} else {
+		fmt.Println("Git: NOT found")
+	}
+
+	// Shell config detection
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = os.Getenv("COMSPEC")
+	}
+	if shell != "" {
+		fmt.Printf("Shell: %s\n", shell)
+	}
+
+	// MCP servers
+	if agent.config.MCPManager != nil {
+		servers := agent.config.MCPManager.ListServers()
+		if len(servers) > 0 {
+			fmt.Printf("MCP Servers: %d registered\n", len(servers))
+		} else {
+			fmt.Println("MCP Servers: none")
+		}
+	}
+
+	// Skills
+	if agent.config.SkillLoader != nil {
+		skills := agent.config.SkillLoader.ListSkills(false)
+		if len(skills) > 0 {
+			fmt.Printf("Skills: %d loaded\n", len(skills))
+		} else {
+			fmt.Println("Skills: none")
+		}
+	}
+
+	// Transcripts
+	transcriptCount := 0
+	if entries, err := loadTranscriptList(); err == nil {
+		transcriptCount = len(entries)
+	}
+	fmt.Printf("Transcripts: %d\n", transcriptCount)
+
+	// Working directory
+	if wd, err := os.Getwd(); err == nil {
+		fmt.Printf("Working Dir: %s\n", wd)
+	}
+
+	// CLAUDE.md files
+	for _, f := range []string{"CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"} {
+		if _, err := os.Stat(f); err == nil {
+			fmt.Printf("Config File: %s (exists)\n", f)
+		}
+	}
+
+	fmt.Println("==========================")
 }
