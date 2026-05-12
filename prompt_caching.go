@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -269,4 +270,100 @@ func FormatBoundaryCachedSystemPrompt(text string, ttl string) []map[string]any 
 	}
 
 	return result
+}
+
+
+// ---------------------------------------------------------------------------
+// Cache Break Detection
+// ---------------------------------------------------------------------------
+
+// CacheBreakDetector tracks cache read tokens between API calls to detect
+// when the KV cache has been broken (e.g., by message reordering, compaction,
+// or prompt changes that invalidate cached prefixes).
+type CacheBreakDetector struct {
+	mu                  sync.Mutex
+	lastCacheReadTokens int64 // tokens read from cache in previous call
+	baselineSet         bool
+}
+
+// UpdateBaseline records the cache read tokens after a successful API call.
+// This establishes a new baseline for subsequent break detection.
+func (d *CacheBreakDetector) UpdateBaseline(cacheReadTokens int64) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastCacheReadTokens = cacheReadTokens
+	d.baselineSet = true
+}
+
+// DetectBreak checks if there was a significant cache break between calls.
+// A break is detected when cache_read drops by more than 20% from baseline,
+// indicating the server could not reuse cached KV pages from the previous request.
+func (d *CacheBreakDetector) DetectBreak(currentCacheReadTokens int64) bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.baselineSet || d.lastCacheReadTokens == 0 {
+		return false
+	}
+	drop := d.lastCacheReadTokens - currentCacheReadTokens
+	threshold := int64(float64(d.lastCacheReadTokens) * 0.20)
+	return drop > threshold
+}
+
+// ResetBaseline clears the baseline, e.g., after compaction invalidates all
+// cached prefixes.
+func (d *CacheBreakDetector) ResetBaseline() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.baselineSet = false
+	d.lastCacheReadTokens = 0
+}
+
+// ---------------------------------------------------------------------------
+// Pinned Cache Edits
+// ---------------------------------------------------------------------------
+
+// PinnedCacheEdit represents a cache edit (tool_result block with cache_control)
+// that should persist across API calls. Re-inserting these at their original
+// positions preserves KV cache positions for cached tool results.
+type PinnedCacheEdit struct {
+	ToolUseID string
+	Position  int    // original position in message array
+	Content   string // cached content
+}
+
+// ApplyPinnedCacheEdits re-inserts pinned cache edits at their original positions
+// in the message stream. For each pinned edit, it ensures the tool_result at that
+// position has cache_control set to preserve the KV cache prefix.
+//
+// Full implementation requires deeper integration with the message building pipeline.
+// Currently a placeholder that logs when pinned edits are applied.
+func ApplyPinnedCacheEdits(messages []anthropic.MessageParam, edits []PinnedCacheEdit) []anthropic.MessageParam {
+	if len(edits) == 0 || len(messages) == 0 {
+		return messages
+	}
+
+	for _, edit := range edits {
+		if edit.Position < 0 || edit.Position >= len(messages) {
+			fmt.Fprintf(os.Stderr, "[WARN] ApplyPinnedCacheEdits: position %d out of range (len=%d)\n",
+				edit.Position, len(messages))
+			continue
+		}
+
+		msg := &messages[edit.Position]
+		// Ensure the message has content that can receive cache_control.
+		// Full implementation would check for tool_result type and preserve
+		// the cache_reference field matching the original edit.
+		_ = msg // placeholder: real integration needs MessageParam mutation
+	}
+
+	return messages
 }

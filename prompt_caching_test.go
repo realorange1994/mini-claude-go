@@ -350,6 +350,126 @@ func TestApplyPromptCachingWithConfigTwoMessagesSkipCacheWrite(t *testing.T) {
 	}
 }
 
+func TestCacheBreakDetectorUpdateAndDetect(t *testing.T) {
+	d := &CacheBreakDetector{}
+
+	// No baseline set yet
+	if d.DetectBreak(1000) {
+		t.Error("should not detect break when no baseline is set")
+	}
+
+	// Set baseline
+	d.UpdateBaseline(10000)
+
+	// 10% drop should not trigger (threshold is 20%)
+	if d.DetectBreak(9000) {
+		t.Error("10% drop should not trigger break detection")
+	}
+
+	// 20% drop exactly should not trigger (> 20%, not >=)
+	if d.DetectBreak(8000) {
+		t.Error("exactly 20% drop should not trigger break detection")
+	}
+
+	// 25% drop should trigger
+	if !d.DetectBreak(7000) {
+		t.Error("30% drop should trigger break detection")
+	}
+
+	// Zero current tokens should trigger
+	if !d.DetectBreak(0) {
+		t.Error("zero cache read tokens should trigger break detection")
+	}
+}
+
+func TestCacheBreakDetectorResetBaseline(t *testing.T) {
+	d := &CacheBreakDetector{}
+
+	d.UpdateBaseline(10000)
+	if !d.baselineSet {
+		t.Error("baseline should be set after UpdateBaseline")
+	}
+
+	d.ResetBaseline()
+	if d.baselineSet {
+		t.Error("baseline should not be set after ResetBaseline")
+	}
+	if d.lastCacheReadTokens != 0 {
+		t.Error("lastCacheReadTokens should be 0 after ResetBaseline")
+	}
+
+	// After reset, should not detect breaks
+	if d.DetectBreak(0) {
+		t.Error("should not detect break after reset")
+	}
+}
+
+func TestCacheBreakDetectorNilReceiver(t *testing.T) {
+	var d *CacheBreakDetector
+
+	// Should not panic on nil receiver
+	d.UpdateBaseline(1000)
+	if d.DetectBreak(0) {
+		t.Error("nil detector should not detect break")
+	}
+	d.ResetBaseline()
+}
+
+func TestCacheBreakDetectorZeroBaseline(t *testing.T) {
+	d := &CacheBreakDetector{}
+
+	// Update with zero should set baseline but not trigger detection
+	d.UpdateBaseline(0)
+
+	// With baseline of 0, DetectBreak should return false (division guard)
+	if d.DetectBreak(0) {
+		t.Error("should not detect break with zero baseline")
+	}
+}
+
+func TestCacheBreakDetectorSequence(t *testing.T) {
+	d := &CacheBreakDetector{}
+
+	// First call: no baseline
+	d.UpdateBaseline(50000)
+
+	// Second call: small change, no break
+	if d.DetectBreak(48000) {
+		t.Error("4% drop should not trigger")
+	}
+	d.UpdateBaseline(48000)
+
+	// Third call: big drop from updated baseline
+	if !d.DetectBreak(30000) {
+		t.Error("37.5% drop should trigger")
+	}
+	d.UpdateBaseline(30000)
+
+	// After reset (simulating compaction), no detection
+	d.ResetBaseline()
+	if d.DetectBreak(0) {
+		t.Error("should not detect break after ResetBaseline")
+	}
+}
+
+func TestPinnedCacheEditStruct(t *testing.T) {
+	// Verify PinnedCacheEdit struct fields
+	edit := PinnedCacheEdit{
+		ToolUseID: "toolu_123",
+		Position:  5,
+		Content:   "cached content",
+	}
+	if edit.ToolUseID != "toolu_123" {
+		t.Errorf("expected ToolUseID='toolu_123', got %v", edit.ToolUseID)
+	}
+	if edit.Position != 5 {
+		t.Errorf("expected Position=5, got %d", edit.Position)
+	}
+	if edit.Content != "cached content" {
+		t.Errorf("expected Content='cached content', got %v", edit.Content)
+	}
+}
+
 func TestApplyCacheMarkerToolResultArrayBlock(t *testing.T) {
 	// Test cache_reference on tool_result blocks in array content
 	msg := map[string]any{

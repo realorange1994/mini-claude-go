@@ -312,6 +312,7 @@ type AgentLoop struct {
 	totalInputTokens         atomic.Int64               // cumulative input tokens across all turns
 	totalOutputTokens        atomic.Int64               // cumulative output tokens across all turns
 	costTracker              *CostTracker               // per-model USD cost tracking with session persistence
+	cacheBreakDetector       *CacheBreakDetector        // detects KV cache breaks between API calls
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
 	extractionState          *ExtractionState           // session memory extraction threshold tracking
 	sonnetModel              string                    // fallback model for 529 overload (defaults to claude-sonnet-4-20250514)
@@ -472,6 +473,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		todoList:          tools.NewTodoList(),
 		cachedMC:          NewCachedMicrocompactTracker(),
 		costTracker:       NewCostTracker(),
+		cacheBreakDetector: &CacheBreakDetector{},
 		extractionState:   NewExtractionState(),
 		hooks:             cfg.Hooks,
 		sonnetModel:       "claude-sonnet-4-20250514",
@@ -632,6 +634,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		todoList:          tools.NewTodoList(),
 		cachedMC:          NewCachedMicrocompactTracker(),
 		costTracker:       NewCostTracker(),
+		cacheBreakDetector: &CacheBreakDetector{},
 		extractionState:   NewExtractionState(),
 		hooks:             cfg.Hooks,
 	}
@@ -1641,6 +1644,12 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
+				// Detect cache break: warn if cache reuse dropped significantly from previous call
+				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
+					a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
+				}
+				// Update cache break detector baseline with current cache read tokens
+				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
 			}
 			return response, nil
 		}
@@ -1901,6 +1910,12 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		a.recordTokenUsageWithCache(
 			int64(collect.Usage.InputTokens), int64(collect.Usage.OutputTokens),
 			int64(collect.Usage.CacheWriteTokens), int64(collect.Usage.CacheReadTokens))
+		// Detect cache break: warn if cache reuse dropped significantly from previous call
+		if a.cacheBreakDetector.DetectBreak(int64(collect.Usage.CacheReadTokens)) {
+			a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
+		}
+		// Update cache break detector baseline with current cache read tokens
+		a.cacheBreakDetector.UpdateBaseline(int64(collect.Usage.CacheReadTokens))
 	}
 
 	// Detect incomplete streams: if the stream produced no assistant message
@@ -2021,6 +2036,12 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
+				// Detect cache break: warn if cache reuse dropped significantly from previous call
+				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
+					a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
+				}
+				// Update cache break detector baseline with current cache read tokens
+				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// Register compactable tool_use IDs for cache_edits tracking.
@@ -2116,6 +2137,12 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
+				// Detect cache break: warn if cache reuse dropped significantly from previous call
+				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
+					a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
+				}
+				// Update cache break detector baseline with current cache read tokens
+				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// Register compactable tool_use IDs for cache_edits tracking.
@@ -3054,6 +3081,8 @@ func collectDiscoveredToolNames(ctx *ConversationContext) []string {
 // Returns the list of recovered file paths (for deduplication in AddHistorySnip).
 // trigger and compactSummary are passed to post-compact hooks.
 func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary string) []string {
+	// Reset cache break detector baseline — compaction invalidates all cached prefixes.
+	a.cacheBreakDetector.ResetBaseline()
 	// File content recovery — optional, skipped when PostCompactRecoverFiles is false.
 	// All other recovery steps (tools, agents, todo, session memory) always run.
 	var recoveredPaths []string
