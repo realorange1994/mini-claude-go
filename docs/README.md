@@ -58,4 +58,11 @@ All data extracted from [diff_upstream/](../diff_upstream/) (32 分类文件, �
 | 5 | Cost tracking with per-model USD pricing | P1 | ✅ Committed |
 | 6 | Reactive compaction with token-gap parsing | P1 | ✅ Committed |
 | 7 | 529 model fallback + 429 subscriber gating | P1 | ✅ Committed |
-| 8 | Model alias system (sonnet/opus/haiku) | P1 | ✅ Committed |
+| 9 | Per-model context window | P0 | ✅ Committed |
+| 10 | Cache break detection + pinned edits | P1 | ✅ Committed |
+| 11 | Classifier improvements (injection protection, empty bypass, telemetry) | P1 | ✅ Committed |
+| 12 | Skill content pipeline (args, variables, paths, MCP discovery) | P1 | ✅ Committed |
+| 13 | Hook system expansion (2→16 types, timeout, death spiral) | P1 | ✅ Committed |
+| 14 | Normalization pipeline enhancements (attachments, images, PDF, virtual) | P1 | ✅ Committed |
+| 15 | Transcript DAG (UUID, parent chain, metadata, interrupt detection) | P1 | ✅ Committed |
+| 16 | Agent tool improvements (sync mode, naming, handoff, worktree, sidechain) | P1 | ✅ Committed |
