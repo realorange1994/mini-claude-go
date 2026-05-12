@@ -328,25 +328,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-22: Notebook Edit Tool
+## P1-22: Notebook Edit Tool [DONE — AUDIT: PASS]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 缺失 |
 | Severity | MEDIUM |
 | Source | 02-tools.md §A.7 |
-| Status | NEW |
-| Affected files | New: `tools/notebook_tool.go` |
+| Round | 22 Committed (PASS) |
+| Affected files | `tools/notebook_edit.go`, `tools/notebook_edit_test.go`, `config.go` |
 | Upstream | `src/tools/notebook.ts` — cell-level operations |
 | REPL | N/A — tool implementation |
 
-**Problem**: Upstream has a dedicated `NotebookEdit` tool for Jupyter notebooks (.ipynb). Go has no notebook support at all.
-
-**Action items**:
-1. Create `NotebookEdit` tool with cell-level operations
-2. Support cell types: code, markdown
-3. Support edit modes: replace, insert, delete
-4. Support cell ID targeting
+**Audit note**: Implemented `NotebookEditTool` with: (1) cell-level operations (replace, insert, delete), (2) cell type support (code, markdown), (3) cell ID targeting (actual ID or `cell-N` index format), (4) nbformat 4+ validation, (5) read-before-edit check with staleness detection, (6) auto-promote replace to insert when cell not found, (7) output clearing on code cell replace, (8) `.ipynb.bak` backup before write, (9) 16 tests covering all operations and edge cases. `file_edit.go` already rejects `.ipynb` files with redirect to notebook tool.
 
 ---
 
@@ -534,7 +528,7 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 | P1-19 | File write safety | PARTIAL | DONE | Small | REPL |
 | P1-20 | Grep/Glob alignment | PARTIAL | DONE | Medium | REPL |
 | P1-21 | Git tool enhancements | PASS | DONE | Medium | REPL |
-| P1-22 | Notebook edit tool | — | NEW | Medium | N/A |
+| P1-22 | Notebook edit tool | PASS | DONE | Medium | N/A |
 | P1-23 | System prompt dynamic sections | PARTIAL | DONE | Medium | N/A |
 | P1-24 | Permission rule engine | PARTIAL | DONE | Large | N/A |
 | P1-25 | API client beta headers | — | DONE | Small | N/A |
