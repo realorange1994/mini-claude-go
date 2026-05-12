@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ type SkillMeta struct {
 	ExtBins     []string // extended_requires.bins
 	ExtEnv      []string // extended_requires.env
 	WhenToUse   string   // when_to_use field describing ideal usage scenarios
+	Paths       []string // paths field: conditional applicability patterns
 }
 
 // SkillInfo represents metadata about a skill.
@@ -38,6 +40,30 @@ type SkillInfo struct {
 	Version     string   `json:"version"`
 	MissingDeps []string `json:"missing_deps,omitempty"`
 	WhenToUse   string   `json:"when_to_use,omitempty"`
+	Paths       []string `json:"paths,omitempty"` // conditional applicability patterns
+}
+
+// IsApplicable checks if a skill applies to the current project directory.
+// If no paths are specified, the skill is always applicable.
+// Paths are matched against both the full project directory and the base name.
+func (s *SkillInfo) IsApplicable(projectDir string) bool {
+	if len(s.Paths) == 0 {
+		return true // No path restriction = always applicable
+	}
+	for _, pattern := range s.Paths {
+		// Try matching against the full project directory path
+		matched, err := filepath.Match(pattern, projectDir)
+		if err == nil && matched {
+			return true
+		}
+		// Also try matching against just the base directory name
+		// (e.g., pattern "*/my-project" matches "my-project")
+		matched, err = filepath.Match(pattern, filepath.Base(projectDir))
+		if err == nil && matched {
+			return true
+		}
+	}
+	return false
 }
 
 // Loader loads and parses skill definitions.
@@ -151,6 +177,25 @@ func (l *Loader) ListSkills(filterUnavailable bool) []SkillInfo {
 	return result
 }
 
+// ListSkillsForProject returns all available skills applicable to the given project directory.
+// Skills with a paths restriction are filtered; skills without paths are always included.
+func (l *Loader) ListSkillsForProject(projectDir string, filterUnavailable bool) []SkillInfo {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var result []SkillInfo
+	for _, s := range l.skillIndex {
+		if filterUnavailable && !s.Available {
+			continue
+		}
+		if !s.IsApplicable(projectDir) {
+			continue
+		}
+		result = append(result, s)
+	}
+	return result
+}
+
 // GetSkillInfo returns skill metadata by name.
 func (l *Loader) GetSkillInfo(name string) (SkillInfo, bool) {
 	l.mu.RLock()
@@ -221,6 +266,164 @@ func (l *Loader) BuildSkillsSummary() string {
 	}
 	sb.WriteString("</skills>")
 	return sb.String()
+}
+
+// ExpandSkillContent performs variable and argument substitution on skill content.
+// It replaces $ARGUMENTS with all arguments joined as one string, and
+// $ARG_<NAME> with named arguments from the args map.
+func ExpandSkillContent(content string, args map[string]string) string {
+	// Replace $ARGUMENTS with all arguments joined
+	if allArgs, ok := args["ARGUMENTS"]; ok {
+		content = strings.ReplaceAll(content, "$ARGUMENTS", allArgs)
+	}
+
+	// Replace $ARG_<NAME> with named arguments
+	for key, value := range args {
+		if strings.HasPrefix(key, "ARG_") {
+			content = strings.ReplaceAll(content, "$"+key, value)
+		}
+	}
+
+	return content
+}
+
+// ExpandSkillVariables expands ${VAR} style variables in skill content.
+// Supported variables: CLAUDE_SKILL_DIR, CLAUDE_SESSION_ID, CLAUDE_PROJECT_DIR, CLAUDE_CONFIG_DIR.
+func ExpandSkillVariables(content string, skillDir string, sessionID string) string {
+	replacements := map[string]string{
+		"${CLAUDE_SKILL_DIR}":   skillDir,
+		"${CLAUDE_SESSION_ID}":  sessionID,
+		"${CLAUDE_PROJECT_DIR}": getProjectDir(),
+		"${CLAUDE_CONFIG_DIR}":  getConfigDir(),
+	}
+
+	for placeholder, value := range replacements {
+		content = strings.ReplaceAll(content, placeholder, value)
+	}
+
+	return content
+}
+
+func getProjectDir() string {
+	if dir, err := os.Getwd(); err == nil {
+		return dir
+	}
+	return ""
+}
+
+func getConfigDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
+// --- MCP Skill Discovery ---
+
+// MCPResourceClient is the interface needed for MCP skill discovery.
+// This avoids importing the mcp package directly in the skills package.
+type MCPResourceClient interface {
+	DiscoverSkillResources(ctx context.Context) []MCPSkillResource
+}
+
+// MCPSkillResource represents a skill discovered from an MCP server resource.
+type MCPSkillResource struct {
+	Server      string
+	URI         string
+	Name        string
+	Description string
+	Content     string
+}
+
+// MCPSkillDiscovery discovers skills from MCP servers that expose skill:// resources.
+type MCPSkillDiscovery struct {
+	client MCPResourceClient
+}
+
+// NewMCPSkillDiscovery creates a new discovery instance wrapping an MCP client.
+// Pass nil to create a discovery with no client (useful for testing).
+func NewMCPSkillDiscovery(client MCPResourceClient) *MCPSkillDiscovery {
+	return &MCPSkillDiscovery{client: client}
+}
+
+// DiscoverSkills queries MCP servers for skill:// resources and converts them to SkillInfo objects.
+// Returns an empty list if no client is configured.
+func (d *MCPSkillDiscovery) DiscoverSkills(ctx context.Context) []SkillInfo {
+	if d.client == nil {
+		return nil
+	}
+
+	resources := d.client.DiscoverSkillResources(ctx)
+	var skills []SkillInfo
+	for _, res := range resources {
+		// Only process skill:// URIs (defensive filter)
+		if !strings.HasPrefix(res.URI, "skill://") {
+			continue
+		}
+		skillName := strings.TrimPrefix(res.URI, "skill://")
+		// If name is just the URI path, use the Name field instead
+		if skillName == res.URI || strings.Contains(skillName, "/") {
+			if res.Name != "" {
+				skillName = res.Name
+			}
+		}
+		skill := SkillInfo{
+			Name:        skillName,
+			Source:      "mcp:" + res.Server,
+			Description: res.Description,
+			Available:   true,
+			Always:      false,
+			Commands:    []string{"/" + skillName},
+		}
+		skills = append(skills, skill)
+	}
+	return skills
+}
+
+// LoadSkillContent returns the raw content of a discovered MCP skill by name.
+func (d *MCPSkillDiscovery) LoadSkillContent(name string) string {
+	if d.client == nil {
+		return ""
+	}
+
+	resources := d.client.DiscoverSkillResources(context.Background())
+	for _, res := range resources {
+		skillName := strings.TrimPrefix(res.URI, "skill://")
+		if skillName == res.URI || strings.Contains(skillName, "/") {
+			if res.Name != "" {
+				skillName = res.Name
+			}
+		}
+		if skillName == name {
+			return res.Content
+		}
+	}
+	return ""
+}
+
+// MCPManagerAdapter wraps an mcp.Manager to implement MCPResourceClient.
+// This bridges the mcp.SkillResource type to the skills.MCPSkillResource type
+// without importing the mcp package in the skills package.
+type MCPManagerAdapter struct {
+	// manager is the underlying MCP manager. Stored as any to avoid importing mcp.
+	manager any
+	// discoverFn is the wrapped DiscoverSkillResources method.
+	discoverFn func(ctx context.Context) []MCPSkillResource
+}
+
+// NewMCPManagerAdapter creates an adapter wrapping an MCP manager.
+// Pass the *mcp.Manager directly; it is stored as any to avoid import cycles.
+func NewMCPManagerAdapter(manager any, discoverFn func(ctx context.Context) []MCPSkillResource) *MCPManagerAdapter {
+	return &MCPManagerAdapter{manager: manager, discoverFn: discoverFn}
+}
+
+// DiscoverSkillResources implements MCPResourceClient.
+func (a *MCPManagerAdapter) DiscoverSkillResources(ctx context.Context) []MCPSkillResource {
+	if a == nil || a.discoverFn == nil {
+		return nil
+	}
+	return a.discoverFn(ctx)
 }
 
 // --- Internal helpers ---
@@ -306,6 +509,7 @@ func (l *Loader) parseSkillFileLocked(name string, path string, source string) *
 		Version:     meta.Version,
 		MissingDeps: missingDeps,
 		WhenToUse:   meta.WhenToUse,
+		Paths:       meta.Paths,
 	}
 }
 
@@ -352,6 +556,8 @@ func parseFrontmatter(content string) SkillMeta {
 				meta.ExtBins = append(meta.ExtBins, val)
 			case "env":
 				meta.ExtEnv = append(meta.ExtEnv, val)
+			case "paths":
+				meta.Paths = append(meta.Paths, val)
 			}
 			continue
 		}
@@ -402,6 +608,13 @@ func parseFrontmatter(content string) SkillMeta {
 			}
 		case "when_to_use":
 			meta.WhenToUse = unquote(val)
+		case "paths":
+			// Could be inline: paths: [a, b] or multi-line
+			if strings.HasPrefix(val, "[") {
+				meta.Paths = parseInlineList(val)
+			} else {
+				currentKey = "paths"
+			}
 		}
 	}
 

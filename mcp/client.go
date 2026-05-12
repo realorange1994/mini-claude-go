@@ -65,6 +65,17 @@ type ContentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
+// ─── Resource Types ───
+
+// Resource represents an MCP resource (e.g. skill://...).
+type Resource struct {
+	URI         string         `json:"uri"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	MimeType    string         `json:"mimeType,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
 // ─── Client ───
 
 type serverType int
@@ -656,6 +667,97 @@ func (c *Client) Instructions() string {
 	return c.instructions
 }
 
+// ListResources discovers available resources from this MCP server.
+func (c *Client) ListResources(ctx context.Context) ([]Resource, error) {
+	if c.serverType == remoteServer {
+		return c.listResourcesRemote(ctx)
+	}
+	return c.listResourcesStdio(ctx)
+}
+
+func (c *Client) listResourcesStdio(ctx context.Context) ([]Resource, error) {
+	resp, err := c.requestStdio(ctx, "resources/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Resources []Resource `json:"resources"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Resources, nil
+}
+
+func (c *Client) listResourcesRemote(ctx context.Context) ([]Resource, error) {
+	resp, err := c.requestRemote(ctx, "resources/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Resources []Resource `json:"resources"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Resources, nil
+}
+
+// ReadResource reads the content of a resource from this MCP server.
+func (c *Client) ReadResource(ctx context.Context, uri string) (string, error) {
+	if c.serverType == remoteServer {
+		return c.readResourceRemote(ctx, uri)
+	}
+	return c.readResourceStdio(ctx, uri)
+}
+
+func (c *Client) readResourceStdio(ctx context.Context, uri string) (string, error) {
+	params := map[string]any{"uri": uri}
+	paramsJSON, _ := json.Marshal(params)
+	resp, err := c.requestStdio(ctx, "resources/read", paramsJSON)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Contents []struct {
+			URI      string `json:"uri"`
+			MimeType string `json:"mimeType,omitempty"`
+			Text     string `json:"text,omitempty"`
+			Blob     string `json:"blob,omitempty"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	if len(result.Contents) == 0 {
+		return "", fmt.Errorf("no content returned for resource: %s", uri)
+	}
+	return result.Contents[0].Text, nil
+}
+
+func (c *Client) readResourceRemote(ctx context.Context, uri string) (string, error) {
+	params := map[string]any{"uri": uri}
+	resp, err := c.requestRemote(ctx, "resources/read", params)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Contents []struct {
+			URI      string `json:"uri"`
+			MimeType string `json:"mimeType,omitempty"`
+			Text     string `json:"text,omitempty"`
+			Blob     string `json:"blob,omitempty"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	if len(result.Contents) == 0 {
+		return "", fmt.Errorf("no content returned for resource: %s", uri)
+	}
+	return result.Contents[0].Text, nil
+}
+
 // ─── Manager ───
 
 type ToolWithServer struct {
@@ -855,4 +957,48 @@ func (m *Manager) StopAll() {
 	for _, client := range m.clients {
 		client.Stop()
 	}
+}
+
+// DiscoverSkillResources queries all MCP servers for skill:// resources
+// and returns them as a list of (server, resource) pairs.
+func (m *Manager) DiscoverSkillResources(ctx context.Context) []SkillResource {
+	m.mu.RLock()
+	clients := make(map[string]*Client, len(m.clients))
+	for k, v := range m.clients {
+		clients[k] = v
+	}
+	m.mu.RUnlock()
+
+	var skills []SkillResource
+	for name, client := range clients {
+		resources, err := client.ListResources(ctx)
+		if err != nil {
+			continue
+		}
+		for _, res := range resources {
+			if strings.HasPrefix(res.URI, "skill://") {
+				content, err := client.ReadResource(ctx, res.URI)
+				if err != nil {
+					continue
+				}
+				skills = append(skills, SkillResource{
+					Server:      name,
+					URI:         res.URI,
+					Name:        res.Name,
+					Description: res.Description,
+					Content:     content,
+				})
+			}
+		}
+	}
+	return skills
+}
+
+// SkillResource represents a skill discovered via MCP resource.
+type SkillResource struct {
+	Server      string `json:"server"`
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Content     string `json:"content"`
 }
