@@ -227,11 +227,11 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 		appliedNewStrings = append(appliedNewStrings, e.new)
 	}
 
-	// Apply atomically
+	// Apply atomically (temp-file-then-rename)
 	if hasCRLF {
 		content = RestoreCRLF(content)
 	}
-	if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
+	if err := WriteFileAtomically(fp, []byte(content)); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
 

@@ -107,7 +107,7 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
 		}
-		if err := os.WriteFile(fp, []byte(newStr), 0o644); err != nil {
+		if err := WriteFileAtomically(fp, []byte(newStr)); err != nil {
 			return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 		}
 		// Update registry so subsequent writes are allowed without re-reading
@@ -221,7 +221,7 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 	} else {
 		out = []byte(contentNorm)
 	}
-	if err := os.WriteFile(fp, out, 0o644); err != nil {
+	if err := WriteFileAtomically(fp, out); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
 	// Update registry so subsequent writes are allowed without re-reading

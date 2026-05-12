@@ -4,7 +4,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 )
+
+// WriteFileAtomically writes content to a file using a temp-file-then-rename pattern.
+// This prevents partial/corrupt files if the process crashes mid-write.
+// Callers should clean up the target file after a successful write if they need
+// to ensure no stale .tmp files remain (the rename handles this automatically).
+func WriteFileAtomically(path string, content []byte) error {
+	tmpName := path + ".tmp." + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := os.WriteFile(tmpName, content, 0o644); err != nil {
+		os.Remove(tmpName) // cleanup on write failure
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName) // cleanup on rename failure
+		// On Windows, rename may fail for locked files; fall back to direct write
+		return os.WriteFile(path, content, 0o644)
+	}
+	return nil
+}
 
 // FileWriteTool writes content to a file, creating parent directories as needed.
 // It enforces read-before-write validation and concurrent modification detection.
@@ -83,14 +103,8 @@ func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error creating directory: %v", err), IsError: true}
 	}
-	if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
+	if err := WriteFileAtomically(fp, []byte(content)); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
-	}
-	// Sync to ensure the file is flushed to disk before subsequent read_file calls
-	// in the same batch can see it (tool calls are executed concurrently).
-	if f, err := os.Open(fp); err == nil {
-		f.Sync()
-		f.Close()
 	}
 	// Update registry so subsequent writes are allowed without re-reading
 	if w.registry != nil {

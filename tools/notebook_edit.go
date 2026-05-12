@@ -342,7 +342,7 @@ func writeNotebookFile(path string, nb *nbDocument) error {
 		return fmt.Errorf("failed to serialize notebook: %w", err)
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return WriteFileAtomically(path, data)
 }
 
 func trunc(s string, n int) string {

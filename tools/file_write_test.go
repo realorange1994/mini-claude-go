@@ -176,6 +176,67 @@ func TestFileWriteToolExecuteRegistryMarksStale(t *testing.T) {
 	}
 }
 
+// ─── Atomic write (temp+rename) ─────────────────────────────────────────────
+
+func TestFileWriteToolAtomicWriteNoTempLeftover(t *testing.T) {
+	dir := t.TempDir()
+	reg := NewRegistry()
+	tool := NewFileWriteTool(reg)
+	path := filepath.Join(dir, "atomic.txt")
+
+	result := tool.Execute(map[string]any{
+		"file_path": path,
+		"content":   "atomic content",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+
+	// Verify file content
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+	if string(data) != "atomic content" {
+		t.Errorf("expected 'atomic content', got %q", string(data))
+	}
+
+	// Verify no leftover .tmp files
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.tmp.*"))
+	if len(matches) > 0 {
+		t.Errorf("leftover temp files found: %v", matches)
+	}
+}
+
+func TestFileWriteToolAtomicWriteOverwritesExisting(t *testing.T) {
+	dir := t.TempDir()
+	reg := NewRegistry()
+	tool := NewFileWriteTool(reg)
+	path := filepath.Join(dir, "existing.txt")
+
+	// Create existing file
+	os.WriteFile(path, []byte("old content"), 0644)
+	// Mark as read so write-before-read check passes
+	reg.MarkFileReadWithContent(path, "old content")
+
+	// Overwrite should succeed via rename
+	result := tool.Execute(map[string]any{
+		"file_path": path,
+		"content":   "new content",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+	if string(data) != "new content" {
+		t.Errorf("expected 'new content', got %q", string(data))
+	}
+}
+
 // ─── NewFileWriteTool ───────────────────────────────────────────────────────
 
 func TestNewFileWriteTool(t *testing.T) {
