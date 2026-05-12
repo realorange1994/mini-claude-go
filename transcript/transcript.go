@@ -3,6 +3,8 @@ package transcript
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,16 +13,33 @@ import (
 	"time"
 )
 
+// uuidV4 generates a version 4 UUID using crypto/rand.
+func uuidV4() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// Fallback: should essentially never happen
+		return hex.EncodeToString(buf[:])
+	}
+	buf[6] = (buf[6] & 0x0f) | 0x40 // version 4
+	buf[8] = (buf[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
+}
+
 // Entry represents a single transcript entry.
 type Entry struct {
-	Type      string         `json:"type"`                 // user, assistant, tool_use, tool_result, error, system
-	Content   string         `json:"content,omitempty"`
-	ToolName  string         `json:"tool_name,omitempty"`
-	ToolArgs  map[string]any `json:"tool_args,omitempty"`
-	ToolID    string         `json:"tool_id,omitempty"`
-	Timestamp time.Time      `json:"timestamp"`
-	Model     string         `json:"model,omitempty"`
-	Error     string         `json:"error,omitempty"`
+	UUID       string         `json:"uuid"`                  // unique identifier per entry
+	ParentUUID string         `json:"parent_uuid,omitempty"` // parent entry for DAG branching
+	Type       string         `json:"type"`                  // user, assistant, tool_use, tool_result, error, system, metadata
+	Content    string         `json:"content,omitempty"`
+	ToolName   string         `json:"tool_name,omitempty"`
+	ToolArgs   map[string]any `json:"tool_args,omitempty"`
+	ToolID     string         `json:"tool_id,omitempty"`
+	Timestamp  time.Time      `json:"timestamp"`
+	Model      string         `json:"model,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	Subtype    string         `json:"subtype,omitempty"`  // e.g. "compact_boundary", "interrupt", "custom-title", "tag"
+	Metadata   map[string]any `json:"metadata,omitempty"` // extensible metadata
 }
 
 // Writer writes transcript entries to a JSONL file.
@@ -30,6 +49,7 @@ type Writer struct {
 	filePath  string
 	mu        sync.Mutex
 	closed    bool
+	lastUUID  string // UUID of the last written entry for DAG chain
 }
 
 // NewWriter creates a new transcript writer.
@@ -53,12 +73,21 @@ func NewWriterFromExisting(filePath string) *Writer {
 }
 
 // Write adds an entry to the transcript and flushes immediately to disk.
+// It auto-generates a UUID if one is not set, and links to the parent entry
+// via ParentUUID for DAG chain tracking.
 func (w *Writer) Write(entry Entry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
 		return fmt.Errorf("transcript writer closed")
 	}
+	if entry.UUID == "" {
+		entry.UUID = uuidV4()
+	}
+	if entry.ParentUUID == "" && w.lastUUID != "" {
+		entry.ParentUUID = w.lastUUID
+	}
+	w.lastUUID = entry.UUID
 	entry.Timestamp = time.Now()
 	return w.writeOne(entry)
 }
@@ -110,6 +139,41 @@ func (w *Writer) WriteSummary(content string) error {
 	return w.Write(Entry{Type: "summary", Content: content})
 }
 
+// WriteTitle writes a custom-title metadata entry.
+func (w *Writer) WriteTitle(title string) error {
+	return w.Write(Entry{Type: "metadata", Subtype: "custom-title", Metadata: map[string]any{"title": title}})
+}
+
+// WriteTag writes a tag metadata entry.
+func (w *Writer) WriteTag(tag string) error {
+	return w.Write(Entry{Type: "metadata", Subtype: "tag", Metadata: map[string]any{"tag": tag}})
+}
+
+// WriteCompactBoundary writes a compact boundary with rich metadata.
+func (w *Writer) WriteCompactBoundary(trigger string, preCompactTokens int, messagesSummarized int, discoveredTools []string) error {
+	return w.Write(Entry{
+		Type:    "system",
+		Subtype: "compact_boundary",
+		Metadata: map[string]any{
+			"trigger":             trigger,
+			"pre_compact_tokens":  preCompactTokens,
+			"messages_summarized": messagesSummarized,
+			"discovered_tools":    discoveredTools,
+		},
+	})
+}
+
+// WriteInterrupt writes an interrupt detection entry.
+func (w *Writer) WriteInterrupt(interruptType string) error {
+	return w.Write(Entry{
+		Type:    "system",
+		Subtype: "interrupt",
+		Metadata: map[string]any{
+			"interrupt_type": interruptType,
+		},
+	})
+}
+
 // Flush is a no-op kept for API compatibility; writes are already immediate.
 func (w *Writer) Flush() error {
 	return nil
@@ -118,6 +182,13 @@ func (w *Writer) Flush() error {
 // FilePath returns the path to the transcript file.
 func (w *Writer) FilePath() string {
 	return w.filePath
+}
+
+// LastUUID returns the UUID of the most recently written entry.
+func (w *Writer) LastUUID() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastUUID
 }
 
 func (w *Writer) writeOne(entry Entry) error {
@@ -164,6 +235,7 @@ func NewReader(filePath string) *Reader { return &Reader{filePath: filePath} }
 
 // ReadAll reads all entries from the transcript.
 // Handles truncated last lines (from Ctrl+C / crash) by discarding them.
+// Deduplicates entries by UUID and skips pre-boundary entries in large files.
 func (r *Reader) ReadAll() ([]Entry, error) {
 	f, err := os.Open(r.filePath)
 	if err != nil {
@@ -171,15 +243,26 @@ func (r *Reader) ReadAll() ([]Entry, error) {
 	}
 	defer f.Close()
 
+	// Check file size for pre-boundary skip optimization
+	var skipPreBoundary bool
+	if info, statErr := f.Stat(); statErr == nil {
+		skipPreBoundary = info.Size() > 5*1024*1024 // > 5MB
+	}
+
 	var entries []Entry
 	var lastBadLine string
+	seenUUIDs := make(map[string]bool)
+
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	// First pass: collect all entries
+	var allEntries []Entry
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		var entry Entry
 		if err := json.Unmarshal(line, &entry); err == nil {
-			entries = append(entries, entry)
+			allEntries = append(allEntries, entry)
 			lastBadLine = ""
 		} else {
 			// Keep the bad line in case it's the last one (truncated write)
@@ -190,5 +273,65 @@ func (r *Reader) ReadAll() ([]Entry, error) {
 	// it's safe to discard -- it was an incomplete write.
 	_ = lastBadLine
 
-	return entries, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	// For large files, skip entries before the last compact boundary
+	startIdx := 0
+	if skipPreBoundary {
+		for i := len(allEntries) - 1; i >= 0; i-- {
+			e := allEntries[i]
+			if (e.Type == "system" && e.Subtype == "compact_boundary") || e.Type == "compact" {
+				startIdx = i
+				break
+			}
+		}
+	}
+
+	// Second pass: dedup and collect
+	for i := startIdx; i < len(allEntries); i++ {
+		entry := allEntries[i]
+		if entry.UUID != "" {
+			if seenUUIDs[entry.UUID] {
+				continue // dedup
+			}
+			seenUUIDs[entry.UUID] = true
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
+}
+
+// ============================================================================
+// Interrupt Detection
+// ============================================================================
+
+// DetectInterruptType examines the last few entries to determine
+// if and how the conversation was interrupted.
+func DetectInterruptType(entries []Entry) string {
+	if len(entries) == 0 {
+		return "none"
+	}
+	last := entries[len(entries)-1]
+
+	// If last entry is an explicit interrupt marker
+	if last.Type == "system" && last.Subtype == "interrupt" {
+		if md, ok := last.Metadata["interrupt_type"].(string); ok {
+			return md
+		}
+	}
+
+	// Heuristic: if last entry is a user message without a following assistant response
+	if last.Type == "user" {
+		return "interrupted_prompt"
+	}
+
+	// If last entry is tool_use without tool_result
+	if last.Type == "tool_use" {
+		return "interrupted_turn"
+	}
+
+	return "none"
 }

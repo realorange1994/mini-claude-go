@@ -148,3 +148,333 @@ func TestWriteSystemCompactSummary(t *testing.T) {
 		t.Error("compact entry should have content")
 	}
 }
+
+// ============================================================================
+// DAG-specific tests
+// ============================================================================
+
+func TestAutoUUIDGeneration(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "uuid.jsonl")
+	w := NewWriter("uuid-session", fpath)
+
+	_ = w.WriteUser("hello")
+	_ = w.Flush()
+	_ = w.Close()
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].UUID == "" {
+		t.Error("expected auto-generated UUID, got empty")
+	}
+}
+
+func TestParentUUIDChain(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "chain.jsonl")
+	w := NewWriter("chain-session", fpath)
+
+	_ = w.WriteUser("msg1")
+	_ = w.WriteAssistant("response1", "model1")
+	_ = w.WriteUser("msg2")
+	_ = w.Flush()
+	_ = w.Close()
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+
+	// First entry has no parent
+	if entries[0].ParentUUID != "" {
+		t.Errorf("first entry should have no parent, got %q", entries[0].ParentUUID)
+	}
+
+	// Second entry's parent should be first entry's UUID
+	if entries[1].ParentUUID != entries[0].UUID {
+		t.Errorf("second entry parent %q != first entry UUID %q", entries[1].ParentUUID, entries[0].UUID)
+	}
+
+	// Third entry's parent should be second entry's UUID
+	if entries[2].ParentUUID != entries[1].UUID {
+		t.Errorf("third entry parent %q != second entry UUID %q", entries[2].ParentUUID, entries[1].UUID)
+	}
+}
+
+func TestExplicitUUIDAndParent(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "explicit.jsonl")
+	w := NewWriter("explicit-session", fpath)
+
+	// Set explicit UUIDs (simulating a fork/branch)
+	_ = w.Write(Entry{UUID: "uuid-A", Type: "user", Content: "original"})
+	_ = w.Write(Entry{UUID: "uuid-B1", ParentUUID: "uuid-A", Type: "assistant", Content: "branch1"})
+	_ = w.Write(Entry{UUID: "uuid-B2", ParentUUID: "uuid-A", Type: "assistant", Content: "branch2"})
+	_ = w.Flush()
+	_ = w.Close()
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	if entries[1].UUID != "uuid-B1" {
+		t.Errorf("expected UUID uuid-B1, got %q", entries[1].UUID)
+	}
+	if entries[1].ParentUUID != "uuid-A" {
+		t.Errorf("expected parent uuid-A, got %q", entries[1].ParentUUID)
+	}
+	if entries[2].UUID != "uuid-B2" {
+		t.Errorf("expected UUID uuid-B2, got %q", entries[2].UUID)
+	}
+	if entries[2].ParentUUID != "uuid-A" {
+		t.Errorf("expected parent uuid-A, got %q", entries[2].ParentUUID)
+	}
+}
+
+func TestWriteTitle(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "title.jsonl")
+	w := NewWriter("title-session", fpath)
+
+	_ = w.WriteTitle("My Conversation")
+	_ = w.WriteUser("hello")
+	_ = w.Flush()
+	_ = w.Close()
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].Type != "metadata" {
+		t.Errorf("expected type metadata, got %q", entries[0].Type)
+	}
+	if entries[0].Subtype != "custom-title" {
+		t.Errorf("expected subtype custom-title, got %q", entries[0].Subtype)
+	}
+	if entries[0].Metadata["title"] != "My Conversation" {
+		t.Errorf("expected title 'My Conversation', got %v", entries[0].Metadata["title"])
+	}
+}
+
+func TestWriteTag(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "tag.jsonl")
+	w := NewWriter("tag-session", fpath)
+
+	_ = w.WriteTag("debug")
+	_ = w.Flush()
+	_ = w.Close()
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if entries[0].Subtype != "tag" {
+		t.Errorf("expected subtype tag, got %q", entries[0].Subtype)
+	}
+	if entries[0].Metadata["tag"] != "debug" {
+		t.Errorf("expected tag 'debug', got %v", entries[0].Metadata["tag"])
+	}
+}
+
+func TestWriteCompactBoundary(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "boundary.jsonl")
+	w := NewWriter("boundary-session", fpath)
+
+	_ = w.WriteCompactBoundary("auto", 10000, 5, []string{"read_file", "write_file"})
+	_ = w.Flush()
+	_ = w.Close()
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if entries[0].Type != "system" {
+		t.Errorf("expected type system, got %q", entries[0].Type)
+	}
+	if entries[0].Subtype != "compact_boundary" {
+		t.Errorf("expected subtype compact_boundary, got %q", entries[0].Subtype)
+	}
+	if entries[0].Metadata["pre_compact_tokens"] != float64(10000) {
+		t.Errorf("expected pre_compact_tokens 10000, got %v", entries[0].Metadata["pre_compact_tokens"])
+	}
+	if entries[0].Metadata["messages_summarized"] != float64(5) {
+		t.Errorf("expected messages_summarized 5, got %v", entries[0].Metadata["messages_summarized"])
+	}
+}
+
+func TestWriteInterrupt(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "interrupt.jsonl")
+	w := NewWriter("interrupt-session", fpath)
+
+	_ = w.WriteInterrupt("interrupted_turn")
+	_ = w.Flush()
+	_ = w.Close()
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if entries[0].Type != "system" {
+		t.Errorf("expected type system, got %q", entries[0].Type)
+	}
+	if entries[0].Subtype != "interrupt" {
+		t.Errorf("expected subtype interrupt, got %q", entries[0].Subtype)
+	}
+	if entries[0].Metadata["interrupt_type"] != "interrupted_turn" {
+		t.Errorf("expected interrupt_type 'interrupted_turn', got %v", entries[0].Metadata["interrupt_type"])
+	}
+}
+
+func TestDetectInterruptType(t *testing.T) {
+	tests := []struct {
+		name     string
+		entries  []Entry
+		expected string
+	}{
+		{
+			name:     "empty",
+			entries:  []Entry{},
+			expected: "none",
+		},
+		{
+			name:     "normal_end",
+			entries:  []Entry{{Type: "assistant", Content: "done"}},
+			expected: "none",
+		},
+		{
+			name:     "interrupted_prompt",
+			entries:  []Entry{{Type: "assistant", Content: "hi"}, {Type: "user", Content: "stop"}},
+			expected: "interrupted_prompt",
+		},
+		{
+			name:     "interrupted_turn",
+			entries:  []Entry{{Type: "tool_use", ToolName: "read_file"}},
+			expected: "interrupted_turn",
+		},
+		{
+			name: "explicit_interrupt_marker",
+			entries: []Entry{
+				{Type: "user", Content: "hello"},
+				{Type: "system", Subtype: "interrupt", Metadata: map[string]any{"interrupt_type": "interrupted_prompt"}},
+			},
+			expected: "interrupted_prompt",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := DetectInterruptType(tc.entries)
+			if result != tc.expected {
+				t.Errorf("DetectInterruptType: expected %q, got %q", tc.expected, result)
+			}
+		})
+	}
+}
+
+func TestDedupByUUID(t *testing.T) {
+	// Manually create a JSONL file with duplicate UUIDs
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "dedup.jsonl")
+	lines := []string{
+		`{"uuid":"uuid-1","type":"user","content":"hello"}`,
+		`{"uuid":"uuid-2","type":"assistant","content":"hi"}`,
+		`{"uuid":"uuid-1","type":"user","content":"duplicate"}`,
+	}
+	content := ""
+	for _, line := range lines {
+		content += line + "\n"
+	}
+	if err := os.WriteFile(fpath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	// Should dedup to 2 entries (uuid-1 appears only once)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries after dedup, got %d", len(entries))
+	}
+	// First occurrence of uuid-1 should be kept
+	if entries[0].Content != "hello" {
+		t.Errorf("expected first uuid-1 content 'hello', got %q", entries[0].Content)
+	}
+}
+
+func TestBackwardCompatibilityNoUUID(t *testing.T) {
+	// Manually create a JSONL file with entries that have no UUID
+	// (simulating old transcript files)
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "old_format.jsonl")
+	lines := []string{
+		`{"type":"user","content":"old hello","timestamp":"2026-01-01T00:00:00Z"}`,
+		`{"type":"assistant","content":"old hi","timestamp":"2026-01-01T00:00:01Z"}`,
+	}
+	content := ""
+	for _, line := range lines {
+		content += line + "\n"
+	}
+	if err := os.WriteFile(fpath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewReader(fpath)
+	entries, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].Type != "user" || entries[0].Content != "old hello" {
+		t.Errorf("backward compat failed: got %+v", entries[0])
+	}
+}
+
+func TestLastUUID(t *testing.T) {
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "lastuuid.jsonl")
+	w := NewWriter("lastuuid-session", fpath)
+
+	_ = w.WriteUser("hello")
+	uuid1 := w.LastUUID()
+	if uuid1 == "" {
+		t.Fatal("LastUUID should not be empty after WriteUser")
+	}
+
+	_ = w.WriteAssistant("hi", "model1")
+	uuid2 := w.LastUUID()
+	if uuid2 == uuid1 {
+		t.Error("LastUUID should change after each write")
+	}
+
+	_ = w.Flush()
+	_ = w.Close()
+}
+
