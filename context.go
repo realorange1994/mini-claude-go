@@ -1521,12 +1521,11 @@ func (c *ConversationContext) ValidateToolPairing() {
 	// Instead of discarding the result (losing context), we create a synthetic
 	// tool_use block with a descriptive placeholder and keep the original result.
 	resultIDs := make(map[string]bool)
-	// Collect all orphaned tool_results grouped by entry index
+	// Track orphan results per entry index
 	type orphanResult struct {
-		r   anthropic.ToolResultBlockParam
-		idx int
+		r anthropic.ToolResultBlockParam
 	}
-	var allOrphans []orphanResult
+	orphanByIndex := make(map[int][]orphanResult)
 
 	for i, entry := range c.entries {
 		if entry.role == "user" {
@@ -1537,76 +1536,47 @@ func (c *ConversationContext) ValidateToolPairing() {
 						valid = append(valid, r)
 						resultIDs[r.ToolUseID] = true
 					} else {
-						allOrphans = append(allOrphans, orphanResult{r, i})
+						orphanByIndex[i] = append(orphanByIndex[i], orphanResult{r})
 					}
 				}
-				if len(valid) == 0 && len(allOrphans) > 0 && allOrphans[0].idx == i {
-					// All results in this entry are orphaned
-					c.entries[i].content = nil
-				} else if len(valid) > 0 {
+				if len(orphanByIndex[i]) > 0 && len(valid) == 0 {
+					// All results are orphaned — keep the entry, we'll inject
+					// synthetic tool_use before it in the final rebuild step
+					// Don't discard, don't set to nil
+				} else if len(valid) > 0 && len(orphanByIndex[i]) > 0 {
+					// Mixed: keep valid, drop orphans (no backfill for mixed entries)
 					c.entries[i].content = ToolResultContent(valid)
+					delete(orphanByIndex, i)
+				} else if len(valid) == 0 && len(orphanByIndex[i]) == 0 {
+					// No results at all (edge case), keep as-is
 				}
+				// If all results were valid, leave entry unchanged
 			}
 		}
 	}
 
-	// Remove nil entries
-	compacted := make([]conversationEntry, 0, len(c.entries))
-	for _, e := range c.entries {
-		if e.content != nil {
-			compacted = append(compacted, e)
-		}
-	}
-	c.entries = compacted
-
-	// Inject synthetic tool_use blocks for orphaned tool_results
-	if len(allOrphans) > 0 {
-		// Rebuild callIDs after compaction
-		callIDsRebuild := make(map[string]bool)
-		for _, entry := range c.entries {
-			if entry.role == "assistant" {
-				if blocks, ok := entry.content.(ToolUseContent); ok {
-					for _, b := range blocks {
-						if b.OfToolUse != nil {
-							callIDsRebuild[b.OfToolUse.ID] = true
-						}
-					}
+	// Build final entries: inject synthetic tool_use before orphaned tool_results
+	if len(orphanByIndex) > 0 {
+		finalEntries := make([]conversationEntry, 0, len(c.entries)+len(orphanByIndex))
+		for i, entry := range c.entries {
+			if orphans, hasOrphans := orphanByIndex[i]; hasOrphans {
+				// Create synthetic tool_use blocks for all orphaned results
+				var synthBlocks []anthropic.ContentBlockParamUnion
+				for _, o := range orphans {
+					toolName := inferToolNameFromResult(o.r)
+					synthBlocks = append(synthBlocks, anthropic.ContentBlockParamUnion{
+						OfToolUse: &anthropic.ToolUseBlockParam{
+							ID:    o.r.ToolUseID,
+							Name:  toolName,
+							Input: map[string]any{},
+						},
+					})
 				}
-			}
-		}
-
-		finalEntries := make([]conversationEntry, 0, len(c.entries))
-		for _, entry := range c.entries {
-			if entry.role == "user" {
-				if results, ok := entry.content.(ToolResultContent); ok {
-					var orphaned []anthropic.ToolResultBlockParam
-					for _, r := range results {
-						if !callIDsRebuild[r.ToolUseID] {
-							orphaned = append(orphaned, r)
-						}
-					}
-					if len(orphaned) > 0 {
-						// Create synthetic tool_use blocks for orphaned results
-						var synthBlocks []anthropic.ContentBlockParamUnion
-						for _, r := range orphaned {
-							toolName := inferToolNameFromResult(r)
-							synthBlocks = append(synthBlocks, anthropic.ContentBlockParamUnion{
-								OfToolUse: &anthropic.ToolUseBlockParam{
-									ID:    r.ToolUseID,
-									Name:  toolName,
-									Input: map[string]any{},
-								},
-							})
-						}
-						// Insert synthetic tool_use before the tool_result
-						finalEntries = append(finalEntries, conversationEntry{
-							role:    "assistant",
-							content: ToolUseContent(synthBlocks),
-						})
-					}
-					finalEntries = append(finalEntries, entry)
-					continue
-				}
+				finalEntries = append(finalEntries, conversationEntry{
+					role:    "assistant",
+					content: ToolUseContent(synthBlocks),
+				})
+				// Then append the original entry with all orphaned results
 			}
 			finalEntries = append(finalEntries, entry)
 		}
