@@ -18,8 +18,9 @@ import (
 
 // ClassifierResult holds the result of a classification decision.
 type ClassifierResult struct {
-	Allow  bool
-	Reason string
+	Allow       bool
+	Reason      string
+	Unavailable bool // true when the classifier couldn't make a determination (API error, parse failure, timeout, disabled)
 }
 
 // AutoModeClassifier uses an LLM to classify whether tool calls should be
@@ -621,8 +622,9 @@ func (c *AutoModeClassifier) Classify(
 	if !c.IsEnabled() {
 		// Classifier unavailable: fail-closed (block)
 		return ClassifierResult{
-			Allow:  false,
-			Reason: "auto mode classifier unavailable; action requires manual approval",
+			Allow:       false,
+			Reason:      "auto mode classifier unavailable; action requires manual approval",
+			Unavailable: true,
 		}
 	}
 
@@ -756,13 +758,13 @@ func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 API error: %v\n", err)
 		// API error in stage 1: escalate to stage 2 rather than blocking
-		return ClassifierResult{}, fmt.Errorf("API error: %v", err)
+		return ClassifierResult{Unavailable: true}, fmt.Errorf("API error: %v", err)
 	}
 
 	result, ok := parseClassifierResponse(resp.Content, actionDesc)
 	if !ok {
 		// Parse failure in stage 1: escalate to stage 2
-		return ClassifierResult{}, fmt.Errorf("parse failure in stage 1")
+		return ClassifierResult{Unavailable: true}, fmt.Errorf("parse failure in stage 1")
 	}
 
 	if result.Allow {
@@ -779,8 +781,9 @@ func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc
 	stage2Prompt := userMsg + "\n\n## Analysis required:\nProvide a detailed security analysis of this action. Consider: is the action clearly requested by the user? Could it have unintended consequences? Does it modify the system state or download external code? Explain your reasoning step by step, then provide your verdict."
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     c.model,
-		MaxTokens: stage2MaxTokens,
+		Model:       c.model,
+		MaxTokens:   stage2MaxTokens,
+		Temperature: param.NewOpt(0.0),
 		System: []anthropic.TextBlockParam{
 			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT, CacheControl: anthropic.CacheControlEphemeralParam{}},
 		},
@@ -819,21 +822,23 @@ func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc
 	})
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 API error: %v, falling back to stage 1 block verdict\n", err)
-		// Stage 2 API failed: use stage 1 block verdict if available, or fail-open
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 API error: %v, failing closed\n", err)
+		// Stage 2 API failed: fail-closed (block by default)
 		return ClassifierResult{
-			Allow:  true,
-			Reason: "classifier unavailable (stage 2 error); action allowed by default",
+			Allow:       false,
+			Reason:      "classifier unavailable (stage 2 error); action blocked by default",
+			Unavailable: true,
 		}
 	}
 
 	result, ok := parseClassifierResponse(resp.Content, actionDesc)
 	if !ok {
-		// Parse failure in stage 2: fail-open (technical issue, not security)
-		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 parse failure, allowing: %s\n", actionDesc)
+		// Parse failure in stage 2: fail-closed (block by default)
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 parse failure, blocking: %s\n", actionDesc)
 		return ClassifierResult{
-			Allow:  true,
-			Reason: "classifier stage 2 returned unparseable response; action allowed by default",
+			Allow:       false,
+			Reason:      "classifier stage 2 returned unparseable response; action blocked by default",
+			Unavailable: true,
 		}
 	}
 
@@ -878,8 +883,8 @@ func parseClassifierResponse(content []anthropic.ContentBlockUnion, actionDesc s
 
 	// No valid response found
 	return ClassifierResult{
-		Allow:  true,
-		Reason: "classifier returned no usable response; action allowed by default",
+		Allow:  false,
+		Reason: "classifier returned no usable response; action blocked by default",
 	}, false
 }
 
@@ -998,8 +1003,9 @@ func parseToolUseResponse(block anthropic.ToolUseBlock) ClassifierResult {
 	var input map[string]any
 	if err := json.Unmarshal(block.Input, &input); err != nil {
 		return ClassifierResult{
-			Allow:  true,
-			Reason: "classifier tool_use input parse failure; allowed by default",
+			Allow:       false,
+			Reason:      "classifier tool_use input parse failure; blocked by default",
+			Unavailable: true,
 		}
 	}
 
