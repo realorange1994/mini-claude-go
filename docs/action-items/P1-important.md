@@ -308,7 +308,7 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 | Upstream | `src/tools/grep.ts`, `src/tools/glob.ts` — context lines, multiline, pagination |
 | REPL | REPL-relevant — search tools are primary REPL interaction |
 
-**Audit note**: Grep has: `-A`/`-B`/`-C` context lines, multiline mode, `head_limit`/`offset` pagination, `output_mode` (content/files_with_matches/count), `type` language filter, `glob` file filter, `max_depth`, `max_filesize`, case-insensitive, fixed_strings. Glob has: modification-time sorting, `head_limit`, `excludes` patterns. **Remaining gap**: Glob lacks `type` parameter for file type filtering (upstream has this). Minor gap.
+**Audit note**: Grep has: `-A`/`-B`/`-C` context lines, multiline mode, `head_limit`/`offset` pagination, `output_mode` (content/files_with_matches/count), `type` language filter, `glob` file filter, `max_depth`, `max_filesize`, case-insensitive, fixed_strings. Glob has: modification-time sorting, `head_limit`, `excludes` patterns, `type` filter (`file`/`dir`/`all`). **All gaps closed** — glob type filter added, status upgraded to PASS.
 
 ---
 
@@ -526,7 +526,7 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 | P1-17 | Exec tool safety | PASS | DONE | Medium | REPL |
 | P1-18 | File read enhancements | PARTIAL | DONE | Medium | REPL |
 | P1-19 | File write safety | PARTIAL | DONE | Small | REPL |
-| P1-20 | Grep/Glob alignment | PARTIAL | DONE | Medium | REPL |
+| P1-20 | Grep/Glob alignment | PASS | DONE | Medium | REPL |
 | P1-21 | Git tool enhancements | PASS | DONE | Medium | REPL |
 | P1-22 | Notebook edit tool | PASS | DONE | Medium | N/A |
 | P1-23 | System prompt dynamic sections | PARTIAL | DONE | Medium | N/A |
