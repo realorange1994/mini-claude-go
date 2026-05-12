@@ -2571,6 +2571,105 @@ func CheckReactiveCompact(currentTokens, previousTokens, threshold int) *Reactiv
 	}
 }
 
+// reactiveCompact performs reactive compaction triggered by context overflow
+// errors. It uses precise token-gap parsing when available, falling back to
+// aggressive truncation when the exact overflow count is unknown.
+//
+// Parameters:
+//   targetTokens - if > 0, compact to this specific token budget.
+//                  if == 0, compact aggressively (keep only recent 25% of context).
+func (a *AgentLoop) reactiveCompact(targetTokens int) error {
+	currentTokens := a.context.EstimatedTokens()
+
+	if a.toolStateTracker != nil {
+		a.toolStateTracker.OnCompaction()
+	}
+
+	if targetTokens > 0 {
+		// Precise reactive compact: we know exactly how many tokens to shed.
+		// Use SM-compact if session memory is available, otherwise fall back
+		// to tryCompaction which handles LLM and truncation paths.
+		a.out("[reactive-compact] Precise targeting: %d tokens (current: %d, shedding: %d)\n",
+			targetTokens, currentTokens, currentTokens-targetTokens)
+
+		if a.config.SessionMemory != nil {
+			memoryPath := filepath.Join(a.config.ProjectDir, ".claude", "session_memory.md")
+			var smContent string
+			if data, err := os.ReadFile(memoryPath); err == nil {
+				content := strings.TrimSpace(string(data))
+				if content != "" && !IsSessionMemoryTemplateOnly(content) {
+					smContent = content
+				}
+			}
+			if smContent == "" {
+				smContent = a.config.SessionMemory.FormatForPromptCompact()
+			}
+			if smContent != "" {
+				a.trySMCompact(smContent, "")
+			} else {
+				a.tryCompaction()
+			}
+		} else {
+			a.tryCompaction()
+		}
+	} else {
+		// Aggressive reactive compact: no precise token count available.
+		// Keep only the most recent messages, discarding the rest.
+		a.out("[reactive-compact] Aggressive compaction (current: %d tokens)\n", currentTokens)
+
+		preTokens := currentTokens
+		a.context.TruncateHistory()
+		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
+
+		// Build a structured summary for the boundary
+		summaryContent := a.buildCompactSummaryMessage(preTokens, a.context.BuildMessages(), nil)
+		a.context.AddSummary(summaryContent)
+
+		if a.transcript != nil {
+			_ = a.transcript.WriteCompact("reactive_compact", preTokens)
+			_ = a.transcript.WriteSummary(summaryContent)
+		}
+
+		// Keep only the recent 25% of messages (minimum 3, maximum 10)
+		msgs := a.context.entries
+		totalMsgs := len(msgs)
+		keepCount := totalMsgs / 4
+		if keepCount < 3 {
+			keepCount = 3
+		}
+		if keepCount > 10 {
+			keepCount = 10
+		}
+		a.context.KeepRecentMessages(keepCount)
+		a.context.ValidateToolPairing()
+		a.context.FixRoleAlternation()
+	}
+
+	// Reset consecutive error counters after any successful compaction.
+	a.consecutiveContextErrors = 0
+
+	// Post-compact recovery: re-inject critical context
+	recoveredPaths := a.PostCompactRecovery(HookTriggerAuto, "")
+	if a.toolStateTracker != nil {
+		for _, path := range recoveredPaths {
+			a.toolStateTracker.MarkFileFresh(path)
+		}
+	}
+
+	// Inject running agent status to prevent duplicate spawns
+	a.InjectRunningAgentStatus()
+
+	// Update post-compact token count for cooldown tracking
+	postCompactMessages := a.context.BuildMessages()
+	postCompactTokens := estimateMessageParamsTokens(postCompactMessages)
+	if a.compactor != nil {
+		a.compactor.SetPostCompactTokens(postCompactTokens)
+	}
+
+	a.out("[reactive-compact] Complete: %d -> %d tokens\n", currentTokens, postCompactTokens)
+	return nil
+}
+
 // ─── Sensitive info redaction ────────────────────────────────────────────────
 
 // Precompiled regex patterns for sensitive info redaction (H-03: avoid compiling per call).

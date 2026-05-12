@@ -314,6 +314,7 @@ type AgentLoop struct {
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
 	extractionState          *ExtractionState           // session memory extraction threshold tracking
 	hooks                    *HookManager              // compact pre/post hook handlers
+	consecutiveContextErrors int                       // tracks consecutive context overflow errors for reactive compact
 }
 
 // recordTokenUsage accumulates API token usage into the agent's running totals.
@@ -990,6 +991,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				a.out("\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
 					a.prevTurnTokens, currentTokens, result.TokenDelta, threshold)
 				a.tryCompaction()
+				a.consecutiveContextErrors = 0 // reset after successful compaction
 			}
 			// Update previous token count for next turn
 			a.prevTurnTokens = a.context.EstimatedTokens()
@@ -1099,18 +1101,38 @@ func (a *AgentLoop) Run(userMessage string) string {
 					return finalText
 				}
 
+				// Try precise token-gap parsing for reactive compaction.
+				if a.config.ReactiveCompactEnabled {
+					if overflowTokens, found := parseMaxTokensContextOverflowError(err); found {
+						a.out("\n[reactive-compact] Parsed context overflow: %d tokens over, shedding precisely...\n",
+							overflowTokens)
+						currentTokens := a.context.EstimatedTokens()
+						safetyMargin := 5000
+						targetTokens := currentTokens - overflowTokens - safetyMargin
+						a.reactiveCompact(targetTokens)
+						contextErrors = 0
+						continue
+					}
+				}
+
 				if a.toolStateTracker != nil {
 					a.toolStateTracker.OnCompaction()
 				}
 				preTokens := a.context.EstimatedTokens()
-				if contextErrors <= 1 {
-					a.context.TruncateHistory()
-				} else if contextErrors <= 2 {
-					a.context.AggressiveTruncateHistory()
+				// Use reactive compact when enabled, falling back to truncation
+				if a.config.ReactiveCompactEnabled {
+					a.reactiveCompact(0) // 0 = compact aggressively
 				} else {
-					a.context.MinimumHistory()
+					if contextErrors <= 1 {
+						a.context.TruncateHistory()
+					} else if contextErrors <= 2 {
+						a.context.AggressiveTruncateHistory()
+					} else {
+						a.context.MinimumHistory()
+					}
+					a.injectTruncationContinuation(preTokens)
 				}
-				a.injectTruncationContinuation(preTokens)
+				a.consecutiveContextErrors = 0
 				continue
 			}
 			return fmt.Sprintf("API error: %v", err)
@@ -1936,7 +1958,6 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 // Mirrors Claude Code's non-streaming fallback + retry budget.
 func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewParams) ([]map[string]any, []string, error) {
 	const maxRetries = 9 // 1 attempt + 9 retries = 10 total
-	consecutive500s := 0
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -2008,7 +2029,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			// Re-inject cache_edits after rebuild.
 			rebuilt = a.injectCacheEdits(rebuilt)
 			params.Messages = rebuilt
-			consecutive500s = 0
+			a.consecutiveContextErrors = 0
 			continue
 		}
 
@@ -2022,22 +2043,44 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 		// Track consecutive 500 errors as a heuristic for context overflow.
 		// When using a proxy (e.g., coze.site), context overflow often returns
-		// a generic 500 instead of "context_length_exceeded". If we see 3+
-		// consecutive 500s, assume context overflow and trigger compaction
-		// instead of retrying the same oversized request indefinitely.
+		// a generic 500 instead of "context_length_exceeded". We now use
+		// precise token-gap parsing when possible, falling back to a reduced
+		// consecutive-500 threshold only when we can't parse the exact count.
 		is500 := strings.Contains(errMsg, " 500 ") || strings.Contains(errMsg, "500 Internal Server Error")
-		if is500 {
-			consecutive500s++
-			if consecutive500s >= 5 {
-				a.out("\n[WARN] Consecutive 500 errors detected (context overflow likely), triggering compaction...\n")
-				a.context.TruncateHistory()
+
+		// Try precise token-gap parsing from the error message.
+		// If the error contains exact token counts, we can trigger compaction
+		// immediately with a precise token target instead of waiting for
+		// multiple consecutive 500s.
+		if overflowTokens, found := parseMaxTokensContextOverflowError(err); found {
+			currentTokens := a.context.EstimatedTokens()
+			safetyMargin := 5000 // shed extra tokens to avoid boundary issues
+			targetTokens := currentTokens - overflowTokens - safetyMargin
+			a.out("\n[reactive-compact] Parsed token overflow: %d tokens over limit, triggering precise compaction (current=%d, target=%d)...\n",
+				overflowTokens, currentTokens, targetTokens)
+			a.reactiveCompact(targetTokens)
+			return nil, nil, fmt.Errorf("context_length_exceeded")
+		}
+
+		// Fallback: if the error is a context length error but we couldn't
+		// parse exact token counts, use the reduced consecutive-500 heuristic.
+		if isContextLengthError(errMsg) || is500 {
+			a.consecutiveContextErrors++
+			if a.consecutiveContextErrors >= 3 { // reduced from 5 for faster recovery
+				a.out("\n[WARN] Consecutive context/500 errors detected (%d), triggering reactive compaction...\n",
+					a.consecutiveContextErrors)
+				a.reactiveCompact(0) // 0 = compact aggressively
+				a.consecutiveContextErrors = 0
 				return nil, nil, fmt.Errorf("context_length_exceeded")
 			}
-			// Transient 500: retry
-			a.out("\n[WARN] Transient 500 during non-streaming (attempt %d/%d): %v\n", consecutive500s, 5, err)
+			if is500 {
+				a.out("\n[WARN] Transient 500 during non-streaming (attempt %d/3): %v\n", a.consecutiveContextErrors, err)
+			} else {
+				a.out("\n[WARN] Context length error during non-streaming (attempt %d/3): %v\n", a.consecutiveContextErrors, err)
+			}
 			continue
 		}
-		consecutive500s = 0
+		a.consecutiveContextErrors = 0
 
 		// Transient error: retry
 		if isTransientError(errMsg) {

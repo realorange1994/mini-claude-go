@@ -478,3 +478,64 @@ func parsePromptTooLongTokenGap(errMsg string) (actual int, max int, found bool)
 	}
 	return 0, 0, false
 }
+
+// parseMaxTokensContextOverflowError attempts to extract the overflow token
+// count from "prompt is too long" or context overflow API errors.
+// Returns the overflow token count (actual - max) and true if parseable,
+// 0 and false otherwise.
+//
+// Handles patterns like:
+//   - "prompt is too long: 137500 tokens > 135000 maximum" → returns 2500
+//   - "request too large: 140000 tokens, max 135000" → returns 5000
+//   - Chinese: "超过最大长度137500，最大135000" → returns 2500
+//   - Generic: "context length 137500 exceeds limit 135000" → returns 2500
+func parseMaxTokensContextOverflowError(err error) (overflowTokens int, found bool) {
+	if err == nil {
+		return 0, false
+	}
+	errMsg := err.Error()
+
+	// Try the standard "X tokens > Y" pattern first (most common)
+	if actual, maxTokens, ok := parsePromptTooLongTokenGap(errMsg); ok {
+		return actual - maxTokens, true
+	}
+
+	// Pattern: "request too large: X tokens, max Y" or "X tokens, max Y"
+	reTokensMax := regexp.MustCompile(`(\d+)\s*tokens?.{0,20}?\s*max\s*(\d+)`)
+	if matches := reTokensMax.FindStringSubmatch(errMsg); len(matches) >= 3 {
+		actual, _ := strconv.Atoi(matches[1])
+		maxTokens, _ := strconv.Atoi(matches[2])
+		if actual > 0 && maxTokens > 0 && actual > maxTokens {
+			return actual - maxTokens, true
+		}
+	}
+
+	// Pattern: "context length X exceeds limit Y" or "context_length_exceeded: X/Y"
+	reExceedsLimit := regexp.MustCompile(`(?:context[_\s]?(?:length|window|size))?[_\s]*(\d+)\s*(?:tokens?)?\s*(?:exceeds|over|>|/|>)\s*(?:limit|max|maximum)?[_\s]*(\d+)`)
+	if matches := reExceedsLimit.FindStringSubmatch(errMsg); len(matches) >= 3 {
+		actual, _ := strconv.Atoi(matches[1])
+		maxTokens, _ := strconv.Atoi(matches[2])
+		if actual > 0 && maxTokens > 0 && actual > maxTokens {
+			return actual - maxTokens, true
+		}
+	}
+
+	// Chinese patterns: "超过最大长度X，最大Y" or "上下文长度X超过Y"
+	reChinese := regexp.MustCompile(`(?:超过最大长度|上下文长度|超出限制)[^\d]*(\d+)[^\d]*(?:最大|限制|超过)[^\d]*(\d+)`)
+	if matches := reChinese.FindStringSubmatch(errMsg); len(matches) >= 3 {
+		actual, _ := strconv.Atoi(matches[1])
+		maxTokens, _ := strconv.Atoi(matches[2])
+		if actual > 0 && maxTokens > 0 && actual > maxTokens {
+			return actual - maxTokens, true
+		}
+	}
+
+	// Fallback: if error is classified as context overflow but no exact
+	// token count is parseable, return 0, false — caller should use
+	// the fallback heuristic instead.
+	if isContextLengthError(errMsg) {
+		return 0, false
+	}
+
+	return 0, false
+}
