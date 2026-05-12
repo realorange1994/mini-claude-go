@@ -232,58 +232,35 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-16: Tool Output Structured Format
+## P1-16: Tool Output Structured Format [DONE — AUDIT: PASS]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 缺失 |
 | Severity | MEDIUM |
 | Source | 02-tools.md §A.1 |
-| Status | NEW |
+| Round | 20 Committed (PASS) |
 | Affected files | `tools/base.go` |
 | Upstream | `output_type: "text"|"error"` in tool result, `ToolResult` type |
 | REPL | N/A — core tool logic |
 
-**Problem**: Upstream tools return structured output with `output_type` field (text, error, metadata) and standardized error format. Go tools return plain strings, making it harder for the model to distinguish between success output and error output.
-
-**Upstream format**:
-```typescript
-{ output_type: "text"|"error", content: string, metadata?: object }
-```
-
-**Action items**:
-1. Add `ToolResult` struct with `OutputType` and `Content` fields
-2. Update all tools to return structured results
-3. Add metadata support for tool-specific data (file paths, line numbers, etc.)
-4. Update agent loop to handle structured results differently for errors vs text
+**Audit note**: Go has `ToolResult` struct with `Output` (string), `IsError` (bool), and `Metadata` (ToolResultMetadata with ToolName, ExitCode, DurationMs, OutputLines, Truncated). When sent to the API, `IsError` maps to `anthropic.ToolResultBlockParam.IsError` which corresponds to upstream's `output_type: "error"`. Helper functions `ToolResultOK()` and `ToolResultError()` provide clean construction. Metadata supports tool-specific data like file paths and line counts.
 
 ---
 
-## P1-17: Exec Tool Safety Improvements
+## P1-17: Exec Tool Safety Improvements [DONE — AUDIT: PASS]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 02-tools.md §A.2 |
-| Status | NEW |
+| Round | 20 Committed (PASS) |
 | Affected files | `tools/exec_tool.go` |
 | Upstream | `src/tools/bash.ts` — timeout, output truncation, background process |
 | REPL | REPL-relevant — exec tool is primary REPL interaction |
 
-**Problem**: Go's exec tool lacks several upstream safety features:
-- No per-command timeout (upstream: 2min default, configurable)
-- No working directory validation (prevents path traversal)
-- No output truncation with truncation notice (upstream: 30K chars)
-- No background process management (`run_in_background`)
-- No shell injection prevention for piped commands
-
-**Action items**:
-1. Add per-command timeout with configurable default
-2. Add working directory validation
-3. Add output truncation at 30K chars with `[truncated]` notice
-4. Add `run_in_background` parameter support
-5. Add shell injection prevention for piped commands
+**Audit note**: All upstream safety features are implemented: (1) per-command timeout (2min default, configurable up to 10min), (2) working directory validation with expandPath, (3) output truncation at 30K chars with `[N lines truncated]` notice, (4) `run_in_background` parameter with BackgroundTaskCallback, (5) TimeoutCallback for auto-backgrounding timed-out processes, (6) command substitution detection (detectCommandSubstitution), (7) glob/brace expansion detection in destructive commands, (8) path validation for deletion commands, (9) redirect target validation, (10) UNC path blocking for SMB/WebDAV credential leakage, (11) deny regex patterns for destructive commands, (12) compound command splitting with quote awareness, (13) safe wrapper stripping, (14) safe variable whitelist for ${} expansion.
 
 ---
 
@@ -315,29 +292,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-19: File Write Tool Safety
+## P1-19: File Write Tool Safety [DONE — AUDIT: PARTIAL]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 02-tools.md §A.4 |
-| Status | NEW |
+| Round | 20 Committed (PARTIAL) |
 | Affected files | `tools/file_write.go` |
 | Upstream | `src/tools/write.ts` — must-read-first check |
 | REPL | REPL-relevant — file writing is primary REPL interaction |
 
-**Problem**: Go's file write tool lacks:
-- Must-read-first check (upstream requires reading file before overwriting)
-- Directory creation with parent validation
-- File size limit for writes
-- Write confirmation for large files
-
-**Action items**:
-1. Add must-read-first check (error if file exists but wasn't read in this session)
-2. Add parent directory creation with safety validation
-3. Add file size limit for writes
-4. Add write confirmation for files > 1MB
+**Audit note**: Most upstream safety features implemented: (1) must-read-first check via `CheckFileStale()` (concurrent modification detection), (2) parent directory creation with `os.MkdirAll`, (3) file size limit (10MB), (4) UNC path blocking, (5) disk sync after write, (6) registry tracking via `MarkFileReadWithContent`. **Remaining gap**: upstream has write confirmation for files > 1MB (asks user before writing large files) — Go doesn't have this confirmation step.
 
 ---
 
@@ -536,29 +503,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 
 ---
 
-## P1-28: Error Classification System
+## P1-28: Error Classification System [DONE — AUDIT: PASS]
 
 | Field | Value |
 |-------|-------|
 | Gap type | 简化 |
 | Severity | MEDIUM |
 | Source | 07-architecture.md §A.3 |
-| Status | NEW |
+| Round | 20 Committed (PASS) |
 | Affected files | `error_types.go` |
 | Upstream | Error severity levels, categories, retry strategies |
 | REPL | N/A — core agent logic |
 
-**Problem**: Go's error classification is basic. Upstream has a comprehensive system with:
-- Error severity levels (transient, permanent, overloaded)
-- Error categories (API, network, auth, rate-limit, context-overflow)
-- Automatic retry strategies per category
-- Error telemetry and reporting
-
-**Action items**:
-1. Add error severity levels
-2. Add error categories
-3. Add automatic retry strategies per category
-4. Add error telemetry
+**Audit note**: Full implementation with 15-category `ErrorClass` enum (retryable, non_retryable, context_overflow, tool_pairing, rate_limit, billing, model_not_found, payload_too_large, overloaded, timeout, format_error, auth, thinking_signature, long_context_tier, unknown). `ClassifyResult` carries recovery hints: `Retryable`, `Compress`, `RotateKey`, `Fallback`, `RetryAfter`. Error pattern matching covers billing, rate limit, usage limit, overload, auth, model not found, and payload too large patterns.
 
 ---
 
@@ -684,19 +641,19 @@ These gaps limit capabilities or cause degraded behavior but don't break core fu
 | P1-13 | SM-compact token retention | — | DONE | Medium | N/A |
 | P1-14 | LLM compaction summary quality | — | DONE | Medium | N/A |
 | P1-15 | Non-LLM compaction metadata | — | DONE | Small | N/A |
-| P1-16 | Tool output structured format | — | NEW | Medium | N/A |
-| P1-17 | Exec tool safety | — | NEW | Medium | REPL |
+| P1-16 | Tool output structured format | PASS | DONE | Medium | N/A |
+| P1-17 | Exec tool safety | PASS | DONE | Medium | REPL |
 | P1-18 | File read enhancements | — | NEW | Medium | REPL |
-| P1-19 | File write safety | — | NEW | Small | REPL |
+| P1-19 | File write safety | PARTIAL | DONE | Small | REPL |
 | P1-20 | Grep/Glob alignment | — | NEW | Medium | REPL |
 | P1-21 | Git tool enhancements | — | NEW | Medium | REPL |
 | P1-22 | Notebook edit tool | — | NEW | Medium | N/A |
 | P1-23 | System prompt dynamic sections | — | NEW | Medium | N/A |
 | P1-24 | Permission rule engine | — | NEW | Large | N/A |
 | P1-25 | API client beta headers | — | DONE | Small | N/A |
-| P1-26 | Error classification system | — | DONE | Medium | N/A |
+| P1-26 | Error classification system | PARTIAL | DONE | Medium | N/A |
 | P1-27 | Transcript resume | — | NEW | Medium | REPL |
-| P1-28 | Error classification system | — | NEW | Medium | N/A |
+| P1-28 | Error classification system | PASS | DONE | Medium | N/A |
 | P1-29 | Context reference expansion | — | NEW | Medium | REPL |
 | P1-30 | File history snapshots | — | NEW | Medium | N/A |
 | P1-31 | MCP tool schema validation | — | NEW | Small | N/A |
