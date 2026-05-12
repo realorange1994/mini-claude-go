@@ -344,6 +344,7 @@ type AgentLoop struct {
 	modelCapabilities        *ModelCapabilitiesCache   // per-model context window and capability lookup
 	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
 	errorReporter              *ErrorReporter            // captures error events for analysis
+	featureFlags               *FeatureFlagStore         // feature flag store
 }
 
 // handle529Error processes a 529 Overloaded error. It increments the consecutive
@@ -563,6 +564,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		hooks:             cfg.Hooks,
 		sonnetModel:       "claude-sonnet-4-20250514",
 		errorReporter:    NewErrorReporter(),
+		featureFlags:     NewFeatureFlagStore(),
 	}
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
@@ -734,8 +736,9 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		cacheBreakDetector: &CacheBreakDetector{},
 		extractionState:   NewExtractionState(),
 		hooks:             cfg.Hooks,
+		errorReporter:    NewErrorReporter(),
+		featureFlags:     NewFeatureFlagStore(),
 	}
-
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
 	SetGlobalModelCapabilities(agent.modelCapabilities)

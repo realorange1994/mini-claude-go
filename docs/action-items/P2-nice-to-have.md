@@ -1,7 +1,7 @@
 # P2 — Nice-to-Have Gaps
 
 > Quality-of-life improvements, architectural features, and long-term goals
-> Updated: 2026-05-13 (13 DONE, 2 PARTIAL, 15 NEW)
+> Updated: 2026-05-13 (14 DONE, 2 PARTIAL, 14 NEW)
 
 These gaps would improve the user experience or enable future capabilities but are not blocking current functionality.
 
@@ -89,18 +89,16 @@ These gaps would improve the user experience or enable future capabilities but a
 | Gap type | 缺失 |
 | Severity | LOW |
 | Source | 05-services.md §3 |
-| Status | NEW |
-| Affected files | New: `growthbook/` |
+| Status | DONE (PASS) |
+| Affected files | `feature_flags.go` |
 | Upstream | `src/services/growthbook/` — GrowthBook SDK |
 | REPL | N/A — core service logic |
 
-**Missing**: GrowthBook SDK integration, remote flag evaluation, A/B test enrollment, flag caching/refresh.
-
-**Why P2**: Go can use config-file-based feature toggles as a simpler alternative.
-
-**Action items**:
-1. Implement simple feature flag system (config-based)
-2. Add GrowthBook integration if needed for parity
+**Implemented**:
+1. `FeatureFlagStore` — JSON-based feature flag persistence in `.claude/feature_flags.json`
+2. `Enabled(name)` / `Enable(name, desc)` / `Disable(name)` / `List()` methods
+3. `/feature list|enable <name>|disable <name>` REPL command
+4. `FeatureFlagStore` wired into `AgentLoop` struct for programmatic access
 
 ---
 
@@ -616,7 +614,7 @@ These gaps would improve the user experience or enable future capabilities but a
 | P2-1 | OAuth/PKCE | NEW | Large | N/A |
 | P2-2 | Basic TUI | NEW | Large | TUI |
 | P2-3 | Analytics | NEW | Medium | N/A |
-| P2-4 | Feature flags | NEW | Medium | N/A |
+| P2-4 | Feature flags | DONE (PASS) | Medium | N/A |
 | P2-5 | Multi-provider | NEW | Large | N/A |
 | P2-6 | MCP transports | NEW | Medium | N/A |
 | P2-7 | Session improvements | PARTIAL | Medium | REPL |
