@@ -1,0 +1,216 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// ---------------------------------------------------------------------------
+// Feature flag tests — regression guard for flag persistence and CRUD
+// ---------------------------------------------------------------------------
+
+func TestNewFeatureFlagStoreNoFile(t *testing.T) {
+	// Create store when no file exists — should start empty
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	flags := store.List()
+	if len(flags) != 0 {
+		t.Error("new store without file should have no flags")
+	}
+}
+
+func TestFeatureFlagStoreEnabledDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	// Unknown flag should return false
+	if store.Enabled("nonexistent") {
+		t.Error("unknown flag should default to false")
+	}
+}
+
+func TestFeatureFlagStoreEnable(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	store.Enable("test_flag", "A test feature")
+
+	if !store.Enabled("test_flag") {
+		t.Error("enabled flag should return true")
+	}
+
+	// Check persistence
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("expected flag file to exist, got error: %v", err)
+	}
+	var saved map[string]FeatureFlag
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("failed to parse saved flags: %v", err)
+	}
+	if f, ok := saved["test_flag"]; !ok || !f.Enabled {
+		t.Error("enabled flag should be persisted")
+	}
+	if f, ok := saved["test_flag"]; ok && f.Description != "A test feature" {
+		t.Errorf("expected description 'A test feature', got %q", f.Description)
+	}
+}
+
+func TestFeatureFlagStoreDisable(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	store.Enable("test_flag", "A test feature")
+	if !store.Enabled("test_flag") {
+		t.Fatal("flag should be enabled before disable")
+	}
+
+	store.Disable("test_flag")
+	if store.Enabled("test_flag") {
+		t.Error("disabled flag should return false")
+	}
+
+	// Flag should still exist in store (just disabled)
+	flags := store.List()
+	found := false
+	for _, f := range flags {
+		if f.Name == "test_flag" {
+			found = true
+			if f.Enabled {
+				t.Error("flag in list should show as disabled")
+			}
+		}
+	}
+	if !found {
+		t.Error("disabled flag should still appear in list")
+	}
+}
+
+func TestFeatureFlagStoreDisableNonexistent(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	// Disabling nonexistent flag should not crash or create it
+	store.Disable("nonexistent")
+	if store.Enabled("nonexistent") {
+		t.Error("nonexistent flag should remain false after disable")
+	}
+}
+
+func TestFeatureFlagStoreList(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	store.Enable("flag_a", "First flag")
+	store.Enable("flag_b", "Second flag")
+	store.Enable("flag_c", "Third flag")
+
+	flags := store.List()
+	if len(flags) != 3 {
+		t.Errorf("expected 3 flags, got %d", len(flags))
+	}
+}
+
+func TestFeatureFlagStoreLoadFromFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	// Pre-create the file
+	initialFlags := map[string]FeatureFlag{
+		"existing_flag": {Name: "existing_flag", Enabled: true, Description: "pre-existing"},
+	}
+	data, _ := json.MarshalIndent(initialFlags, "", "  ")
+	os.WriteFile(file, data, 0o644)
+
+	// Create store that loads from the file
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+	rawData, _ := os.ReadFile(file)
+	json.Unmarshal(rawData, &store.flags)
+	for name, f := range store.flags {
+		f.Name = name
+		store.flags[name] = f
+	}
+
+	if !store.Enabled("existing_flag") {
+		t.Error("should load pre-existing enabled flag from file")
+	}
+}
+
+func TestFeatureFlagStoreEnableDisableCycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	// Enable → Disable → Enable cycle
+	store.Enable("cycle_flag", "test")
+	if !store.Enabled("cycle_flag") {
+		t.Fatal("should be enabled after first Enable")
+	}
+
+	store.Disable("cycle_flag")
+	if store.Enabled("cycle_flag") {
+		t.Fatal("should be disabled after Disable")
+	}
+
+	store.Enable("cycle_flag", "test again")
+	if !store.Enabled("cycle_flag") {
+		t.Fatal("should be enabled after second Enable")
+	}
+}
+
+func TestFeatureFlagStruct(t *testing.T) {
+	f := FeatureFlag{
+		Name:        "test",
+		Enabled:     true,
+		Description: "desc",
+	}
+	if f.Name != "test" {
+		t.Errorf("expected Name='test', got %q", f.Name)
+	}
+	if !f.Enabled {
+		t.Error("expected Enabled=true")
+	}
+	if f.Description != "desc" {
+		t.Errorf("expected Description='desc', got %q", f.Description)
+	}
+}
