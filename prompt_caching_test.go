@@ -122,12 +122,12 @@ func TestApplyCacheMarkerToolRole(t *testing.T) {
 	if _, ok := msg["cache_control"]; !ok {
 		t.Error("tool role message should have cache_control at message level")
 	}
-	// For cached tool_result blocks, tool_use_id should be replaced with cache_reference
-	if _, ok := msg["tool_use_id"]; ok {
-		t.Error("tool role message should NOT have tool_use_id after cache marking (replaced by cache_reference)")
+	// tool_use_id MUST be preserved — the API requires it for tool_result pairing (error 2013 fix)
+	if _, ok := msg["tool_use_id"]; !ok {
+		t.Error("tool role message MUST have tool_use_id preserved after cache marking")
 	}
-	if msg["cache_reference"] != "toolu_12345" {
-		t.Errorf("expected cache_reference='toolu_12345', got %v", msg["cache_reference"])
+	if _, ok := msg["cache_reference"]; ok {
+		t.Error("tool role message should NOT have cache_reference (deprecated)")
 	}
 }
 
@@ -142,7 +142,7 @@ func TestApplyCacheMarkerToolRoleNoToolUseID(t *testing.T) {
 	if _, ok := msg["cache_control"]; !ok {
 		t.Error("tool role message should have cache_control at message level")
 	}
-	// No tool_use_id to convert, cache_reference should not be set
+	// No tool_use_id present — should just add cache_control
 	if _, ok := msg["cache_reference"]; ok {
 		t.Error("tool role message without tool_use_id should NOT have cache_reference")
 	}
@@ -621,11 +621,11 @@ func TestApplyCacheMarkerToolResultArrayBlock(t *testing.T) {
 	if _, ok := lastBlock["cache_control"]; !ok {
 		t.Error("last block (tool_result) should have cache_control")
 	}
-	// tool_result block should have cache_reference instead of tool_use_id
-	if lastBlock["cache_reference"] != "toolu_abc123" {
-		t.Errorf("expected cache_reference='toolu_abc123', got %v", lastBlock["cache_reference"])
+	// tool_use_id MUST be preserved — the API requires it for tool_result pairing (error 2013 fix)
+	if lastBlock["tool_use_id"] != "toolu_abc123" {
+		t.Errorf("expected tool_use_id='toolu_abc123', got %v", lastBlock["tool_use_id"])
 	}
-	if _, ok := lastBlock["tool_use_id"]; ok {
-		t.Error("tool_result block should NOT have tool_use_id after cache marking (replaced by cache_reference)")
+	if _, ok := lastBlock["cache_reference"]; ok {
+		t.Error("tool_result block should NOT have cache_reference (deprecated)")
 	}
 }
