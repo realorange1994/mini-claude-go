@@ -139,7 +139,21 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 
 	input := make(map[string]any)
 	if tc.Arguments != "" {
-		_ = json.Unmarshal([]byte(tc.Arguments), &input)
+		if err := json.Unmarshal([]byte(tc.Arguments), &input); err != nil {
+			// Return a clear error so the model knows the JSON was malformed,
+			// rather than silently proceeding with empty params and getting
+			// a misleading "missing required parameter" error later.
+			e.recordResult(toolExecResult{
+				index:     idx,
+				toolName:  tc.Name,
+				toolUseID: tc.ID,
+				isError:   true,
+				output:    fmt.Sprintf("Error: failed to parse tool arguments: %v\nRaw arguments: %s", err, tc.Arguments),
+				duration:  time.Since(start),
+			})
+			e.completed.Add(1)
+			return
+		}
 	}
 
 	// Check permissions
@@ -159,7 +173,22 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 		}
 	}
 
-	result := tool.Execute(input)
+	// Recover from panics inside tool execution, matching agent_loop.go's
+	// panic safety net. Without this, a panic in a tool would crash the
+	// entire streaming executor goroutine.
+	var result tools.ToolResult
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				result = tools.ToolResult{
+					Output:   fmt.Sprintf("Error: tool execution panicked: %v", r),
+					IsError:  true,
+				}
+			}
+		}()
+		result = tool.Execute(input)
+	}()
+
 	e.recordResult(toolExecResult{
 		index:     idx,
 		toolName:  tc.Name,
