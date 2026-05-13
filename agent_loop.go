@@ -1280,6 +1280,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 			// If we got tool calls and have a streaming executor, wait for
 			// pipelined execution to complete instead of synchronous execution.
 			if len(toolCalls) > 0 && executor != nil {
+				// CRITICAL: Add tool_use blocks to context BEFORE tool_results.
+				// The Anthropic API requires tool_use to precede its tool_result.
+				// If we add results first, BuildMessages produces user(tool_result)
+				// before assistant(tool_use), causing API error 2013.
+				a.context.AddAssistantToolCalls(toolCalls)
+
 				streamingResults := executor.Wait(len(toolCalls))
 				if len(streamingResults) > 0 {
 					// Streaming executor completed all tool calls — use results directly
@@ -1506,7 +1512,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 			})
 		}
 
-		a.context.AddAssistantToolCalls(toolCalls)
+		// Add tool_use blocks to context (skip if streaming executor already added them)
+		if !streamingExecDone {
+			a.context.AddAssistantToolCalls(toolCalls)
+		}
 
 		// Extract conclusions from intermediate text before tool calls
 		if a.toolStateTracker != nil && len(textParts) > 0 {
@@ -2305,7 +2314,9 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
 	messages := a.context.BuildMessages()
+
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
+
 	params := anthropic.MessageNewParams{
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
@@ -2513,6 +2524,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		// 2013 error: tool pairing broken -- repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
 			a.out("\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
+			// DEBUG: dump messages that caused the error
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
 			// Inject a recovery hint so the model produces properly sequenced tool calls
@@ -2726,12 +2738,17 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 
 	for _, e := range entries {
 		go func(ent toolCallEntry) {
+			// Safe extraction of toolUseID (guard against missing id)
+			toolUseID, _ := ent.call["id"].(string)
+			if toolUseID == "" {
+				toolUseID = "synthetic_tool_use_id"
+			}
 			// Check for interrupt before starting each tool
 			if a.IsInterrupted() {
 				ch <- jobResult{
 					index: ent.index,
 					param: anthropic.ToolResultBlockParam{
-						ToolUseID: ent.call["id"].(string),
+						ToolUseID: toolUseID,
 						Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "Interrupted by user"}}},
 						IsError:   param.NewOpt(true),
 					},
@@ -2743,7 +2760,7 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 				ch <- jobResult{
 					index: ent.index,
 					param: anthropic.ToolResultBlockParam{
-						ToolUseID: ent.call["id"].(string),
+						ToolUseID: toolUseID,
 						Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: ent.errText}}},
 						IsError:   param.NewOpt(true),
 					},
@@ -2757,10 +2774,11 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 		}(e)
 	}
 
-	// Collect results and sort by original index
+		// Collect results and sort by original index
 	collected := make([]jobResult, 0, len(entries))
 	for i := 0; i < len(entries); i++ {
-		collected = append(collected, <-ch)
+		jr := <-ch
+		collected = append(collected, jr)
 	}
 	// Sort by index to preserve original order
 	sort.Slice(collected, func(i, j int) bool {
@@ -2818,6 +2836,22 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	input, _ := call["input"].(map[string]any)
 	if input == nil {
 		input = make(map[string]any)
+	}
+
+	// Guard: if toolUseID is empty, try to recover it from the raw map
+	// or generate a fallback. Empty toolUseID causes API error 2013.
+	if toolUseID == "" {
+		// Try alternate key locations (some proxies/models use different field names)
+		if altID, ok := call["tool_use_id"].(string); ok && altID != "" {
+			toolUseID = altID
+		} else if altID, ok := call["toolId"].(string); ok && altID != "" {
+			toolUseID = altID
+		}
+		// If still empty, log the full call map and generate a synthetic ID
+		if toolUseID == "" {
+			fmt.Fprintf(os.Stderr, "[WARN-EXEC] Empty toolUseID! call=%v\n", call)
+			toolUseID = "synthetic_tool_use_id"
+		}
 	}
 
 	// Hook: PreToolUse — before tool execution (matches upstream's PreToolUse hook)
@@ -5003,3 +5037,4 @@ func (a *AgentLoop) runSessionMemoryExtraction() {
 		a.extractionState.MarkExtracted(int64(a.context.EstimatedTokens()))
 	}
 }
+

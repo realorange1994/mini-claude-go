@@ -132,6 +132,11 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	e.dispatched.Add(1)
 	start := time.Now()
 
+	// Guard against empty toolUseID
+	if tc.ID == "" {
+		tc.ID = "synthetic_tool_use_id"
+	}
+
 	input := make(map[string]any)
 	if tc.Arguments != "" {
 		_ = json.Unmarshal([]byte(tc.Arguments), &input)

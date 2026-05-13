@@ -100,11 +100,8 @@ func applyCacheMarker(msg map[string]any, marker map[string]any) {
 	// tool role: cache_control goes at message level
 	if role == "tool" {
 		msg["cache_control"] = marker
-		// Use cache_reference instead of tool_use_id for cached tool_result blocks
-		if toolUseID, ok := msg["tool_use_id"].(string); ok && toolUseID != "" {
-			msg["cache_reference"] = toolUseID
-			delete(msg, "tool_use_id")
-		}
+		// Do NOT delete tool_use_id — the API requires it for tool_result pairing.
+		// cache_reference is an additional field for cache tracking, not a replacement.
 		return
 	}
 
@@ -132,21 +129,15 @@ func applyCacheMarker(msg map[string]any, marker map[string]any) {
 		return
 	}
 
-	// Array content -> add cache_control to last block;
-	// for tool_result blocks, use cache_reference instead of tool_use_id
-	if arr, ok := content.([]any); ok && len(arr) > 0 {
-		last := arr[len(arr)-1]
-		if m, ok := last.(map[string]any); ok {
-			m["cache_control"] = marker
-			// For tool_result blocks, use cache_reference field
-			if blockType, _ := m["type"].(string); blockType == "tool_result" {
-				if toolUseID, ok := m["tool_use_id"].(string); ok && toolUseID != "" {
-					m["cache_reference"] = toolUseID
-					delete(m, "tool_use_id")
-				}
+	// Array content -> add cache_control to last block
+		if arr, ok := content.([]any); ok && len(arr) > 0 {
+			last := arr[len(arr)-1]
+			if m, ok := last.(map[string]any); ok {
+				m["cache_control"] = marker
+				// Do NOT delete tool_use_id from tool_result blocks —
+				// the API requires it for tool_result/tool_use pairing (error 2013).
 			}
 		}
-	}
 }
 
 // deepCopyMessages does a deep copy via JSON marshal/unmarshal.
@@ -168,6 +159,7 @@ func deepCopyMessages(messages []map[string]any) []map[string]any {
 func cacheMessageParams(params *anthropic.MessageNewParams) {
 	// Convert messages to maps
 	msgMaps := messageParamToMaps(params.Messages)
+
 	msgMaps = ApplyPromptCaching(msgMaps, "5m")
 
 	// Convert back to MessageParam
