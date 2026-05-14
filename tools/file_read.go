@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -268,14 +269,15 @@ func expandPath(p string) string {
 		home, _ := os.UserHomeDir()
 		p = filepath.Join(home, p[1:])
 	}
+	// On Windows, convert POSIX paths to Windows native paths
+	// This handles /x/ (drive), /tmp/ (MSYS2 temp), /home/ (MSYS2 home), /cygdrive/
+	if runtime.GOOS == "windows" && strings.HasPrefix(p, "/") {
+		p = PosixToWindowsPath(p)
+	}
 	// On Windows, bare drive letter like "E:" means current dir on that drive.
 	// Normalize to "E:\" to reference the drive root.
 	if len(p) == 2 && p[1] == ':' && (p[0] >= 'A' && p[0] <= 'Z' || p[0] >= 'a' && p[0] <= 'z') {
 		p = p + string(filepath.Separator)
-	}
-	// Handle Unix-style absolute paths like /e/ on Windows: convert /x/ to X:\
-	if len(p) >= 3 && p[0] == '/' && (p[1] >= 'a' && p[1] <= 'z' || p[1] >= 'A' && p[1] <= 'Z') && p[2] == '/' {
-		p = strings.ToUpper(string(p[1])) + ":\\" + p[3:]
 	}
 	return filepath.Clean(p)
 }

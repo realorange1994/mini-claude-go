@@ -358,10 +358,6 @@ func straightToCurlySingle(s string) string {
 	return sb.String()
 }
 
-func isLetter(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
-}
-
 // stripTrailingWhitespace removes trailing whitespace from each line.
 func stripTrailingWhitespace(s string) string {
 	lines := strings.Split(s, "\n")

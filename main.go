@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -343,8 +344,43 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 		}
 	}()
 
-	// Use a single bufio.Reader for the entire REPL lifetime.
+	// Use a single bufio.Reader for input reading.
 	stdinReader := bufio.NewReader(os.Stdin)
+
+	// Piped input mode: read all stdin at once as a single prompt.
+	// Without this, ReadString('\n') splits multi-line input into separate
+	// agent.Run() calls, causing the first (often empty/incomplete) line
+	// to be sent as a prompt with no task context.
+	if !interactive {
+		data, err := io.ReadAll(stdinReader)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Failed to read piped input: %v\n", err)
+			agent.Close()
+			return
+		}
+		prompt := strings.TrimSpace(string(data))
+		if prompt == "" {
+			fmt.Fprintln(os.Stderr, "[!] Empty piped input.")
+			agent.Close()
+			return
+		}
+		// Record prompt to history
+		if history != nil {
+			history.Record(prompt, sessionID)
+		}
+		result := agent.Run(prompt)
+		if !agent.IsStreaming() || !stdoutIsTerm {
+			fmt.Println(result)
+		}
+		fmt.Println()
+
+		// Drain any pending sub-agent notifications before exit
+		drainOneShotNotifications(agent)
+
+		printResumeHint(agent)
+		agent.Close()
+		return
+	}
 
 	reopenStdin := func() *bufio.Reader {
 		var f *os.File

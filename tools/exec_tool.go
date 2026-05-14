@@ -1767,6 +1767,74 @@ func windowsToPosixPath(windowsPath string) string {
 	return strings.ReplaceAll(windowsPath, `\`, "/")
 }
 
+// PosixToWindowsPath converts a POSIX-style path to a Windows native path.
+// This ensures file tools and Git Bash resolve the same physical file.
+//
+// Mapping rules (matching MSYS2/Git Bash mount points):
+//
+//	/cygdrive/x/... → X:\...
+//	/x/...          → X:\...  (single-letter drive)
+//	//server/share  → \\server\share (UNC)
+//	/tmp/...        → os.TempDir()/...
+//	/home/...       → os.UserHomeDir()/...
+func PosixToWindowsPath(posixPath string) string {
+	// UNC paths: //server/share → \\server\share
+	if strings.HasPrefix(posixPath, "//") {
+		return `\\` + posixPath[2:]
+	}
+
+	// Cygwin drive prefix: /cygdrive/x/... → X:\...
+	if strings.HasPrefix(posixPath, "/cygdrive/") {
+		rest := posixPath[len("/cygdrive/"):]
+		if len(rest) >= 2 && isLetter(rune(rest[0])) && rest[1] == '/' {
+			return strings.ToUpper(string(rest[0])) + `:\` + rest[2:]
+		}
+	}
+
+	// MSYS2 mount: /tmp/... → os.TempDir()/...
+	if posixPath == "/tmp" || strings.HasPrefix(posixPath, "/tmp/") {
+		rest := posixPath[len("/tmp"):]
+		return filepath.Join(os.TempDir(), rest)
+	}
+
+	// MSYS2 mount: /home/... → os.UserHomeDir()/...
+	if posixPath == "/home" || strings.HasPrefix(posixPath, "/home/") {
+		rest := posixPath[len("/home"):]
+		// Skip username segment if present: /home/user/file → ~/file
+		if rest != "" && rest[0] == '/' {
+			rest = rest[1:] // drop leading /
+			// Check if first segment is a username (not another known mount)
+			if idx := strings.Index(rest, "/"); idx > 0 {
+				rest = rest[idx+1:] // skip username, keep rest
+			} else if idx < 0 && rest != "" {
+				rest = "" // /home/user → just home dir
+			}
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Clean(posixPath)
+		}
+		return filepath.Join(home, rest)
+	}
+
+	// Drive letter paths: /x/... → X:\...
+	if len(posixPath) >= 3 && posixPath[0] == '/' && isLetter(rune(posixPath[1])) && posixPath[2] == '/' {
+		return strings.ToUpper(string(posixPath[1])) + `:\` + posixPath[3:]
+	}
+	// Bare drive: /x → X:\
+	if len(posixPath) == 2 && posixPath[0] == '/' && isLetter(rune(posixPath[1])) {
+		return strings.ToUpper(string(posixPath[1])) + `:\`
+	}
+
+	// Fallback: just clean it (relative paths, already-Windows paths)
+	return filepath.Clean(posixPath)
+}
+
+// isLetter reports whether r is an ASCII letter.
+func isLetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
+
 // shellQuote single-quotes a string for POSIX shell.
 // Handles single quotes within the string by breaking out and adding escaped quotes.
 func shellQuote(s string) string {
@@ -1785,7 +1853,7 @@ func GetShellInfo() string {
 	shellInfoCache.once.Do(func() {
 		if runtime.GOOS == "windows" {
 			if gitBash := findGitBashForWindows(); gitBash != "" {
-				shellInfoCache.info = fmt.Sprintf("Git Bash (%s) — use POSIX/bash syntax", gitBash)
+				shellInfoCache.info = fmt.Sprintf("Git Bash (%s) — use POSIX/bash syntax for exec, Windows paths (C:\\path) for file tools. /tmp/ maps to your temp dir.", gitBash)
 			} else if _, err := exec.LookPath("powershell"); err == nil {
 				shellInfoCache.info = "PowerShell — use PowerShell syntax"
 			} else {
@@ -1796,4 +1864,16 @@ func GetShellInfo() string {
 		}
 	})
 	return shellInfoCache.info
+}
+
+// GetPathFormatInfo returns path format guidance for the system prompt.
+// This tells the LLM which path format to use for file tools vs exec commands.
+func GetPathFormatInfo() string {
+	if runtime.GOOS == "windows" {
+		if findGitBashForWindows() != "" {
+			return "Use Windows paths (C:\\path\\to\\file) for file_read/file_write/file_edit/glob/grep/list_dir. Use POSIX paths (/c/path/to) in exec commands running in Git Bash. /tmp/ in file tools maps to the Windows temp directory."
+		}
+		return "Use Windows paths (C:\\path\\to\\file) for all tools."
+	}
+	return "Use POSIX paths (/path/to/file) for all tools."
 }

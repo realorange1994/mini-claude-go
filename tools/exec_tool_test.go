@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -590,6 +592,48 @@ func TestCheckPermissionsWindowsPaths(t *testing.T) {
 		result := tool.CheckPermissions(map[string]any{"command": cmd})
 		if result.Behavior == PermissionPassthrough {
 			t.Logf("expected denial for Windows path: %s (got: %v)", cmd, result)
+		}
+	}
+}
+
+// ─── PosixToWindowsPath ──────────────────────────────────────────────────────
+
+func TestPosixToWindowsPath(t *testing.T) {
+	tmpDir := os.TempDir()
+	homeDir, _ := os.UserHomeDir()
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		// Drive letter paths
+		{"/e/workspace", "E:\\workspace"},
+		{"/c/Users/foo", "C:\\Users\\foo"},
+		{"/c/", "C:\\"},
+		// Cygwin drive prefix
+		{"/cygdrive/c/file.txt", "C:\\file.txt"},
+		{"/cygdrive/e/workspace", "E:\\workspace"},
+		// MSYS2 mount: /tmp
+		{"/tmp", tmpDir},
+		{"/tmp/test.txt", filepath.Join(tmpDir, "test.txt")},
+		// MSYS2 mount: /home
+		{"/home", homeDir},
+		{"/home/user/file.txt", filepath.Join(homeDir, "file.txt")},
+		// UNC paths
+		{"//server/share", `\\server\share`},
+		// Relative paths (no conversion needed)
+		{"relative/path", filepath.Clean("relative/path")},
+		// Already Windows paths (no conversion needed)
+		{`C:\Users\foo`, `C:\Users\foo`},
+	}
+
+	for _, tt := range tests {
+		got := PosixToWindowsPath(tt.input)
+		gotClean := filepath.Clean(got)
+		expectedClean := filepath.Clean(tt.expected)
+		if gotClean != expectedClean {
+			t.Errorf("PosixToWindowsPath(%q) = %q (clean: %q), want %q (clean: %q)",
+				tt.input, got, gotClean, tt.expected, expectedClean)
 		}
 	}
 }
