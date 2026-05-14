@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -264,11 +265,15 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		}
 	}
 
+	// Determine shell and flags.
+	// On Windows: prefer Git Bash (via git.exe path derivation), then PowerShell, then cmd.
+	// Git Bash requires POSIX paths for CWD, so we convert wd to POSIX format.
 	var shell, flag string
+	var isGitBash bool
 	if runtime.GOOS == "windows" {
-		// Prefer Git Bash on Windows, then PowerShell, then cmd
-		if _, err := exec.LookPath("bash"); err == nil {
-			shell, flag = "bash", "-c"
+		if gitBash := findGitBashForWindows(); gitBash != "" {
+			shell, flag = gitBash, "-c"
+			isGitBash = true
 		} else if _, err := exec.LookPath("powershell"); err == nil {
 			shell, flag = "powershell", "-Command"
 		} else {
@@ -286,11 +291,22 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		wd = expandPath(wd)
 	}
 
+	// On Windows with Git Bash, the working directory must be set differently.
+	// Go's exec.Command.Dir uses Windows CreateProcess which requires Windows paths.
+	// Git Bash (MSYS2) cannot resolve Windows paths for its internal cd, so we:
+	//  - Keep cmd.Dir as the Windows path (for process creation)
+	//  - Prepend a "cd /posix/path" to the command so bash starts in the right dir
+	var cdPrefix string
+	if runtime.GOOS == "windows" && isGitBash && wd != "" {
+		posixWd := windowsToPosixPath(wd)
+		cdPrefix = "cd " + shellQuote(posixWd) + " && "
+	}
+
 	// Note: we do NOT use context.WithTimeout or CommandContext here.
 	// The timeout is handled at the select level below. On timeout, the
 	// process continues running in the background (registered via TimeoutCallback).
 	// On user interrupt (ctx.Done()), the process is killed.
-	cmd := exec.Command(shell, flag, command)
+	cmd := exec.Command(shell, flag, cdPrefix+command)
 	cmd.Dir = wd
 	cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
 
@@ -1618,4 +1634,166 @@ func isDestructiveCommand(cmd string) (bool, string) {
 	}
 
 	return false, ""
+}
+
+// ─── Windows Git Bash detection ───────────────────────────────────────────────
+
+// gitBashCache caches the result of findGitBashForWindows to avoid repeated
+// filesystem probing. Matching upstream's memoize(findGitBashPath).
+var gitBashCache struct {
+	path string
+	ok   bool
+	once sync.Once
+}
+
+// findGitBashForWindows locates Git Bash on Windows by finding git.exe first,
+// then deriving bash.exe from its path. Matching upstream's findGitBashPath()
+// in windowsPaths.ts:97.
+//
+// Resolution order:
+//  1. CLAUDE_CODE_GIT_BASH_PATH environment variable (if set and exists)
+//  2. Derive from git.exe: gitPath\..\..\bin\bash.exe
+//     (e.g. C:\Program Files\Git\cmd\git.exe → C:\Program Files\Git\bin\bash.exe)
+//  3. LookPath("bash") as fallback
+//  4. Empty string (not found)
+func findGitBashForWindows() string {
+	gitBashCache.once.Do(func() {
+		// 1. Check CLAUDE_CODE_GIT_BASH_PATH env var
+		if envPath := os.Getenv("CLAUDE_CODE_GIT_BASH_PATH"); envPath != "" {
+			if _, err := os.Stat(envPath); err == nil {
+				gitBashCache.path = envPath
+				gitBashCache.ok = true
+				return
+			}
+		}
+
+		// 2. Find git.exe and derive bash.exe path
+		gitPath := findGitExecutableWindows()
+		if gitPath != "" {
+		// git.exe is typically at: <GitInstall>\cmd\git.exe
+			// bash.exe is at:          <GitInstall>\bin\bash.exe
+			// Derive bash.exe from git.exe using path-style normalization:
+			// filepath.Join treats git.exe as a path component, so ".." strips it.
+			// C:\Program Files\Git\cmd\git.exe\..\..\bin\bash.exe → C:\Program Files\Git\bin\bash.exe
+			bashPath := filepath.Clean(filepath.Join(gitPath, "..", "..", "bin", "bash.exe"))
+			absBash, err := filepath.Abs(bashPath)
+			if err == nil {
+				bashPath = absBash
+			}
+			if _, err := os.Stat(bashPath); err == nil {
+				gitBashCache.path = bashPath
+				gitBashCache.ok = true
+				return
+			}
+		}
+
+		// 3. Fallback: try PATH
+		if p, err := exec.LookPath("bash"); err == nil {
+			gitBashCache.path = p
+			gitBashCache.ok = true
+			return
+		}
+
+		// Not found
+		gitBashCache.ok = true // don't retry
+	})
+
+	return gitBashCache.path
+}
+
+// findGitExecutableWindows locates git.exe on Windows.
+// Matching upstream's findExecutable('git') in windowsPaths.ts:26.
+func findGitExecutableWindows() string {
+	// Check common installation locations first (64-bit before 32-bit)
+	defaultLocations := []string{
+		`C:\Program Files\Git\cmd\git.exe`,
+		`C:\Program Files (x86)\Git\cmd\git.exe`,
+	}
+	for _, loc := range defaultLocations {
+		if _, err := os.Stat(loc); err == nil {
+			return loc
+		}
+	}
+
+	// Fall back to where.exe
+	out, err := exec.Command("where.exe", "git").Output()
+	if err != nil {
+		return ""
+	}
+
+	// Parse output, skip results in CWD (security: avoid malicious git.bat)
+	cwd, _ := os.Getwd()
+	cwdLower := strings.ToLower(cwd)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\r\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		absPath, err := filepath.Abs(line)
+		if err != nil {
+			continue
+		}
+		dirLower := strings.ToLower(filepath.Dir(absPath))
+		if dirLower == cwdLower {
+			continue // skip executable in current directory
+		}
+		return line
+	}
+
+	return ""
+}
+
+// windowsToPosixPath converts a Windows path to a POSIX path for Git Bash.
+// Matching upstream's windowsPathToPosixPath() in windowsPaths.ts:125.
+// Examples:
+//
+//	C:\Users\foo → /c/Users/foo
+//	\\server\share → //server/share
+//	relative/path → relative/path
+func windowsToPosixPath(windowsPath string) string {
+	// Handle UNC paths: \\server\share → //server/share
+	if strings.HasPrefix(windowsPath, `\\`) {
+		return strings.ReplaceAll(windowsPath, `\`, "/")
+	}
+
+	// Handle drive letter paths: C:\Users\foo → /c/Users/foo
+	re := regexp.MustCompile(`^([A-Za-z]):[/\\]`)
+	if m := re.FindStringSubmatch(windowsPath); m != nil {
+		driveLetter := strings.ToLower(m[1])
+		return "/" + driveLetter + strings.ReplaceAll(windowsPath[2:], `\`, "/")
+	}
+
+	// Already POSIX or relative — just flip slashes
+	return strings.ReplaceAll(windowsPath, `\`, "/")
+}
+
+// shellQuote single-quotes a string for POSIX shell.
+// Handles single quotes within the string by breaking out and adding escaped quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// GetShellInfo returns a human-readable description of the shell used by the exec tool.
+// This is injected into the system prompt so the LLM knows which shell syntax to use.
+// Result is cached after first call.
+var shellInfoCache struct {
+	info string
+	once sync.Once
+}
+
+func GetShellInfo() string {
+	shellInfoCache.once.Do(func() {
+		if runtime.GOOS == "windows" {
+			if gitBash := findGitBashForWindows(); gitBash != "" {
+				shellInfoCache.info = fmt.Sprintf("Git Bash (%s) — use POSIX/bash syntax", gitBash)
+			} else if _, err := exec.LookPath("powershell"); err == nil {
+				shellInfoCache.info = "PowerShell — use PowerShell syntax"
+			} else {
+				shellInfoCache.info = "cmd.exe — use cmd/CMD syntax"
+			}
+		} else {
+			shellInfoCache.info = "bash — use POSIX/bash syntax"
+		}
+	})
+	return shellInfoCache.info
 }

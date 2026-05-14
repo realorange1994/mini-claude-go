@@ -788,22 +788,68 @@ func buildHookEnv(extra map[string]string) []string {
 }
 
 // detectGitBashForHook finds the Git Bash executable on Windows.
-// Returns empty string if not found.
+// Uses the same path derivation logic as exec_tool.go's findGitBashForWindows().
 func detectGitBashForHook() string {
-	// Common Git Bash paths
-	paths := []string{
-		`C:\Program Files\Git\bin\bash.exe`,
-		`C:\Program Files (x86)\Git\bin\bash.exe`,
-	}
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return p
+	// 1. Check CLAUDE_CODE_GIT_BASH_PATH env var
+	if envPath := os.Getenv("CLAUDE_CODE_GIT_BASH_PATH"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath
 		}
 	}
-	// Try PATH
+
+	// 2. Find git.exe and derive bash.exe path
+	gitPath := findGitExecutableForHook()
+	if gitPath != "" {
+		bashPath := filepath.Clean(filepath.Join(gitPath, "..", "..", "bin", "bash.exe"))
+		if _, err := os.Stat(bashPath); err == nil {
+			return bashPath
+		}
+	}
+
+	// 3. Fallback: try PATH
 	if p, err := exec.LookPath("bash"); err == nil {
 		return p
 	}
+
+	return ""
+}
+
+// findGitExecutableForHook locates git.exe on Windows.
+func findGitExecutableForHook() string {
+	defaultLocations := []string{
+		`C:\Program Files\Git\cmd\git.exe`,
+		`C:\Program Files (x86)\Git\cmd\git.exe`,
+	}
+	for _, loc := range defaultLocations {
+		if _, err := os.Stat(loc); err == nil {
+			return loc
+		}
+	}
+
+	// Fall back to where.exe
+	out, err := exec.Command("where.exe", "git").Output()
+	if err != nil {
+		return ""
+	}
+
+	cwd, _ := os.Getwd()
+	cwdLower := strings.ToLower(cwd)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\r\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		absPath, err := filepath.Abs(line)
+		if err != nil {
+			continue
+		}
+		dirLower := strings.ToLower(filepath.Dir(absPath))
+		if dirLower == cwdLower {
+			continue
+		}
+		return line
+	}
+
 	return ""
 }
 

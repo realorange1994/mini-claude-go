@@ -26,7 +26,8 @@ const systemPromptTemplateStatic = `You are miniClaudeCode (model: %s), a lightw
 - OS: %s
 - Working Directory: %s
 - Current Date/Time: %s (%s)
-- Shell: PowerShell on Windows, sh/bash on Unix
+- Platform: %s
+- Shell: %s
 %s
 
 You have access to the following tools to help the user with software engineering tasks:
@@ -345,7 +346,8 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 
 	// Build static part (environment, tool descriptions, operating rules)
 	gitCtx := tools.GetGitContext()
-	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, gitCtx, toolList)
+	shellInfo := tools.GetShellInfo()
+	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, runtime.GOOS, shellInfo, gitCtx, toolList)
 
 	// Build dynamic part (permission mode, project instructions, skills)
 	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection, 5)
@@ -493,7 +495,8 @@ func buildStaticPart(registry *tools.Registry, modelName string) (string, uint64
 	timezone := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
 
 	gitCtx := tools.GetGitContext()
-	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, gitCtx, toolList)
+	shellInfo := tools.GetShellInfo()
+	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, runtime.GOOS, shellInfo, gitCtx, toolList)
 	hash := fnvHash(staticPart)
 	return staticPart, hash
 }
