@@ -4,17 +4,17 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 func main() {
@@ -212,68 +212,56 @@ func main() {
 	runInteractive(agent, history, sessionID)
 }
 
-func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) {
-	// Track Ctrl+C timing for double-press exit (works during agent.Run too)
-	var lastCtrlC atomic.Int64 // stores UnixNano of last Ctrl+C
+// ensureConsoleInputMode ensures the Windows console input mode has the
+// required flags for interactive input. MCP child processes (node.exe) may
+// alter the console input mode when they start, breaking ReadString.
+func ensureConsoleInputMode() {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	getStdHandle := kernel32.NewProc("GetStdHandle")
+	getConsoleMode := kernel32.NewProc("GetConsoleMode")
+	setConsoleMode := kernel32.NewProc("SetConsoleMode")
 
-	// Idle timeout: exit gracefully after inactivity.
-	// Controlled by CLAUDE_CODE_EXIT_AFTER_STOP_DELAY env var.
-	// Accepts duration strings like "5m", "30s", or milliseconds as plain number.
-	idleDelay := parseIdleTimeoutEnv()
-	idleTimerCh := make(chan struct{}, 1)
-	startIdleTimer := func() {
-		if idleDelay <= 0 {
-			return
-		}
-		time.AfterFunc(idleDelay, func() {
-			select {
-			case idleTimerCh <- struct{}{}:
-			default:
-			}
-		})
+	const STD_INPUT_HANDLE = ^uintptr(10) // -10
+	const (
+		ENABLE_PROCESSED_INPUT    = 0x0001
+		ENABLE_LINE_INPUT         = 0x0002
+		ENABLE_ECHO_INPUT         = 0x0004
+		ENABLE_EXTENDED_FLAGS     = 0x0080
+		ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+	)
+
+	h, _, _ := getStdHandle.Call(uintptr(STD_INPUT_HANDLE))
+	if h == 0 {
+		return
 	}
 
-	// Set up signal handler for Ctrl+C and termination signals
-	// The handler goroutine consumes signalCh; REPL select uses ctrlCh for
-	// Ctrl+C notification (avoids two goroutines competing on signalCh).
-	signalCh := make(chan os.Signal, 1)
-	ctrlCh := make(chan struct{}, 1)
-	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		for sig := range signalCh {
-			now := time.Now().UnixNano()
-			prev := lastCtrlC.Load()
-			if sig == syscall.SIGINT {
-				if prev != 0 && time.Duration(now-prev) < 2*time.Second {
-					// Double Ctrl+C within 2s -- exit immediately (clean up first)
-					printResumeHint(agent)
-					agent.Close()
-					os.Exit(0)
-				}
-				lastCtrlC.Store(now)
-				agent.SetInterrupted(true)
-				// Non-blocking notify to REPL select (may already be processing)
-				select {
-				case ctrlCh <- struct{}{}:
-				default:
-				}
-			} else {
-				// SIGTERM/SIGHUP -- graceful shutdown
-				printResumeHint(agent)
-				fmt.Fprintf(os.Stderr, "\n[idle] Received %v, shutting down gracefully.\n", sig)
-				agent.Close()
-				exitCode := 128
-				if sig == syscall.SIGTERM {
-					exitCode = 143
-				} else if sig == syscall.SIGHUP {
-					exitCode = 129
-				}
-				os.Exit(exitCode)
-			}
-		}
-	}()
+	var mode uint32
+	ret, _, _ := getConsoleMode.Call(h, uintptr(unsafe.Pointer(&mode)))
+	if ret == 0 {
+		return
+	}
 
+	// Ensure the critical flags are set
+	needMode := mode
+	needMode |= ENABLE_PROCESSED_INPUT
+	needMode |= ENABLE_LINE_INPUT
+	needMode |= ENABLE_ECHO_INPUT
+	needMode &^= ENABLE_VIRTUAL_TERMINAL_INPUT
+	needMode |= ENABLE_EXTENDED_FLAGS
+
+	if needMode != mode {
+		setConsoleMode.Call(h, uintptr(needMode))
+	}
+}
+
+func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) {
 	defer agent.Close()
+
+	// On Windows, ensure console input mode has ENABLE_PROCESSED_INPUT and
+	// ENABLE_LINE_INPUT. MCP child processes may have altereded the console mode.
+	if runtime.GOOS == "windows" {
+		ensureConsoleInputMode()
+	}
 
 	// Detect if stdin is a terminal (interactive) or piped
 	isTerminal := func() bool {
@@ -295,40 +283,83 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 	}
 	stdoutIsTerm := stdoutIsTerminal()
 
-	// Run REPL read loop in a goroutine so the main loop can handle
-	// Ctrl+C signals without being blocked on ReadString.
-	// On Windows, Ctrl+C closes the stdin handle which can make
-	// reopenStdin unreliable -- this approach avoids needing it entirely.
-	type readResult struct {
-		line string
-		err  error
+	// Idle timeout: exit gracefully after inactivity.
+	// Controlled by CLAUDE_CODE_EXIT_AFTER_STOP_DELAY env var.
+	// Accepts duration strings like "5m", "30s", or milliseconds as plain number.
+	idleDelay := parseIdleTimeoutEnv()
+	idleTimerCh := make(chan struct{}, 1)
+	startIdleTimer := func() {
+		if idleDelay <= 0 {
+			return
+		}
+		// Drain any previous timer signal before re-arming
+		select {
+		case <-idleTimerCh:
+		default:
+		}
+		time.AfterFunc(idleDelay, func() {
+			select {
+			case idleTimerCh <- struct{}{}:
+			default:
+			}
+		})
 	}
-	inputCh := make(chan readResult, 1)
+	// Background goroutine: monitors idle timer and exits when it fires.
+	// Since ReadString blocks the main thread, we can't use select in the
+	// REPL loop. This goroutine watches the channel and calls os.Exit.
+	go func() {
+		if idleDelay <= 0 {
+			return
+		}
+		<-idleTimerCh
+		printResumeHint(agent)
+		fmt.Fprintf(os.Stderr, "[idle] Exiting after %s of inactivity.\n", idleDelay)
+		agent.Close()
+		os.Exit(0)
+	}()
 
-	readStdin := func(reader *bufio.Reader) {
-		line, err := reader.ReadString('\n')
-		inputCh <- readResult{line: line, err: err}
-	}
+	// Set up signal handler for Ctrl+C (SIGINT) and termination signals.
+	// SIGTERM/SIGHUP are POSIX signals — they work on Unix but are not delivered
+	// by Windows OS. We keep them for cross-platform compatibility.
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		for sig := range signalCh {
+			if sig == syscall.SIGINT {
+				agent.SetInterrupted(true)
+			} else {
+				// SIGTERM/SIGHUP -- graceful shutdown
+				printResumeHint(agent)
+				fmt.Fprintf(os.Stderr, "\n[idle] Received %v, shutting down gracefully.\n", sig)
+				agent.Close()
+				exitCode := 128
+				if sig == syscall.SIGTERM {
+					exitCode = 143
+				} else if sig == syscall.SIGHUP {
+					exitCode = 129
+				}
+				os.Exit(exitCode)
+			}
+		}
+	}()
 
+	// Use a single bufio.Reader for the entire REPL lifetime.
 	stdinReader := bufio.NewReader(os.Stdin)
-	go readStdin(stdinReader)
 
-	loop:
+	reopenStdin := func() *bufio.Reader {
+		var f *os.File
+		var err error
+		f, err = os.OpenFile("CONIN$", os.O_RDWR, 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Failed to reopen stdin (CONIN$): %v\n", err)
+			return nil
+		}
+		return bufio.NewReader(f)
+	}
+
+	var lastCtrlC time.Time
+
 	for {
-		// Always restart the stdin reader goroutine at the start of each
-		// iteration. This is necessary because:
-		// 1. After agent.Run(), the goroutine may have died (Ctrl+C on Windows
-		//    closes stdin, producing EOF). We must create a fresh one.
-		// 2. After slash commands (which use `continue`), the old goroutine is
-		//    also dead (same reason). Moving restart here ensures it runs for
-		//    both code paths, fixing the bug where /help, /tools etc. caused
-		//    the REPL to deadlock waiting for input on the next iteration.
-		// The old goroutine (if still alive) will just block forever on the
-		// old, unreferenced channel.
-		stdinReader = bufio.NewReader(os.Stdin)
-		inputCh = make(chan readResult, 1)
-		go readStdin(stdinReader)
-
 		// Drain async sub-agent notifications and display them
 		if notifications := agent.DrainNotifications(); len(notifications) > 0 {
 			fmt.Println("\n--- Sub-agent notifications ---")
@@ -341,77 +372,47 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 			agent.InjectNotifications(notifications)
 		}
 
+		// Start idle timeout after agent finishes (only when waiting at prompt)
+		startIdleTimer()
+
 		fmt.Print("\n> ")
 
-		// Wait for either user input or Ctrl+C signal.
-		// On Windows, Ctrl+C produces BOTH a SIGINT and may close stdin
-		// (EOF). The select picks whichever arrives first. To correctly
-		// detect Ctrl+C-triggered EOF, we check the lastCtrlC timestamp
-		// (set atomically by the signal handler) instead of ctrlCh.
-		var line string
-		var isEOF bool
-		select {
-		case <-idleTimerCh:
-			// Idle timeout expired -- exit gracefully
+		// Read input synchronously — no goroutine, no channel.
+		// On Windows console, ReadString blocks until Enter is pressed or
+		// Ctrl+C interrupts the blocking call (returning an error).
+		// This matches the old working version's approach.
+		line, err := stdinReader.ReadString('\n')
+		if err != nil {
+			// Read error — on Windows Ctrl+C, stdin is closed and we get EOF.
+			if interactive {
+				// Check if this was a recent Ctrl+C
+				now := time.Now()
+				if !lastCtrlC.IsZero() && now.Sub(lastCtrlC) < 2*time.Second {
+					// Double Ctrl+C within 2s -- exit
+					printResumeHint(agent)
+					agent.Close()
+					os.Exit(0)
+				}
+				lastCtrlC = now
+				agent.SetInterrupted(false)
+				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
+				// Reopen stdin via CONIN$ (Windows console input device)
+				if newReader := reopenStdin(); newReader != nil {
+					stdinReader = newReader
+				}
+				continue
+			}
+			// Piped input ended — exit
 			printResumeHint(agent)
-			fmt.Fprintf(os.Stderr, "[idle] Exiting after %s of inactivity.\n", idleDelay)
-			agent.Close()
-			return
-		case <-ctrlCh:
-			// Ctrl+C while waiting for input at the ">" prompt.
-			fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
-			continue
-		case r := <-inputCh:
-			line = r.line
-			isEOF = r.err == io.EOF
-			if r.err != nil && !isEOF {
-				// Read error (not EOF) -- try to recover
-				if interactive {
-					stdinReader = bufio.NewReader(os.Stdin)
-					go readStdin(stdinReader)
-					continue
-				}
-				break loop
-			}
-			if isEOF && strings.TrimSpace(line) == "" {
-				// On Windows, Ctrl+C closes stdin (producing EOF)
-				// at the same time as SIGINT. The signal handler goroutine
-				// may not have processed SIGINT yet, so lastCtrlC might
-				// still be 0. Wait briefly for either the ctrlCh signal
-				// or the lastCtrlC update, then decide.
-				select {
-				case <-ctrlCh:
-					// SIGINT confirmed -- reopen stdin and continue
-					fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
-					stdinReader = bufio.NewReader(os.Stdin)
-					go readStdin(stdinReader)
-					continue
-				case <-time.After(200 * time.Millisecond):
-					// No ctrlCh signal -- check lastCtrlC one more time
-					// (handler may have run but ctrlCh was already consumed)
-					prev := lastCtrlC.Load()
-					if prev != 0 && time.Since(time.Unix(0, prev)) < 2*time.Second {
-						fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
-						stdinReader = bufio.NewReader(os.Stdin)
-						go readStdin(stdinReader)
-						continue
-					}
-					// True EOF (piped input closed, Ctrl+D)
-					break loop
-				}
-			}
-			// Got real input -- drain any stale Ctrl+C so it doesn't
-			// fire on the next iteration and confuse the REPL.
-			select {
-			case <-ctrlCh:
-			default:
-			}
+			break
 		}
+		// Reset lastCtrlC on successful input
+		lastCtrlC = time.Time{}
 
 		userInput := strings.TrimSpace(line)
 		if userInput == "" {
 			if !interactive {
-				break loop
+				break
 			}
 			continue
 		}
@@ -437,7 +438,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 				switch cmd {
 				case "/quit", "/exit", "/q":
 					fmt.Println("Goodbye!")
-					break loop
+					return
 				case "/tools":
 					fmt.Println("\nAvailable tools:")
 					for _, t := range agent.registry.AllTools() {
@@ -567,18 +568,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 		result := agent.Run(userInput)
 		agent.SetInterrupted(false) // clear after run
 
-		// Start idle timeout after agent finishes
-		startIdleTimer()
-
-		// Drain any stale Ctrl+C signal from the channel. When the user
-		// presses Ctrl+C to interrupt the agent, the signal handler sends
-		// to ctrlCh. The agent detects IsInterrupted() and returns, but the
-		// ctrlCh message is unconsumed. If we don't drain it, the next REPL
-		// loop will pick it up and print an extraneous "[WARN] Interrupting...".
-		select {
-		case <-ctrlCh:
-		default:
-		}
 
 		// In streaming mode, TerminalHandler displays output on stderr.
 		// When stdout is a terminal, skip printing to avoid duplication.

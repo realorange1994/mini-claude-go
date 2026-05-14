@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -120,6 +121,12 @@ func NewClient(name, command string, args []string, env map[string]string) *Clie
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}
+	}
+	// On Windows, create a new process group to prevent Ctrl+C from being
+	// forwarded to the child process and to isolate the child's console state
+	// from the parent.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
 	}
 	return &Client{
 		name:       name,
