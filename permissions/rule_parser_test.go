@@ -391,25 +391,158 @@ func TestParseFormatParseRoundtrip(t *testing.T) {
 	}
 }
 
-func TestParseFormatParseRoundtripWithContent(t *testing.T) {
-	// Rules with content-specific patterns should also roundtrip.
-	ruleStrings := []string{
+// ============================================================================
+// Upstream Quality: Port from permissionRuleParser.test.ts
+// Additional tests for existing Go functions matching upstream patterns.
+// ============================================================================
+
+// ─── ParseRule: MCP-style tool names (upstream: permissionRuleValueFromString) ──
+
+func TestParseRuleMCPStyleToolName(t *testing.T) {
+	// Upstream: handles MCP-style tool names
+	rule, err := ParseRule("mcp__server__tool")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rule.ToolName != "mcp__server__tool" {
+		t.Errorf("expected 'mcp__server__tool', got %q", rule.ToolName)
+	}
+	if rule.Content != "" {
+		t.Errorf("expected empty content, got %q", rule.Content)
+	}
+}
+
+// ─── FormatRule: upstream permissionRuleValueToString patterns ───────────────
+
+func TestFormatRuleToolOnly(t *testing.T) {
+	// Upstream: permissionRuleValueToString({ toolName: "Bash" }) === "Bash"
+	rule := &ParsedRule{ToolName: "Bash"}
+	if FormatRule(rule) != "Bash" {
+		t.Errorf("expected 'Bash', got %q", FormatRule(rule))
+	}
+}
+
+func TestFormatRuleContentOnly(t *testing.T) {
+	// Upstream: permissionRuleValueToString({ toolName: "Bash", ruleContent: "npm install" })
+	//   === "Bash(npm install)"
+	rule := &ParsedRule{ToolName: "Bash", Content: "npm install"}
+	if FormatRule(rule) != "Bash(npm install)" {
+		t.Errorf("expected 'Bash(npm install)', got %q", FormatRule(rule))
+	}
+}
+
+func TestFormatRuleEscapedParens(t *testing.T) {
+	// Upstream: permissionRuleValueToString with content containing parens
+	//   { toolName: "Bash", ruleContent: 'python -c "print(1)"' }
+	//   → 'Bash(python -c "print\\(1\\)")'
+	// Go: FormatRule does NOT escape parens (it just formats with raw content).
+	// This test documents the difference: Go FormatRule is lossy for parens.
+	rule := &ParsedRule{ToolName: "Bash", Content: `python -c "print(1)"`}
+	got := FormatRule(rule)
+	// Should contain tool name and content
+	if !strings.Contains(got, "Bash") {
+		t.Errorf("FormatRule should contain 'Bash', got %q", got)
+	}
+	if !strings.Contains(got, "print(1)") {
+		t.Errorf("FormatRule should contain 'print(1)', got %q", got)
+	}
+}
+
+// ─── FormatRule + ParseRule roundtrip (upstream: roundtrip invariant) ───────
+
+func TestFormatParseRoundtripSimple(t *testing.T) {
+	// Upstream: permissionRuleValueFromString(permissionRuleValueToString(x)) === x
+	// For simple rules (no escaped parens), FormatRule → ParseRule should produce
+	// equivalent tool name and content.
+	rules := []string{
+		"Bash",
+		"Edit",
+		"Read",
 		"Bash(git:*)",
 		"Edit(*.env)",
+		"mcp__server__tool",
 	}
-	for _, rs := range ruleStrings {
+	for _, rs := range rules {
 		rule1, err := ParseRule(rs)
 		if err != nil {
 			t.Fatalf("ParseRule(%q) error: %v", rs, err)
 		}
 		formatted := FormatRule(rule1)
-		// The formatted string should contain the tool name and content
-		if !strings.Contains(formatted, rule1.ToolName) {
-			t.Errorf("FormatRule output should contain tool name %q", rule1.ToolName)
+		rule2, err := ParseRule(formatted)
+		if err != nil {
+			t.Fatalf("ParseRule(%q) error: %v", formatted, err)
 		}
-		if rule1.Content != "" && !strings.Contains(formatted, rule1.Content) {
-			t.Errorf("FormatRule output should contain content %q", rule1.Content)
+		if rule1.ToolName != rule2.ToolName {
+			t.Errorf("roundtrip tool name mismatch: %q -> %q -> toolName=%q (expected %q)",
+				rs, formatted, rule2.ToolName, rule1.ToolName)
 		}
+		if rule1.Content != rule2.Content {
+			t.Errorf("roundtrip content mismatch: %q -> %q -> content=%q (expected %q)",
+				rs, formatted, rule2.Content, rule1.Content)
+		}
+	}
+}
+
+// ─── ParseRule: alias resolution (upstream: normalizeLegacyToolName) ─────────
+
+func TestParseRuleAliasTask(t *testing.T) {
+	// Upstream: normalizeLegacyToolName("Task") === "Agent"
+	rule, err := ParseRule("Task")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rule.ToolName != "Agent" {
+		t.Errorf("ParseRule('Task') should resolve to 'Agent', got %q", rule.ToolName)
+	}
+}
+
+func TestParseRuleAliasKillShell(t *testing.T) {
+	// Upstream: normalizeLegacyToolName("KillShell") === "TaskStop"
+	rule, err := ParseRule("KillShell")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rule.ToolName != "TaskStop" {
+		t.Errorf("ParseRule('KillShell') should resolve to 'TaskStop', got %q", rule.ToolName)
+	}
+}
+
+func TestParseRuleAliasNonAlias(t *testing.T) {
+	// Upstream: normalizeLegacyToolName("Bash") === "Bash"
+	rule, err := ParseRule("Bash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rule.ToolName != "Bash" {
+		t.Errorf("ParseRule('Bash') should remain 'Bash', got %q", rule.ToolName)
+	}
+}
+
+// ─── ParseRules: upstream patterns ───────────────────────────────────────────
+
+func TestParseRulesBehaviorSet(t *testing.T) {
+	rules, err := ParseRules([]string{"Bash", "Edit(foo)", "Read"}, "deny")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rules) != 3 {
+		t.Errorf("expected 3 rules, got %d", len(rules))
+	}
+	for _, r := range rules {
+		if r.Behavior != "deny" {
+			t.Errorf("expected behavior 'deny', got %q", r.Behavior)
+		}
+	}
+}
+
+// ─── globMatch: upstream shellRuleMatching edge cases ────────────────────────
+
+func TestGlobMatchPrefixStarBackslash(t *testing.T) {
+	// Upstream: "echo \\*" pattern edge case
+	// Go globMatch does not handle \* escaping; * is always a wildcard.
+	// Document this difference.
+	if !wildcardMatch("echo \\*", "echo \\hello") {
+		t.Error(`wildcardMatch("echo \\*", "echo \\hello") should succeed via wildcard *`)
 	}
 }
 

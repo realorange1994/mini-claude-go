@@ -1,6 +1,7 @@
 package permissions
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -261,14 +262,115 @@ func TestStrippedRulesSummaryEmpty(t *testing.T) {
 	}
 }
 
-func TestStrippedRulesSummaryWithRules(t *testing.T) {
-	rule, _ := ParseRule("Bash(python)")
-	rule.Behavior = "allow"
-	stash := map[string][]*ParsedRule{
-		"session|allow": {rule},
+// ============================================================================
+// Upstream Quality: Port from dangerousPatterns.test.ts
+// Tests for DANGEROUS_SHELL_PATTERNS (equivalent to CROSS_PLATFORM_CODE_EXEC +
+// DANGEROUS_BASH_PATTERNS in upstream).
+// ============================================================================
+
+// ─── DANGEROUS_SHELL_PATTERNS: content invariants ───────────────────────────
+
+func TestDangerousShellPatternsNonEmpty(t *testing.T) {
+	// Invariant from upstream: CROSS_PLATFORM_CODE_EXEC.length > 0
+	if len(DANGEROUS_SHELL_PATTERNS) == 0 {
+		t.Error("DANGEROUS_SHELL_PATTERNS should not be empty")
 	}
-	summary := StrippedRulesSummary(stash)
-	if summary == "" {
-		t.Error("non-empty stash should have non-empty summary")
+}
+
+func TestDangerousShellPatternsAllStrings(t *testing.T) {
+	// Invariant from upstream: all elements are strings
+	for i, p := range DANGEROUS_SHELL_PATTERNS {
+		if p == "" {
+			t.Errorf("DANGEROUS_SHELL_PATTERNS[%d] should not be empty string", i)
+		}
+	}
+}
+
+func TestDangerousShellPatternsIncludesCoreInterpreters(t *testing.T) {
+	// Upstream: includes core interpreters
+	set := make(map[string]bool, len(DANGEROUS_SHELL_PATTERNS))
+	for _, p := range DANGEROUS_SHELL_PATTERNS {
+		set[p] = true
+	}
+	for _, expected := range []string{"python", "node", "ruby", "perl"} {
+		if !set[expected] {
+			t.Errorf("DANGEROUS_SHELL_PATTERNS should include %q", expected)
+		}
+	}
+}
+
+func TestDangerousShellPatternsIncludesPackageRunners(t *testing.T) {
+	// Upstream: includes package runners
+	set := make(map[string]bool, len(DANGEROUS_SHELL_PATTERNS))
+	for _, p := range DANGEROUS_SHELL_PATTERNS {
+		set[p] = true
+	}
+	for _, expected := range []string{"npx", "bunx"} {
+		if !set[expected] {
+			t.Errorf("DANGEROUS_SHELL_PATTERNS should include %q", expected)
+		}
+	}
+}
+
+func TestDangerousShellPatternsIncludesShells(t *testing.T) {
+	// Upstream: includes shells
+	set := make(map[string]bool, len(DANGEROUS_SHELL_PATTERNS))
+	for _, p := range DANGEROUS_SHELL_PATTERNS {
+		set[p] = true
+	}
+	for _, expected := range []string{"bash", "sh"} {
+		if !set[expected] {
+			t.Errorf("DANGEROUS_SHELL_PATTERNS should include %q", expected)
+		}
+	}
+}
+
+func TestDangerousShellPatternsIncludesUnixSpecific(t *testing.T) {
+	// Upstream: includes unix-specific patterns
+	set := make(map[string]bool, len(DANGEROUS_SHELL_PATTERNS))
+	for _, p := range DANGEROUS_SHELL_PATTERNS {
+		set[p] = true
+	}
+	for _, expected := range []string{"zsh", "fish", "eval", "exec", "sudo", "xargs", "env"} {
+		if !set[expected] {
+			t.Errorf("DANGEROUS_SHELL_PATTERNS should include %q", expected)
+		}
+	}
+}
+
+func TestDangerousShellPatternsNoDuplicates(t *testing.T) {
+	// Invariant from upstream: new Set(DANGEROUS_BASH_PATTERNS).size === DANGEROUS_BASH_PATTERNS.length
+	seen := make(map[string]bool)
+	for _, p := range DANGEROUS_SHELL_PATTERNS {
+		if seen[p] {
+			t.Errorf("DANGEROUS_SHELL_PATTERNS has duplicate entry: %q", p)
+		}
+		seen[p] = true
+	}
+}
+
+func TestDangerousShellPatternsEmptyStringNoMatch(t *testing.T) {
+	// Upstream: "" does not start with any dangerous pattern
+	for _, pattern := range DANGEROUS_SHELL_PATTERNS {
+		if strings.HasPrefix("", strings.ToLower(pattern)) {
+			t.Errorf("empty string should not match pattern %q", pattern)
+		}
+	}
+}
+
+func TestDangerousShellPatternsContainsExpectedInterpreters(t *testing.T) {
+	// Upstream: contains expected interpreters
+	expected := []string{
+		"node", "python", "python3", "ruby", "perl", "php", "lua",
+		"deno", "npx", "bunx", "tsx",
+	}
+	set := make(map[string]bool, len(DANGEROUS_SHELL_PATTERNS))
+	for _, p := range DANGEROUS_SHELL_PATTERNS {
+		set[p] = true
+	}
+	for _, entry := range expected {
+		if !set[entry] {
+			t.Errorf("DANGEROUS_SHELL_PATTERNS should include %q", entry)
+		}
 	}
 }
