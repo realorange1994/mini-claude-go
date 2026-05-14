@@ -384,7 +384,39 @@ These are differences driven by Go's language design rather than deliberate feat
 
 ---
 
-## 20. Go-Only Features Not in Upstream
+## 20. Windows Path Handling & Pipe Input (R23)
+
+### 20.1 Unified Path Handling: PosixToWindowsPath
+
+On Windows with Git Bash, file tools and exec tool must resolve the same physical file despite using different path formats. Go now matches upstream's approach:
+
+| Feature | Go | Upstream |
+|---------|-----|----------|
+| POSIX→Windows conversion | `PosixToWindowsPath()` in `exec_tool.go` | `posixPathToWindowsPath()` in `windowsPaths.ts` |
+| MSYS2 mount: `/tmp/` | Maps to `os.TempDir()` | Same mapping |
+| MSYS2 mount: `/home/` | Maps to `os.UserHomeDir()` (skips username segment) | Same mapping |
+| Cygwin drive: `/cygdrive/x/` | Maps to `X:\` | Same mapping |
+| Drive letter: `/x/` | Maps to `X:\` | Same mapping |
+| UNC: `//server/share` | Maps to `\\server\share` | Same mapping |
+| `expandPath()` integration | Uses `PosixToWindowsPath()` on Windows for all file tools | Uses `posixPathToWindowsPath()` in `expandPath()` |
+| Path format guidance | `GetPathFormatInfo()` injected into system prompt | Path format guidance in system prompt |
+| Git Bash detection | `findGitBashForWindows()` with memoize pattern | `Shell.ts` detection |
+
+**Result**: `file_write /tmp/test.txt` and `exec cat /tmp/test.txt` now resolve to the same physical file on Windows.
+
+### 20.2 Pipe Input Fix
+
+When stdin is not a terminal (pipe mode), `ReadString('\n')` splits multi-line input into separate `agent.Run()` calls, causing the first (often empty) line to be sent as a prompt with no task context.
+
+| Aspect | Before (broken) | After (fixed) |
+|--------|-----------------|---------------|
+| Pipe input reading | `ReadString('\n')` per line | `io.ReadAll(stdinReader)` — entire input as single prompt |
+| Multi-line prompts | Split into separate incomplete calls | Single `agent.Run()` with full prompt |
+| Exit code 124 | Common on multi-line pipe input | Eliminated |
+
+---
+
+## 21. Go-Only Features Not in Upstream
 
 [diff_upstream/30-go-enhancements.md §G]
 

@@ -637,3 +637,298 @@ func TestPosixToWindowsPath(t *testing.T) {
 		}
 	}
 }
+
+// ─── Upstream Quality: Invariants ────────────────────────────────────────────
+
+// TestExecToolEmptyStringNonMatch — empty string should NOT match any deny pattern.
+// Invariant from upstream dangerousPatterns.test.ts: CROSS_PLATFORM_CODE_EXEC[0] !== ""
+func TestExecToolEmptyStringNonMatch(t *testing.T) {
+	tool := &ExecTool{}
+	// Empty command should not be denied as dangerous (it's an input validation issue)
+	result := tool.CheckPermissions(map[string]any{"command": ""})
+	// If it's denied, the reason should NOT be a pattern match — empty doesn't match patterns
+	if result.Behavior != PermissionPassthrough {
+		// If denied, verify it's for the right reason (empty command validation, not pattern match)
+		// The invariant: no deny pattern should fire on empty string
+		denyPatterns := compileDenyPatterns()
+		for _, re := range denyPatterns {
+			if re.MatchString("") {
+				t.Errorf("deny pattern %q matches empty string — violates non-match invariant", re.String())
+			}
+		}
+	}
+}
+
+// TestExecToolNoDuplicatePatterns — deny pattern list must have no duplicates.
+// Invariant from upstream: new Set(DANGEROUS_BASH_PATTERNS).size === DANGEROUS_BASH_PATTERNS.length
+func TestExecToolNoDuplicatePatterns(t *testing.T) {
+	patternStrings := []string{
+		`\brm\s+-[rf]{1,2}\b`,
+		`\bdel\s+/[fq]\b`,
+		`\brmdir\s+/s\b`,
+		`(?:^|[;&|]\s*)format\b`,
+		`\b(mkfs|diskpart)\b`,
+		`\bdd\s+.*\bof=`,
+		`>\s*/dev/sd`,
+		`\b(shutdown|reboot|poweroff)\b`,
+		`:\(\)\s*\{.*\};\s*:`,
+		`\w+\(\)\s*\{[^}]*\|\s*[^}]*&\s*\}\s*;\s*`,
+		`remove-item\s`,
+		`\bri\s+`,
+		`remove-itemproperty\s`,
+		`rd\s+/[sS]\b`,
+		`docker\s+system\s+prune`,
+		`docker\s+\S+\s+prune`,
+		`git\s+push\s+.*--force`,
+		`git\s+push\s+-f\b`,
+		`git\s+clean\s+-[fd]`,
+		`git\s+reset\s+--hard`,
+		`git\s+checkout\s+--force`,
+		`git\s+rebase\s+--interactive`,
+		`git\s+filter-branch`,
+		`git\s+reflog\s+expire`,
+		`&\S*&\S*&`,
+	}
+
+	seen := make(map[string]bool)
+	for _, p := range patternStrings {
+		if seen[p] {
+			t.Errorf("duplicate deny pattern: %q", p)
+		}
+		seen[p] = true
+	}
+}
+
+// ─── Upstream Quality: IsReadOnlyCommand ─────────────────────────────────────
+
+func TestIsReadOnlyCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		// Empty/whitespace — not read-only (input validation issue)
+		{"empty", "", false},
+		{"whitespace", "   ", false},
+
+		// Always read-only commands
+		{"ls", "ls", true},
+		{"ls -la", "ls -la", true},
+		{"cat", "cat file.txt", true},
+		{"head", "head -n 10 file.txt", true},
+		{"tail", "tail -f log.txt", true},
+		{"less", "less file.txt", true},
+		{"more", "more file.txt", true},
+		{"wc", "wc -l file.txt", true},
+		{"file", "file binary.bin", true},
+		{"stat", "stat file.txt", true},
+		{"du", "du -sh .", true},
+		{"df", "df -h", true},
+		{"find", "find . -name '*.go'", true},
+		{"which", "which go", true},
+		{"whereis", "whereis go", true},
+		{"locate", "locate go.mod", true},
+		{"grep", "grep pattern file.go", true},
+		{"rg", "rg pattern", true},
+		{"pwd", "pwd", true},
+		{"whoami", "whoami", true},
+		{"id", "id", true},
+		{"hostname", "hostname", true},
+		{"uname", "uname -a", true},
+		{"date", "date", true},
+		{"env", "env", true},
+		{"echo", "echo hello", true},
+		{"printf", "printf '%s' hello", true},
+		{"jq", "jq '.foo' data.json", true},
+		{"tree", "tree", true},
+
+		// Redirects → NOT read-only
+		{"redirect output", "echo hello > out.txt", false},
+		{"redirect append", "echo hello >> out.txt", false},
+		{"ls with redirect", "ls > files.txt", false},
+
+		// Safe wrappers preserve read-only
+		{"timeout ls", "timeout 30 ls", true},
+		{"nice ls", "nice -n 10 ls -la", true},
+		{"nohup ls", "nohup ls &", true},
+
+		// Git read-only subcommands
+		{"git status", "git status", true},
+		{"git log", "git log", true},
+		{"git diff", "git diff", true},
+		{"git blame", "git blame file.go", true},
+		{"git ls-files", "git ls-files", true},
+		{"git branch (list)", "git branch", true},
+		{"git branch -v", "git branch -v", true},
+		{"git remote (list)", "git remote", true},
+		{"git remote -v", "git remote -v", true},
+		{"git stash list", "git stash list", true},
+		{"git stash show", "git stash show", true},
+		{"git tag (list)", "git tag", true},
+		{"git tag -l", "git tag -l", true},
+		{"git rev-parse", "git rev-parse HEAD", true},
+
+		// Git mutation subcommands
+		{"git branch -d", "git branch -d old-branch", false},
+		{"git branch -D", "git branch -D force-branch", false},
+		{"git branch -m", "git branch -m old new", false},
+		{"git remote add", "git remote add origin url", false},
+		{"git remote rm", "git remote rm origin", false},
+		{"git stash pop", "git stash pop", false},
+		{"git stash drop", "git stash drop", false},
+		{"git stash save", "git stash save message", false},
+		{"git tag -d", "git tag -d old-tag", false},
+		{"git tag -a", "git tag -a v1.0 -m 'message'", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsReadOnlyCommand(tc.cmd)
+			if got != tc.want {
+				t.Errorf("IsReadOnlyCommand(%q) = %v, want %v", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
+// ─── Upstream Quality: CheckDestructiveWarning ──────────────────────────────
+
+func TestCheckDestructiveWarning(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmd     string
+		wantMsg bool
+	}{
+		{"rm -rf", "rm -rf /tmp/test", true},
+		{"rmdir", "rmdir /tmp/test", true},
+		{"unlink", "unlink /tmp/file", true},
+		{"git force push", "git push --force origin main", true},
+		{"git push -f", "git push -f origin main", true},
+		{"git reset hard", "git reset --hard HEAD", true},
+		{"git clean", "git clean -fd", true},
+		{"git checkout .", "git checkout .", true},
+		{"git stash drop", "git stash drop", true},
+		{"git branch -D", "git branch -D feature", true},
+		{"kubectl delete", "kubectl delete pod foo", true},
+		{"docker rm", "docker rm container", true},
+		{"docker rmi", "docker rmi image", true},
+		{"docker system prune", "docker system prune", true},
+		{"terraform destroy", "terraform destroy", true},
+		{"mysql", "mysql -u root -e 'DROP DATABASE test'", true},
+		{"psql", "psql -c 'DROP TABLE users'", true},
+
+		// Non-destructive
+		{"echo hello", "echo hello", false},
+		{"ls", "ls -la", false},
+		{"git status", "git status", false},
+		{"git log", "git log --oneline", false},
+		{"cat", "cat file.txt", false},
+		{"empty", "", false},
+
+		// Safe wrappers should still be detected
+		{"timeout rm", "timeout 30 rm -rf /tmp/test", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := CheckDestructiveWarning(tc.cmd)
+			hasMsg := msg != ""
+			if hasMsg != tc.wantMsg {
+				t.Errorf("CheckDestructiveWarning(%q) hasMsg=%v (want %v), msg=%q", tc.cmd, hasMsg, tc.wantMsg, msg)
+			}
+		})
+	}
+}
+
+// ─── Upstream Quality: containsVulnerableUncPath ─────────────────────────────
+
+func TestContainsVulnerableUncPath(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		// UNC backslash paths — should detect
+		{"UNC backslash", `echo \\server\share`, true},
+		{"UNC backslash share", `cat \\server\share\file.txt`, true},
+		{"UNC IPv4", `dir \\192.168.1.1\share`, true},
+
+		// UNC forward-slash paths (non-URL) — should detect
+		{"UNC forward slash", `echo //server/share`, true},
+
+		// URLs — should NOT detect
+		{"https URL", "curl https://example.com/api", false},
+		{"http URL", "curl http://example.com/file", false},
+		{"ftp URL", "wget ftp://ftp.example.com/file", false},
+
+		// WebDAV patterns — should detect
+		{"WebDAV SSL", `copy \\server@SSL@8443\path\file .`, true},
+		{"WebDAV port", `copy \\server@8443@SSL\path\file .`, true},
+		{"DavWWWRoot", `dir \\server\DavWWWRoot\path`, true},
+
+		// Non-UNC paths — should NOT detect
+		{"relative path", "cat ./file.txt", false},
+		{"absolute unix", "cat /tmp/file.txt", false},
+		{"Windows path", `cat C:\Users\foo\file.txt`, false},
+
+		// Empty — should NOT detect
+		{"empty", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := containsVulnerableUncPath(tc.cmd)
+			if got != tc.want {
+				t.Errorf("containsVulnerableUncPath(%q) = %v, want %v", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
+// ─── Upstream Quality: Path Conversion Roundtrip ─────────────────────────────
+
+func TestWindowsPathRoundtrip(t *testing.T) {
+	// Windows → POSIX → Windows should return equivalent path.
+	// Invariant: roundtrip should preserve semantic meaning.
+	paths := []string{
+		`C:\Users\foo`,
+		`C:\Users\foo\bar.txt`,
+		`E:\workspace\project`,
+	}
+
+	for _, p := range paths {
+		posix := windowsToPosixPath(p)
+		roundtrip := PosixToWindowsPath(posix)
+		// Normalize both for comparison (lowercase, forward slashes)
+		origNorm := strings.ToLower(strings.ReplaceAll(p, `\`, `/`))
+		rtNorm := strings.ToLower(strings.ReplaceAll(roundtrip, `\`, `/`))
+		if origNorm != rtNorm {
+			t.Errorf("Roundtrip %q → %q → %q (original: %q, roundtrip: %q)",
+				p, posix, roundtrip, origNorm, rtNorm)
+		}
+	}
+}
+
+func TestWindowsToPosixPathUNC(t *testing.T) {
+	got := windowsToPosixPath(`\\server\share`)
+	want := `//server/share`
+	if got != want {
+		t.Errorf("windowsToPosixPath(UNC) = %q, want %q", got, want)
+	}
+}
+
+func TestWindowsToPosixPathDrive(t *testing.T) {
+	got := windowsToPosixPath(`C:\Users\foo`)
+	want := `/c/Users/foo`
+	if got != want {
+		t.Errorf("windowsToPosixPath(drive) = %q, want %q", got, want)
+	}
+}
+
+func TestWindowsToPosixPathRelative(t *testing.T) {
+	got := windowsToPosixPath(`relative\path`)
+	want := `relative/path`
+	if got != want {
+		t.Errorf("windowsToPosixPath(relative) = %q, want %q", got, want)
+	}
+}

@@ -338,3 +338,77 @@ func TestFormatRule(t *testing.T) {
 		t.Errorf("expected 'git:*' in output, got %q", FormatRule(rule2))
 	}
 }
+
+// ─── Upstream Quality: Unescape Idempotency ─────────────────────────────────
+
+func TestUnescapeParensIdempotent(t *testing.T) {
+	// unescapeParens(unescapeParens(x)) == unescapeParens(x) — idempotency invariant
+	// Note: double-backslash inputs like "test\\\\(more\\)" are NOT idempotent
+	// because unescapeParens converts \\( to \( on first pass, then \( to ( on second.
+	// This is a known limitation — only single-escaped inputs are idempotent.
+	inputs := []string{
+		"foo\\(bar\\)",
+		"no-escapes",
+		"\\(\\)",
+		"",
+	}
+	for _, in := range inputs {
+		first := unescapeParens(in)
+		second := unescapeParens(first)
+		if second != first {
+			t.Errorf("unescapeParens not idempotent for %q: first=%q, second=%q", in, first, second)
+		}
+	}
+}
+
+// ─── Upstream Quality: Parse→Format→Parse Roundtrip ─────────────────────────
+
+func TestParseFormatParseRoundtrip(t *testing.T) {
+	// For simple rules (no escaped parens), Parse→Format→Parse should produce equivalent result.
+	ruleStrings := []string{
+		"Bash",
+		"Edit",
+		"Read",
+	}
+	for _, rs := range ruleStrings {
+		rule1, err := ParseRule(rs)
+		if err != nil {
+			t.Fatalf("ParseRule(%q) error: %v", rs, err)
+		}
+		formatted := FormatRule(rule1)
+		rule2, err := ParseRule(formatted)
+		if err != nil {
+			t.Fatalf("ParseRule(%q) error: %v", formatted, err)
+		}
+		if rule1.ToolName != rule2.ToolName {
+			t.Errorf("roundtrip tool name mismatch: original %q → formatted %q → parsed tool %q (expected %q)",
+				rs, formatted, rule2.ToolName, rule1.ToolName)
+		}
+		if rule1.Content != rule2.Content {
+			t.Errorf("roundtrip content mismatch: original %q → formatted %q → parsed content %q (expected %q)",
+				rs, formatted, rule2.Content, rule1.Content)
+		}
+	}
+}
+
+func TestParseFormatParseRoundtripWithContent(t *testing.T) {
+	// Rules with content-specific patterns should also roundtrip.
+	ruleStrings := []string{
+		"Bash(git:*)",
+		"Edit(*.env)",
+	}
+	for _, rs := range ruleStrings {
+		rule1, err := ParseRule(rs)
+		if err != nil {
+			t.Fatalf("ParseRule(%q) error: %v", rs, err)
+		}
+		formatted := FormatRule(rule1)
+		// The formatted string should contain the tool name and content
+		if !strings.Contains(formatted, rule1.ToolName) {
+			t.Errorf("FormatRule output should contain tool name %q", rule1.ToolName)
+		}
+		if rule1.Content != "" && !strings.Contains(formatted, rule1.Content) {
+			t.Errorf("FormatRule output should contain content %q", rule1.Content)
+		}
+	}
+}

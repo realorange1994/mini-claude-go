@@ -4,7 +4,7 @@
 
 ## Overview
 
-Go has ~40 test files using standard `testing.T`; upstream has ~80+ test files using Bun's `describe/test` framework. Both sides have unique test strengths and significant coverage gaps.
+Go has ~100 test files using standard `testing.T`; upstream has ~80+ test files using Bun's `describe/test` framework. Both sides have unique test strengths and significant coverage gaps.
 
 ---
 
@@ -13,10 +13,10 @@ Go has ~40 test files using standard `testing.T`; upstream has ~80+ test files u
 | Aspect | Go | Upstream | Gap |
 |--------|-----|----------|-----|
 | Test runner | `testing.T` (standard library) | Bun `describe/test` with `expect` assertions |
-| Test count | ~40 files (excluding worktrees) | ~80+ files |
-| Test types | Primarily unit tests, few integration | Unit, integration, snapshot, E2E |
+| Test count | ~100 files, ~2100+ test functions | ~80+ files |
+| Test types | Unit tests, integration, concurrency tests, benchmarks | Unit, integration, snapshot, E2E |
 | Test configuration | None | `vitest.config.ts` with 120s timeout, file exclusions |
-| Mock infrastructure | Minimal: simple struct stubs | Minimal: simple object stubs |
+| Mock infrastructure | Minimal: simple struct stubs, callbacks | Minimal: simple object stubs |
 | Test utilities | None (manual setup) | `createTestContext()`, `createTestQuery()`, `createMockServer()` |
 | Benchmarks | Present (`BenchmarkNormalizeWhitespace`, `BenchmarkSortMapKeys`) | Absent |
 
@@ -80,6 +80,7 @@ Go has ~40 test files using standard `testing.T`; upstream has ~80+ test files u
 | Background task execution with/without callback | |
 | Deletion target extraction with `--` separator | |
 | Path escape detection via `--` | |
+| **`PosixToWindowsPath`** — MSYS2 mount points (/tmp/, /home/, /cygdrive/), drive letters (/x/), UNC paths (//server/share), Cygwin drive prefix, relative paths, already-Windows paths (R23) | |
 
 **Test patterns**: Go uses `CheckPermissions()` integration tests with actual command strings; upstream uses pattern list membership checks. Go tests are more behavioral; upstream tests are more declarative.
 
@@ -191,7 +192,30 @@ All 12 test functions (frontmatter parsing, inline list parsing, unquote, strip 
 
 **Edge cases**: Go has 4 aliases; upstream only has 2. Go adds AgentOutputTool→TaskOutput and BashOutputTool→TaskOutput.
 
-### 3.14 Path Validation (`permissions/path_validation_test.go`)
+### 3.14 Hook Shell Execution (`hooks_shell_test.go`)
+
+**Upstream counterpart**: No equivalent test file in upstream.
+
+All 12 test functions are Go-specific additions (R22):
+
+| Test Function | What's Tested |
+|---------------|---------------|
+| `TestHookGlobMatch` | Glob pattern matching with `**`, `*`, `?`, character classes |
+| `TestMatchHook` | Hook name matching against glob patterns and prefixes |
+| `TestHookShellResult_ParseStdout` | Hook JSON stdout parsing with error extraction |
+| `TestExecuteShellHook_Echo` | Successful shell hook execution with output capture |
+| `TestExecuteShellHook_Block` | Hook block behavior (denial via exit code) |
+| `TestHookBlockError` | Error wrapping for blocked hook executions |
+| `TestLoadHooksFromSettings` | Loading hook definitions from settings.json |
+| `TestLoadHooksFromSettings_MissingFile` | Graceful handling of missing settings file |
+| `TestLoadHooksFromSettings_NoHooks` | Graceful handling of settings with no hooks section |
+| `TestHookShellResult_UpdatedInput` | Hook-modified command input propagation |
+| `TestHookEnvironment` | Environment variable injection into hook execution |
+| `TestHookJSONRoundTrip` | JSON serialization/deserialization of hook input/output |
+
+**Test patterns**: Hook tests use real shell execution (not mocked), testing end-to-end command execution with stdout/stderr capture, exit code handling, and JSON round-trip serialization.
+
+### 3.15 Path Validation (`permissions/path_validation_test.go`)
 
 **Upstream counterpart**: Partially `windowsPaths.test.ts`
 
@@ -223,6 +247,7 @@ All 12 test functions (frontmatter parsing, inline list parsing, unquote, strip 
 | Go Test File | What's Tested |
 |-------------|---------------|
 | `git_tool_test.go` | Git operations |
+| `hooks_shell_test.go` | Hook shell execution: glob matching, JSON round-trip, settings loading, environment injection (R22) |
 | `brief_tool_test.go` | Brief output tool |
 | `runtime_info_test.go` | Runtime/system info |
 | `web_search_test.go` | Web search tool |
@@ -347,7 +372,7 @@ All 12 test functions (frontmatter parsing, inline list parsing, unquote, strip 
 | 3 | Test isolation | Fresh structs per test (`DefaultConfig()`, `NewConversationContext()`) | `resetStateForTests()` in `beforeEach`; env saved/restored | Go适配 |
 | 4 | Table-driven tests | Common: `tests := []struct{...}{...}; for _, tc := range tests` | BDD `test()` per case; `expect(...).toBe(...)` | Go适配 |
 | 5 | Mocking | No framework; inject via struct fields or callbacks | `bun:mock` for module-level; DI via `QueryDeps`/`productionDeps()` | 简化 |
-| 6 | Test count | ~100 `*_test.go` files | ~194 `*.test.ts`/`*.test.tsx` files | 简化 |
+| 6 | Test count | ~100 `*_test.go` files, ~2100+ test functions | ~194 `*.test.ts`/`*.test.tsx` files | Go适配 |
 | 7 | Integration tests | `combined_exec_test.go`, `forked_agent_test.go` | Multi-module integration: autonomy, daemon, bridge | 简化 |
 | 8 | Snapshot testing | None | VCR recording via `withStreamingVCR()` for API replay | 缺失 |
 | 9 | Feature-gated tests | None | `feature('FEATURE_NAME')` gates in test imports/bodies | 缺失 |

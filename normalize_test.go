@@ -1231,3 +1231,90 @@ func TestNormalizeAPIMessagesFullPipelineOrder(t *testing.T) {
 		t.Error("expected second message to be assistant")
 	}
 }
+
+// ─── Upstream Quality: Idempotency ──────────────────────────────────────────
+
+func TestNormalizeWhitespaceIdempotent(t *testing.T) {
+	// normalizeWhitespace(normalizeWhitespace(x)) == normalizeWhitespace(x)
+	// Invariant: normalization should be idempotent
+	inputs := []string{
+		"hello   \nworld  ",
+		"a\n\n\n\nb",
+		"line1\n\n\n\nline2\n\n\n\nline3",
+		"a  \n\n\nb  \n\n",
+		"\n\n\n\n",
+		"   \t   \n\n\t  \n",
+		"no trailing spaces",
+		"",
+	}
+	for _, in := range inputs {
+		first := normalizeWhitespace(in)
+		second := normalizeWhitespace(first)
+		if second != first {
+			t.Errorf("normalizeWhitespace not idempotent for %q: first=%q, second=%q", in, first, second)
+		}
+	}
+}
+
+func TestNormalizeJSONBytesIdempotent(t *testing.T) {
+	// NormalizeJSONBytes should be idempotent
+	inputs := []string{
+		`{"z":1,"a":2,"m":3}`,
+		`{"outer":{"z":1,"a":2}}`,
+		`{"a":1,"b":2}`,
+		`{}`,
+		`[1,2,{"z":3,"a":4}]`,
+	}
+	for _, in := range inputs {
+		first := NormalizeJSONBytes([]byte(in))
+		second := NormalizeJSONBytes(first)
+		if string(second) != string(first) {
+			t.Errorf("NormalizeJSONBytes not idempotent for %q: first=%q, second=%q", in, string(first), string(second))
+		}
+	}
+}
+
+func TestNormalizeAPIMessagesIdempotent(t *testing.T) {
+	// NormalizeAPIMessages should be idempotent: normalize(normalize(msgs)) == normalize(msgs)
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Hello"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolUse: &anthropic.ToolUseBlockParam{
+					ID:    "tool-1",
+					Name:  "read_file",
+					Input: map[string]any{"path": "/tmp/test.go", "offset": 10},
+				}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool-1",
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "result\n\n\n\nmore"}},
+					},
+				}},
+			},
+		},
+	}
+
+	first := NormalizeAPIMessages(msgs)
+	second := NormalizeAPIMessages(first)
+
+	if len(first) != len(second) {
+		t.Fatalf("idempotency violation: message count changed from %d to %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i].Role != second[i].Role {
+			t.Errorf("idempotency violation: message %d role changed from %q to %q", i, first[i].Role, second[i].Role)
+		}
+	}
+}

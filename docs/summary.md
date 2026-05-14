@@ -45,6 +45,9 @@ This document summarizes the gap analysis between Go **miniClaudeCode** and the 
 | **Rate limit state** | Persistent tracking across requests with proactive delays |
 | **Chinese error patterns** | Supports Chinese provider error messages |
 | **Stall detection** | Always-on with automatic recovery (upstream: env-gated, telemetry-only) |
+| **Windows path handling** | `PosixToWindowsPath()` matches upstream's approach: MSYS2 mounts (/tmp/, /home/), Cygdrive, UNC |
+| **Pipe input mode** | `io.ReadAll()` for non-terminal stdin fixes multi-line prompt splitting |
+| **Git Bash detection** | `findGitBashForWindows()` with memoize pattern, auto-selected as default Windows shell |
 
 ## Go Simplifications (简化)
 
@@ -57,6 +60,14 @@ This document summarizes the gap analysis between Go **miniClaudeCode** and the 
 | **Error classification** | 15-category enum, string matching | 25+ categories with type guards |
 | **Skill content** | Raw markdown injection | Rich pipeline (args, vars, shell, fork, model) |
 | **Multi-edit** | Atomic multi-edit per call | Single edit per call |
+
+## Recently Resolved (R23)
+
+| # | Gap | Resolution |
+|---|-----|------------|
+| 1 | **Path inconsistency** — file tools and exec resolved different physical files for `/tmp/` on Windows | `PosixToWindowsPath()` maps MSYS2 mounts (/tmp/, /home/, /cygdrive/) to Windows native paths. `expandPath()` uses the converter on Windows for all file tools |
+| 2 | **Shell detection** — hardcoded static text in system prompt | `GetShellInfo()` dynamically detects Git Bash/PowerShell on Windows. `GetPathFormatInfo()` returns path format guidance injected into system prompt |
+| 3 | **Pipe input split** — multi-line piped input split by `ReadString('\n')` causing empty first prompt | `io.ReadAll(stdinReader)` for non-terminal stdin reads entire input as single prompt |
 
 ## Refactoring Priorities
 

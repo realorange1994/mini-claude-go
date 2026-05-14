@@ -222,7 +222,7 @@ The upstream has a sophisticated multi-layer system for system prompt constructi
 | Model name | Yes -- `modelName` param (line 348) | Yes -- `getMarketingNameForModel` + model ID |
 | OS/Platform | Yes -- `runtime.GOOS/Version/GOARCH` (line 231) | Yes -- `computeEnvInfo` with uname, platform |
 | Working directory | Yes -- `os.Getwd()` (line 230) | Yes -- `getCwd()` |
-| Shell info | Static text "PowerShell on Windows, sh/bash on Unix" (line 29) | Dynamic -- `getShellInfoLine()` reads `$SHELL` (line 825) |
+| Shell info | Dynamic: `GetShellInfo()` — detects Git Bash/PowerShell; `GetPathFormatInfo()` — path format guidance | Dynamic -- `getShellInfoLine()` reads `$SHELL` (line 825) + `windowsPaths.ts` |
 | Date/time | Yes -- `time.Now().Format()` (line 335) | Yes -- included in env info |
 | Git context | Yes -- `tools.GetGitContext()` | Yes -- `getIsGit()` |
 | Knowledge cutoff | **No** | Yes -- `getKnowledgeCutoff` by model (lines 803-822) |

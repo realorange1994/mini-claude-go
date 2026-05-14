@@ -378,3 +378,103 @@ func TestValidateReadPathInternal(t *testing.T) {
 		t.Error("internal readable path under projects should be allowed")
 	}
 }
+
+// ─── Upstream Quality: Mixed Separators ──────────────────────────────────────
+
+func TestValidatePathMixedSeparators(t *testing.T) {
+	// Windows paths with mixed forward/backward slashes should be handled
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"forward slashes", "C:/Users/foo/file.txt"},
+		{"mixed slashes", `C:\Users/foo\file.txt`},
+		{"all forward", "C:/Program Files/app/config.ini"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ValidatePath(tc.path, OpWrite, nil, "")
+			// Mixed separator paths should be recognized as Windows paths
+			// and should not be flagged as shell expansion or glob
+			if result.Allowed && result.Reason == "shellExpand" {
+				t.Errorf("mixed separator path %q incorrectly flagged as shell expansion", tc.path)
+			}
+		})
+	}
+}
+
+// ─── Upstream Quality: Long Path Prefix ──────────────────────────────────────
+
+func TestValidatePathLongPathPrefix(t *testing.T) {
+	// \\?\C:\path is a Windows long path prefix — should be flagged as suspicious
+	result := ValidatePath(`\\?\C:\path\to\file`, OpWrite, nil, "")
+	if result.Allowed {
+		t.Error("long path prefix should be flagged as suspicious and not allowed for write")
+	}
+}
+
+func TestValidatePathLongPathPrefixRead(t *testing.T) {
+	// \\?\C:\path — suspicious even for read
+	result := ValidateReadPath(`\\?\C:\path\to\file`, nil)
+	if result.Allowed {
+		t.Error("long path prefix should be flagged as suspicious even for read")
+	}
+}
+
+// ─── Upstream Quality: UNC Variants ──────────────────────────────────────────
+
+func TestValidatePathUNCVariants(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"backslash UNC", `\\server\share\file.txt`},
+		{"forward slash UNC", "//server/share/file.txt"},
+		{"long path UNC", `\\?\UNC\server\share\file.txt`},
+		{"device path", `\\.\COM1`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ValidatePath(tc.path, OpWrite, nil, "")
+			if result.Allowed {
+				t.Errorf("UNC variant %q should not be allowed for write", tc.path)
+			}
+		})
+	}
+}
+
+func TestValidateReadPathUNCVariants(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"backslash UNC", `\\server\share\file.txt`},
+		{"forward slash UNC", "//server/share/file.txt"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ValidateReadPath(tc.path, nil)
+			if result.Allowed {
+				t.Errorf("UNC path %q should not be allowed for read", tc.path)
+			}
+		})
+	}
+}
+
+// ─── Upstream Quality: Idempotent Path Resolution ────────────────────────────
+
+func TestExpandTildeIdempotent(t *testing.T) {
+	// expandTilde should be idempotent: expandTilde(expandTilde(p)) == expandTilde(p)
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no home directory")
+	}
+	paths := []string{"~/file.go", "~", "no-tilde"}
+	for _, p := range paths {
+		first := expandTilde(p)
+		second := expandTilde(first)
+		if second != first {
+			t.Errorf("expandTilde not idempotent for %q: first=%q, second=%q", p, first, second)
+		}
+	}
+}

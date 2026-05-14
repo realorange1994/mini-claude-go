@@ -50,9 +50,9 @@ Go has a rich set of tools including some that upstream lacks (GitTool, @-refere
 
 ### A.6 Path Canonicalization
 
-- **Upstream**: `expandPath()` + `normalizeCaseForComparison()` + `toPosixPath()` + `relativePath()` for cross-platform comparison. Uses `posix` module for gitignore-pattern matching. Memoized `getResolvedWorkingDirPaths`.
-- **Go**: `canonicalPath()` expands `~`, resolves to absolute, converts backslashes, lowercases. `normalizeFilePath()` uses `path.Clean` + backslash replacement + lowercase (`base.go` lines 39-49, 470-477)
-- **Type**: Go适配
+- **Upstream**: `expandPath()` + `normalizeCaseForComparison()` + `toPosixPath()` + `relativePath()` for cross-platform comparison. Uses `posix` module for gitignore-pattern matching. Memoized `getResolvedWorkingDirPaths`. On Windows: `posixPathToWindowsPath()` + `windowsPathToPosixPath()` handle MSYS2 mount points (`/tmp/`, `/home/`, `/cygdrive/`).
+- **Go**: `expandPath()` expands `~`, on Windows uses `PosixToWindowsPath()` to convert POSIX paths to Windows native paths (handling `/tmp/` → temp dir, `/home/` → home dir, `/cygdrive/x/` → `X:\`, `/x/` → `X:\`, `//server/share` → `\\server\share`). `canonicalPath()` resolves to absolute, converts backslashes, lowercases. `normalizeFilePath()` uses `path.Clean` + backslash replacement + lowercase (`file_read.go` lines 267-283, `exec_tool.go` lines 1767-1832)
+- **Type**: Go适配 — now matches upstream's `posixPathToWindowsPath()` approach for MSYS2 mount point handling
 
 ### A.7 Path Allowlist (IsPathAllowed)
 
@@ -508,16 +508,18 @@ Both implementations use the same mechanism:
 - **Go**: `backgroundTasks` map with `BackgroundTask` struct. `list_bg`, `wait_bg`, `kill_bg` subcommands.
 - **Type**: Go适配
 
-### C.7 Shell Selection
+### C.7 Shell Selection & Path Format
 
 | Aspect | Go (`exec_tool.go`) | Upstream |
 |--------|---------------------|----------|
 | Unix | Always `bash -c` | Uses user's login shell (bash/zsh), detected by `Shell.ts` |
-| Windows | `powershell -Command` > `bash -c` > `cmd /C` | Separate `PowerShellTool` for Windows; `BashTool` uses bash via WSL/Git Bash |
+| Windows | **Git Bash** (auto-detected via `findGitBashForWindows()`) > PowerShell > cmd | Separate `PowerShellTool` for Windows; `BashTool` uses bash via WSL/Git Bash |
 | Shell state | "The working directory persists between commands, but shell state does not." | "The shell environment is initialized from the user's profile (bash or zsh)." |
 | Profile sourcing | **No** — bare `bash -c` runs without profile | **Yes** — "initialized from the user's profile (bash or zsh)" |
+| Path format guidance | **Yes** — `GetPathFormatInfo()` injects guidance: "Windows paths (C:\path) for file tools, POSIX paths (/c/path) in exec" | **Yes** — `posixPathToWindowsPath()` + `windowsPathToPosixPath()` in `windowsPaths.ts` |
+| MSYS2 mount handling | **Yes** — `PosixToWindowsPath()` maps `/tmp/` → temp dir, `/home/` → home dir, `/cygdrive/x/` → `X:\` | **Yes** — same approach in upstream |
 
-**Key difference**: Upstream runs commands through the user's login shell with profile sourcing. Go always uses bare `bash -c` on Unix.
+**Key improvement (R23)**: Go now auto-detects Git Bash on Windows and prefers it over PowerShell. `PosixToWindowsPath()` ensures file tools (using Windows native paths) and exec (using POSIX paths in Git Bash) resolve the same physical file for paths like `/tmp/`, `/home/`, `/cygdrive/x/`. System prompt includes path format guidance.
 
 ### C.8 Process Group Management — Go's Platform-Specific Approach
 
@@ -633,7 +635,7 @@ Both implementations use the same mechanism:
 | 6 | Auto-background on timeout | `TimeoutCallback` — process continues as background task | Same concept | Match |
 | 7 | User interrupt (Ctrl+C) | Context cancellation kills process group | Same — abort controller | Match |
 | 8 | Output truncation | 30KB max + `[N lines truncated]` | `EndTruncatingAccumulator` + persisted result | 简化 |
-| 9 | Shell selection | PowerShell → bash → cmd on Windows; bash on Unix | Detected via `Shell` utility | Go适配 |
+| 9 | Shell selection | **Git Bash** (auto-detected) > PowerShell > cmd on Windows; bash on Unix | Detected via `Shell` utility | Go适配 |
 | 10 | Process group management | `setupProcessGroup` / `killProcessGroup` | Same concept | Match |
 | 11 | Deny patterns | Regex-based `denyRegexps` — 20+ patterns | `bashSecurity.ts` + AST-based analysis | Go适配 |
 | 12 | Command substitution detection | `$()`, `${}`, backtick, `<()`, `>()` | AST-based `parseForSecurity()` | 简化 |
@@ -647,6 +649,9 @@ Both implementations use the same mechanism:
 | 20 | Destructive command warning | `isDestructiveCommand()` — informational warning | `destructiveCommandWarning.ts` — similar | Match |
 | 21 | UNC path blocking | `containsVulnerableUncPath()` | Same concept | Match |
 | 22 | Internal URL detection | `containsInternalURL()` — localhost, private IPs | Handled at network level | Go增强 |
+| 23 | Git Bash detection | `findGitBashForWindows()` with memoize pattern | `Shell.ts` detection | Match |
+| 24 | POSIX→Windows path conversion | `PosixToWindowsPath()` — MSYS2 mounts (/tmp/, /home/, /cygdrive/) | `posixPathToWindowsPath()` — same approach | Match |
+| 25 | Path format guidance | `GetPathFormatInfo()` injected into system prompt | Path format guidance in system prompt | Match |
 | 23 | Sandbox support | Not present | `dangerouslyDisableSandbox`, `SandboxManager` | 缺失 |
 | 24 | Sed edit parsing | Not present | `parseSedEditCommand()` + `_simulatedSedEdit` | 缺失 |
 | 25 | Sleep command blocking | Not present | Blocks `sleep` > 2s, suggests `run_in_background` | 缺失 |
