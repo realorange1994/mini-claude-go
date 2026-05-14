@@ -30,6 +30,7 @@ const (
 	ChunkTypeDone     ChunkType = "done"         // Stream complete
 	ChunkTypeBlockStop ChunkType = "block_stop"  // Content block finished
 	ChunkTypeRefusal  ChunkType = "refusal"      // stop_reason: refusal (content policy)
+	ChunkTypeRedactedThinking ChunkType = "redacted_thinking" // redacted thinking block (content policy)
 )
 
 // StreamChunk is a single event emitted during a streaming response.
@@ -69,7 +70,8 @@ type CollectHandler struct {
 	ChunksCollect int
 	toolUseAsText bool // detects model echoing tool syntax as text
 	finishReason  string // captured from MessageDeltaEvent.stop_reason
-	isRefusal     bool   // true when stop_reason is "refusal"
+	isRefusal          bool     // true when stop_reason is "refusal"
+	redactedThinkingData []string // opaque data blobs from redacted_thinking blocks (for context continuity)
 	// toolCallDoneCh is an optional channel that receives the index of a
 	// completed tool call when its content block finishes during streaming.
 	// This enables pipelined tool execution: tools start as their arguments
@@ -203,6 +205,8 @@ func (h *CollectHandler) Handle(chunk StreamChunk) error {
 
 	case ChunkTypeRefusal:
 		h.isRefusal = true
+	case ChunkTypeRedactedThinking:
+		h.redactedThinkingData = append(h.redactedThinkingData, chunk.Content)
 	}
 
 	return nil
@@ -247,6 +251,17 @@ func (h *CollectHandler) IsRefusal() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.isRefusal
+}
+
+// RedactedThinkingData returns the collected opaque data blobs from
+// redacted_thinking blocks. These must be preserved and re-submitted
+// in subsequent API requests for context continuity.
+func (h *CollectHandler) RedactedThinkingData() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	data := make([]string, len(h.redactedThinkingData))
+	copy(data, h.redactedThinkingData)
+	return data
 }
 
 // HasPartialToolCall checks if the last tool call has no arguments yet
@@ -887,6 +902,19 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 					Name: block.Name,
 				}
 				sa.trackDeltaState(ChunkTypeToolCall, chunk.ID)
+				if err := wrapped(chunk); err != nil {
+					return err
+				}
+			case "redacted_thinking":
+				data := block.AsAny()
+				var dataStr string
+				if rt, ok := data.(anthropic.RedactedThinkingBlock); ok {
+					dataStr = rt.Data
+				}
+				chunk := StreamChunk{
+					Type:    ChunkTypeRedactedThinking,
+					Content: dataStr,
+				}
 				if err := wrapped(chunk); err != nil {
 					return err
 				}

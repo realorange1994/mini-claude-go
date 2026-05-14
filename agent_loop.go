@@ -565,6 +565,10 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	client := anthropic.NewClient(opts...)
 
 	ctx := NewConversationContext(cfg)
+	// Initialize tool result disk persistence store
+	if cfg.ProjectDir != "" {
+		ctx.SetToolResultStore(NewToolResultStore(cfg.ProjectDir))
+	}
 
 	// Initialize transcript writer
 	sessionID := time.Now().Format("20060102-150405")
@@ -882,6 +886,9 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 // - Multiple consecutive tool_result entries become one user message
 func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config) *ConversationContext {
 	ctx := NewConversationContext(cfg)
+	if cfg.ProjectDir != "" {
+		ctx.SetToolResultStore(NewToolResultStore(cfg.ProjectDir))
+	}
 
 	var pendingToolUses []map[string]any
 	var pendingToolResults []anthropic.ToolResultBlockParam
@@ -2321,6 +2328,14 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		return nil, []string{msg}, nil
 	}
 
+	// Preserve redacted_thinking data for context continuity.
+	// The API returns opaque data blobs in redacted_thinking blocks when
+	// interleaved thinking is enabled but the thinking content is policy-filtered.
+	// These must be re-submitted in subsequent API requests.
+	if data := collect.RedactedThinkingData(); len(data) > 0 {
+		a.context.SetRedactedThinkingData(data)
+	}
+
 	// Check for tool-as-text echo and truncated arguments
 	if collect.IsToolUseAsText() {
 		a.out("\n[WARN] Model echoed tool syntax as text -- recovering\n")
@@ -2720,6 +2735,7 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 	var toolCalls []map[string]any
 	var textParts []string
 	var thinking string
+	var redactedData []string
 
 	for _, block := range response.Content {
 		switch v := block.AsAny().(type) {
@@ -2742,6 +2758,8 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 			toolCalls = append(toolCalls, call)
 		case anthropic.ThinkingBlock:
 			thinking = v.Thinking
+		case anthropic.RedactedThinkingBlock:
+			redactedData = append(redactedData, v.Data)
 		}
 	}
 
@@ -2757,6 +2775,12 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 
 	// Capture stop_reason for max_tokens escalation
 	stopReason := string(response.StopReason)
+	// Preserve redacted_thinking data for context continuity.
+	// The API returns opaque data blobs in redacted_thinking blocks when
+	// interleaved thinking is enabled but the thinking content is policy-filtered.
+	if len(redactedData) > 0 {
+		a.context.SetRedactedThinkingData(redactedData)
+	}
 	return toolCalls, textParts, stopReason
 }
 

@@ -24,6 +24,65 @@ func generateUUID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// ToolResultStore persists oversized tool results to disk so they can be
+// re-read on demand after micro-compact clears them from context.
+// Matching upstream's tool result persistence pattern: large results are
+// saved to .claude/tool_results/ and replaced with XML tag references.
+type ToolResultStore struct {
+	dir string // base directory for persisted results
+}
+
+// NewToolResultStore creates a store rooted at .claude/tool_results/ under projectDir.
+func NewToolResultStore(projectDir string) *ToolResultStore {
+	dir := filepath.Join(projectDir, ".claude", "tool_results")
+	_ = os.MkdirAll(dir, 0755) // create if not exists
+	return &ToolResultStore{dir: dir}
+}
+
+// Persist saves a tool result's text content to disk and returns an XML
+// reference tag that replaces the original content in context.
+// The tag format: <tool_result_ref id="TOOL_USE_ID" path=".claude/tool_results/FILE"/>
+func (s *ToolResultStore) Persist(toolUseID string, content string) string {
+	if s.dir == "" || content == "" {
+		return content // no persistence if store not configured or content empty
+	}
+	// Use toolUseID as filename base (sanitize for filesystem)
+	safeID := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, toolUseID)
+	filename := safeID + ".txt"
+	path := filepath.Join(s.dir, filename)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		// Fallback: if write fails, just return the original content
+		return content
+	}
+	// Return XML reference tag with relative path for the model to re-read
+	relPath := filepath.Join(".claude", "tool_results", filename)
+	return fmt.Sprintf("<tool_result_ref id=\"%s\" path=\"%s\"/>", toolUseID, relPath)
+}
+
+// Read loads a persisted tool result from disk by its toolUseID.
+func (s *ToolResultStore) Read(toolUseID string) (string, error) {
+	if s.dir == "" {
+		return "", fmt.Errorf("tool result store not configured")
+	}
+	safeID := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, toolUseID)
+	path := filepath.Join(s.dir, safeID+".txt")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("tool result not found on disk: %w", err)
+	}
+	return string(data), nil
+}
+
 // EntryContent is a sealed interface for conversation entry content types.
 // The unexported method prevents external types from implementing it.
 type EntryContent interface {
@@ -294,6 +353,14 @@ type ConversationContext struct {
 	lastSummarizedIndex    int    // index of last entry included in summary/compact (-1 = none)
 	compactedEntryCount    int    // entries already summarized by previous compaction (skip on next compact)
 	lastAssistantTime      time.Time // timestamp of last assistant message added; used for time-based microcompact
+	// pendingRedactedThinking holds opaque data blobs from redacted_thinking blocks
+	// received in the most recent API response. These must be preserved and
+	// re-submitted in subsequent assistant messages for context continuity.
+	// Matching upstream's handling of redacted_thinking in normalizeMessagesForAPI().
+	pendingRedactedThinking []string
+	// toolResultStore persists oversized tool results to disk during micro-compact,
+	// so they can be re-read on demand without re-executing tools.
+	toolResultStore *ToolResultStore
 }
 
 // NewConversationContext creates a new context.
@@ -402,6 +469,24 @@ func (c *ConversationContext) SystemPrompt() string {
 	return c.systemPrompt
 }
 
+// SetRedactedThinkingData stores opaque data blobs from redacted_thinking blocks
+// received in the most recent API response. These must be preserved and re-submitted
+// in subsequent API requests for context continuity.
+func (c *ConversationContext) SetRedactedThinkingData(data []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingRedactedThinking = data
+}
+
+// SetToolResultStore configures the disk persistence store for tool results.
+// When set, MicroCompactEntries will persist cleared results to disk and
+// replace them with XML reference tags.
+func (c *ConversationContext) SetToolResultStore(store *ToolResultStore) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.toolResultStore = store
+}
+
 // AddUserMessage appends a user text message.
 func (c *ConversationContext) AddUserMessage(content string) {
 	c.mu.Lock()
@@ -471,8 +556,11 @@ func (c *ConversationContext) AddToolResults(results []anthropic.ToolResultBlock
 // when there are entries after the boundary (the first append after [:0] overwrites
 // array[0], the system prompt, which subsequent appends then continue to overwrite).
 func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	redactedData := make([]string, len(c.pendingRedactedThinking))
+	copy(redactedData, c.pendingRedactedThinking)
+	c.pendingRedactedThinking = nil // consume; only used once
+	c.mu.Unlock()
 
 	// Find the last compact boundary. Entries at or after this point are preserved;
 	// everything before is dropped. This is the key mechanism that makes compaction
@@ -501,7 +589,20 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 				{OfText: &anthropic.TextBlockParam{Text: string(v)}},
 			}
 		case ToolUseContent:
-			msg.Content = v
+			// Prepend redacted_thinking blocks to the first assistant tool_use message.
+			// The API requires these opaque data blobs to be re-submitted for context
+			// continuity when interleaved thinking is enabled.
+			if len(redactedData) > 0 {
+				blocks := make([]anthropic.ContentBlockParamUnion, 0, len(redactedData)+len(v))
+				for _, data := range redactedData {
+					blocks = append(blocks, anthropic.NewRedactedThinkingBlock(data))
+				}
+				blocks = append(blocks, v...)
+				redactedData = nil // consume once
+				msg.Content = blocks
+			} else {
+				msg.Content = v
+			}
 		case ToolResultContent:
 			blocks := make([]anthropic.ContentBlockParamUnion, len(v))
 			for i, r := range v {
@@ -1386,10 +1487,28 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 					}
 				}
 				if totalChars >= minCharCount {
+					// Persist the content to disk before clearing from context.
+					// The model can re-read the result on demand without re-executing.
+					contentText := ""
+					for _, cb := range r.Content {
+						if cb.OfText != nil {
+							contentText += cb.OfText.Text
+						}
+					}
+					diskRef := ""
+					if c.toolResultStore != nil && contentText != "" {
+						diskRef = c.toolResultStore.Persist(r.ToolUseID, contentText)
+					}
+					// Use disk reference tag as the placeholder. If persistence
+					// succeeded, the placeholder includes an XML ref the model can use.
+					blockText := placeholder
+					if diskRef != "" && diskRef != contentText {
+						blockText = placeholder + " " + diskRef
+					}
 					clearedResults = append(clearedResults, anthropic.ToolResultBlockParam{
 						ToolUseID: r.ToolUseID,
 						Content: []anthropic.ToolResultBlockParamContentUnion{
-							{OfText: &anthropic.TextBlockParam{Text: placeholder}},
+							{OfText: &anthropic.TextBlockParam{Text: blockText}},
 						},
 						IsError: r.IsError,
 					})
