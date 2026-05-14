@@ -50,6 +50,28 @@ func (*SystemTool) ExecuteContext(ctx context.Context, params map[string]any) To
 	return systemExecute(ctx, params)
 }
 
+// runPowershellUTF8 runs a PowerShell command with UTF-8 output encoding.
+// This is necessary on Chinese/other locale Windows to avoid garbled characters
+// (e.g. "Microsoft Windows 11 家庭中文版" would appear as mojibake without this).
+func runPowershellUTF8(command string) ToolResult {
+	psCmd := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; " + command
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, stderr.String()), IsError: true}
+	}
+	return ToolResult{Output: strings.TrimSpace(stdout.String())}
+}
+
+// runPowershellCombined runs a PowerShell command with UTF-8 encoding and captures combined output.
+func runPowershellCombined(command string) ([]byte, error) {
+	psCmd := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; " + command
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
+	return cmd.CombinedOutput()
+}
+
 func systemExecute(ctx context.Context, params map[string]any) ToolResult {
 	operation, _ := params["operation"].(string)
 	if operation == "" {
@@ -87,15 +109,7 @@ func systemExecute(ctx context.Context, params map[string]any) ToolResult {
 // systemInfo returns a comprehensive system overview.
 func systemInfo() ToolResult {
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("powershell", "-NoProfile", "-Command",
-			`$os = Get-CimInstance Win32_OperatingSystem; $cpu = Get-CimInstance Win32_Processor; $mem = [math]::Round($os.TotalVisibleMemorySize/1MB,2); $free = [math]::Round($os.FreePhysicalMemory/1MB,2); $used = [math]::Round($mem - $free, 2); $bootTime = $os.LastBootUpTime; $now = Get-Date; $diff = New-TimeSpan -Start $bootTime -End $now; $d = [math]::Floor($diff.TotalDays); $h = $diff.Hours; $m = $diff.Minutes; $uptimeStr = if ($d -gt 0) { "{0} days, {1}:{2}" -f $d, $h.ToString("00"), $m.ToString("00") } else { "{0}:{1}" -f $h.ToString("00"), $m.ToString("00") }; Write-Output "OS:       $($os.Caption) $($os.Version)"; Write-Output "Host:     $env:COMPUTERNAME"; Write-Output "Arch:     $($cpu.Name)"; Write-Output "CPU:      $($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) threads"; Write-Output "Memory:   ${used}GB used / ${mem}GB total ($(${free})GB free)"; Write-Output "Uptime:   $uptimeStr"`)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, stderr.String()), IsError: true}
-		}
-		return ToolResult{Output: strings.TrimSpace(stdout.String())}
+		return runPowershellUTF8(`$os = Get-CimInstance Win32_OperatingSystem; $cpu = Get-CimInstance Win32_Processor; $mem = [math]::Round($os.TotalVisibleMemorySize/1MB,2); $free = [math]::Round($os.FreePhysicalMemory/1MB,2); $used = [math]::Round($mem - $free, 2); $bootTime = $os.LastBootUpTime; $now = Get-Date; $diff = New-TimeSpan -Start $bootTime -End $now; $d = [math]::Floor($diff.TotalDays); $h = $diff.Hours; $m = $diff.Minutes; $uptimeStr = if ($d -gt 0) { "{0} days, {1}:{2}" -f $d, $h.ToString("00"), $m.ToString("00") } else { "{0}:{1}" -f $h.ToString("00"), $m.ToString("00") }; Write-Output "OS:       $($os.Caption) $($os.Version)"; Write-Output "Host:     $env:COMPUTERNAME"; Write-Output "Arch:     $($cpu.Name)"; Write-Output "CPU:      $($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) threads"; Write-Output "Memory:   ${used}GB used / ${mem}GB total ($(${free})GB free)"; Write-Output "Uptime:   $uptimeStr"`)
 	}
 
 	// Unix: combine uname, uptime, memory, cpu info
@@ -132,14 +146,12 @@ func systemUname(params map[string]any) ToolResult {
 			args = strings.Fields(flags)
 		}
 		if len(args) == 0 || (len(args) == 1 && args[0] == "-a") {
-			// Return OS name, hostname, kernel version (like uname -a on Unix)
-			cmd := exec.Command("powershell", "-NoProfile", "-Command",
+				out, err := runPowershellCombined(
 				"$h = $env:COMPUTERNAME; "+
 					"$os = (Get-CimInstance Win32_OperatingSystem).Caption -replace 'Microsoft ', ''; "+
 					"$v = (Get-CimInstance Win32_OperatingSystem).Version; "+
 					"$arch = (Get-CimInstance Win32_Processor)[0].Name; "+
 					"Write-Output \"Windows $h $os $v $arch\"")
-			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, string(out)), IsError: true}
 			}
