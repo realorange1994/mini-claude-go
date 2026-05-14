@@ -103,8 +103,20 @@ func (e *StreamingToolExecutor) SetMaxConcurrency(n int) {
 }
 
 // isConcurrencySafe returns true if the tool can safely run alongside other tools.
-// Read-only tools are safe; anything that writes or executes commands is not.
-func (e *StreamingToolExecutor) isConcurrencySafe(toolName string) bool {
+// Matching upstream's tool.isConcurrencySafe(input) which checks isReadOnly(cmd)
+// for BashTool — only read-only bash commands (ls, cat, grep, etc.) are safe.
+func (e *StreamingToolExecutor) isConcurrencySafe(toolName string, arguments string) bool {
+	if toolName == "exec" {
+		// Parse the command from arguments and check if it's read-only
+		var input map[string]any
+		if arguments != "" {
+			_ = json.Unmarshal([]byte(arguments), &input)
+		}
+		if cmd, ok := input["command"].(string); ok {
+			return tools.IsReadOnlyCommand(cmd)
+		}
+		return false
+	}
 	switch toolName {
 	case "read_file", "glob", "grep", "web_search", "web_fetch",
 		"read_skill", "tool_search", "agent_list", "agent_get":
@@ -236,7 +248,7 @@ func (e *StreamingToolExecutor) dispatch(idx int, toolCalls *[]ToolCallInfo) {
 		tc:               tc,
 		tool:             tool,
 		status:           toolQueued,
-		isConcurrencySafe: e.isConcurrencySafe(tc.Name),
+		isConcurrencySafe: e.isConcurrencySafe(tc.Name, tc.Arguments),
 		index:            idx,
 	}
 	e.tools = append(e.tools, tracked)
@@ -405,6 +417,29 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	}()
 
 	wasError := result.IsError
+
+	// CRITICAL: After execution, check if a sibling tool errored while this
+	// tool was running. Matching upstream's getAbortReason() check inside
+	// the for-await loop (StreamingToolExecutor.ts:344):
+	//   const abortReason = this.getAbortReason(tool)
+	//   if (abortReason && !thisToolErrored) { synthetic error; break }
+	// Since Go tools execute synchronously (no streaming loop), we can only
+	// check after execution returns. If siblingCtx was cancelled, a Bash
+	// sibling errored — this tool should report a synthetic error unless it
+	// was the one that errored.
+	if e.siblingCtx.Err() != nil && !(wasError && tc.Name == "exec") {
+		// Sibling Bash errored — cancel this tool
+		e.recordResult(toolExecResult{
+			index:     idx,
+			toolName:  tc.Name,
+			toolUseID: tc.ID,
+			isError:   true,
+			output:    e.createSyntheticErrorMessage(tc),
+			duration:  time.Since(start),
+		})
+		e.completed.Add(1)
+		return
+	}
 
 	e.recordResult(toolExecResult{
 		index:     idx,

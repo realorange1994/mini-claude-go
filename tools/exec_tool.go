@@ -1423,7 +1423,7 @@ func stripSafeWrappers(cmd string) string {
 // IsReadOnly reports whether the given command is read-only (safe to auto-approve).
 func (et *ExecTool) IsReadOnly(params map[string]any) bool {
 	cmd, _ := params["command"].(string)
-	return isReadOnlyCommand(cmd)
+	return IsReadOnlyCommand(cmd)
 }
 
 // CheckDestructiveWarning returns a warning message if the command is known to be
@@ -1433,8 +1433,8 @@ func CheckDestructiveWarning(cmd string) string {
 	return warning
 }
 
-// isReadOnlyCommand reports whether a command is read-only (no side effects).
-func isReadOnlyCommand(cmd string) bool {
+// IsReadOnlyCommand reports whether a command is read-only (no side effects).
+func IsReadOnlyCommand(cmd string) bool {
 	stripped := stripSafeWrappers(cmd)
 
 	// Check for redirects — any write operator means NOT read-only

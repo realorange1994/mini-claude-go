@@ -90,23 +90,48 @@ func TestIsConcurrencySafe(t *testing.T) {
 	reg := tools.NewRegistry()
 	exec := NewStreamingToolExecutor(reg, nil)
 
-	safeTools := []string{
-		"read_file", "glob", "grep", "web_search", "web_fetch",
-		"read_skill", "tool_search", "agent_list", "agent_get",
+	safeTools := []struct {
+		name string
+		args string // JSON arguments string
+	}{
+		{"read_file", `{"file_path":"test.txt"}`},
+		{"glob", `{"pattern":"*.go"}`},
+		{"grep", `{"pattern":"test"}`},
+		{"web_search", `{"query":"test"}`},
+		{"web_fetch", `{"url":"https://example.com"}`},
+		{"read_skill", `{"name":"test"}`},
+		{"tool_search", `{"query":"test"}`},
+		{"agent_list", ""},
+		{"agent_get", `{"name":"test"}`},
+		// exec with read-only command
+		{"exec", `{"command":"ls -la"}`},
+		{"exec", `{"command":"cat test.txt"}`},
+		{"exec", `{"command":"grep test file"}`},
 	}
 	for _, tool := range safeTools {
-		if !exec.isConcurrencySafe(tool) {
-			t.Errorf("expected %s to be concurrency-safe", tool)
+		if !exec.isConcurrencySafe(tool.name, tool.args) {
+			t.Errorf("expected %s to be concurrency-safe", tool.name)
 		}
 	}
 
-	unsafeTools := []string{
-		"exec", "write_file", "edit_file", "multi_edit",
-		"file_write", "file_edit", "bash", "notebook_edit",
+	unsafeTools := []struct {
+		name string
+		args string
+	}{
+		{"write_file", `{"file_path":"test.txt","content":"hello"}`},
+		{"edit_file", `{"file_path":"test.txt"}`},
+		{"multi_edit", `{"file_path":"test.txt"}`},
+		{"file_write", `{"file_path":"test.txt","content":"hello"}`},
+		{"file_edit", `{"file_path":"test.txt"}`},
+		{"bash", `{"command":"echo hello"}`},
+		{"notebook_edit", `{"notebook_path":"test.ipynb"}`},
+		// exec with non-read-only commands
+		{"exec", `{"command":"rm -rf test"}`},
+		{"exec", `{"command":"go build"}`},
 	}
 	for _, tool := range unsafeTools {
-		if exec.isConcurrencySafe(tool) {
-			t.Errorf("expected %s to NOT be concurrency-safe", tool)
+		if exec.isConcurrencySafe(tool.name, tool.args) {
+			t.Errorf("expected %s to NOT be concurrency-safe", tool.name)
 		}
 	}
 }
