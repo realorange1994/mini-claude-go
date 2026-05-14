@@ -170,7 +170,7 @@ func TestOpCopyDirMissingDest(t *testing.T) {
 	}
 }
 
-func TestOpLinkMissingDest(t *testing.T) {
+func TestOpLinkMissingDestFileops(t *testing.T) {
 	result := opLink("/tmp", map[string]any{})
 	if !result.IsError {
 		t.Error("ln without destination should return error")

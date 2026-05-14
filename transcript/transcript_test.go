@@ -3,6 +3,7 @@ package transcript
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -476,5 +477,78 @@ func TestLastUUID(t *testing.T) {
 
 	_ = w.Flush()
 	_ = w.Close()
+}
+
+// ---------------------------------------------------------------------------
+// uuidV4 — transcript.go:17
+// ---------------------------------------------------------------------------
+
+func TestUUIDV4Uniqueness(t *testing.T) {
+	// Upstream invariant: N generated UUIDs are all different
+	const n = 1000
+	seen := make(map[string]bool, n)
+	for i := 0; i < n; i++ {
+		u := uuidV4()
+		if seen[u] {
+			t.Fatalf("duplicate UUID at iteration %d: %s", i, u)
+		}
+		seen[u] = true
+	}
+}
+
+func TestUUIDV4Format(t *testing.T) {
+	// Upstream: matches /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+	uuidRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	for i := 0; i < 100; i++ {
+		u := uuidV4()
+		if !uuidRegex.MatchString(u) {
+			t.Errorf("UUID does not match standard format: %s", u)
+		}
+	}
+}
+
+func TestUUIDV4Length(t *testing.T) {
+	// Invariant: always 36 chars (32 hex + 4 hyphens)
+	for i := 0; i < 100; i++ {
+		u := uuidV4()
+		if len(u) != 36 {
+			t.Errorf("expected length 36, got %d for UUID: %s", len(u), u)
+		}
+	}
+}
+
+func TestUUIDV4VersionBits(t *testing.T) {
+	// UUID v4: the version nibble (char at position 14) should be '4'
+	for i := 0; i < 100; i++ {
+		u := uuidV4()
+		// Position 14 is the version digit: xxxxxxxx-xxxx-4xxx-...
+		if u[14] != '4' {
+			t.Errorf("UUID v4 should have version nibble '4' at position 14, got %c: %s", u[14], u)
+		}
+	}
+}
+
+func TestUUIDV4VariantBits(t *testing.T) {
+	// UUID v4 variant 10: the first char of the 4th group (position 19) should be 8, 9, a, or b
+	validVariant := map[byte]bool{'8': true, '9': true, 'a': true, 'b': true}
+	for i := 0; i < 100; i++ {
+		u := uuidV4()
+		// Position 19: xxxxxxxx-xxxx-4xxx-Nxxx-..., N should be 8/9/a/b
+		if !validVariant[u[19]] {
+			t.Errorf("UUID v4 variant byte should be 8/9/a/b, got %c: %s", u[19], u)
+		}
+	}
+}
+
+func TestUUIDV4HyphenPositions(t *testing.T) {
+	// Hyphens at fixed positions: 8, 13, 18, 23
+	for i := 0; i < 100; i++ {
+		u := uuidV4()
+		for _, pos := range []int{8, 13, 18, 23} {
+			if u[pos] != '-' {
+				t.Errorf("expected hyphen at position %d, got %c: %s", pos, u[pos], u)
+			}
+		}
+	}
 }
 

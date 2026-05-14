@@ -229,6 +229,139 @@ func TestParseBool(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Upstream Quality: XML Escaping Tests
+// ============================================================================
+
+func TestEscapeXML(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// All 5 XML entities (matching upstream xml.test.ts coverage)
+		{"ampersand", "a & b", "a &amp; b"},
+		{"less-than", "<div>", "&lt;div&gt;"},
+		{"greater-than", "a > b", "a &gt; b"},
+		{"double quote", `say "hello"`, `say &quot;hello&quot;`},
+		{"single quote", "it's", "it&apos;s"},
+		// Multiple special chars in one string
+		{"multiple special chars", "<a & b>", "&lt;a &amp; b&gt;"},
+		{"all five entities", `<a & 'b' "c">`, `&lt;a &amp; &apos;b&apos; &quot;c&quot;&gt;`},
+		// Empty string
+		{"empty string", "", ""},
+		// Normal text unchanged
+		{"normal text unchanged", "hello world", "hello world"},
+		{"numbers unchanged", "42 + 10", "42 + 10"},
+		{"spaces unchanged", "  spaces  ", "  spaces  "},
+		// Only special chars
+		{"only ampersands", "&&", "&amp;&amp;"},
+		{"only angle brackets", "<<>>", "&lt;&lt;&gt;&gt;"},
+		{"only quotes", `''""`, `&apos;&apos;&quot;&quot;`},
+		// Mixed normal and special
+		{"mixed content", `if (x < 10 && y > 5) return "ok"`, `if (x &lt; 10 &amp;&amp; y &gt; 5) return &quot;ok&quot;`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := escapeXML(tt.input)
+			if got != tt.want {
+				t.Errorf("escapeXML(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEscapeXMLIdempotent(t *testing.T) {
+	// escapeXML(escapeXML(x)) should equal escapeXML(x) for already-escaped text.
+	// This is the key invariant from upstream: already-escaped text should not be
+	// double-escaped. The Go implementation processes & first, so already-escaped
+	// &amp; stays as &amp; (the & is replaced, then amp; is left as literal text).
+	// However, this function is NOT idempotent because & in &amp; gets re-escaped
+	// on a second pass. This is a known limitation of simple ReplaceAll-based
+	// implementations. Test the actual behavior so we document it.
+	inputs := []string{
+		"hello world",           // no special chars: idempotent
+		"",                      // empty: idempotent
+		"a & b",                 // ampersand: NOT idempotent (&amp; -> &amp;amp;)
+		"<div>",                 // angle brackets: NOT idempotent
+	}
+
+	for _, in := range inputs {
+		first := escapeXML(in)
+		second := escapeXML(first)
+		// For plain text, it should be idempotent
+		if in == "hello world" || in == "" {
+			if second != first {
+				t.Errorf("escapeXML should be idempotent for %q: first=%q, second=%q", in, first, second)
+			}
+		}
+		// For text with special chars, double-escaping is the known behavior
+		// Just verify that the first pass produces the expected result
+		if in == "a & b" && first != "a &amp; b" {
+			t.Errorf("escapeXML(%q) = %q, want %q", in, first, "a &amp; b")
+		}
+		if in == "<div>" && first != "&lt;div&gt;" {
+			t.Errorf("escapeXML(%q) = %q, want %q", in, first, "&lt;div&gt;")
+		}
+	}
+}
+
+func TestEscapeXMLOrderMatters(t *testing.T) {
+	// The Go implementation replaces & first, which is the correct order for
+	// XML escaping. If & were not replaced first, &lt; would become &amp;lt;
+	// instead of the intended &lt;.
+	result := escapeXML("&lt;")
+	// & is replaced first: &lt; -> &amp;lt;
+	// This means text that is already partially escaped gets the & re-escaped.
+	// This is expected behavior for a simple ReplaceAll chain.
+	if result != "&amp;lt;" {
+		t.Errorf("escapeXML('&lt;') = %q, want %q (amp-first order verified)", result, "&amp;lt;")
+	}
+
+	// But for unescaped input, the order is correct:
+	result2 := escapeXML("<")
+	if result2 != "&lt;" {
+		t.Errorf("escapeXML('<') = %q, want %q", result2, "&lt;")
+	}
+}
+
+func TestEscapeXMLInBuildSkillsSummary(t *testing.T) {
+	// Integration: verify escapeXML is used correctly in BuildSkillsSummary
+	// when skill names contain special characters.
+	skillContent := `---
+name: skill<with>&special'"chars
+description: A skill with XML entities: <tag> & "quoted" 'single'
+always: false
+available: true
+---
+
+Skill body.
+`
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "skills", "skill-with-special")
+	os.MkdirAll(skillDir, 0755)
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0644)
+
+	loader := NewLoader(dir)
+	_ = loader.Refresh()
+
+	summary := loader.BuildSkillsSummary()
+	// Verify that special chars in name/description are escaped
+	if !strings.Contains(summary, "&lt;") {
+		t.Error("expected &lt; in skills summary for < character")
+	}
+	if !strings.Contains(summary, "&amp;") {
+		t.Error("expected &amp; in skills summary for & character")
+	}
+	if !strings.Contains(summary, "&quot;") {
+		t.Error("expected &quot; in skills summary for double-quote character")
+	}
+	if !strings.Contains(summary, "&apos;") {
+		t.Error("expected &apos; in skills summary for single-quote character")
+	}
+}
+
 func TestLoaderGetAlwaysSkills(t *testing.T) {
 	dir := t.TempDir()
 

@@ -885,50 +885,189 @@ func TestContainsVulnerableUncPath(t *testing.T) {
 	}
 }
 
-// ─── Upstream Quality: Path Conversion Roundtrip ─────────────────────────────
+// ─── Upstream Quality: windowsPaths parity tests ──────────────────────────────
+// Ported from upstream: src/utils/__tests__/windowsPaths.test.ts
 
-func TestWindowsPathRoundtrip(t *testing.T) {
-	// Windows → POSIX → Windows should return equivalent path.
-	// Invariant: roundtrip should preserve semantic meaning.
-	paths := []string{
-		`C:\Users\foo`,
-		`C:\Users\foo\bar.txt`,
-		`E:\workspace\project`,
+func TestWindowsToPosixPathDriveLetterLowercased(t *testing.T) {
+	// Upstream: "converts drive letter path to posix" + "lowercases the drive letter"
+	tests := []struct {
+		input, want string
+	}{
+		{`C:\Users\foo`, "/c/Users/foo"},
+		{`D:\Work\project`, "/d/Work/project"},
 	}
-
-	for _, p := range paths {
-		posix := windowsToPosixPath(p)
-		roundtrip := PosixToWindowsPath(posix)
-		// Normalize both for comparison (lowercase, forward slashes)
-		origNorm := strings.ToLower(strings.ReplaceAll(p, `\`, `/`))
-		rtNorm := strings.ToLower(strings.ReplaceAll(roundtrip, `\`, `/`))
-		if origNorm != rtNorm {
-			t.Errorf("Roundtrip %q → %q → %q (original: %q, roundtrip: %q)",
-				p, posix, roundtrip, origNorm, rtNorm)
+	for _, tt := range tests {
+		got := windowsToPosixPath(tt.input)
+		if got != tt.want {
+			t.Errorf("windowsToPosixPath(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 }
 
+func TestWindowsToPosixPathLowercaseDriveInput(t *testing.T) {
+	// Upstream: "handles lowercase drive letter input"
+	got := windowsToPosixPath(`e:\data`)
+	want := "/e/data"
+	if got != want {
+		t.Errorf("windowsToPosixPath(%q) = %q, want %q", `e:\data`, got, want)
+	}
+}
+
 func TestWindowsToPosixPathUNC(t *testing.T) {
-	got := windowsToPosixPath(`\\server\share`)
-	want := `//server/share`
+	// Upstream: "converts UNC path"
+	got := windowsToPosixPath(`\\server\share\dir`)
+	want := "//server/share/dir"
 	if got != want {
-		t.Errorf("windowsToPosixPath(UNC) = %q, want %q", got, want)
+		t.Errorf("windowsToPosixPath(%q) = %q, want %q", `\\server\share\dir`, got, want)
 	}
 }
 
-func TestWindowsToPosixPathDrive(t *testing.T) {
-	got := windowsToPosixPath(`C:\Users\foo`)
-	want := `/c/Users/foo`
+func TestWindowsToPosixPathRootDrive(t *testing.T) {
+	// Upstream: "converts root drive path"
+	got := windowsToPosixPath(`D:\`)
+	want := "/d/"
 	if got != want {
-		t.Errorf("windowsToPosixPath(drive) = %q, want %q", got, want)
+		t.Errorf("windowsToPosixPath(%q) = %q, want %q", `D:\`, got, want)
 	}
 }
 
-func TestWindowsToPosixPathRelative(t *testing.T) {
-	got := windowsToPosixPath(`relative\path`)
-	want := `relative/path`
+func TestWindowsToPosixPathRelativeFlipsBackslashes(t *testing.T) {
+	// Upstream: "converts relative path by flipping backslashes"
+	got := windowsToPosixPath(`src\main.ts`)
+	want := "src/main.ts"
 	if got != want {
-		t.Errorf("windowsToPosixPath(relative) = %q, want %q", got, want)
+		t.Errorf("windowsToPosixPath(%q) = %q, want %q", `src\main.ts`, got, want)
+	}
+}
+
+func TestWindowsToPosixPathForwardSlashInDrivePath(t *testing.T) {
+	// Upstream: "handles forward slashes in windows drive path"
+	// The regex matches both / and \ after drive letter
+	got := windowsToPosixPath(`C:/Users/foo`)
+	want := "/c/Users/foo"
+	if got != want {
+		t.Errorf("windowsToPosixPath(%q) = %q, want %q", `C:/Users/foo`, got, want)
+	}
+}
+
+func TestWindowsToPosixPathAlreadyPosixPassthrough(t *testing.T) {
+	// Upstream: "already-posix relative path passes through"
+	got := windowsToPosixPath("src/main.ts")
+	want := "src/main.ts"
+	if got != want {
+		t.Errorf("windowsToPosixPath(%q) = %q, want %q", "src/main.ts", got, want)
+	}
+}
+
+func TestWindowsToPosixPathDeeplyNested(t *testing.T) {
+	// Upstream: "handles deeply nested path"
+	got := windowsToPosixPath(`C:\Users\me\Documents\project\src\index.ts`)
+	want := "/c/Users/me/Documents/project/src/index.ts"
+	if got != want {
+		t.Errorf("windowsToPosixPath(deeply nested) = %q, want %q", got, want)
+	}
+}
+
+func TestPosixToWindowsPathMSYS2Drive(t *testing.T) {
+	// Upstream: "converts MSYS2/Git Bash drive path to windows"
+	got := PosixToWindowsPath("/c/Users/foo")
+	want := `C:\Users\foo`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", "/c/Users/foo", got, want)
+	}
+}
+
+func TestPosixToWindowsPathUppercaseDriveLetter(t *testing.T) {
+	// Upstream: "uppercases the drive letter"
+	got := PosixToWindowsPath("/d/Work/project")
+	want := `D:\Work\project`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", "/d/Work/project", got, want)
+	}
+}
+
+func TestPosixToWindowsPathCygdrivePath(t *testing.T) {
+	// Upstream: "converts cygdrive path"
+	got := PosixToWindowsPath("/cygdrive/d/work")
+	want := `D:\work`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", "/cygdrive/d/work", got, want)
+	}
+}
+
+func TestPosixToWindowsPathCygdriveRootPath(t *testing.T) {
+	// Upstream: "converts cygdrive root path"
+	got := PosixToWindowsPath("/cygdrive/c/")
+	want := `C:\`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", "/cygdrive/c/", got, want)
+	}
+}
+
+func TestPosixToWindowsPathUNCPosix(t *testing.T) {
+	// Upstream: "converts UNC posix path to windows UNC"
+	got := PosixToWindowsPath("//server/share/dir")
+	want := `\\server\share\dir`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", "//server/share/dir", got, want)
+	}
+}
+
+func TestPosixToWindowsPathRootDrivePosix(t *testing.T) {
+	// Upstream: "converts root drive posix path"
+	got := PosixToWindowsPath("/d/")
+	want := `D:\`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", "/d/", got, want)
+	}
+}
+
+func TestPosixToWindowsPathBareDriveMount(t *testing.T) {
+	// Upstream: "converts bare drive mount (no trailing slash)"
+	got := PosixToWindowsPath("/d")
+	want := `D:\`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", "/d", got, want)
+	}
+}
+
+func TestPosixToWindowsPathRelativeFlipsSlashes(t *testing.T) {
+	// Upstream: "converts relative path by flipping forward slashes"
+	got := PosixToWindowsPath("src/main.ts")
+	want := `src\main.ts`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", "src/main.ts", got, want)
+	}
+}
+
+func TestPosixToWindowsPathAlreadyWindowsRelative(t *testing.T) {
+	// Upstream: "handles already-windows relative path"
+	got := PosixToWindowsPath(`foo\bar`)
+	want := `foo\bar`
+	if got != want {
+		t.Errorf("PosixToWindowsPath(%q) = %q, want %q", `foo\bar`, got, want)
+	}
+}
+
+func TestWindowsPathRoundtripWinToPosixToWin(t *testing.T) {
+	// Upstream: "drive path round-trips windows -> posix -> windows"
+	original := `C:\Users\foo\bar`
+	posix := windowsToPosixPath(original)
+	back := PosixToWindowsPath(posix)
+	// Normalize for comparison
+	origNorm := strings.ToLower(strings.ReplaceAll(original, `\`, `/`))
+	backNorm := strings.ToLower(strings.ReplaceAll(back, `\`, `/`))
+	if origNorm != backNorm {
+		t.Errorf("Roundtrip %q → %q → %q (norm: %q vs %q)", original, posix, back, origNorm, backNorm)
+	}
+}
+
+func TestWindowsPathRoundtripPosixToWinToPosix(t *testing.T) {
+	// Upstream: "drive path round-trips posix -> windows -> posix"
+	original := "/c/Users/foo/bar"
+	win := PosixToWindowsPath(original)
+	back := windowsToPosixPath(win)
+	if back != original {
+		t.Errorf("Roundtrip %q → %q → %q", original, win, back)
 	}
 }

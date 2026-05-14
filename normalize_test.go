@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -1315,6 +1316,116 @@ func TestNormalizeAPIMessagesIdempotent(t *testing.T) {
 	for i := range first {
 		if first[i].Role != second[i].Role {
 			t.Errorf("idempotency violation: message %d role changed from %q to %q", i, first[i].Role, second[i].Role)
+		}
+	}
+}
+
+// ─── Upstream Quality: NormalizeWhitespace Edge Cases ───────────────────────
+
+func TestNormalizeWhitespaceUnicodePreservation(t *testing.T) {
+	// normalizeWhitespace is about collapsing blank lines and trimming trailing
+	// spaces/tabs. It does NOT strip unicode or BOM characters. Unicode text
+	// should be preserved as-is (matching upstream's sanitization principle that
+	// normalizeWhitespace doesn't strip unicode).
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"CJK characters preserved", "你好\n\n\n世界", "你好\n\n世界"},
+		{"emoji preserved", "Hello 🌍\n\n\nWorld  ", "Hello 🌍\n\nWorld"},
+		{"accented chars preserved", "café\n\n\trésumé  ", "café\n\n\trésumé"}, // leading tab on line preserved, trailing space trimmed
+		{"unicode whitespace not trimmed (only space/tab)", "hello\xc2\xa0\n", "hello\xc2\xa0"}, // non-breaking space not trimmed
+		{"BOM preserved (not stripped by normalizeWhitespace)", "\uFEFFhello\n\nworld", "\uFEFFhello\n\nworld"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeWhitespace(tt.input)
+			if got != tt.want {
+				t.Errorf("normalizeWhitespace(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeWhitespaceControlCharacters(t *testing.T) {
+	// normalizeWhitespace only trims space and tab from line endings (\t).
+	// Other control characters like \r (carriage return) are NOT trimmed
+	// because TrimRight(line, " \t") only targets space and tab.
+	// This matches upstream's behavior where normalizeWhitespace is purely
+	// a whitespace collapser, not a general sanitization function.
+
+	// \r is not trimmed (only space and tab are)
+	input := "line1\r\n\n\nline2"
+	got := normalizeWhitespace(input)
+	// \r survives because TrimRight(line, " \t") doesn't strip it
+	want := "line1\r\n\nline2"
+	if got != want {
+		t.Errorf("normalizeWhitespace with \\r: got %q, want %q", got, want)
+	}
+
+	// Tab at end of line IS trimmed
+	input2 := "line1\t\n\n\nline2\t"
+	got2 := normalizeWhitespace(input2)
+	want2 := "line1\n\nline2"
+	if got2 != want2 {
+		t.Errorf("normalizeWhitespace with trailing tabs: got %q, want %q", got2, want2)
+	}
+}
+
+func TestNormalizeWhitespaceLargeBlankBlocks(t *testing.T) {
+	// Verify that 10, 50, 100 blank lines are all collapsed to exactly 1.
+	for _, n := range []int{10, 50, 100} {
+		// Create n blank lines between two lines of text
+		lines := "a" + strings.Repeat("\n", n+1) + "b" // n+1 = n blank lines
+		got := normalizeWhitespace(lines)
+		want := "a\n\nb"
+		if got != want {
+			t.Errorf("normalizeWhitespace with %d blank lines: got %q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestNormalizeWhitespaceSingleLineNoTrailing(t *testing.T) {
+	// A single line with no trailing newline should remain unchanged.
+	inputs := []string{
+		"hello",
+		"a   ",
+		"no trailing spaces",
+	}
+	for _, in := range inputs {
+		got := normalizeWhitespace(in)
+		want := strings.TrimRight(in, " \t")
+		if got != want {
+			t.Errorf("normalizeWhitespace(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeAPIMessagesIdempotentRepeated(t *testing.T) {
+	// Verify that running NormalizeAPIMessages many times doesn't keep
+	// changing the output (strong idempotency).
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Hello"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Hi"}},
+			},
+		},
+	}
+
+	first := NormalizeAPIMessages(msgs)
+	for i := 0; i < 10; i++ {
+		next := NormalizeAPIMessages(first)
+		if len(next) != len(first) {
+			t.Fatalf("NormalizeAPIMessages changed length on iteration %d", i)
 		}
 	}
 }

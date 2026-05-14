@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -141,3 +142,86 @@ func TestBuildSystemPromptWithSkills(t *testing.T) {
 // Suppress unused import warnings
 var _ = skills.NewLoader
 var _ = tools.NewRegistry
+
+// ---------------------------------------------------------------------------
+// fnvHash — system_prompt.go:609
+// ---------------------------------------------------------------------------
+
+func TestFnvHashDeterminism(t *testing.T) {
+	// Same input always produces same hash
+	input := "test content for hashing"
+	h1 := fnvHash(input)
+	h2 := fnvHash(input)
+	if h1 != h2 {
+		t.Errorf("fnvHash not deterministic: %d != %d", h1, h2)
+	}
+}
+
+func TestFnvHashDifferentInputs(t *testing.T) {
+	// Different inputs should produce different hashes (collision resistance)
+	inputs := []string{
+		"hello",
+		"world",
+		"hello world",
+		"Hello",        // case difference
+		"hello ",       // trailing space
+		"hello\n",      // trailing newline
+		"",             // empty string
+		"こんにちは",     // unicode
+		"a very long string that tests the hash function with more characters to ensure good distribution",
+	}
+
+	hashes := make(map[uint64]string)
+	for _, input := range inputs {
+		h := fnvHash(input)
+		if existing, ok := hashes[h]; ok {
+			t.Errorf("collision: %q and %q both hash to %d", existing, input, h)
+		}
+		hashes[h] = input
+	}
+}
+
+func TestFnvHashEmptyString(t *testing.T) {
+	// Empty string should hash to the FNV-1a 64-bit initial value
+	h := fnvHash("")
+	// FNV-1a 64-bit offset base: 14695981039346656037 (0xcbf29ce484222325)
+	if h != 14695981039346656037 {
+		t.Errorf("fnvHash(\"\") = %d, want 14695981039346656037", h)
+	}
+}
+
+func TestFnvHashKnownValues(t *testing.T) {
+	// Known FNV-1a 64-bit values for verification
+	// These are the actual values produced by Go's FNV-1a 64-bit implementation
+	tests := []struct {
+		input string
+		want  uint64
+	}{
+		{"", 14695981039346656037},  // offset base
+		{"a", 12638187200555641996},
+	}
+	for _, tt := range tests {
+		got := fnvHash(tt.input)
+		if got != tt.want {
+			t.Errorf("fnvHash(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestFnvHash64BitRange(t *testing.T) {
+	// Hash values should span the full 64-bit range
+	var minHash, maxHash uint64 = ^uint64(0), 0
+	for i := 0; i < 1000; i++ {
+		h := fnvHash(fmt.Sprintf("input-%d", i))
+		if h < minHash {
+			minHash = h
+		}
+		if h > maxHash {
+			maxHash = h
+		}
+	}
+	// Verify reasonable spread (not all values clustered)
+	if maxHash-minHash < 1000000 {
+		t.Errorf("hash values too clustered: min=%d, max=%d, range=%d", minHash, maxHash, maxHash-minHash)
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"path/filepath"
 	"testing"
@@ -362,6 +363,108 @@ func TestCalculateUSDCostEdgeCases(t *testing.T) {
 }
 
 // ─── Upstream Quality: Cost tracker token count accuracy ─────────────────────
+
+// ─── Upstream Quality: modelCost parity tests ─────────────────────────────────
+// Ported from upstream: src/utils/__tests__/modelCost.test.ts
+// The upstream tests formatPrice and formatModelPricing — pure formatting functions
+// that operate on the same COST_TIER / ModelPricing data. We port the invariants
+// that can be tested against the existing Go pricing table and data.
+
+// formatPrice mirrors the upstream function: integers get "$3", decimals get "$0.80".
+func formatPrice(price float64) string {
+	if price == float64(int(price)) {
+		return fmt.Sprintf("$%d", int(price))
+	}
+	return fmt.Sprintf("$%.2f", price)
+}
+
+// formatModelPricing mirrors the upstream function.
+func formatModelPricing(inputTokens, outputTokens float64) string {
+	return fmt.Sprintf("%s/%s per Mtok", formatPrice(inputTokens), formatPrice(outputTokens))
+}
+
+func TestFormatPriceInteger(t *testing.T) {
+	// Upstream: "formats integers without decimals: 3 → '$3'"
+	tests := []struct {
+		input float64
+		want  string
+	}{
+		{3, "$3"},
+		{150, "$150"},
+		{1, "$1"},
+	}
+	for _, tt := range tests {
+		got := formatPrice(tt.input)
+		if got != tt.want {
+			t.Errorf("formatPrice(%v) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestFormatPriceDecimal(t *testing.T) {
+	// Upstream: "formats floats with 2 decimals: 0.8 → '$0.80'"
+	tests := []struct {
+		input float64
+		want  string
+	}{
+		{0.8, "$0.80"},
+		{22.5, "$22.50"},
+	}
+	for _, tt := range tests {
+		got := formatPrice(tt.input)
+		if got != tt.want {
+			t.Errorf("formatPrice(%v) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestCostTierFormatting(t *testing.T) {
+	// Upstream: "COST_TIER_3_15: $3/$15 (Sonnet tier)" etc.
+	// These verify that the pricing constants format correctly, matching upstream tiers.
+	tests := []struct {
+		name         string
+		input, output float64
+		want         string
+	}{
+		{"Sonnet tier", 3, 15, "$3/$15 per Mtok"},
+		{"Opus 4 tier", 15, 75, "$15/$75 per Mtok"},
+		{"Opus 4.5 tier", 5, 25, "$5/$25 per Mtok"},
+		{"Haiku 3.5", 0.8, 4, "$0.80/$4 per Mtok"},
+		{"Haiku 4.5", 1, 5, "$1/$5 per Mtok"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatModelPricing(tt.input, tt.output)
+			if got != tt.want {
+				t.Errorf("formatModelPricing(%v, %v) = %q, want %q", tt.input, tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModelPricingMatchesCostTiers(t *testing.T) {
+	// Verify that the Go ModelPricing table values match the upstream COST_TIER constants
+	// when formatted through formatModelPricing.
+	expectedFormats := map[string]string{
+		"claude-sonnet-4-20250514":   "$3/$15 per Mtok",
+		"claude-3-5-sonnet-20241022": "$3/$15 per Mtok",
+		"claude-opus-4-20250514":     "$15/$75 per Mtok",
+		"claude-opus-4-5-20250610":   "$5/$25 per Mtok",
+		"claude-3-5-haiku-20241022":  "$0.80/$4 per Mtok",
+		"claude-haiku-4-5-20250610":  "$1/$5 per Mtok",
+	}
+	for model, want := range expectedFormats {
+		p, ok := ModelPricing[model]
+		if !ok {
+			t.Errorf("ModelPricing missing entry for %q", model)
+			continue
+		}
+		got := formatModelPricing(p.Input, p.Output)
+		if got != want {
+			t.Errorf("ModelPricing[%q] formats as %q, want %q", model, got, want)
+		}
+	}
+}
 
 func TestCostTrackerTokenCountAccuracy(t *testing.T) {
 	ct := NewCostTracker()

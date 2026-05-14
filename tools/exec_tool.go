@@ -1780,14 +1780,14 @@ func windowsToPosixPath(windowsPath string) string {
 func PosixToWindowsPath(posixPath string) string {
 	// UNC paths: //server/share → \\server\share
 	if strings.HasPrefix(posixPath, "//") {
-		return `\\` + posixPath[2:]
+		return `\\` + strings.ReplaceAll(posixPath[2:], "/", `\`)
 	}
 
 	// Cygwin drive prefix: /cygdrive/x/... → X:\...
 	if strings.HasPrefix(posixPath, "/cygdrive/") {
 		rest := posixPath[len("/cygdrive/"):]
 		if len(rest) >= 2 && isLetter(rune(rest[0])) && rest[1] == '/' {
-			return strings.ToUpper(string(rest[0])) + `:\` + rest[2:]
+			return strings.ToUpper(string(rest[0])) + `:\` + strings.ReplaceAll(rest[2:], "/", `\`)
 		}
 	}
 
@@ -1819,7 +1819,7 @@ func PosixToWindowsPath(posixPath string) string {
 
 	// Drive letter paths: /x/... → X:\...
 	if len(posixPath) >= 3 && posixPath[0] == '/' && isLetter(rune(posixPath[1])) && posixPath[2] == '/' {
-		return strings.ToUpper(string(posixPath[1])) + `:\` + posixPath[3:]
+		return strings.ToUpper(string(posixPath[1])) + `:\` + strings.ReplaceAll(posixPath[3:], "/", `\`)
 	}
 	// Bare drive: /x → X:\
 	if len(posixPath) == 2 && posixPath[0] == '/' && isLetter(rune(posixPath[1])) {

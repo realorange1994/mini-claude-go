@@ -342,10 +342,10 @@ func TestBuildFolderListing(t *testing.T) {
 	if result == "" {
 		t.Error("expected non-empty folder listing")
 	}
-	if !contains(result, "sub1") {
+	if !containsInListing(result, "sub1") {
 		t.Error("folder listing should contain 'sub1'")
 	}
-	if !contains(result, "file1.txt") {
+	if !containsInListing(result, "file1.txt") {
 		t.Error("folder listing should contain 'file1.txt'")
 	}
 }
@@ -365,7 +365,7 @@ func TestBuildFolderListingLimit(t *testing.T) {
 	}
 
 	result := buildFolderListing(dir, dir, 3, 2)
-	if !contains(result, "...") {
+	if !containsInListing(result, "...") {
 		t.Error("folder listing should contain truncation marker")
 	}
 }
@@ -376,7 +376,7 @@ func TestBuildFolderListingHidesHidden(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, ".hidden"), []byte("secret"), 0644)
 
 	result := buildFolderListing(dir, dir, 200, 2)
-	if contains(result, ".hidden") {
+	if containsInListing(result, ".hidden") {
 		t.Error("folder listing should not contain hidden files")
 	}
 }
@@ -402,6 +402,6 @@ func TestGlobMatch(t *testing.T) {
 	}
 }
 
-func contains(s, sub string) bool {
-	return len(s) > 0 && len(sub) > 0 && (s == sub || (len(s) > len(sub) && (s[:len(sub)] == sub || s[len(s)-len(sub):] == sub || contains(s[1:], sub))))
+func containsInListing(s, sub string) bool {
+	return len(s) > 0 && len(sub) > 0 && (s == sub || (len(s) > len(sub) && (s[:len(sub)] == sub || s[len(s)-len(sub):] == sub || containsInListing(s[1:], sub))))
 }

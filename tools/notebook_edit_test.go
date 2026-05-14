@@ -375,3 +375,279 @@ func TestNotebookEditFileModifiedSinceRead(t *testing.T) {
 func containsStr(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
+
+// ============================================================================
+// Upstream Quality: Cell ID Parsing Edge Cases (port from parseCellId tests)
+// ============================================================================
+
+func TestFindCellIndexCellNFormat(t *testing.T) {
+	cells := []nbCell{
+		{CellType: "code", Source: []string{"a = 1\n"}, ID: "cell-0"},
+		{CellType: "code", Source: []string{"b = 2\n"}, ID: "cell-1"},
+		{CellType: "markdown", Source: []string{"# Title\n"}, ID: "cell-2"},
+	}
+
+	tests := []struct {
+		name   string
+		cellID string
+		want   int
+	}{
+		{"cell-0", "cell-0", 0},
+		{"cell-1", "cell-1", 1},
+		{"cell-2", "cell-2", 2},
+		{"cell-100 (out of range)", "cell-100", -1},
+		{"cell- (no number)", "cell-", -1},
+		{"cell-abc (non-numeric)", "cell-abc", -1},
+		{"other-format", "other-format", -1},
+		// Note: empty string "" matches cell 0 via source substring fallback
+		// (strings.Contains(src, "") is always true), so Go returns 0 not -1
+		{"empty string", "", 0},
+		// Note: "cell-0-extra" -- fmt.Sscanf("cell-%d") parses idx=0 (trailing text ignored)
+		{"cell-0-extra (trailing text)", "cell-0-extra", 0},
+		{"cell--1 (negative)", "cell--1", -1},
+		{"actual cell ID match", "cell-0", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := findCellIndex(cells, tt.cellID)
+			if got != tt.want {
+				t.Errorf("findCellIndex(cells, %q) = %d, want %d", tt.cellID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindCellIndexLeadingZeros(t *testing.T) {
+	// fmt.Sscanf parses "007" as 7, so cell-007 should match index 7
+	cells := make([]nbCell, 10)
+	for i := range cells {
+		cells[i] = nbCell{CellType: "code", Source: []string{""}, ID: ""}
+	}
+
+	got := findCellIndex(cells, "cell-007")
+	if got != 7 {
+		t.Errorf("findCellIndex with cell-007 = %d, want 7", got)
+	}
+}
+
+func TestFindCellIndexActualCellID(t *testing.T) {
+	cells := []nbCell{
+		{CellType: "code", Source: []string{"a = 1\n"}, ID: "abc-123"},
+		{CellType: "code", Source: []string{"b = 2\n"}, ID: "xyz-456"},
+	}
+
+	// Match by actual cell ID (not cell-N format)
+	got := findCellIndex(cells, "xyz-456")
+	if got != 1 {
+		t.Errorf("findCellIndex by actual ID = %d, want 1", got)
+	}
+}
+
+func TestFindCellIndexSourcePrefixMatch(t *testing.T) {
+	cells := []nbCell{
+		{CellType: "code", Source: []string{"import numpy as np\n"}, ID: ""},
+		{CellType: "code", Source: []string{"import pandas as pd\n"}, ID: ""},
+	}
+
+	// Source prefix match: "import numpy" should match first cell
+	got := findCellIndex(cells, "import numpy")
+	if got != 0 {
+		t.Errorf("findCellIndex by source prefix = %d, want 0", got)
+	}
+}
+
+func TestFindCellIndexSourceSubstringMatch(t *testing.T) {
+	cells := []nbCell{
+		{CellType: "code", Source: []string{"x = 1\n"}, ID: ""},
+		{CellType: "code", Source: []string{"y = x + 1\n"}, ID: ""},
+	}
+
+	// Source substring match
+	got := findCellIndex(cells, "x + 1")
+	if got != 1 {
+		t.Errorf("findCellIndex by source substring = %d, want 1", got)
+	}
+}
+
+func TestFindCellIndexPriorityCellIDOverSource(t *testing.T) {
+	// cell-N format should take priority over source substring matching
+	cells := []nbCell{
+		{CellType: "code", Source: []string{"cell-0 is here\n"}, ID: "real-id-0"},
+		{CellType: "code", Source: []string{"cell-1 is here\n"}, ID: "real-id-1"},
+	}
+
+	// cell-0 should match index 0 via cell-N format, not source substring
+	got := findCellIndex(cells, "cell-0")
+	if got != 0 {
+		t.Errorf("findCellIndex should prefer cell-N format: got %d, want 0", got)
+	}
+}
+
+func TestSourceStringString(t *testing.T) {
+	got := sourceString("hello world")
+	if got != "hello world" {
+		t.Errorf("sourceString(string) = %q, want %q", got, "hello world")
+	}
+}
+
+func TestSourceStringSliceAny(t *testing.T) {
+	src := []any{"line1\n", "line2\n", "line3"}
+	got := sourceString(src)
+	want := "line1\nline2\nline3"
+	if got != want {
+		t.Errorf("sourceString([]any) = %q, want %q", got, want)
+	}
+}
+
+func TestSourceStringSliceString(t *testing.T) {
+	src := []string{"a\n", "b\n"}
+	got := sourceString(src)
+	if got != "a\nb\n" {
+		t.Errorf("sourceString([]string) = %q, want %q", got, "a\nb\n")
+	}
+}
+
+func TestSourceStringNil(t *testing.T) {
+	got := sourceString(nil)
+	if got != "" {
+		t.Errorf("sourceString(nil) = %q, want empty", got)
+	}
+}
+
+// ============================================================================
+// Upstream Quality: Notebook Cell Merging (port from mapNotebookCells tests)
+// ============================================================================
+
+func TestNotebookEditMultipleCellsPreserved(t *testing.T) {
+	// Port of "merges adjacent text blocks" invariant: multiple cells should
+	// be preserved as separate entities after edit operations
+	r := NewRegistry()
+	tool := NewNotebookEditTool(r)
+
+	dir := t.TempDir()
+	nb := nbDocument{
+		NbFormat:      4,
+		NbFormatMinor: 5,
+		Cells: []nbCell{
+			{CellType: "code", Source: []string{"a = 1\n"}, ID: "cell-0"},
+			{CellType: "code", Source: []string{"b = 2\n"}, ID: "cell-1"},
+			{CellType: "code", Source: []string{"c = 3\n"}, ID: "cell-2"},
+		},
+	}
+	data, _ := json.MarshalIndent(nb, "", "  ")
+	fp := filepath.Join(dir, "test.ipynb")
+	os.WriteFile(fp, data, 0644)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+
+	// Edit middle cell
+	result := tool.Execute(map[string]any{
+		"notebook_path": fp,
+		"cell_id":       "cell-1",
+		"new_source":    "b = 20\n",
+		"edit_mode":     "replace",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", result.Output)
+	}
+
+	// Verify all cells preserved
+	data, _ = os.ReadFile(fp)
+	var saved nbDocument
+	json.Unmarshal(data, &saved)
+	if len(saved.Cells) != 3 {
+		t.Errorf("expected 3 cells preserved, got %d", len(saved.Cells))
+	}
+	if sourceString(saved.Cells[0].Source) != "a = 1\n" {
+		t.Errorf("cell 0 should be unchanged, got: %q", sourceString(saved.Cells[0].Source))
+	}
+	if !containsStr(sourceString(saved.Cells[1].Source), "b = 20") {
+		t.Errorf("cell 1 should be updated, got: %q", sourceString(saved.Cells[1].Source))
+	}
+	if sourceString(saved.Cells[2].Source) != "c = 3\n" {
+		t.Errorf("cell 2 should be unchanged, got: %q", sourceString(saved.Cells[2].Source))
+	}
+}
+
+func TestNotebookEditPreservesCellTypes(t *testing.T) {
+	// Markdown cells should keep their type when not explicitly changed
+	r := NewRegistry()
+	tool := NewNotebookEditTool(r)
+
+	dir := t.TempDir()
+	nb := nbDocument{
+		NbFormat:      4,
+		NbFormatMinor: 5,
+		Cells: []nbCell{
+			{CellType: "markdown", Source: []string{"# Title\n"}, ID: "cell-0"},
+			{CellType: "code", Source: []string{"print(1)\n"}, ID: "cell-1"},
+			{CellType: "markdown", Source: []string{"## Conclusion\n"}, ID: "cell-2"},
+		},
+	}
+	data, _ := json.MarshalIndent(nb, "", "  ")
+	fp := filepath.Join(dir, "test.ipynb")
+	os.WriteFile(fp, data, 0644)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+
+	// Edit markdown cell without specifying cell_type
+	result := tool.Execute(map[string]any{
+		"notebook_path": fp,
+		"cell_id":       "cell-0",
+		"new_source":    "# New Title\n",
+		"edit_mode":     "replace",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", result.Output)
+	}
+
+	data, _ = os.ReadFile(fp)
+	var saved nbDocument
+	json.Unmarshal(data, &saved)
+	if saved.Cells[0].CellType != "markdown" {
+		t.Errorf("markdown cell type should be preserved, got: %s", saved.Cells[0].CellType)
+	}
+	if saved.Cells[2].CellType != "markdown" {
+		t.Errorf("untouched markdown cell type should be preserved, got: %s", saved.Cells[2].CellType)
+	}
+}
+
+func TestNotebookEditInsertAtEnd(t *testing.T) {
+	// Insert at position beyond last cell should append
+	r := NewRegistry()
+	tool := NewNotebookEditTool(r)
+
+	dir := t.TempDir()
+	nb := nbDocument{
+		NbFormat:      4,
+		NbFormatMinor: 5,
+		Cells: []nbCell{
+			{CellType: "code", Source: []string{"a = 1\n"}, ID: "cell-0"},
+		},
+	}
+	data, _ := json.MarshalIndent(nb, "", "  ")
+	fp := filepath.Join(dir, "test.ipynb")
+	os.WriteFile(fp, data, 0644)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+
+	result := tool.Execute(map[string]any{
+		"notebook_path": fp,
+		"cell_id":       "cell-999", // beyond range
+		"new_source":    "b = 2\n",
+		"edit_mode":     "insert",
+		"cell_type":     "code",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got: %s", result.Output)
+	}
+
+	data, _ = os.ReadFile(fp)
+	var saved nbDocument
+	json.Unmarshal(data, &saved)
+	if len(saved.Cells) != 2 {
+		t.Fatalf("expected 2 cells after insert at end, got %d", len(saved.Cells))
+	}
+	// New cell should be at the end
+	if sourceString(saved.Cells[1].Source) != "b = 2\n" {
+		t.Errorf("inserted cell should be at end, got: %q", sourceString(saved.Cells[1].Source))
+	}
+}

@@ -102,7 +102,9 @@ func GetModelForAPI(model string) string {
 }
 
 // isEnvTruthy checks if an environment variable is set to a truthy value.
+// Matches upstream's isEnvTruthy() in envUtils.ts:32-36.
 func isEnvTruthy(key string) bool {
 	v := strings.ToLower(os.Getenv(key))
-	return v == "1" || v == "true" || v == "yes"
+	v = strings.TrimSpace(v)
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }

@@ -612,3 +612,119 @@ func TestStreamProgressRecordTokens(t *testing.T) {
 		t.Errorf("expected 80 tokens, got %d", p.TokensRecv)
 	}
 }
+
+// ============================================================================
+// Upstream Quality: Refusal and Redacted Thinking (port from stream tests)
+// ============================================================================
+
+func TestCollectHandlerIsRefusal(t *testing.T) {
+	h := NewCollectHandler()
+	if h.IsRefusal() {
+		t.Error("should not be refusal by default")
+	}
+
+	h.Handle(StreamChunk{Type: ChunkTypeRefusal})
+	if !h.IsRefusal() {
+		t.Error("should be refusal after ChunkTypeRefusal")
+	}
+}
+
+func TestCollectHandlerRedactedThinkingData(t *testing.T) {
+	h := NewCollectHandler()
+
+	// Initially empty
+	if len(h.RedactedThinkingData()) != 0 {
+		t.Error("redacted thinking data should be empty by default")
+	}
+
+	// Collect redacted thinking blocks
+	h.Handle(StreamChunk{Type: ChunkTypeRedactedThinking, Content: "blob1"})
+	h.Handle(StreamChunk{Type: ChunkTypeRedactedThinking, Content: "blob2"})
+
+	data := h.RedactedThinkingData()
+	if len(data) != 2 {
+		t.Fatalf("expected 2 redacted blobs, got %d", len(data))
+	}
+	if data[0] != "blob1" {
+		t.Errorf("expected first blob 'blob1', got %q", data[0])
+	}
+	if data[1] != "blob2" {
+		t.Errorf("expected second blob 'blob2', got %q", data[1])
+	}
+}
+
+func TestCollectHandlerRedactedThinkingDataReturnsCopy(t *testing.T) {
+	// RedactedThinkingData should return a copy, not the internal slice
+	h := NewCollectHandler()
+	h.Handle(StreamChunk{Type: ChunkTypeRedactedThinking, Content: "blob"})
+
+	data1 := h.RedactedThinkingData()
+	data1[0] = "modified"
+
+	data2 := h.RedactedThinkingData()
+	if data2[0] == "modified" {
+		t.Error("RedactedThinkingData should return a copy, not internal slice")
+	}
+}
+
+// ============================================================================
+// Upstream Quality: ClearAll (port from stream tests)
+// ============================================================================
+
+func TestCollectHandlerClearAll(t *testing.T) {
+	h := NewCollectHandler()
+	h.Handle(StreamChunk{Type: ChunkTypeText, Content: "some text"})
+	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
+	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"cmd":"ls"}`})
+	h.Handle(StreamChunk{Type: ChunkTypeThinking, Content: "thinking..."})
+
+	h.ClearAll()
+
+	if h.Text != "" {
+		t.Errorf("expected empty text after ClearAll, got %q", h.Text)
+	}
+	if len(h.ToolCalls) != 0 {
+		t.Errorf("expected 0 tool calls after ClearAll, got %d", len(h.ToolCalls))
+	}
+	if h.Thinking != "" {
+		t.Errorf("expected empty thinking after ClearAll, got %q", h.Thinking)
+	}
+}
+
+func TestCollectHandlerClearAllOnEmpty(t *testing.T) {
+	// ClearAll on empty handler should not panic
+	h := NewCollectHandler()
+	h.ClearAll()
+}
+
+func TestCollectHandlerClearAllDoesNotClearError(t *testing.T) {
+	h := NewCollectHandler()
+	h.Handle(StreamChunk{Type: ChunkTypeError, Content: "error"})
+	h.ClearAll()
+	// ClearAll only clears text/tool calls/thinking, not error
+	if h.Err == nil {
+		t.Error("ClearAll should not clear error")
+	}
+}
+
+// ============================================================================
+// Upstream Quality: Concurrent enqueue invariant (port: concurrent chunk safety)
+// ============================================================================
+
+func TestCollectHandlerConcurrentChunks(t *testing.T) {
+	// Concurrent Handle calls should not lose data (mutex safety)
+	h := NewCollectHandler()
+
+	const n = 100
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			h.Handle(StreamChunk{Type: ChunkTypeText, Content: "x"})
+		}(i)
+	}
+	// Give goroutines time to finish
+	time.Sleep(100 * time.Millisecond)
+
+	if len(h.Text) != n {
+		t.Errorf("expected %d chars in text, got %d", n, len(h.Text))
+	}
+}

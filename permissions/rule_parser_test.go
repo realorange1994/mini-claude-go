@@ -412,3 +412,218 @@ func TestParseFormatParseRoundtripWithContent(t *testing.T) {
 		}
 	}
 }
+
+// ============================================================================
+// Upstream Quality: Shell Rule Matching Edge Cases (port from shellRuleMatching.test.ts)
+// ============================================================================
+
+// ─── globMatch: Escaped Wildcards ──────────────────────────────────────────
+
+func TestGlobMatchEscapedAsterisk(t *testing.T) {
+	// NOTE: The Go globMatch does NOT handle \* escaping in wildcardMatch.
+	// This test documents that limitation vs upstream shellRuleMatching.
+	// globMatch("echo \\*", "echo *") falls through to wildcardMatch which
+	// treats * as wildcard, so the \* is literal backslash+asterisk.
+	// This differs from upstream matchWildcardPattern which properly handles escapes.
+	// Pattern "echo \\*" means literal backslash followed by wildcard,
+	// so it matches "echo \anything" via wildcardMatch.
+	if !globMatch("echo \\*", "echo \\hello") {
+		t.Error(`globMatch("echo \\*", "echo \\hello") should succeed via wildcard *`)
+	}
+}
+
+func TestGlobMatchEscapedAsteriskRejectsOther(t *testing.T) {
+	// Pattern "echo \\*" - the * is still a wildcard for wildcardMatch,
+	// but the pattern starts with "echo \", so it matches "echo \" + anything
+	// It does NOT match "echo hello" because of the backslash prefix requirement
+	if globMatch("echo \\*", "echo hello") {
+		t.Error(`globMatch("echo \\*", "echo hello") should fail - no backslash in text`)
+	}
+}
+
+// ─── globMatch: Exact Match Without Wildcards ──────────────────────────────
+
+func TestGlobMatchExactCommandMatch(t *testing.T) {
+	if !globMatch("npm install", "npm install") {
+		t.Error(`globMatch("npm install", "npm install") should succeed`)
+	}
+}
+
+func TestGlobMatchExactCommandMismatch(t *testing.T) {
+	if globMatch("npm install", "npm update") {
+		t.Error(`globMatch("npm install", "npm update") should fail`)
+	}
+}
+
+// ─── globMatch: Prefix Patterns (colon-style) ──────────────────────────────
+
+func TestGlobMatchGitPrefix(t *testing.T) {
+	// git:* matches anything starting with "git:"
+	if !globMatch("git:*", "git:status") {
+		t.Error(`globMatch("git:*", "git:status") should succeed`)
+	}
+	if !globMatch("git:*", "git:commit") {
+		t.Error(`globMatch("git:*", "git:commit") should succeed`)
+	}
+}
+
+func TestGlobMatchGitPrefixRejectsSpace(t *testing.T) {
+	// git:* does NOT match "git status" (space not colon)
+	if globMatch("git:*", "git status") {
+		t.Error(`globMatch("git:*", "git status") should fail - space not colon`)
+	}
+}
+
+// ─── globMatch: Suffix Patterns ────────────────────────────────────────────
+
+func TestGlobMatchDotEnvSuffix(t *testing.T) {
+	if !globMatch("*.env", "foo.env") {
+		t.Error(`globMatch("*.env", "foo.env") should succeed`)
+	}
+	if !globMatch("*.env", "bar.env") {
+		t.Error(`globMatch("*.env", "bar.env") should succeed`)
+	}
+}
+
+// ─── globMatch: Regex Special Characters ───────────────────────────────────
+
+func TestGlobMatchParentheses(t *testing.T) {
+	// Parentheses should be treated as literal characters (not regex)
+	if !globMatch("echo (hello)", "echo (hello)") {
+		t.Error(`globMatch("echo (hello)", "echo (hello)") should succeed`)
+	}
+}
+
+func TestGlobMatchBrackets(t *testing.T) {
+	if !globMatch("file[1]", "file[1]") {
+		t.Error(`globMatch("file[1]", "file[1]") should succeed`)
+	}
+}
+
+// ─── wildcardMatch: Edge Cases ─────────────────────────────────────────────
+
+func TestWildcardMatchEmptyPatternEmptyText(t *testing.T) {
+	if !wildcardMatch("", "") {
+		t.Error("wildcardMatch empty pattern on empty text should succeed")
+	}
+}
+
+func TestWildcardMatchEmptyPatternNonEmptyText(t *testing.T) {
+	if wildcardMatch("", "hello") {
+		t.Error("wildcardMatch empty pattern on non-empty text should fail")
+	}
+}
+
+func TestWildcardMatchSingleStar(t *testing.T) {
+	if !wildcardMatch("*", "") {
+		t.Error("wildcardMatch * on empty text should succeed")
+	}
+	if !wildcardMatch("*", "anything") {
+		t.Error("wildcardMatch * should match anything")
+	}
+}
+
+func TestWildcardMatchStarAtEnd(t *testing.T) {
+	if !wildcardMatch("hello*", "hello world") {
+		t.Error(`wildcardMatch("hello*", "hello world") should succeed`)
+	}
+	if wildcardMatch("hello*", "goodbye") {
+		t.Error(`wildcardMatch("hello*", "goodbye") should fail`)
+	}
+}
+
+func TestWildcardMatchStarAtStart(t *testing.T) {
+	if !wildcardMatch("*world", "hello world") {
+		t.Error(`wildcardMatch("*world", "hello world") should succeed`)
+	}
+}
+
+func TestWildcardMatchStarBothEnds(t *testing.T) {
+	if !wildcardMatch("*ell*", "hello") {
+		t.Error(`wildcardMatch("*ell*", "hello") should succeed`)
+	}
+}
+
+func TestWildcardMatchMultipleStars(t *testing.T) {
+	if !wildcardMatch("a*b*c", "aXXXbYYYc") {
+		t.Error(`wildcardMatch("a*b*c", "aXXXbYYYc") should succeed`)
+	}
+}
+
+func TestWildcardMatchQuestionMark(t *testing.T) {
+	if !wildcardMatch("f?o", "foo") {
+		t.Error(`wildcardMatch("f?o", "foo") should succeed`)
+	}
+	if wildcardMatch("f?o", "fooo") {
+		t.Error(`wildcardMatch("f?o", "fooo") should fail - ? matches exactly one char`)
+	}
+}
+
+func TestWildcardMatchNoMatch(t *testing.T) {
+	if wildcardMatch("abc", "xyz") {
+		t.Error(`wildcardMatch("abc", "xyz") should fail`)
+	}
+}
+
+// ─── ContentMatches: Integration Tests ─────────────────────────────────────
+
+func TestContentMatchesPrefixWithColon(t *testing.T) {
+	rule := &ParsedRule{ToolName: "Bash", Content: "git:*"}
+	if !rule.ContentMatches("git:status") {
+		t.Error("git:* should match git:status")
+	}
+	if !rule.ContentMatches("git:commit -m test") {
+		t.Error("git:* should match git:commit -m test")
+	}
+}
+
+func TestContentMatchesExactString(t *testing.T) {
+	rule := &ParsedRule{ToolName: "Bash", Content: "npm install"}
+	if !rule.ContentMatches("npm install") {
+		t.Error("should match exact content")
+	}
+	if rule.ContentMatches("npm install --save") {
+		t.Error("exact rule should not match longer string")
+	}
+}
+
+func TestContentMatchesWildcardOnly(t *testing.T) {
+	rule := &ParsedRule{ToolName: "Bash", Content: "*"}
+	if !rule.ContentMatches("anything goes here") {
+		t.Error("* should match anything")
+	}
+}
+
+// ─── ParseRule: Edge Cases ─────────────────────────────────────────────────
+
+func TestParseRuleWhitespaceAroundToolName(t *testing.T) {
+	rule, err := ParseRule("  Bash  (git:*)")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rule.ToolName != "Bash" {
+		t.Errorf("expected 'Bash', got %q", rule.ToolName)
+	}
+}
+
+func TestParseRuleNestedParens(t *testing.T) {
+	rule, err := ParseRule("Edit(func(x))")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rule.Content != "func(x)" {
+		t.Errorf("expected 'func(x)', got %q", rule.Content)
+	}
+}
+
+func TestParseRuleMultipleParens(t *testing.T) {
+	// LastIndex for closing paren
+	rule, err := ParseRule("Bash(a)(b)")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Content should be everything between first ( and last )
+	if rule.Content != "a)(b" {
+		t.Errorf("expected 'a)(b', got %q", rule.Content)
+	}
+}

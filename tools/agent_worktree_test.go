@@ -87,3 +87,45 @@ func TestWorktreePathConstruction(t *testing.T) {
 		t.Errorf("path should contain agent name, got %s", expectedDir)
 	}
 }
+
+func TestUUIDV4ShortUniqueness(t *testing.T) {
+	// Upstream invariant: N generated UUIDs are all different
+	// Note: 8 hex chars = 32 bits, collisions become likely around sqrt(2^32) ~ 65k
+	// Test with a reasonable sample size
+	const n = 500
+	seen := make(map[string]bool, n)
+	for i := 0; i < n; i++ {
+		id := uuidV4Short()
+		if seen[id] {
+			t.Fatalf("duplicate uuidV4Short at iteration %d: %s", i, id)
+		}
+		seen[id] = true
+	}
+}
+
+func TestUUIDV4ShortFormatRegex(t *testing.T) {
+	// Format validation: always exactly 8 lowercase hex chars
+	for i := 0; i < 100; i++ {
+		id := uuidV4Short()
+		if len(id) != 8 {
+			t.Errorf("uuidV4Short length = %d, want 8", len(id))
+		}
+		for _, c := range id {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+				t.Errorf("uuidV4Short has non-hex char %c in: %s", c, id)
+			}
+		}
+	}
+}
+
+func TestUUIDV4ShortDistribution(t *testing.T) {
+	// Verify hex values span a reasonable range (not all identical or clustered)
+	seen := make(map[string]bool)
+	for i := 0; i < 200; i++ {
+		seen[uuidV4Short()] = true
+	}
+	// With 200 samples from 32-bit space, expect most to be unique
+	if len(seen) < 190 {
+		t.Errorf("too many collisions in uuidV4Short: %d unique out of 200", len(seen))
+	}
+}

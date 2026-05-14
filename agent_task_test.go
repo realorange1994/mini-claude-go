@@ -270,3 +270,74 @@ func TestTaskStateTranscriptPathConcurrentAccess(t *testing.T) {
 		t.Error("transcript path should not be empty after concurrent writes")
 	}
 }
+
+// ============================================================================
+// Upstream Quality: XML Escaping Tests (main package)
+// ============================================================================
+
+func TestEscapeXMLMainPackage(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// All 5 XML entities
+		{"ampersand", "a & b", "a &amp; b"},
+		{"less-than", "<div>", "&lt;div&gt;"},
+		{"greater-than", "a > b", "a &gt; b"},
+		{"double quote", `say "hello"`, `say &quot;hello&quot;`},
+		{"single quote", "it's", "it&apos;s"},
+		{"all five entities", `<a & 'b' "c">`, `&lt;a &amp; &apos;b&apos; &quot;c&quot;&gt;`},
+		// Empty string
+		{"empty string", "", ""},
+		// Normal text unchanged
+		{"normal text", "hello world", "hello world"},
+		// Only special chars
+		{"only ampersands", "&&", "&amp;&amp;"},
+		{"only angle brackets", "<<>>", "&lt;&lt;&gt;&gt;"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := escapeXML(tt.input)
+			if got != tt.want {
+				t.Errorf("escapeXML(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEscapeXMLMainOrderMatters(t *testing.T) {
+	// Verify & is replaced first (correct XML escaping order).
+	result := escapeXML("&lt;")
+	// & replaced first: &lt; -> &amp;lt;
+	if result != "&amp;lt;" {
+		t.Errorf("escapeXML('&lt;') = %q, want %q", result, "&amp;lt;")
+	}
+
+	// Fresh unescaped input:
+	result2 := escapeXML("<")
+	if result2 != "&lt;" {
+		t.Errorf("escapeXML('<') = %q, want %q", result2, "&lt;")
+	}
+}
+
+func TestTaskStatusString(t *testing.T) {
+	tests := []struct {
+		status TaskStatus
+		want   string
+	}{
+		{TaskStatusPending, "pending"},
+		{TaskStatusRunning, "running"},
+		{TaskStatusCompleted, "completed"},
+		{TaskStatusFailed, "failed"},
+		{TaskStatusKilled, "killed"},
+		{TaskStatus(99), "unknown(99)"},
+	}
+	for _, tt := range tests {
+		got := tt.status.String()
+		if got != tt.want {
+			t.Errorf("TaskStatus(%d).String() = %q, want %q", int(tt.status), got, tt.want)
+		}
+	}
+}

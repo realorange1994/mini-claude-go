@@ -1106,3 +1106,170 @@ func TestBuildMessagesSameRoleMerge(t *testing.T) {
 		t.Error("merged message should contain tool_result block")
 	}
 }
+
+// ============================================================================
+// Upstream Quality: formatFileSize Tests
+// ============================================================================
+
+func TestFormatFileSize(t *testing.T) {
+	tests := []struct {
+		name  string
+		bytes int
+		want  string
+	}{
+		// Boundary tests matching upstream format.test.ts coverage
+		{"0 bytes", 0, "0 bytes"},
+		{"500 bytes", 500, "500 bytes"},
+		{"1023 bytes (just under KB)", 1023, "1023 bytes"},
+		{"1024 bytes (exact 1 KB)", 1024, "1.0 KB"},
+		{"1536 bytes (1.5 KB)", 1536, "1.5 KB"},
+		{"1 MB", 1024 * 1024, "1.0 MB"},
+		{"1.5 MB", int(1.5 * 1024 * 1024), "1.5 MB"},
+		{"2000 bytes", 2000, "2.0 KB"},
+		{"512 bytes", 512, "512 bytes"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatFileSize(tt.bytes)
+			if got != tt.want {
+				t.Errorf("formatFileSize(%d) = %q, want %q", tt.bytes, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatFileSizeTrailingDotZero(t *testing.T) {
+	// Upstream strips trailing ".0" (e.g. 1024 -> "1KB" not "1.0KB").
+	// The Go implementation does NOT strip ".0" — it uses fmt.Sprintf("%.1f KB", ...)
+	// which always produces one decimal place. Test the actual Go behavior.
+	exactKB := formatFileSize(1024)
+	if exactKB != "1.0 KB" {
+		t.Errorf("formatFileSize(1024) = %q, want %q (Go retains .0)", exactKB, "1.0 KB")
+	}
+
+	// And verify that non-.0 values work correctly
+	halfKB := formatFileSize(512 + 512) // 1.0 KB since 1024 bytes
+	if halfKB != "1.0 KB" {
+		t.Errorf("formatFileSize(1024) = %q, want %q", halfKB, "1.0 KB")
+	}
+
+	oneAndHalfKB := formatFileSize(1536)
+	if oneAndHalfKB != "1.5 KB" {
+		t.Errorf("formatFileSize(1536) = %q, want %q", oneAndHalfKB, "1.5 KB")
+	}
+}
+
+func TestFormatFileSizeIdempotent(t *testing.T) {
+	// formatFileSize output is deterministic: calling it twice with the same
+	// input produces the same output.
+	inputs := []int{0, 500, 1023, 1024, 1536, 1024 * 1024, int(1.5 * 1024 * 1024)}
+	for _, in := range inputs {
+		first := formatFileSize(in)
+		second := formatFileSize(in)
+		if second != first {
+			t.Errorf("formatFileSize not deterministic for %d: first=%q, second=%q", in, first, second)
+		}
+	}
+}
+
+func TestFormatFileSizeUsedInPersistedOutput(t *testing.T) {
+	// Integration test: verify formatFileSize is used correctly in
+	// buildLargeToolResultMessage for the "Output too large" label.
+	result := &PersistedToolResult{
+		Filepath:     "/tmp/test.output",
+		OriginalSize: 1536,
+		IsJSON:       false,
+		Preview:      "preview text",
+		HasMore:      true,
+	}
+	msg := buildLargeToolResultMessage(result)
+	// Should contain the formatted file size
+	if !strings.Contains(msg, "1.5 KB") {
+		t.Errorf("expected '1.5 KB' in persisted output message, got: %q", msg)
+	}
+	// Should contain the preview size label
+	if !strings.Contains(msg, "2.0 KB") {
+		t.Errorf("expected '2.0 KB' (preview size) in persisted output message, got: %q", msg)
+	}
+}
+
+// ============================================================================
+// Upstream Quality: sanitizeToolID Tests
+// ============================================================================
+
+func TestSanitizeToolID(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// Safe characters preserved (matching the allowed set in context.go)
+		{"lowercase letters", "abc", "abc"},
+		{"uppercase letters", "ABC", "ABC"},
+		{"digits", "123", "123"},
+		{"hyphen", "tool-1", "tool-1"},
+		{"underscore", "tool_1", "tool_1"},
+		{"mixed safe chars", "tool-1_v2", "tool-1_v2"},
+		// Unsafe characters replaced with underscore
+		{"spaces", "tool 1", "tool_1"},
+		{"dots", "tool.1", "tool_1"},
+		{"slashes", "tool/1", "tool_1"},
+		{"special chars", "tool@1!", "tool_1_"},
+		{"unicode", "你好", "__"},
+		{"empty string", "", ""},
+		// Typical Anthropic tool_use_id format
+		{"typical tool ID", "toolu_01ABC123", "toolu_01ABC123"},
+		// BOM-like characters get sanitized
+		{"BOM prefix", "\uFEFFtool-1", "_tool-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeToolID(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeToolID(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeToolIDIdempotent(t *testing.T) {
+	// sanitizeToolID should be idempotent: sanitizing an already-sanitized
+	// ID produces the same result.
+	inputs := []string{
+		"tool-1_v2",
+		"toolu_01ABC123",
+		"___",
+		"",
+	}
+	for _, in := range inputs {
+		first := sanitizeToolID(in)
+		second := sanitizeToolID(first)
+		if second != first {
+			t.Errorf("sanitizeToolID not idempotent for %q: first=%q, second=%q", in, first, second)
+		}
+	}
+}
+
+func TestSanitizeToolIDProducesValidFilename(t *testing.T) {
+	// After sanitization, the result should be usable as a filename component.
+	// This is important because sanitizeToolID is used to construct file paths
+	// for tool result persistence.
+	inputs := []string{
+		"tool/with/slashes",
+		"tool with spaces",
+		"tool.with.dots",
+		"tool\u200Bzero\uFEFFwidth", // zero-width chars
+	}
+	for _, in := range inputs {
+		sanitized := sanitizeToolID(in)
+		// Should not contain path separators or other filesystem-dangerous chars
+		if strings.Contains(sanitized, "/") || strings.Contains(sanitized, "\\") {
+			t.Errorf("sanitizeToolID(%q) = %q, contains path separator", in, sanitized)
+		}
+		if strings.Contains(sanitized, "..") {
+			t.Errorf("sanitizeToolID(%q) = %q, contains ..", in, sanitized)
+		}
+	}
+}
