@@ -358,6 +358,7 @@ type AgentLoop struct {
 	extractionState          *ExtractionState           // session memory extraction threshold tracking
 	sonnetModel              string                    // fallback model for 529 overload (defaults to claude-sonnet-4-20250514)
 	hooks                    *HookManager              // compact pre/post hook handlers
+	shellHooks               HookConfig                // shell command hooks from settings.json
 	consecutiveContextErrors int                       // tracks consecutive context overflow errors for reactive compact
 	consecutive529Errors     int                       // tracks consecutive 529 overloaded errors for model fallback
 	modelCapabilities        *ModelCapabilitiesCache   // per-model context window and capability lookup
@@ -612,6 +613,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		cacheBreakDetector: &CacheBreakDetector{},
 		extractionState:   NewExtractionState(),
 		hooks:             cfg.Hooks,
+		shellHooks:        LoadAllHooks(cfg.ProjectDir),
 		sonnetModel:       "claude-sonnet-4-20250514",
 		errorReporter:    NewErrorReporter(),
 		featureFlags:     NewFeatureFlagStore(),
@@ -787,6 +789,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		cacheBreakDetector: &CacheBreakDetector{},
 		extractionState:   NewExtractionState(),
 		hooks:             cfg.Hooks,
+		shellHooks:        LoadAllHooks(cfg.ProjectDir),
 		errorReporter:    NewErrorReporter(),
 		featureFlags:     NewFeatureFlagStore(),
 		telemetry:       NewTelemetryManager(),
@@ -1336,7 +1339,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			// Tools start executing as their content blocks complete during streaming,
 			// overlapping with remaining stream processing.
 			toolCallDoneCh := make(chan int, 20)
-			executor := NewStreamingToolExecutor(a.registry, a.gate)
+			executor := NewStreamingToolExecutor(a.registry, a.gate, a.shellHooks)
 
 			toolCalls, textParts, err = a.callWithRetryAndFallbackStreaming(toolCallDoneCh, executor)
 

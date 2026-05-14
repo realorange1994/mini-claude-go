@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +25,7 @@ import (
 type StreamingToolExecutor struct {
 	registry *tools.Registry
 	gate     *PermissionGate
+	hooks    HookConfig // shell command hooks loaded from settings
 
 	// Tool queue
 	tools     []*TrackedTool
@@ -81,11 +84,12 @@ type TrackedTool struct {
 }
 
 // NewStreamingToolExecutor creates a new executor.
-func NewStreamingToolExecutor(registry *tools.Registry, gate *PermissionGate) *StreamingToolExecutor {
+func NewStreamingToolExecutor(registry *tools.Registry, gate *PermissionGate, hooks HookConfig) *StreamingToolExecutor {
 	siblingCtx, siblingCancel := context.WithCancel(context.Background())
 	return &StreamingToolExecutor{
 		registry:    registry,
 		gate:        gate,
+		hooks:       hooks,
 		semaphore:   make(chan struct{}, 10), // up to 10 concurrent tools
 		siblingCtx:  siblingCtx,
 		siblingCancel: siblingCancel,
@@ -407,6 +411,24 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 		}
 	}
 
+	// PreToolUse shell hooks: execute matching hooks before tool execution.
+	// Hooks can block, modify input, or allow through.
+	// Matching upstream's executePreToolHooks().
+	if e.hooks != nil {
+		if blockErr := e.executePreToolUseHooks(tc, input); blockErr != nil {
+			e.recordResult(toolExecResult{
+				index:     idx,
+				toolName:  tc.Name,
+				toolUseID: tc.ID,
+				isError:   true,
+				output:    fmt.Sprintf("Blocked by PreToolUse hook: %v", blockErr),
+				duration:  time.Since(start),
+			})
+			e.completed.Add(1)
+			return
+		}
+	}
+
 	// Recover from panics inside tool execution, matching agent_loop.go's
 	// panic safety net.
 	var result tools.ToolResult
@@ -455,6 +477,12 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 		isError:   result.IsError,
 		duration:  time.Since(start),
 	})
+
+	// PostToolUse shell hooks: execute matching hooks after tool execution.
+	// Matching upstream's executePostToolHooks().
+	if e.hooks != nil {
+		e.executePostToolUseHooks(tc, input, result)
+	}
 
 	// CRITICAL: Only Bash errors cancel sibling tools.
 	// Matching upstream (StreamingToolExecutor.ts:368):
@@ -568,4 +596,114 @@ func (e *StreamingToolExecutor) Wait(totalCalls int) []toolExecResult {
 	}
 
 	return results
+}
+
+// executePreToolUseHooks runs PreToolUse shell hooks matching the tool name.
+// Returns a HookBlockError if any hook blocks execution.
+// Matching upstream's executePreToolHooks() in hooks.ts.
+func (e *StreamingToolExecutor) executePreToolUseHooks(tc ToolCallInfo, input map[string]any) error {
+	hooks := e.hooks["PreToolUse"]
+	if len(hooks) == 0 {
+		return nil
+	}
+
+	for _, hook := range hooks {
+		if !MatchHook(hook, tc.Name) {
+			continue
+		}
+
+		// Build hook input matching upstream's PreToolUseInput schema
+		hookInput := map[string]interface{}{
+			"tool_name":  tc.Name,
+			"tool_input": input,
+			"session_id": getSessionID(),
+		}
+
+		jsonBytes, err := json.Marshal(hookInput)
+		if err != nil {
+			log.Printf("PreToolUse hook: failed to marshal input: %v", err)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), defaultHookTimeout)
+		defer cancel()
+
+		result, err := ExecuteShellHook(ctx, hook, HookPreToolUse, string(jsonBytes), nil)
+		if err != nil {
+			log.Printf("PreToolUse hook %q failed: %v", hook.Command, err)
+			continue
+		}
+
+		if result.ShouldBlock() {
+			return HookBlockError{
+				ToolName: tc.Name,
+				Command:  hook.Command,
+				Reason:   result.BlockReason(),
+			}
+		}
+
+		// If hook provides updated input, merge it
+		if result.UpdatedInput != nil {
+			for k, v := range result.UpdatedInput {
+				input[k] = v
+			}
+		}
+	}
+
+	return nil
+}
+
+// executePostToolUseHooks runs PostToolUse shell hooks matching the tool name.
+// Matching upstream's executePostToolHooks() in hooks.ts.
+func (e *StreamingToolExecutor) executePostToolUseHooks(tc ToolCallInfo, input map[string]any, result tools.ToolResult) {
+	hooks := e.hooks["PostToolUse"]
+	if len(hooks) == 0 {
+		return
+	}
+
+	for _, hook := range hooks {
+		if !MatchHook(hook, tc.Name) {
+			continue
+		}
+
+		// Build hook input matching upstream's PostToolUseInput schema
+		hookInput := map[string]interface{}{
+			"tool_name":   tc.Name,
+			"tool_input":  input,
+			"tool_output": result.Output,
+			"session_id":  getSessionID(),
+		}
+
+		if result.IsError {
+			hookInput["tool_error"] = true
+		}
+
+		jsonBytes, err := json.Marshal(hookInput)
+		if err != nil {
+			log.Printf("PostToolUse hook: failed to marshal input: %v", err)
+			continue
+		}
+
+		// PostToolUse hooks run asynchronously (fire-and-forget)
+		// Matching upstream's async PostToolUse execution
+		go func(h HookCommand, jsonStr string) {
+			ctx, cancel := context.WithTimeout(context.Background(), defaultHookTimeout)
+			defer cancel()
+
+			_, err := ExecuteShellHook(ctx, h, HookPostToolUse, jsonStr, nil)
+			if err != nil {
+				log.Printf("PostToolUse hook %q failed: %v", h.Command, err)
+			}
+		}(hook, string(jsonBytes))
+	}
+}
+
+// getSessionID returns the current session ID for hook context.
+// Falls back to a process-level ID if session tracking is not available.
+func getSessionID() string {
+	// Try to get from the global session tracker if available
+	if sid := os.Getenv("CLAUDE_SESSION_ID"); sid != "" {
+		return sid
+	}
+	return "unknown"
 }

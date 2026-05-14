@@ -2,8 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -439,3 +445,515 @@ func (hm *HookManager) ExecuteGenericHooksQuiet(event HookEvent, metadata map[st
 // ctx is cancelled if the hook exceeds its timeout.
 type PreCompactHandler  func(ctx context.Context, input PreCompactInput) (PreCompactOutput, error)
 type PostCompactHandler func(ctx context.Context, input PostCompactInput) (PostCompactOutput, error)
+
+// ─── Shell command hook configuration ─────────────────────────────────────────
+
+// HookCommand represents a shell command hook loaded from settings.json.
+// Matching upstream's HookCommand type in settings/types.ts.
+type HookCommand struct {
+	Matcher  string                 `json:"matcher"`  // tool name or glob pattern (e.g., "Bash", "Write", "Edit")
+	Command  string                 `json:"command"`  // shell command to execute
+	Shell    string                 `json:"shell,omitempty"` // "bash" (default) or "powershell"
+	Timeout  int                    `json:"timeout,omitempty"` // timeout in seconds (default: 600)
+	Async    bool                   `json:"async,omitempty"`   // run in background
+	Type     string                 `json:"type,omitempty"`    // "command" (default)
+	When     map[string]interface{} `json:"when,omitempty"`    // conditional execution
+}
+
+// HookConfig represents the hooks section in settings.json.
+// Keys are hook event names (e.g., "PreToolUse", "PostToolUse").
+type HookConfig map[string][]HookCommand
+
+// HookShellResult is the parsed result from a shell hook's stdout.
+// Matching upstream's HookJSONOutput schema.
+type HookShellResult struct {
+	// Common fields
+	Continue          bool   `json:"continue,omitempty"`
+	SuppressOutput    bool   `json:"suppressOutput,omitempty"`
+	StopReason        string `json:"stopReason,omitempty"`
+	Decision          string `json:"decision,omitempty"`           // "approve" or "block"
+	Reason            string `json:"reason,omitempty"`
+	SystemMessage     string `json:"systemMessage,omitempty"`
+
+	// PreToolUse specific
+	HookSpecificOutput *json.RawMessage `json:"hookSpecificOutput,omitempty"`
+
+	// Parsed from hookSpecificOutput for PreToolUse
+	PermissionDecision       string                 `json:"-"` // "allow", "deny", "ask"
+	PermissionDecisionReason string                 `json:"-"`
+	UpdatedInput             map[string]interface{} `json:"-"`
+
+	// Raw output for diagnostics
+	RawStdout string
+	RawStderr string
+	ExitCode  int
+}
+
+// HookBlockError signals that a PreToolUse hook blocked tool execution.
+type HookBlockError struct {
+	ToolName string
+	Command  string
+	Reason   string
+}
+
+func (e HookBlockError) Error() string {
+	return fmt.Sprintf("Hook blocked %s: %s (command: %s)", e.ToolName, e.Reason, e.Command)
+}
+
+// ─── Shell command execution ──────────────────────────────────────────────────
+
+// defaultHookTimeout is the default timeout for shell command hooks (10 minutes).
+// Matching upstream's TOOL_HOOK_EXECUTION_TIMEOUT_MS = 10 * 60 * 1000.
+const defaultHookTimeout = 10 * 60 * time.Second
+
+// sessionEndHookTimeout is the timeout for SessionEnd hooks (1.5 seconds).
+const sessionEndHookTimeout = 1500 * time.Millisecond
+
+// ExecuteShellHook runs a shell command hook with JSON input via stdin.
+// It spawns a shell process, passes the serialized input as JSON, and
+// parses the stdout for structured output.
+//
+// Matching upstream's execCommandHook() in hooks.ts:830.
+func ExecuteShellHook(ctx context.Context, hook HookCommand, hookEvent HookEvent, jsonInput string, extraEnv map[string]string) (*HookShellResult, error) {
+	timeout := defaultHookTimeout
+	if hook.Timeout > 0 {
+		timeout = time.Duration(hook.Timeout) * time.Second
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Build environment
+	env := buildHookEnv(extraEnv)
+
+	// Determine shell and command
+	var cmd *exec.Cmd
+	shellType := hook.Shell
+	if shellType == "" {
+		shellType = "bash"
+	}
+
+	if runtime.GOOS == "windows" && shellType == "powershell" {
+		// PowerShell path detection
+		pwsh := detectPowerShellForHook()
+		if pwsh == "" {
+			return nil, fmt.Errorf("hook has shell: 'powershell' but no PowerShell executable found")
+		}
+		args := buildPowerShellHookArgs(hook.Command)
+		cmd = exec.CommandContext(execCtx, pwsh, args...)
+	} else {
+		// Bash/sh: use system shell
+		if runtime.GOOS == "windows" {
+			// On Windows, prefer Git Bash if available
+			bash := detectGitBashForHook()
+			if bash != "" {
+				cmd = exec.CommandContext(execCtx, bash, "-c", hook.Command)
+			} else {
+				cmd = exec.CommandContext(execCtx, "cmd", "/c", hook.Command)
+			}
+		} else {
+			cmd = exec.CommandContext(execCtx, "bash", "-c", hook.Command)
+		}
+	}
+
+	cmd.Env = env
+	cmd.Dir = getCwd()
+
+	// Pipe stdin/stdout/stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	// Start the process
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start hook command: %w", err)
+	}
+
+	// Write JSON input to stdin (with trailing newline, matching upstream)
+	stdin.Write([]byte(jsonInput + "\n"))
+	stdin.Close()
+
+	// Read stdout and stderr
+	var stdoutBuf, stderrBuf strings.Builder
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdoutPipe.Read(buf)
+			if n > 0 {
+				stdoutBuf.Write(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderrPipe.Read(buf)
+			if n > 0 {
+				stderrBuf.Write(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	exitCode := -1
+	err = cmd.Wait()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+
+	result := &HookShellResult{
+		RawStdout: stdoutBuf.String(),
+		RawStderr: stderrBuf.String(),
+		ExitCode:  exitCode,
+	}
+
+	// Parse stdout for structured output
+	result.ParseStdout()
+
+	return result, nil
+}
+
+// ParseStdout parses the hook's stdout for JSON output.
+// If stdout starts with '{', it's treated as JSON and validated
+// against the hook output schema. Otherwise, it's plain text.
+// Matching upstream's parseHookOutput() in hooks.ts:400.
+func (r *HookShellResult) ParseStdout() {
+	stdout := strings.TrimSpace(r.RawStdout)
+	if stdout == "" || !strings.HasPrefix(stdout, "{") {
+		// Plain text output — no structured parsing
+		return
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+		// Failed to parse as JSON — treat as plain text
+		return
+	}
+
+	// Extract common fields
+	if v, ok := parsed["continue"].(bool); ok && !v {
+		r.Continue = false
+	}
+	if v, ok := parsed["suppressOutput"].(bool); ok {
+		r.SuppressOutput = v
+	}
+	if v, ok := parsed["stopReason"].(string); ok {
+		r.StopReason = v
+	}
+	if v, ok := parsed["decision"].(string); ok {
+		r.Decision = v
+	}
+	if v, ok := parsed["reason"].(string); ok {
+		r.Reason = v
+	}
+	if v, ok := parsed["systemMessage"].(string); ok {
+		r.SystemMessage = v
+	}
+
+	// Extract hookSpecificOutput for PreToolUse hooks
+	if raw, ok := parsed["hookSpecificOutput"]; ok {
+		if spec, ok := raw.(map[string]interface{}); ok {
+			if v, ok := spec["permissionDecision"].(string); ok {
+				r.PermissionDecision = v
+			}
+			if v, ok := spec["permissionDecisionReason"].(string); ok {
+				r.PermissionDecisionReason = v
+			}
+			if v, ok := spec["updatedInput"].(map[string]interface{}); ok {
+				r.UpdatedInput = v
+			}
+			if v, ok := spec["additionalContext"].(string); ok {
+				// Store additionalContext in SystemMessage if not already set
+				if r.SystemMessage == "" {
+					r.SystemMessage = v
+				}
+			}
+		}
+	}
+}
+
+// ShouldBlock returns true if the hook result indicates the tool should be blocked.
+func (r *HookShellResult) ShouldBlock() bool {
+	// Check decision field
+	if r.Decision == "block" {
+		return true
+	}
+	// Check hookSpecificOutput.permissionDecision
+	if r.PermissionDecision == "deny" {
+		return true
+	}
+	return false
+}
+
+// BlockReason returns the reason why the hook blocked the tool.
+func (r *HookShellResult) BlockReason() string {
+	if r.PermissionDecisionReason != "" {
+		return r.PermissionDecisionReason
+	}
+	if r.Reason != "" {
+		return r.Reason
+	}
+	return "Blocked by hook"
+}
+
+// ShouldAsk returns true if the hook wants the user to be prompted.
+func (r *HookShellResult) ShouldAsk() bool {
+	return r.PermissionDecision == "ask"
+}
+
+// ─── Hook matcher ─────────────────────────────────────────────────────────────
+
+// MatchHook checks if a hook's matcher pattern matches the given query string.
+// Supports exact match and glob patterns (* and ?).
+// Matching upstream's matchesPattern() in hooks.ts:1484.
+func MatchHook(hook HookCommand, query string) bool {
+	pattern := hook.Matcher
+	if pattern == query {
+		return true
+	}
+	// Simple glob matching (supports * and ?)
+	return hookGlobMatch(pattern, query)
+}
+
+// hookGlobMatch performs simple glob pattern matching for hook matchers.
+// Supports * (any characters) and ? (single character).
+// This is a simpler version than the file_history_tools globMatch which
+// supports ** (recursive directory matching).
+func hookGlobMatch(pattern, text string) bool {
+	pLen := len(pattern)
+	tLen := len(text)
+
+	// dp[i][j] = can pattern[:i] match text[:j]?
+	dp := make([][]bool, pLen+1)
+	for i := range dp {
+		dp[i] = make([]bool, tLen+1)
+	}
+	dp[0][0] = true
+
+	for i := 1; i <= pLen; i++ {
+		if pattern[i-1] == '*' {
+			dp[i][0] = dp[i-1][0]
+		}
+		for j := 1; j <= tLen; j++ {
+			if pattern[i-1] == '*' {
+				dp[i][j] = dp[i-1][j] || dp[i][j-1]
+			} else if pattern[i-1] == '?' || pattern[i-1] == text[j-1] {
+				dp[i][j] = dp[i-1][j-1]
+			}
+		}
+	}
+	return dp[pLen][tLen]
+}
+
+// ─── Environment helpers ──────────────────────────────────────────────────────
+
+// buildHookEnv builds the environment variables for a hook command.
+// Inherits the current process environment and adds CLAUDE_* variables.
+func buildHookEnv(extra map[string]string) []string {
+	env := os.Environ()
+
+	// Add Claude-specific environment variables
+	cwd := getCwd()
+	env = append(env, "CLAUDE_PROJECT_DIR="+cwd)
+	env = append(env, "CLAUDE_CWD="+cwd)
+
+	for k, v := range extra {
+		env = append(env, k+"="+v)
+	}
+	return env
+}
+
+// detectGitBashForHook finds the Git Bash executable on Windows.
+// Returns empty string if not found.
+func detectGitBashForHook() string {
+	// Common Git Bash paths
+	paths := []string{
+		`C:\Program Files\Git\bin\bash.exe`,
+		`C:\Program Files (x86)\Git\bin\bash.exe`,
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// Try PATH
+	if p, err := exec.LookPath("bash"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// detectPowerShellForHook finds the PowerShell executable.
+func detectPowerShellForHook() string {
+	// Try pwsh first (cross-platform PowerShell 7+)
+	if p, err := exec.LookPath("pwsh"); err == nil {
+		return p
+	}
+	// Fall back to Windows PowerShell
+	if runtime.GOOS == "windows" {
+		return "powershell"
+	}
+	return ""
+}
+
+// buildPowerShellHookArgs builds the command-line arguments for PowerShell.
+// Using -NoProfile for faster startup and -NonInteractive for fail-fast.
+func buildPowerShellHookArgs(command string) []string {
+	return []string{"-NoProfile", "-NonInteractive", "-Command", command}
+}
+
+// ─── Settings.json hook loading ───────────────────────────────────────────────
+
+// LoadHooksFromSettings loads hook commands from a settings.json file.
+// Returns a map of hook event to list of commands.
+func LoadHooksFromSettings(filePath string) (HookConfig, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	hooksRaw, ok := raw["hooks"]
+	if !ok {
+		return nil, nil
+	}
+
+	hooksMap, ok := hooksRaw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("hooks must be an object, got %T", hooksRaw)
+	}
+
+	result := make(HookConfig)
+	for eventName, hookList := range hooksMap {
+		hooks, ok := hookList.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, h := range hooks {
+			hookJSON, err := json.Marshal(h)
+			if err != nil {
+				continue
+			}
+			var hook HookCommand
+			if err := json.Unmarshal(hookJSON, &hook); err != nil {
+				continue
+			}
+			if hook.Type == "" {
+				hook.Type = "command"
+			}
+			eventNameUpper := strings.ToUpper(eventName[:1]) + eventName[1:]
+			result[eventNameUpper] = append(result[eventNameUpper], hook)
+		}
+	}
+
+	return result, nil
+}
+
+// LoadAllHooks loads hooks from all config sources (project + home).
+// Matching upstream's getHooksConfigFromSnapshot().
+func LoadAllHooks(projectDir string) HookConfig {
+	result := make(HookConfig)
+
+	// Load from project-level settings
+	projectHooksPath := filepath.Join(projectDir, ".claude", "settings.json")
+	if hooks, err := LoadHooksFromSettings(projectHooksPath); err == nil {
+		for event, cmds := range hooks {
+			result[event] = append(result[event], cmds...)
+		}
+	}
+
+	// Load from home directory settings
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		homeHooksPath := filepath.Join(homeDir, ".claude", "settings.json")
+		if hooks, err := LoadHooksFromSettings(homeHooksPath); err == nil {
+			for event, cmds := range hooks {
+				result[event] = append(result[event], cmds...)
+			}
+		}
+	}
+
+	return result
+}
+
+// RegisterShellHooks registers shell command hooks from settings into the HookManager.
+// This converts HookCommand configs into generic hook handlers that execute
+// the shell commands.
+func (hm *HookManager) RegisterShellHooks(hookConfig HookConfig, event HookEvent) {
+	cmds, ok := hookConfig[string(event)]
+	if !ok {
+		return
+	}
+
+	for _, cmd := range cmds {
+		if cmd.Type != "" && cmd.Type != "command" {
+			continue // only support command-type hooks for now
+		}
+
+		hookCmd := cmd // capture for closure
+		name := fmt.Sprintf("shell:%s", hookCmd.Command)
+
+		hm.RegisterGeneric(event, name, func(ctx context.Context, input HookInput) (HookOutput, error) {
+			// Build JSON input for the hook
+			jsonBytes, err := json.Marshal(input)
+			if err != nil {
+				return HookOutput{}, fmt.Errorf("failed to marshal hook input: %w", err)
+			}
+
+			result, err := ExecuteShellHook(ctx, hookCmd, event, string(jsonBytes), nil)
+			if err != nil {
+				return HookOutput{}, fmt.Errorf("hook command failed: %w", err)
+			}
+
+			out := HookOutput{
+				Metadata: map[string]interface{}{
+					"stdout":     result.RawStdout,
+					"stderr":     result.RawStderr,
+					"exit_code":  result.ExitCode,
+					"continue":   result.Continue,
+					"blocked":    result.ShouldBlock(),
+					"ask":        result.ShouldAsk(),
+					"reason":     result.BlockReason(),
+					"stopReason": result.StopReason,
+				},
+			}
+
+			if result.ShouldBlock() {
+				return out, HookBlockError{
+					ToolName: fmt.Sprintf("%v", input.Metadata["tool_name"]),
+					Command:  hookCmd.Command,
+					Reason:   result.BlockReason(),
+				}
+			}
+
+			return out, nil
+		}, time.Duration(cmd.Timeout)*time.Second)
+	}
+}
