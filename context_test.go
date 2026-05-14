@@ -365,6 +365,148 @@ func TestEntryContentToText(t *testing.T) {
 	}
 }
 
+// ─── Turn interruption detection tests ───
+
+func TestDetectTurnInterruptionEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	state := ctx.DetectTurnInterruption()
+	if state.Kind != TurnInterruptedNone {
+		t.Errorf("expected none for empty context, got %v", state.Kind)
+	}
+}
+
+func TestDetectTurnInterruptionCompletedTurn(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	ctx.AddUserMessage("Hello")
+	ctx.AddAssistantText("Response")
+	state := ctx.DetectTurnInterruption()
+	if state.Kind != TurnInterruptedNone {
+		t.Errorf("expected none for completed turn, got %v", state.Kind)
+	}
+}
+
+func TestDetectTurnInterruptionInterruptedPrompt(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	ctx.AddUserMessage("Hello")
+	// No assistant response — user prompt was never acted upon
+	state := ctx.DetectTurnInterruption()
+	if state.Kind != TurnInterruptedPrompt {
+		t.Errorf("expected interrupted_prompt, got %v", state.Kind)
+	}
+	if state.PromptText != "Hello" {
+		t.Errorf("expected prompt text 'Hello', got %q", state.PromptText)
+	}
+}
+
+func TestDetectTurnInterruptionInterruptedTurn(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	ctx.AddUserMessage("Hello")
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "call_1", "name": "exec", "input": map[string]any{}},
+	})
+	// No tool result — assistant was mid-response when interrupted
+	state := ctx.DetectTurnInterruption()
+	if state.Kind != TurnInterruptedTurn {
+		t.Errorf("expected interrupted_turn, got %v", state.Kind)
+	}
+}
+
+func TestDetectTurnInterruptionToolResultWithoutFollowUp(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	ctx.AddUserMessage("Hello")
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "call_1", "name": "exec", "input": map[string]any{}},
+	})
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "call_1", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "output"}},
+		}},
+	})
+	// Tool result but no follow-up assistant text
+	state := ctx.DetectTurnInterruption()
+	if state.Kind != TurnInterruptedTurn {
+		t.Errorf("expected interrupted_turn (tool result without follow-up), got %v", state.Kind)
+	}
+}
+
+func TestDetectTurnInterruptionSkipsSystemMessages(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	ctx.AddUserMessage("Hello")
+	ctx.AddAssistantText("Response")
+	ctx.AddCompactBoundary(CompactTriggerAuto, 1000)
+	// Last non-system entry is assistant — completed turn
+	state := ctx.DetectTurnInterruption()
+	if state.Kind != TurnInterruptedNone {
+		t.Errorf("expected none (assistant is last non-system), got %v", state.Kind)
+	}
+}
+
+func TestDetectTurnInterruptionSummaryIsNotInterrupted(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	ctx.AddSummary("Compact summary")
+	// Summary is a meta message — not a user prompt
+	state := ctx.DetectTurnInterruption()
+	if state.Kind != TurnInterruptedNone {
+		t.Errorf("expected none for summary, got %v", state.Kind)
+	}
+}
+
+func TestApplyTurnInterruptionResumeInterruptedTurn(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	ctx.AddUserMessage("Hello")
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "call_1", "name": "exec", "input": map[string]any{}},
+	})
+	// No tool result — interrupted turn
+
+	state := ctx.DetectTurnInterruption()
+	ctx.ApplyTurnInterruptionResume(state)
+
+	// Should inject "Continue from where you left off." user message
+	lastEntry := ctx.entries[len(ctx.entries)-1]
+	if lastEntry.role != "user" {
+		t.Errorf("expected last entry to be user, got %s", lastEntry.role)
+	}
+	if tc, ok := lastEntry.content.(TextContent); ok {
+		if string(tc) != "Continue from where you left off." {
+			t.Errorf("expected continuation message, got %q", string(tc))
+		}
+	} else {
+		t.Errorf("expected TextContent, got %T", lastEntry.content)
+	}
+}
+
+func TestApplyTurnInterruptionResumeInterruptedPrompt(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+	ctx.AddUserMessage("Hello")
+	// No assistant response — interrupted prompt
+
+	state := ctx.DetectTurnInterruption()
+	ctx.ApplyTurnInterruptionResume(state)
+
+	// Should append a synthetic assistant sentinel
+	lastEntry := ctx.entries[len(ctx.entries)-1]
+	if lastEntry.role != "assistant" {
+		t.Errorf("expected last entry to be assistant sentinel, got %s", lastEntry.role)
+	}
+	if tc, ok := lastEntry.content.(TextContent); ok {
+		if string(tc) != NO_RESPONSE_REQUESTED {
+			t.Errorf("expected NO_RESPONSE_REQUESTED sentinel, got %q", string(tc))
+		}
+	} else {
+		t.Errorf("expected TextContent, got %T", lastEntry.content)
+	}
+}
+
 // ─── EntryContent sealed interface tests ───
 
 func TestTextContentType(t *testing.T) {

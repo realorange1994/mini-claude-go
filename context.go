@@ -2315,6 +2315,154 @@ func (c *ConversationContext) FixRoleAlternation() {
 
 // entryContentToText serializes any EntryContent to a plain text string.
 // Used by FixRoleAlternation to handle type-mismatched same-role entries.
+// TurnInterruptionKind represents how a session was interrupted on resume.
+// Matching upstream's TurnInterruptionState (conversationRecovery.ts:139-142).
+type TurnInterruptionKind string
+
+const (
+	// TurnInterruptedNone means the session completed normally or has no
+	// indication of interruption.
+	TurnInterruptedNone TurnInterruptionKind = "none"
+	// TurnInterruptedPrompt means the user's prompt was never acted upon.
+	// The assistant never started responding, so the prompt is still pending.
+	TurnInterruptedPrompt TurnInterruptionKind = "interrupted_prompt"
+	// TurnInterruptedTurn means the assistant was in the middle of responding
+	// when interrupted. The model started a turn but didn't finish it.
+	TurnInterruptedTurn TurnInterruptionKind = "interrupted_turn"
+)
+
+// TurnInterruptionState holds the result of interruption detection.
+type TurnInterruptionState struct {
+	Kind        TurnInterruptionKind
+	PromptText  string  // the user prompt text if interrupted_prompt
+}
+
+// DetectTurnInterruption analyzes the conversation entries to determine if the
+// session was interrupted mid-turn. This matches upstream's detectTurnInterruption
+// (conversationRecovery.ts:272-333).
+//
+// Returns:
+//   - TurnInterruptedNone: session completed normally or empty
+//   - TurnInterruptedPrompt: user prompt never received a response
+//   - TurnInterruptedTurn: assistant was mid-response when interrupted
+func (c *ConversationContext) DetectTurnInterruption() TurnInterruptionState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return detectTurnInterruptionLocked(c.entries)
+}
+
+// detectTurnInterruptionLocked performs the actual detection. Must be called with lock held.
+func detectTurnInterruptionLocked(entries []conversationEntry) TurnInterruptionState {
+	if len(entries) == 0 {
+		return TurnInterruptionState{Kind: TurnInterruptedNone}
+	}
+
+	// Find the last turn-relevant entry, skipping system and compact boundary entries.
+	// These are bookkeeping artifacts that should not mask a genuine interruption.
+	lastIdx := -1
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if e.role != "system" {
+			// Also skip compact boundary markers stored as system entries with
+			// CompactBoundaryContent
+			if _, ok := e.content.(CompactBoundaryContent); ok {
+				continue
+			}
+			lastIdx = i
+			break
+		}
+	}
+	if lastIdx == -1 {
+		return TurnInterruptionState{Kind: TurnInterruptedNone}
+	}
+
+	last := entries[lastIdx]
+
+	// Assistant entry: check if it's a tool_use-only entry without matching results.
+	// In Go's transcript recording, assistant tool_use entries are recorded when
+	// the model requests tools. If no tool_result follows, the turn was interrupted.
+	if last.role == "assistant" {
+		switch last.content.(type) {
+		case ToolUseContent:
+			// Assistant requested tools but results were never received — interrupted turn
+			return TurnInterruptionState{Kind: TurnInterruptedTurn}
+		default:
+			// Text response — turn most likely completed normally
+			return TurnInterruptionState{Kind: TurnInterruptedNone}
+		}
+	}
+
+	// User entry: the assistant never responded to this prompt.
+	if last.role == "user" {
+		// Check if it's a meta/system-generated message (summary, compact)
+		switch last.content.(type) {
+		case SummaryContent:
+			// Compact summary — not a user prompt, session completed normally
+			return TurnInterruptionState{Kind: TurnInterruptedNone}
+		case AttachmentContent:
+			// Attachments are part of the user turn but the assistant never responded
+			return TurnInterruptionState{Kind: TurnInterruptedTurn}
+		case ToolResultContent:
+			// Tool result without a matching tool_use in subsequent entries means
+			// the tool was called but no follow-up text was generated.
+			// Check if this is a terminal tool result (brief mode / send message).
+			// Since we can't easily look back for the tool_use here (entries may
+			// have been flushed), treat as interrupted_turn conservatively.
+			// The upstream checks for SendUserMessage/BriefTool terminal results.
+			return TurnInterruptionState{Kind: TurnInterruptedTurn}
+		default:
+			// Plain text user prompt — assistant hadn't started responding
+			text := ""
+			if tc, ok := last.content.(TextContent); ok {
+				text = string(tc)
+			}
+			return TurnInterruptionState{Kind: TurnInterruptedPrompt, PromptText: text}
+		}
+	}
+
+	// Tool use entry: assistant requested tools but results were never received.
+	if last.role == "assistant" {
+		if _, ok := last.content.(ToolUseContent); ok {
+			return TurnInterruptionState{Kind: TurnInterruptedTurn}
+		}
+	}
+
+	return TurnInterruptionState{Kind: TurnInterruptedNone}
+}
+
+// ApplyTurnInterruptionResume handles the resume logic after detecting an interruption.
+// For interrupted_turn: injects "Continue from where you left off." user message.
+// For interrupted_prompt: no injection needed, the prompt is already there.
+// This matches upstream's conversationRecovery.ts:206-245.
+func (c *ConversationContext) ApplyTurnInterruptionResume(state TurnInterruptionState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	switch state.Kind {
+	case TurnInterruptedTurn:
+		// Mid-turn interruption: inject a synthetic continuation message.
+		// This transforms interrupted_turn into interrupted_prompt by appending
+		// a synthetic continuation message, matching upstream's design.
+		c.entries = append(c.entries, conversationEntry{
+			role:    "user",
+			content: TextContent("Continue from where you left off."),
+		})
+	case TurnInterruptedPrompt:
+		// Prompt was never acted upon — no injection needed, the existing
+		// user prompt will be sent when the agent loop runs.
+		// However, append a synthetic assistant sentinel so the conversation
+		// is API-valid if no action is taken (matching upstream:231-245).
+		c.entries = append(c.entries, conversationEntry{
+			role:    "assistant",
+			content: TextContent(NO_RESPONSE_REQUESTED),
+		})
+	}
+}
+
+// NO_RESPONSE_REQUESTED is a synthetic assistant message placeholder used to
+// make conversations API-valid when resuming from interrupted prompts.
+const NO_RESPONSE_REQUESTED = "[Response requested]"
+
 func entryContentToText(c EntryContent) string {
 	switch v := c.(type) {
 	case TextContent:

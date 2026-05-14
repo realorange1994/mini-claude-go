@@ -987,6 +987,17 @@ func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config) *Conve
 	ctx.ValidateToolPairing()
 	ctx.FixRoleAlternation()
 
+	// Detect turn interruption and apply resume logic.
+	// Matching upstream's deserializeMessagesWithInterruptDetection + detectTurnInterruption
+	// (conversationRecovery.ts:164-333).
+	interruptionState := ctx.DetectTurnInterruption()
+	if interruptionState.Kind != TurnInterruptedNone {
+		ctx.ApplyTurnInterruptionResume(interruptionState)
+		// Re-validate after injection
+		ctx.ValidateToolPairing()
+		ctx.FixRoleAlternation()
+	}
+
 	return ctx
 }
 
