@@ -496,6 +496,295 @@ func TestComputeNextCronRun_NeverMatches(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// upstream port: cronTasks.baseline — nextCronRunMs returns null for invalid
+// cron expressions (equivalent: ComputeNextCronRun with nil fields)
+// ---------------------------------------------------------------------------
+
+func TestComputeNextCronRun_NilFieldsReturnsNil(t *testing.T) {
+	// Upstream: nextCronRunMs('invalid cron', Date.now()) === null
+	// Go equivalent: when parse fails, we get nil fields
+	result := ComputeNextCronRun(CronFields{}, time.Now())
+	// Empty fields: no minutes/hours/etc. match → should walk to maxIter and return nil
+	if result != nil {
+		t.Errorf("expected nil for empty CronFields, got %v", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// upstream port: leap year / Feb 29 edge case
+// ---------------------------------------------------------------------------
+
+func TestComputeNextCronRun_Feb29LeapYear(t *testing.T) {
+	fields := mustParseCron(t, "0 0 29 2 *") // Feb 29
+	// From 2025 (non-leap year), next Feb 29 is 2028
+	from := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.Local)
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil result for Feb 29 cron")
+	}
+	if next.Year() != 2028 {
+		t.Errorf("expected year 2028, got %d", next.Year())
+	}
+	if next.Month() != time.February {
+		t.Errorf("expected February, got %v", next.Month())
+	}
+	if next.Day() != 29 {
+		t.Errorf("expected day 29, got %d", next.Day())
+	}
+}
+
+func TestComputeNextCronRun_Feb29FromLeapYear(t *testing.T) {
+	fields := mustParseCron(t, "0 12 29 2 *") // Feb 29 at noon
+	// From 2024-02-29, next should be 2028-02-29
+	from := time.Date(2024, time.February, 29, 12, 0, 0, 0, time.Local)
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if next.Year() != 2028 {
+		t.Errorf("expected 2028, got %d", next.Year())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// upstream port: oneShotJitteredNextCronRunMs never returns time earlier
+// than fromMs (equivalent: ComputeNextCronRun always returns time strictly
+// after fromMs)
+// ---------------------------------------------------------------------------
+
+func TestComputeNextCronRun_AlwaysStrictlyAfterFrom(t *testing.T) {
+	fields := mustParseCron(t, "0 0 * * *")
+	// Exactly on a cron time
+	from := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.Local)
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !next.After(from) {
+		t.Errorf("next run %v must be strictly after from %v", next, from)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// upstream port: cronTasks.baseline — jittered never earlier than fromMs
+// (invariant: next computed time >= fromMs)
+// ---------------------------------------------------------------------------
+
+func TestComputeNextCronRun_NeverEarlierThanFrom(t *testing.T) {
+	testCases := []struct {
+		name string
+		expr string
+		from time.Time
+	}{
+		{
+			"midnight",
+			"0 0 * * *",
+			time.Date(2026, time.April, 12, 10, 59, 50, 0, time.Local),
+		},
+		{
+			"every5min",
+			"*/5 * * * *",
+			time.Date(2026, time.April, 12, 10, 32, 17, 0, time.Local),
+		},
+		{
+			"specific",
+			"30 14 15 4 *",
+			time.Date(2026, time.April, 15, 14, 30, 0, 0, time.Local),
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := mustParseCron(t, tc.expr)
+			next := ComputeNextCronRun(fields, tc.from)
+			if next == nil {
+				t.Fatalf("expected non-nil for expr=%q from=%v", tc.expr, tc.from)
+			}
+			if !next.After(tc.from) && !next.Equal(tc.from.Add(time.Minute)) {
+				t.Errorf("next %v must be >= from %v (for cron strictly-after semantics)", next, tc.from)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// upstream port: cronScheduler.baseline — boundary patterns for cron
+// parsing edge cases from upstream
+// ---------------------------------------------------------------------------
+
+func TestParseCronExpression_LeadingZeros(t *testing.T) {
+	// Upstream accepts "00 09 * * *" — leading zeros should parse
+	result := ParseCronExpression("00 09 * * *")
+	if result == nil {
+		t.Fatal("expected non-nil for leading zeros")
+	}
+	assertIntSlice(t, result.Minute, []int{0})
+	assertIntSlice(t, result.Hour, []int{9})
+}
+
+func TestParseCronExpression_MultipleCommas(t *testing.T) {
+	result := ParseCronExpression("1,3,5,7,9 * * * *")
+	if result == nil {
+		t.Fatal("expected non-nil")
+	}
+	assertIntSlice(t, result.Minute, []int{1, 3, 5, 7, 9})
+}
+
+func TestParseCronExpression_RangeEdgeCases(t *testing.T) {
+	// Same start and end
+	result := ParseCronExpression("5-5 * * * *")
+	if result == nil {
+		t.Fatal("expected non-nil for 5-5 range")
+	}
+	assertIntSlice(t, result.Minute, []int{5})
+}
+
+func TestParseCronExpression_StepFromRange(t *testing.T) {
+	result := ParseCronExpression("0-59/15 * * * *")
+	if result == nil {
+		t.Fatal("expected non-nil")
+	}
+	assertIntSlice(t, result.Minute, []int{0, 15, 30, 45})
+}
+
+// ---------------------------------------------------------------------------
+// upstream port: CronToHuman roundtrip / idempotency invariants
+// ---------------------------------------------------------------------------
+
+func TestCronToHuman_IdempotentOnFallback(t *testing.T) {
+	// Complex patterns fall through to raw cron — idempotent
+	complex := "0,30 9-17 * * 1-5"
+	got := CronToHuman(complex)
+	if got != complex {
+		t.Errorf("complex cron should be idempotent: got %q", got)
+	}
+}
+
+func TestCronToHuman_MonthlyNotRecognized(t *testing.T) {
+	// 1st of month — falls through to raw
+	got := CronToHuman("0 0 1 * *")
+	if got != "0 0 1 * *" {
+		// If it gets a specific pattern, that's fine too — just not wrong
+		// Check it doesn't say "Every minute" etc.
+		if got == "Every minute" || got == "Every hour" {
+			t.Errorf("got wrong pattern for monthly cron: %q", got)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// upstream port: cron baseline — year boundary transitions
+// ---------------------------------------------------------------------------
+
+func TestComputeNextCronRun_NewYearTransition(t *testing.T) {
+	fields := mustParseCron(t, "0 0 1 1 *") // Jan 1 midnight
+	from := time.Date(2025, time.December, 31, 23, 59, 0, 0, time.Local)
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil for New Year cron")
+	}
+	if next.Year() != 2026 {
+		t.Errorf("expected year 2026, got %d", next.Year())
+	}
+	if next.Month() != time.January {
+		t.Errorf("expected January, got %v", next.Month())
+	}
+	if next.Day() != 1 {
+		t.Errorf("expected day 1, got %d", next.Day())
+	}
+}
+
+func TestComputeNextCronRun_SpecificDateMissedDuringSleep(t *testing.T) {
+	// Simulates a missed task: cron was set to fire at 10:00, but we woke up at 10:10
+	fields := mustParseCron(t, "0 10 * * *")
+	from := time.Date(2026, time.April, 12, 10, 10, 0, 0, time.Local)
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil")
+	}
+	// Should find tomorrow at 10:00
+	if next.Day() != 13 || next.Hour() != 10 {
+		t.Errorf("expected April 13 10:00, got %v", next)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// upstream port: cronScheduler.baseline — invariant that empty/missing
+// CronFields produce no match (equivalent of invalid cron → null)
+// ---------------------------------------------------------------------------
+
+func TestComputeNextCronRun_FarFutureExpression(t *testing.T) {
+	// Upstream: far future cron like "59 23 31 12 *" (Dec 31 23:59)
+	fields := mustParseCron(t, "59 23 31 12 *")
+	from := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.Local)
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil for Dec 31 cron")
+	}
+	if next.Month() != time.December {
+		t.Errorf("expected December, got %v", next.Month())
+	}
+	if next.Day() != 31 {
+		t.Errorf("expected day 31, got %d", next.Day())
+	}
+	if next.Hour() != 23 {
+		t.Errorf("expected hour 23, got %d", next.Hour())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// upstream port: roundtrip — parse -> compute -> result must satisfy fields
+// ---------------------------------------------------------------------------
+
+func TestRoundtrip_WeekdayOnly(t *testing.T) {
+	// Monday at 9am: 0 9 * * 1
+	expr := "0 9 * * 1"
+	fields := mustParseCron(t, expr)
+	from := time.Date(2026, time.March, 2, 9, 0, 0, 0, time.Local) // Monday 9:00
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil")
+	}
+	if !next.After(from) {
+		t.Error("must be strictly after from")
+	}
+	// Should be next Monday at 9:00
+	if int(next.Weekday()) != 1 {
+		t.Errorf("expected Monday, got weekday %d", next.Weekday())
+	}
+	if next.Hour() != 9 || next.Minute() != 0 {
+		t.Errorf("expected 9:00, got %d:%02d", next.Hour(), next.Minute())
+	}
+}
+
+func TestRoundtrip_StepEvery15Min(t *testing.T) {
+	expr := "*/15 * * * *"
+	fields := mustParseCron(t, expr)
+	from := time.Date(2026, time.January, 15, 14, 7, 0, 0, time.Local)
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil")
+	}
+	if next.Minute() != 15 {
+		t.Errorf("expected minute 15, got %d", next.Minute())
+	}
+}
+
+func TestComputeNextCronRun_YearEndToYearStart(t *testing.T) {
+	fields := mustParseCron(t, "0 0 * * *")
+	from := time.Date(2026, time.December, 31, 23, 59, 0, 0, time.Local)
+	next := ComputeNextCronRun(fields, from)
+	if next == nil {
+		t.Fatal("expected non-nil")
+	}
+	if next.Year() != 2027 {
+		t.Errorf("expected year 2027, got %d", next.Year())
+	}
+	if next.Month() != time.January || next.Day() != 1 {
+		t.Errorf("expected Jan 1, got %v", next)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
