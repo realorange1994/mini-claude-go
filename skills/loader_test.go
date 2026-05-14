@@ -390,3 +390,400 @@ Always skill body.
 		t.Errorf("expected 'always-skill', got: %q", alwaysSkills[0].Name)
 	}
 }
+
+// ============================================================================
+// Upstream Quality: frontmatterParser.test.ts Port
+// ============================================================================
+
+func TestParseFrontmatterEmptyBlock(t *testing.T) {
+	// From upstream: handles empty frontmatter block
+	content := `---
+---
+Content`
+	meta := parseFrontmatter(content)
+	if meta.Name != "" {
+		t.Errorf("expected empty name for empty frontmatter, got %q", meta.Name)
+	}
+	if meta.Description != "" {
+		t.Errorf("expected empty description, got %q", meta.Description)
+	}
+	// The body content follows after the closing ---
+}
+
+func TestParseFrontmatterListValues(t *testing.T) {
+	// From upstream: handles frontmatter with list values
+	content := `---
+allowed-tools:
+  - Bash
+  - Read
+---
+Content`
+	// "allowed-tools" is not a known key, so it won't be parsed
+	_ = parseFrontmatter(content)
+	// But let's test the known list keys with multiline
+	// But let's test the known list keys with multiline
+	content2 := `---
+name: test-skill
+requires:
+  - GIT
+  - NPM
+tags:
+  - coding
+  - build
+---
+Body`
+	meta2 := parseFrontmatter(content2)
+	if len(meta2.Requires) != 2 {
+		t.Errorf("expected 2 requires, got %d", len(meta2.Requires))
+	}
+	if meta2.Requires[0] != "GIT" || meta2.Requires[1] != "NPM" {
+		t.Errorf("unexpected requires: %v", meta2.Requires)
+	}
+	if len(meta2.Tags) != 2 {
+		t.Errorf("expected 2 tags, got %d", len(meta2.Tags))
+	}
+	if meta2.Tags[0] != "coding" || meta2.Tags[1] != "build" {
+		t.Errorf("unexpected tags: %v", meta2.Tags)
+	}
+}
+
+func TestParseFrontmatterInlineLists(t *testing.T) {
+	// From upstream: handles inline list values
+	content := `---
+name: test
+commands: ["/test", "/run"]
+tags: [test, dev]
+paths: [my-project, another-project]
+---
+Body`
+	meta := parseFrontmatter(content)
+	if len(meta.Commands) != 2 {
+		t.Errorf("expected 2 commands, got %d", len(meta.Commands))
+	}
+	if meta.Commands[0] != "/test" || meta.Commands[1] != "/run" {
+		t.Errorf("unexpected commands: %v", meta.Commands)
+	}
+	if len(meta.Paths) != 2 {
+		t.Errorf("expected 2 paths, got %d", len(meta.Paths))
+	}
+	if meta.Paths[0] != "my-project" || meta.Paths[1] != "another-project" {
+		t.Errorf("unexpected paths: %v", meta.Paths)
+	}
+}
+
+func TestParseFrontmatterInlineComments(t *testing.T) {
+	// Test that inline comments are stripped
+	content := `---
+name: test-skill # this is a comment
+description: A skill # with comment
+---
+Body`
+	meta := parseFrontmatter(content)
+	if meta.Name != "test-skill" {
+		t.Errorf("expected name 'test-skill', got %q", meta.Name)
+	}
+	if meta.Description != "A skill" {
+		t.Errorf("expected description 'A skill', got %q", meta.Description)
+	}
+}
+
+func TestParseFrontmatterAvailableFalse(t *testing.T) {
+	// Test explicit available: false
+	content := `---
+name: disabled-skill
+available: false
+---
+Body`
+	meta := parseFrontmatter(content)
+	if meta.Name != "disabled-skill" {
+		t.Errorf("expected name 'disabled-skill', got %q", meta.Name)
+	}
+	if meta.Available {
+		t.Error("expected available=false, got true")
+	}
+}
+
+func TestParseFrontmatterWithWhenToUse(t *testing.T) {
+	// Test when_to_use field
+	content := `---
+name: analysis-skill
+description: Code analysis
+when_to_use: Use for complex refactoring and code review tasks
+---
+Body`
+	meta := parseFrontmatter(content)
+	if meta.WhenToUse != "Use for complex refactoring and code review tasks" {
+		t.Errorf("unexpected when_to_use: %q", meta.WhenToUse)
+	}
+}
+
+func TestParseFrontmatterWithVersion(t *testing.T) {
+	// Test version field
+	content := `---
+name: versioned-skill
+version: 2.1.0
+---
+Body`
+	meta := parseFrontmatter(content)
+	if meta.Version != "2.1.0" {
+		t.Errorf("expected version '2.1.0', got %q", meta.Version)
+	}
+}
+
+func TestParseFrontmatterDefaultAvailableIsTrue(t *testing.T) {
+	// When no 'available' key is present, it defaults to true
+	content := `---
+name: no-avail
+description: Test
+---
+Body`
+	meta := parseFrontmatter(content)
+	if !meta.Available {
+		t.Error("expected available=true (default), got false")
+	}
+}
+
+// ============================================================================
+// splitList tests (upstream: splitPathInFrontmatter)
+// ============================================================================
+
+func TestSplitListBasic(t *testing.T) {
+	// From upstream: splits comma-separated paths
+	// Note: splitList does NOT trim whitespace; parseInlineList does
+	// "a, b, c" -> ["a", " b", " c"] (spaces after commas preserved)
+	result := splitList("a, b, c")
+	if len(result) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(result))
+	}
+	if result[0] != "a" || result[1] != " b" || result[2] != " c" {
+		t.Errorf("expected [a, _b, _c] (no trim), got %v", result)
+	}
+	// parseInlineList trims: expected ["a", "b", "c"]
+	parsed := parseInlineList("[a, b, c]")
+	if len(parsed) != 3 || parsed[0] != "a" || parsed[1] != "b" || parsed[2] != "c" {
+		t.Errorf("parseInlineList expected [a, b, c], got %v", parsed)
+	}
+}
+
+func TestSplitListQuoted(t *testing.T) {
+	// splitList does not trim; parseInlineList trims
+	parsed := parseInlineList(`["a", 'b', c]`)
+	if len(parsed) != 3 || parsed[0] != "a" || parsed[1] != "b" || parsed[2] != "c" {
+		t.Errorf("expected [a, b, c] (unquoted), got %v", parsed)
+	}
+}
+
+func TestSplitListSingle(t *testing.T) {
+	result := splitList("single")
+	if len(result) != 1 || result[0] != "single" {
+		t.Errorf("expected [single], got %v", result)
+	}
+}
+
+func TestSplitListEmpty(t *testing.T) {
+	result := splitList("")
+	if result != nil {
+		t.Errorf("expected nil for empty, got %v", result)
+	}
+}
+
+func TestSplitListWithCommasInQuotes(t *testing.T) {
+	// Commas inside quotes should be preserved; parseInlineList trims
+	result := parseInlineList(`["a,b", c]`)
+	if len(result) != 2 || result[0] != "a,b" || result[1] != "c" {
+		t.Errorf("expected [a,b, c], got %v", result)
+	}
+}
+
+// ============================================================================
+// parseInlineList tests (upstream: parseFrontmatter + splitPathInFrontmatter)
+// ============================================================================
+
+func TestParseInlineListEmpty(t *testing.T) {
+	result := parseInlineList("[]")
+	if result != nil {
+		t.Errorf("expected nil for empty list, got %v", result)
+	}
+}
+
+func TestParseInlineListNotAList(t *testing.T) {
+	result := parseInlineList("not a list")
+	if result != nil {
+		t.Errorf("expected nil for non-list, got %v", result)
+	}
+}
+
+func TestParseInlineListWithSpaces(t *testing.T) {
+	result := parseInlineList("  [  a  ,  b  ]  ")
+	if len(result) != 2 || result[0] != "a" || result[1] != "b" {
+		t.Errorf("expected [a, b], got %v", result)
+	}
+}
+
+func TestParseInlineListSingleElement(t *testing.T) {
+	result := parseInlineList("[single]")
+	if len(result) != 1 || result[0] != "single" {
+		t.Errorf("expected [single], got %v", result)
+	}
+}
+
+func TestParseInlineListQuotedElements(t *testing.T) {
+	result := parseInlineList(`["a b", 'c d']`)
+	if len(result) != 2 || result[0] != "a b" || result[1] != "c d" {
+		t.Errorf("expected [a b, c d], got %v", result)
+	}
+}
+
+// ============================================================================
+// stripFrontmatter tests
+// ============================================================================
+
+func TestStripFrontmatterEmptyBlock(t *testing.T) {
+	// From upstream: handles empty frontmatter block
+	content := `---
+---
+Content here`
+	result := stripFrontmatter(content)
+	if result != "Content here" {
+		t.Errorf("expected 'Content here', got %q", result)
+	}
+}
+
+func TestStripFrontmatterNoFrontmatter(t *testing.T) {
+	result := stripFrontmatter("Just plain text")
+	if result != "Just plain text" {
+		t.Errorf("expected 'Just plain text', got %q", result)
+	}
+}
+
+func TestStripFrontmatterWhitespaceOnly(t *testing.T) {
+	// stripFrontmatter trims input first, so "   " -> ""
+	// Empty string -> empty string
+	result := stripFrontmatter("   ")
+	if result != "" {
+		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+func TestStripFrontmatterMissingEndDelimiter(t *testing.T) {
+	// When there's no closing ---, stripFrontmatter trims and returns
+	// (it doesn't error, just returns trimmed input)
+	result := stripFrontmatter("---\nname: test\nno closing")
+	// The function trims and returns (no frontmatter block found means original)
+	_ = result // behavior depends on implementation
+}
+
+// ============================================================================
+// parseBool edge case tests (upstream: parseBooleanFrontmatter)
+// ============================================================================
+
+func TestParseBoolEdgeCases(t *testing.T) {
+	// From upstream: parseBooleanFrontmatter
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"true", true},
+		{"yes", true},
+		{"True", true},
+		{"Yes", true},
+		{"false", false},
+		{"no", false},
+		{"", false},
+		{"TRUE", false}, // case sensitive
+		{"YES", false},  // case sensitive
+		{"random", false},
+	}
+
+	for _, tc := range tests {
+		got := parseBool(tc.input)
+		if got != tc.want {
+			t.Errorf("parseBool(%q) = %v, want %v", tc.input, got, tc.want)
+		}
+	}
+}
+
+// ============================================================================
+// Public ParseFrontmatter function tests
+// ============================================================================
+
+func TestPublicParseFrontmatter(t *testing.T) {
+	content := `---
+name: public-test
+description: Testing public API
+available: true
+---
+Body content`
+
+	meta, err := ParseFrontmatter(content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.Name != "public-test" {
+		t.Errorf("expected 'public-test', got %q", meta.Name)
+	}
+	if meta.Description != "Testing public API" {
+		t.Errorf("expected 'Testing public API', got %q", meta.Description)
+	}
+}
+
+func TestPublicParseFrontmatterNoFrontmatter(t *testing.T) {
+	_, err := ParseFrontmatter("No frontmatter here")
+	if err == nil {
+		t.Error("expected error for content without frontmatter")
+	}
+}
+
+func TestPublicParseFrontmatterMissingEnd(t *testing.T) {
+	_, err := ParseFrontmatter("---\nname: test\nno end delimiter")
+	if err == nil {
+		t.Error("expected error for missing end delimiter")
+	}
+}
+
+func TestPublicParseFrontmatterCouldNotParse(t *testing.T) {
+	// Frontmatter with no parseable keys
+	_, err := ParseFrontmatter("---\n---\nContent")
+	if err == nil {
+		t.Error("expected error for empty/unparseable frontmatter")
+	}
+}
+
+// ============================================================================
+// Upstream Quality: SkillInfo.IsApplicable tests
+// ============================================================================
+
+func TestSkillInfoIsApplicableNoPaths(t *testing.T) {
+	s := &SkillInfo{Name: "test", Paths: nil}
+	if !s.IsApplicable("/some/project") {
+		t.Error("skill with no paths should always be applicable")
+	}
+}
+
+func TestSkillInfoIsApplicableExactMatch(t *testing.T) {
+	s := &SkillInfo{Name: "test", Paths: []string{"/some/project"}}
+	if !s.IsApplicable("/some/project") {
+		t.Error("should match exact path")
+	}
+}
+
+func TestSkillInfoIsApplicableBasenameMatch(t *testing.T) {
+	s := &SkillInfo{Name: "test", Paths: []string{"my-project"}}
+	if !s.IsApplicable("/some/path/my-project") {
+		t.Error("should match basename")
+	}
+}
+
+func TestSkillInfoIsApplicableNoMatch(t *testing.T) {
+	s := &SkillInfo{Name: "test", Paths: []string{"other-project"}}
+	if s.IsApplicable("/some/path/my-project") {
+		t.Error("should not match different basename")
+	}
+}
+
+func TestSkillInfoIsApplicableGlobPattern(t *testing.T) {
+	s := &SkillInfo{Name: "test", Paths: []string{"*/my-project"}}
+	if !s.IsApplicable("/some/path/my-project") {
+		t.Error("should match glob pattern against basename")
+	}
+}

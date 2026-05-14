@@ -320,3 +320,203 @@ func TestMemoizeWithLRUConcurrent(t *testing.T) {
 
 	// Should handle concurrent access without panic
 }
+
+// ============================================================================
+// Upstream Quality: lazySchema.test.ts Port
+// ============================================================================
+// lazySchema is a pattern where a factory function is called once and
+// cached. MemoizeWithLRU implements this pattern. These tests verify
+// the lazy/cached factory behavior matching upstream patterns.
+
+func TestLazySchemaReturnsFunction(t *testing.T) {
+	// From upstream: "returns a function"
+	fn := MemoizeWithLRU(
+		func(args ...interface{}) interface{} { return 42 },
+		func(args ...interface{}) string { return "key" },
+		10,
+	)
+	// In Go, we verify the returned type is callable
+	result := fn.Call()
+	if result != 42 {
+		t.Errorf("expected 42, got %v", result)
+	}
+}
+
+func TestLazySchemaFirstInvocationCallsFactory(t *testing.T) {
+	// From upstream: "calls factory on first invocation"
+	var callCount int32
+	fn := MemoizeWithLRU(
+		func(args ...interface{}) interface{} {
+			atomic.AddInt32(&callCount, 1)
+			return "result"
+		},
+		stringKeyFn,
+		10,
+	)
+	fn.Call("key")
+	if atomic.LoadInt32(&callCount) != 1 {
+		t.Errorf("expected factory called once, got %d", atomic.LoadInt32(&callCount))
+	}
+}
+
+func TestLazySchemaReturnsCachedResult(t *testing.T) {
+	// From upstream: "returns cached result on subsequent invocations"
+	callCount := 0
+	fn := MemoizeWithLRU(
+		func(args ...interface{}) interface{} {
+			callCount++
+			return callCount // Returns different values if not cached
+		},
+		func(args ...interface{}) string { return "same-key" },
+		10,
+	)
+	first := fn.Call("same-key")
+	second := fn.Call("same-key")
+	third := fn.Call("same-key")
+
+	if first != second {
+		t.Errorf("first and second calls should return same value: %v vs %v", first, second)
+	}
+	if second != third {
+		t.Errorf("second and third calls should return same value: %v vs %v", second, third)
+	}
+	if callCount != 1 {
+		t.Errorf("factory should be called only once, got %d", callCount)
+	}
+}
+
+func TestLazySchemaFactoryCalledOnlyOnce(t *testing.T) {
+	// From upstream: "factory is called only once"
+	var callCount int32
+	fn := MemoizeWithLRU(
+		func(args ...interface{}) interface{} {
+			atomic.AddInt32(&callCount, 1)
+			return "cached"
+		},
+		stringKeyFn,
+		10,
+	)
+	fn.Call("x")
+	fn.Call("x")
+	fn.Call("x")
+
+	if atomic.LoadInt32(&callCount) != 1 {
+		t.Errorf("expected factory called exactly once, got %d", atomic.LoadInt32(&callCount))
+	}
+}
+
+func TestLazySchemaDifferentReturnTypes(t *testing.T) {
+	// From upstream: "works with different return types"
+	// Integer
+	numFactory := MemoizeWithLRU(
+		func(args ...interface{}) interface{} { return 123 },
+		stringKeyFn,
+		10,
+	)
+	if numFactory.Call("k") != 123 {
+		t.Error("expected 123")
+	}
+
+	// Array/slice
+	arrFactory := MemoizeWithLRU(
+		func(args ...interface{}) interface{} { return []int{1, 2, 3} },
+		stringKeyFn,
+		10,
+	)
+	result := arrFactory.Call("k").([]int)
+	if len(result) != 3 || result[0] != 1 || result[1] != 2 || result[2] != 3 {
+		t.Errorf("expected [1,2,3], got %v", result)
+	}
+
+	// Struct/map
+	mapFactory := MemoizeWithLRU(
+		func(args ...interface{}) interface{} { return map[string]string{"id": "a"} },
+		stringKeyFn,
+		10,
+	)
+	mapResult := mapFactory.Call("k").(map[string]string)
+	if mapResult["id"] != "a" {
+		t.Errorf("expected id=a, got %v", mapResult)
+	}
+}
+
+func TestLazySchemaIndependentCaches(t *testing.T) {
+	// From upstream: "each call to lazySchema returns independent cache"
+	a := MemoizeWithLRU(
+		func(args ...interface{}) interface{} { return map[string]string{"id": "a"} },
+		stringKeyFn,
+		10,
+	)
+	b := MemoizeWithLRU(
+		func(args ...interface{}) interface{} { return map[string]string{"id": "b"} },
+		stringKeyFn,
+		10,
+	)
+
+	resultA := a.Call("k").(map[string]string)
+	resultB := b.Call("k").(map[string]string)
+
+	if resultA["id"] != "a" {
+		t.Errorf("expected id=a, got %v", resultA)
+	}
+	if resultB["id"] != "b" {
+		t.Errorf("expected id=b, got %v", resultB)
+	}
+
+	// Verify the two cached values are different
+	if resultA["id"] == resultB["id"] {
+		t.Error("a and b should have independent caches with different values")
+	}
+}
+
+func TestLazySchemaIdempotency(t *testing.T) {
+	// Idempotency: calling with the same args always returns the same result
+	var counter int32
+	fn := MemoizeWithLRU(
+		func(args ...interface{}) interface{} {
+			atomic.AddInt32(&counter, 1)
+			return args[0]
+		},
+		stringKeyFn,
+		10,
+	)
+
+	input := "hello"
+	results := make([]interface{}, 100)
+	for i := 0; i < 100; i++ {
+		results[i] = fn.Call(input)
+	}
+
+	// All 100 calls should return the same value
+	for i := 1; i < 100; i++ {
+		if results[i] != results[0] {
+			t.Errorf("idempotency broken at call %d: %v != %v", i, results[i], results[0])
+		}
+	}
+
+	// Factory should be called exactly once
+	if atomic.LoadInt32(&counter) != 1 {
+		t.Errorf("expected 1 factory call for 100 identical calls, got %d", atomic.LoadInt32(&counter))
+	}
+}
+
+func TestLazySchemaCacheClearTriggersRecompute(t *testing.T) {
+	// After clearing cache, the factory should be called again
+	var callCount int32
+	fn := MemoizeWithLRU(
+		func(args ...interface{}) interface{} {
+			atomic.AddInt32(&callCount, 1)
+			return "val"
+		},
+		stringKeyFn,
+		10,
+	)
+
+	fn.Call("k")
+	fn.CacheClear()
+	fn.Call("k")
+
+	if atomic.LoadInt32(&callCount) != 2 {
+		t.Errorf("expected 2 calls (before and after clear), got %d", atomic.LoadInt32(&callCount))
+	}
+}
