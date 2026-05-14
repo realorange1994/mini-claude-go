@@ -206,14 +206,11 @@ func TestClose(t *testing.T) {
 	reg := tools.NewRegistry()
 	exec := NewStreamingToolExecutor(reg, nil)
 
-	if exec.stopped {
-		t.Error("expected stopped to be false initially")
+	if exec.discarded {
+		t.Error("expected discarded to be false initially")
 	}
 
 	exec.Close()
-	if !exec.stopped {
-		t.Error("expected stopped to be true after Close")
-	}
 	if !exec.discarded {
 		t.Error("expected discarded to be true after Close")
 	}

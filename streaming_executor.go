@@ -31,9 +31,10 @@ type StreamingToolExecutor struct {
 	mu         sync.Mutex
 
 	// State
-	dispatched atomic.Int32
-	completed  atomic.Int32
-	hasErrored atomic.Bool
+	dispatched             atomic.Int32
+	completed              atomic.Int32
+	hasErrored             atomic.Bool
+	erroredToolDescription string
 
 	// Results
 	results   []toolExecResult
@@ -42,7 +43,6 @@ type StreamingToolExecutor struct {
 	// Concurrency gating
 	semaphore chan struct{}
 
-	stopped   bool
 	discarded bool
 
 	// Sibling abort context: cancelled only when a Bash tool errors.
@@ -143,6 +143,13 @@ func (e *StreamingToolExecutor) canExecuteToolLocked(isSafe bool) bool {
 			}
 		}
 	}
+	// If a Bash sibling errored (hasErrored), prevent new unsafe tools from
+	// starting. Safe tools are allowed to continue since they're independent.
+	// This matches upstream's getAbortReason() returning 'sibling_error' when
+	// hasErrored is true, which causes collectResults() to return a synthetic error.
+	if !isSafe && e.hasErrored.Load() {
+		return false
+	}
 	return executing == 0 || (isSafe && allExecutingSafe)
 }
 
@@ -156,7 +163,7 @@ func (e *StreamingToolExecutor) processQueue() {
 	defer e.processing.Store(false)
 
 	e.mu.Lock()
-	if e.stopped || e.discarded {
+	if e.discarded {
 		e.mu.Unlock()
 		return
 	}
@@ -184,11 +191,10 @@ func (e *StreamingToolExecutor) processQueue() {
 	}
 }
 
-// Close stops dispatching new tool calls.
+// Close discards the executor, preventing new tool dispatches.
 func (e *StreamingToolExecutor) Close() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.stopped = true
 	e.discarded = true
 	if e.siblingCancel != nil {
 		e.siblingCancel()
@@ -203,7 +209,7 @@ func (e *StreamingToolExecutor) Start(toolCallDoneCh <-chan int, toolCalls *[]To
 	go func() {
 		for idx := range toolCallDoneCh {
 			e.mu.Lock()
-			if e.stopped {
+			if e.discarded {
 				e.mu.Unlock()
 				return
 			}
@@ -223,7 +229,7 @@ func (e *StreamingToolExecutor) dispatch(idx int, toolCalls *[]ToolCallInfo) {
 	tc := (*toolCalls)[idx]
 
 	e.mu.Lock()
-	if e.stopped || e.discarded {
+	if e.discarded {
 		e.mu.Unlock()
 		return
 	}
@@ -457,12 +463,10 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	// Read/WebFetch/etc are independent - one failure shouldn't nuke the rest."
 	if wasError && tc.Name == "exec" {
 		e.hasErrored.Store(true)
-		desc := e.getToolDescription(tc)
-		_ = desc // available for synthetic error messages
+		e.erroredToolDescription = e.getToolDescription(tc)
 		e.siblingCtxDone()
-		e.mu.Lock()
-		e.stopped = true
-		e.mu.Unlock()
+		// Cancel queued unsafe tools. Safe tools are left queued and will
+		// be caught by the post-execution siblingCtx.Err() check.
 		e.cancelRemaining(idx)
 	}
 
@@ -477,26 +481,37 @@ func (e *StreamingToolExecutor) siblingCtxDone() {
 	}
 }
 
-// cancelRemaining marks all queued tools (except the one at errorIdx) as
-// cancelled and records synthetic error results for them.
+// cancelRemaining marks queued tools that cannot be cancelled via siblingCtx
+// as cancelled. Matching upstream's design:
+//   - Non-concurrency-safe (unsafe) queued tools are cancelled here directly,
+//     since they haven't started yet and need immediate cancellation.
+//   - Concurrency-safe (safe) queued tools are left in queued state; they
+//     will be cancelled by the post-execution siblingCtx.Err() check in
+//     execute() when they eventually run.
+//   - Safe tools ALREADY executing in goroutines are also caught by the
+//     post-execution siblingCtx.Err() check.
 func (e *StreamingToolExecutor) cancelRemaining(errorIdx int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, t := range e.tools {
 		if t.index != errorIdx && t.status == toolQueued && !t.cancelled {
-			t.cancelled = true
-			t.status = toolCompleted
-			if t.execDoneCh != nil {
-				close(t.execDoneCh)
+			// Only cancel unsafe tools here. Safe tools will be caught by
+			// the post-execution siblingCtx.Err() check in execute().
+			if !t.isConcurrencySafe {
+				t.cancelled = true
+				t.status = toolCompleted
+				if t.execDoneCh != nil {
+					close(t.execDoneCh)
+				}
+				e.recordResult(toolExecResult{
+					index:     t.index,
+					toolName:  t.tc.Name,
+					toolUseID: t.tc.ID,
+					isError:   true,
+					output:    e.createSyntheticErrorMessage(t.tc),
+				})
+				e.completed.Add(1)
 			}
-			e.recordResult(toolExecResult{
-				index:     t.index,
-				toolName:  t.tc.Name,
-				toolUseID: t.tc.ID,
-				isError:   true,
-				output:    e.createSyntheticErrorMessage(t.tc),
-			})
-			e.completed.Add(1)
 		}
 	}
 }
