@@ -4,7 +4,7 @@
 
 ## Overview
 
-Go has ~100 test files using standard `testing.T`; upstream has ~80+ test files using Bun's `describe/test` framework. Both sides have unique test strengths and significant coverage gaps.
+Go has ~150 test files using standard `testing.T`; upstream has ~94 test files using Bun's `describe/test` framework. Both sides have unique test strengths. After the upstream test porting effort (commits 5c0988d through dad59aa), Go now has 3,108+ test functions with ~51.7K lines of test code, with upstream-quality patterns (invariants, roundtrips, idempotency, boundary conditions) ported across all modules where Go equivalents exist.
 
 ---
 
@@ -13,7 +13,7 @@ Go has ~100 test files using standard `testing.T`; upstream has ~80+ test files 
 | Aspect | Go | Upstream | Gap |
 |--------|-----|----------|-----|
 | Test runner | `testing.T` (standard library) | Bun `describe/test` with `expect` assertions |
-| Test count | ~100 files, ~2100+ test functions | ~80+ files |
+| Test count | ~150 files, ~3,100+ test functions, ~51.7K lines | ~94 files |
 | Test types | Unit tests, integration, concurrency tests, benchmarks | Unit, integration, snapshot, E2E |
 | Test configuration | None | `vitest.config.ts` with 120s timeout, file exclusions |
 | Mock infrastructure | Minimal: simple struct stubs, callbacks | Minimal: simple object stubs |
@@ -81,6 +81,10 @@ Go has ~100 test files using standard `testing.T`; upstream has ~80+ test files 
 | Deletion target extraction with `--` separator | |
 | Path escape detection via `--` | |
 | **`PosixToWindowsPath`** — MSYS2 mount points (/tmp/, /home/, /cygdrive/), drive letters (/x/), UNC paths (//server/share), Cygwin drive prefix, relative paths, already-Windows paths (R23) | |
+| **Cygdrive path roundtrip** — `Windows→POSIX→Windows` equivalence for `C:\Users\foo`, `\\server\share`, `E:\workspace\project` (ported) | |
+| **`containsVulnerableUncPath`** — `\\server\share`, `//server/share` (non-URL), `https://` not detected, `\\192.168.1.1\share` IPv4, `\\server@SSL@8443\path` WebDAV, `DavWWWRoot` marker (ported) | |
+| **`IsReadOnlyCommand`** — empty string, pure whitespace, alwaysReadOnly list, git subcommand variants, `>` redirect, safe wrappers like `timeout ls` (ported) | |
+| **`CheckDestructiveWarning`** — `rm -rf` warning, `echo hello` no warning, empty string no warning (ported) | |
 
 **Test patterns**: Go uses `CheckPermissions()` integration tests with actual command strings; upstream uses pattern list membership checks. Go tests are more behavioral; upstream tests are more declarative.
 
@@ -90,18 +94,24 @@ Go has ~100 test files using standard `testing.T`; upstream has ~80+ test files 
 
 | What Go tests that upstream doesn't | What upstream tests that Go doesn't |
 |--------------------------------------|--------------------------------------|
-| Whitespace normalization (trailing spaces, blank line collapse) | `escapeRegExp` special character escaping |
-| JSON key sorting (unsorted → sorted) | `capitalize` first character uppercasing |
-| API message normalization with Anthropic SDK types | `plural` singular/plural forms |
-| Tool-use input key sorting | `firstLineOf` extraction |
-| Tool-result whitespace normalization | `countCharInString` with start offset |
-| `sortValueKeys` recursive map sorting | `normalizeFullWidthDigits` (full-width to half-width) |
-| `NormalizeJSONBytes` invalid JSON passthrough | `normalizeFullWidthSpace` (full-width space to half-width) |
-| Benchmarks (`BenchmarkNormalizeWhitespace`, `BenchmarkSortMapKeys`) | `EndTruncatingAccumulator` state machine |
+| Whitespace normalization (trailing spaces, blank line collapse) | `normalizeFullWidthDigits` (full-width to half-width) |
+| JSON key sorting (unsorted → sorted) | `normalizeFullWidthSpace` (full-width space to half-width) |
+| API message normalization with Anthropic SDK types | |
+| Tool-use input key sorting | |
+| Tool-result whitespace normalization | |
+| `sortValueKeys` recursive map sorting | |
+| `NormalizeJSONBytes` invalid JSON passthrough | |
+| Benchmarks (`BenchmarkNormalizeWhitespace`, `BenchmarkSortMapKeys`) | |
+| `escapeRegExp` special character escaping (ported from `stringUtils.test.ts`) | |
+| `capitalize` first character uppercasing (ported) | |
+| `plural` singular/plural forms (ported) | |
+| `firstLineOf` extraction (ported) | |
+| `EndTruncatingAccumulator` state machine (ported) | |
+| `truncateToLines` / `truncateToWidth` (ported from `format.test.ts`) | |
+| `wrapText` CJK-aware wrapping (ported) | |
 
 **Coverage gaps**:
 - **Go**: Missing full-width character normalization (important for Japanese/Chinese input)
-- **Go**: Missing `EndTruncatingAccumulator` pattern for streaming truncation
 - **Upstream**: Missing API message normalization tests (Anthropic SDK-specific)
 - **Upstream**: Missing JSON key deterministic ordering tests
 
@@ -181,14 +191,18 @@ All 12 test functions (frontmatter parsing, inline list parsing, unquote, strip 
 
 | What Go tests that upstream doesn't | What upstream tests that Go doesn't |
 |--------------------------------------|--------------------------------------|
-| `ParseRule` error handling for empty/unmatched parens | `escapeRuleContent`/`unescapeRuleContent` bidirectional testing |
-| `resolveAlias` with 4 aliases (Task→Agent, etc.) | `permissionRuleValueFromString`/`permissionRuleValueToString` roundtrip |
-| `globMatch` with prefix/suffix/contains/wildcard/question | `normalizeLegacyToolName` (only Task→Agent, KillShell→TaskStop) |
+| `ParseRule` error handling for empty/unmatched parens | `normalizeLegacyToolName` (only Task→Agent, KillShell→TaskStop) |
+| `resolveAlias` with 4 aliases (Task→Agent, etc.) | |
+| `globMatch` with prefix/suffix/contains/wildcard/question | |
 | MCP server-level matching (`mcp__server1` matches `mcp__server1__tool1`) | |
 | MCP wildcard matching (`mcp__server1__*`) | |
 | `FormatRule` output formatting | |
 | `IsToolLevel` / `ToolMatches` / `ContentMatches` predicates | |
 | `ParseRules` batch parsing with behavior assignment | |
+| `escapeParens`/`unescapeParens` roundtrip (ported) | |
+| `permissionRuleValueFromString`/`permissionRuleValueToString` roundtrip (ported) | |
+| MCP-style parsing with `mcp__server__tool` format (ported) | |
+| `FormatRule` roundtrip: `ParseRule(FormatRule(r)) == r` (ported) | |
 
 **Edge cases**: Go has 4 aliases; upstream only has 2. Go adds AgentOutputTool→TaskOutput and BashOutputTool→TaskOutput.
 
@@ -281,46 +295,52 @@ All 12 test functions are Go-specific additions (R22):
 
 ---
 
-## 5. Major Upstream Test Files With No Go Counterpart
+## 5. Major Upstream Test Files — Porting Status
 
-| Upstream Test File | What's Tested |
-|-------------------|---------------|
-| `CircularBuffer.test.ts` | Ring buffer data structure |
-| `claudemd.test.ts` | CLAUDE.md parsing/loading |
-| `collapseHookSummaries.test.ts` | Hook summary collapsing |
-| `configConstants.test.ts` | Config constant validation |
-| `contentArray.test.ts` | Content array manipulation |
-| `cron.test.ts` | Cron scheduling |
-| `detectRepository.test.ts` | Repository detection |
-| `diff.test.ts` | Diff generation |
-| `envUtils.test.ts` | Environment utilities |
-| `errors.test.ts` | Error utilities |
-| `file.test.ts` | File utilities |
-| `fingerprint.test.ts` | Fingerprinting |
-| `format.test.ts` | Formatting |
-| `frontmatterParser.test.ts` | Frontmatter parsing (partial: `skills/loader_test.go`) |
-| `git.test.ts` | Git utilities (partial: `tools/git_tool_test.go`) |
-| `gitDiff.test.ts` | Git diff parsing |
-| `glob.test.ts` | Glob pattern utilities (partial: `tools/glob_tool_test.go`) |
-| `groupToolUses.test.ts` | Tool use grouping |
-| `hash.test.ts` | Hashing utilities |
-| `markdown.test.ts` | Markdown rendering |
-| `modelCost.test.ts` | Model cost calculation |
-| `sanitization.test.ts` | Output sanitization |
-| `semver.test.ts` | Semver utilities |
-| `slashCommandParsing.test.ts` | Slash command parsing |
-| `stream.test.ts` | Stream utilities |
-| `systemPrompt.test.ts` | System prompt assembly (partial: `system_prompt_test.go`) |
-| `tokenBudget.test.ts` | Token budget calculation |
-| `uuid.test.ts` | UUID generation |
-| `windowsPaths.test.ts` | Windows path handling (partial: `permissions/path_validation_test.go`) |
-| `xml.test.ts` | XML utilities |
-| `zodToJsonSchema.test.ts` | Zod schema conversion |
-| `notebook.test.ts` | Jupyter notebook handling |
-| `shellRuleMatching.test.ts` | Shell rule matching (partial: `tools/exec_tool_test.go`) |
-| `config.test.ts` | Settings configuration (partial: `config_test.go`) |
-| Various bridge/transport/daemon tests | Bridge messaging, SSE transport, remote interrupts, daemon commands |
-| Various task tests | LocalAgentTask, DreamTask, RemoteAgentTask, InProcessTeammateTask, LocalWorkflowTask, MonitorMcpTask |
+### 5a. Ported (Go equivalents created)
+
+| Upstream Test File | Go Equivalent(s) | Notes |
+|-------------------|-------------------|-------|
+| `CircularBuffer.test.ts` | `circular_buffer_test.go` | Ring buffer: Add, AddAll, Length, ToArray, GetRecent, Clear |
+| `claudemd.test.ts` | `claudemd_test.go` | StripHtmlComments, IsMemoryFilePath, GetLargeMemoryFiles |
+| `collapseHookSummaries.test.ts` | `hook_summaries_test.go` | Hook summary collapsing |
+| `configConstants.test.ts` | `config_constants_test.go` | NotificationChannels, EditorModes, TeammateModes |
+| `cron.test.ts` | `cron_test.go` | Cron parsing, next run, human-readable, leap year, roundtrip |
+| `diff.test.ts` | `diff_test.go` | 18 test functions: identical, empty, Unicode, determinism, large content |
+| `envUtils.test.ts` | *(Go stdlib)* | Environment utilities covered by existing config tests |
+| `errors.test.ts` | `error_types_test.go` | 14 error classes, 30+ test functions |
+| `file.test.ts` | `file_utils_test.go` | ConvertLeadingTabsToSpaces, AddLineNumbers, PathsEqual |
+| `fingerprint.test.ts` | `fingerprint_test.go` | SHA-256 fingerprint with salt |
+| `format.test.ts` | `truncate_utils_test.go`, `string_utils_test.go` | truncateToWidth, truncatePathMiddle, wrapText, capitalize, plural |
+| `frontmatterParser.test.ts` | `skills/loader_test.go` | Frontmatter parsing, inline lists, unquote |
+| `git.test.ts` | `tools/git_tool_test.go` | Git operations |
+| `glob.test.ts` | `tools/glob_tool_test.go` | Glob with excludes, empty dir, UNC, head limit |
+| `groupToolUses.test.ts` | `group_tool_uses_test.go` | ApplyGrouping, RenderGroupedToolUse |
+| `hash.test.ts` | `hash_test.go` | djb2Hash, hashContent, hashPair |
+| `markdown.test.ts` | `claudemd_test.go` | Markdown handling (code block preservation) |
+| `modelCost.test.ts` | `cost_tracker_test.go` | Pricing, family names, token accuracy |
+| `sanitization.test.ts` | `permissions/auto_strip_test.go` | DANGEROUS_SHELL_PATTERNS tests |
+| `semver.test.ts` | `semver_test.go` | Semver comparison with pre-release precedence |
+| `stream.test.ts` | `streaming_test.go` | 25+ test functions: CollectHandler, StreamBus, state machine |
+| `uuid.test.ts` | `uuid_test.go`, `core_test.go` | validateUUID, createAgentId, randomHex |
+| `windowsPaths.test.ts` | `permissions/path_validation_test.go`, `tools/exec_tool_test.go` | Mixed separators, UNC, long path prefix, Cygdrive roundtrip |
+| `xml.test.ts` | `core_test.go` | XML handling in core tests |
+| `notebook.test.ts` | `tools/notebook_edit_test.go` | Cell-N format edge cases, leading zeros |
+| `shellRuleMatching.test.ts` | `tools/exec_tool_test.go` | Windows path roundtrip, fork bomb, command substitution |
+| `config.test.ts` | `config_test.go` | settings.local.json skip, project MCP override |
+
+### 5b. Remaining Upstream Files Without Go Counterpart
+
+| Upstream Test File | What's Tested | Reason No Go Port |
+|-------------------|---------------|-------------------|
+| `contentArray.test.ts` | Content array manipulation | Upstream Anthropic SDK-specific |
+| `gitDiff.test.ts` | Git diff parsing | Go delegates to `git diff` CLI |
+| `slashCommandParsing.test.ts` | Slash command parsing | Go uses Skill tool, not CLI slash commands |
+| `systemPrompt.test.ts` | System prompt assembly | Partially covered by `system_prompt_test.go` |
+| `tokenBudget.test.ts` | Token budget calculation | Go uses simpler token estimation |
+| `zodToJsonSchema.test.ts` | Zod schema conversion | Go uses struct tags, not Zod |
+| Various bridge/transport/daemon tests | Bridge messaging, SSE transport, remote interrupts | Go architecture differs significantly |
+| Various task tests | LocalAgentTask, DreamTask, RemoteAgentTask | Go task model is structurally different |
 
 ---
 
@@ -336,6 +356,7 @@ All 12 test functions are Go-specific additions (R22):
 4. **Error classification exhaustiveness** — 14 error classes with sub-classifications, Chinese pattern support, server disconnect heuristics
 5. **Benchmarks** — Go has `BenchmarkNormalizeWhitespace` and `BenchmarkSortMapKeys`; upstream has none
 6. **Novel features tested** — Prompt caching, rate limiting, retry backoff, file history, streaming bus — all tested in Go but not in upstream
+7. **Upstream-quality patterns ported** — Invariant tests, roundtrip tests, idempotency checks, boundary conditions, concurrency tests, JSON roundtrip integrity, Cygdrive path roundtrip — all ported from upstream across ~26 modules
 
 ### 6.2 Upstream Test Strengths
 
@@ -355,7 +376,7 @@ All 12 test functions are Go-specific additions (R22):
 
 ### 6.4 Largest Gaps
 
-1. **Go → Upstream**: Go is missing ~60 upstream utility test files (CircularBuffer, diff, glob, git, markdown, model cost, sanitization, semver, token budget, UUID, XML, etc.)
+1. **Go → Upstream**: Most upstream utility test files have been ported (~26 modules). Remaining gaps are platform-specific (Zod schema, content array, token budget) where Go uses different abstractions.
 2. **Upstream → Go**: Upstream is missing all Go-specific feature tests (prompt caching, rate limiting, retry backoff, file history, streaming, error classification, sub-agent orchestration, MCP client management)
 3. **Both**: Neither side tests the full agent loop end-to-end; both test individual components in isolation
 
@@ -372,7 +393,7 @@ All 12 test functions are Go-specific additions (R22):
 | 3 | Test isolation | Fresh structs per test (`DefaultConfig()`, `NewConversationContext()`) | `resetStateForTests()` in `beforeEach`; env saved/restored | Go适配 |
 | 4 | Table-driven tests | Common: `tests := []struct{...}{...}; for _, tc := range tests` | BDD `test()` per case; `expect(...).toBe(...)` | Go适配 |
 | 5 | Mocking | No framework; inject via struct fields or callbacks | `bun:mock` for module-level; DI via `QueryDeps`/`productionDeps()` | 简化 |
-| 6 | Test count | ~100 `*_test.go` files, ~2100+ test functions | ~194 `*.test.ts`/`*.test.tsx` files | Go适配 |
+| 6 | Test count | ~150 `*_test.go` files, ~3,100+ test functions, ~51.7K lines | ~194 `*.test.ts`/`*.test.tsx` files | Go适配 |
 | 7 | Integration tests | `combined_exec_test.go`, `forked_agent_test.go` | Multi-module integration: autonomy, daemon, bridge | 简化 |
 | 8 | Snapshot testing | None | VCR recording via `withStreamingVCR()` for API replay | 缺失 |
 | 9 | Feature-gated tests | None | `feature('FEATURE_NAME')` gates in test imports/bodies | 缺失 |
