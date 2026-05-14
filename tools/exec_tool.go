@@ -39,7 +39,7 @@ func (*ExecTool) Description() string {
 	return "Execute a shell command. Use for package installs, test runners, build commands, git operations, and any shell task. " +
 		"Do NOT use exec for file reading (use read_file), file searching (use grep or glob), or file editing (use edit_file). " +
 		"Commands run in the current working directory. " +
-		"On Windows, use PowerShell syntax. On Unix, use bash syntax. " +
+		"On Windows, uses Git Bash if available, otherwise PowerShell. On Unix, use bash syntax. " +
 		"Supports running commands in the background with run_in_background=true. " +
 		"SAFETY: Commands targeting system directories (/etc, /usr, /bin, etc.) or using destructive patterns (rm -rf /, rm -rf ~) will be blocked. When deleting files, prefer targeted deletion over broad patterns."
 }
@@ -266,11 +266,11 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 
 	var shell, flag string
 	if runtime.GOOS == "windows" {
-		// Prefer PowerShell on Windows, then bash (Git Bash), then cmd
-		if _, err := exec.LookPath("powershell"); err == nil {
-			shell, flag = "powershell", "-Command"
-		} else if _, err := exec.LookPath("bash"); err == nil {
+		// Prefer Git Bash on Windows, then PowerShell, then cmd
+		if _, err := exec.LookPath("bash"); err == nil {
 			shell, flag = "bash", "-c"
+		} else if _, err := exec.LookPath("powershell"); err == nil {
+			shell, flag = "powershell", "-Command"
 		} else {
 			shell, flag = "cmd", "/C"
 		}
