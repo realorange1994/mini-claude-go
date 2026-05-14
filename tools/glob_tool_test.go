@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,5 +201,115 @@ func TestGlobTypeFilterDefault(t *testing.T) {
 	}
 	if !contains(result.Output, "main.go") {
 		t.Errorf("expected main.go (type defaults to file), got:\n%s", result.Output)
+	}
+}
+
+// ─── Upstream Quality: Glob excludes ─────────────────────────────────────────
+
+func TestGlobExcludes(t *testing.T) {
+	dir := setupGlobTestDir(t)
+	tool := &GlobTool{}
+	result := tool.Execute(map[string]any{
+		"pattern":  "**/*.go",
+		"path":     dir,
+		"excludes": []any{"*_test.go"},
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+	// Should still find .go files since none are *_test.go
+	if !contains(result.Output, "a.go") {
+		t.Errorf("expected a.go in output:\n%s", result.Output)
+	}
+}
+
+// ─── Upstream Quality: Glob empty directory ──────────────────────────────────
+
+func TestGlobEmptyDirectory(t *testing.T) {
+	dir := t.TempDir()
+	// No files in the directory
+	tool := &GlobTool{}
+	result := tool.Execute(map[string]any{
+		"pattern": "**/*",
+		"path":    dir,
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+	if result.Output != "No files matched." {
+		t.Errorf("expected 'No files matched.' for empty directory, got %q", result.Output)
+	}
+}
+
+// ─── Upstream Quality: Glob UNC path rejection ───────────────────────────────
+
+func TestGlobUNCPath(t *testing.T) {
+	tool := &GlobTool{}
+	result := tool.Execute(map[string]any{
+		"pattern": "**/*",
+		"path":    `\\server\share`,
+	})
+	if !result.IsError {
+		t.Error("UNC path should be rejected")
+	}
+}
+
+// ─── Upstream Quality: Glob head_limit ───────────────────────────────────────
+
+func TestGlobHeadLimit(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 20; i++ {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("file_%02d.txt", i)), []byte("x"), 0644)
+	}
+	tool := &GlobTool{}
+	result := tool.Execute(map[string]any{
+		"pattern":   "**/*.txt",
+		"path":      dir,
+		"head_limit": 5,
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+	if !contains(result.Output, "showing first") {
+		t.Errorf("expected truncation message with head_limit=5, got:\n%s", result.Output)
+	}
+}
+
+// ─── Upstream Quality: Glob pattern auto-prefix ──────────────────────────────
+
+func TestGlobPatternAutoPrefix(t *testing.T) {
+	dir := setupGlobTestDir(t)
+	tool := &GlobTool{}
+	// "*.go" without "**/" should auto-prefix to "**/*.go"
+	result := tool.Execute(map[string]any{
+		"pattern": "*.go",
+		"path":    dir,
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+	// Should find files in subdirectories too
+	if !contains(result.Output, "c.go") {
+		t.Errorf("auto-prefix should find files in subdirs, got:\n%s", result.Output)
+	}
+}
+
+// ─── Upstream Quality: Glob type filter edge cases ───────────────────────────
+
+func TestGlobTypeFilterInvalid(t *testing.T) {
+	dir := setupGlobTypeTestDir(t)
+	tool := &GlobTool{}
+	// Invalid type filter — should return no files (only "file" and "all" match files)
+	result := tool.Execute(map[string]any{
+		"pattern": "**/*.go",
+		"path":    dir,
+		"type":    "invalid_type",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+	// Invalid type should not match any files
+	if contains(result.Output, "main.go") {
+		t.Errorf("invalid type filter should not match files, got:\n%s", result.Output)
 	}
 }

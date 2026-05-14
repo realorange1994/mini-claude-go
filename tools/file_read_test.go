@@ -379,6 +379,179 @@ func TestMaxFileSize(t *testing.T) {
 	}
 }
 
+// ─── Upstream Quality: isBinaryExtension completeness invariant ──────────────
+
+func TestIsBinaryExtensionCompleteness(t *testing.T) {
+	// All common binary formats should be detected — invariant from upstream
+	requiredExts := []string{
+		".exe", ".dll", ".so", ".dylib", ".com",
+		".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+		".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svgz",
+		".mp3", ".mp4", ".wav", ".ogg", ".avi", ".flac",
+		".pyc", ".class", ".jar", ".o", ".obj",
+		".pdf", ".docx", ".xlsx", ".pptx",
+		".bin", ".db", ".sqlite",
+		".woff", ".woff2", ".ttf", ".eot",
+	}
+	for _, ext := range requiredExts {
+		if !isBinaryExtension(ext) {
+			t.Errorf("isBinaryExtension(%q) should be true — missing from binary extension list", ext)
+		}
+	}
+}
+
+// ─── Upstream Quality: isBinaryExtension no overlap with text ─────────────────
+
+func TestIsBinaryExtensionNoTextOverlap(t *testing.T) {
+	// Common text formats must NOT be flagged as binary
+	textExts := []string{
+		".go", ".py", ".js", ".ts", ".rs", ".java", ".c", ".cpp",
+		".txt", ".md", ".json", ".yaml", ".yml", ".toml",
+		".html", ".css", ".scss", ".xml", ".csv",
+		".sh", ".bash", ".zsh", ".fish",
+		".gitignore", ".dockerignore",
+		".env", ".ini", ".cfg", ".conf",
+		".sql", ".rb", ".php", ".pl",
+		".swift", ".kt", ".scala",
+		".lua", ".r", ".m",
+	}
+	for _, ext := range textExts {
+		if isBinaryExtension(ext) {
+			t.Errorf("isBinaryExtension(%q) should be false — text extension incorrectly flagged as binary", ext)
+		}
+	}
+}
+
+// ─── Upstream Quality: isBinaryMagic completeness invariant ──────────────────
+
+func TestIsBinaryMagicCompleteness(t *testing.T) {
+	// All major binary magic signatures should be detected
+	tests := []struct {
+		name   string
+		header []byte
+	}{
+		{"PE/EXE", []byte{'M', 'Z', 0x00, 0x00}},
+		{"ELF", []byte{0x7f, 'E', 'L', 'F', 0x00, 0x00}},
+		{"PDF", []byte{'%', 'P', 'D', 'F', '-', '1', '.', '4'}},
+		{"GZIP", []byte{0x1f, 0x8b, 0x08, 0x00}},
+		{"JPEG", []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10}},
+		{"PNG", []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}},
+		{"GIF87a", []byte{'G', 'I', 'F', '8', '7', 'a'}},
+		{"GIF89a", []byte{'G', 'I', 'F', '8', '9', 'a'}},
+		{"ZIP", []byte{'P', 'K', 0x03, 0x04}},
+		{"Wasm", []byte{0x00, 'a', 's', 'm', 0x01, 0x00}},
+		{"Java class", []byte{0xca, 0xfe, 0xba, 0xbe}},
+		{"Lua bytecode", []byte{0x1b, 'L', 'u', 'a'}},
+		{"XZ", []byte{0xfd, '7', 'z', 'X', 'Z', 0x00}},
+		{"7Z", []byte{'7', 'z', 0xbc, 0xaf, 0x27, 0x1c}},
+		{"WebP", []byte{'R', 'I', 'F', 'F', 0x00, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P'}},
+		{"MP4", []byte{0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p'}},
+		{"BZIP2", []byte{'B', 'Z', 'h', 0x31}},
+		{"MP3 ID3v2", []byte{'I', 'D', '3', 0x03, 0x00}},
+		{"MP3 sync", []byte{0xff, 0xfb, 0x90, 0x00}},
+		{"Python pyc", []byte{0x0d, 0x0d, 0x0d, 0x0a}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !isBinaryMagic(tt.header) {
+				t.Errorf("isBinaryMagic should detect %s signature", tt.name)
+			}
+		})
+	}
+}
+
+// ─── Upstream Quality: isDeviceFile edge cases ───────────────────────────────
+
+func TestIsDeviceFileEdgeCases(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		// Exact matches
+		{"/dev/zero", true},
+		{"/dev/random", true},
+		{"/dev/urandom", true},
+		{"/dev/full", true},
+		{"/dev/null", false}, // /dev/null is NOT blocked — it returns EOF
+		// Path suffix matches (e.g., inside container)
+		{"some/path/dev/zero", true},
+		// /proc patterns
+		{"/proc/self/fd/0", true},
+		{"/proc/123/fd/1", true},
+		// Case insensitive
+		{"/DEV/ZERO", true},
+		// Normal paths
+		{"/home/user/main.go", false},
+		{"/tmp/output.txt", false},
+		// Windows paths
+		{"C:\\Users\\file.txt", false},
+	}
+	for _, tt := range tests {
+		got := isDeviceFile(tt.path)
+		if got != tt.expected {
+			t.Errorf("isDeviceFile(%q) = %v, want %v", tt.path, got, tt.expected)
+		}
+	}
+}
+
+// ─── Upstream Quality: expandPath idempotency ────────────────────────────────
+
+func TestExpandPathIdempotent(t *testing.T) {
+	// expandPath(expandPath(p)) should produce the same result for absolute paths
+	paths := []string{
+		"/home/user/file.txt",
+		"C:\\Users\\file.txt",
+	}
+	for _, p := range paths {
+		first := expandPath(p)
+		second := expandPath(first)
+		if second != first {
+			t.Errorf("expandPath not idempotent for %q: first=%q, second=%q", p, first, second)
+		}
+	}
+}
+
+// ─── Upstream Quality: isUncPath edge cases ──────────────────────────────────
+
+func TestIsUncPathEdgeCases(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		{"//server/share", true},
+		{`\\server\share`, true},
+		{"/home/user/file", false},
+		{"C:\\Users\\file", false},
+		{"https://example.com", false}, // URL should not be UNC
+		{"//", true},                   // bare UNC prefix
+	}
+	for _, tt := range tests {
+		got := isUncPath(tt.path)
+		if got != tt.expected {
+			t.Errorf("isUncPath(%q) = %v, want %v", tt.path, got, tt.expected)
+		}
+	}
+}
+
+// ─── Upstream Quality: normalizeQuotes idempotency ───────────────────────────
+
+func TestNormalizeQuotesIdempotent(t *testing.T) {
+	// normalizeQuotes(normalizeQuotes(x)) == normalizeQuotes(x) — idempotency invariant
+	inputs := []string{
+		"hello world",
+		`"straight quotes"`,
+		"\u201Ccurly\u201D",
+		"mixed \u201Cfoo\u201D and \u2018bar\u2019",
+	}
+	for _, in := range inputs {
+		first := normalizeQuotes(in)
+		second := normalizeQuotes(first)
+		if second != first {
+			t.Errorf("normalizeQuotes not idempotent for %q: first=%q, second=%q", in, first, second)
+		}
+	}
+}
+
 // helper
 func stringsContains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||

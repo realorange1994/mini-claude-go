@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -212,5 +214,185 @@ func TestFeatureFlagStruct(t *testing.T) {
 	}
 	if f.Description != "desc" {
 		t.Errorf("expected Description='desc', got %q", f.Description)
+	}
+}
+
+// ─── Upstream Quality: Concurrent access to feature flags ────────────────────
+
+func TestFeatureFlagStoreConcurrentAccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	var wg sync.WaitGroup
+	// Multiple goroutines writing flags concurrently
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			store.Enable(fmt.Sprintf("concurrent_flag_%d", idx), "concurrent test")
+		}(i)
+	}
+	// Multiple goroutines reading flags concurrently
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_ = store.Enabled(fmt.Sprintf("concurrent_flag_%d", idx))
+			_ = store.List()
+		}(i)
+	}
+	wg.Wait()
+
+	// All 10 flags should be persisted
+	flags := store.List()
+	if len(flags) != 10 {
+		t.Errorf("expected 10 flags after concurrent writes, got %d", len(flags))
+	}
+}
+
+// ─── Upstream Quality: Persistence roundtrip integrity ───────────────────────
+
+func TestFeatureFlagStorePersistenceRoundtrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	// Enable multiple flags with different descriptions
+	store.Enable("flag_a", "Description A")
+	store.Enable("flag_b", "Description B")
+	store.Disable("flag_a")
+
+	// Reload from file
+	store2 := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+	rawData, _ := os.ReadFile(file)
+	json.Unmarshal(rawData, &store2.flags)
+	for name, f := range store2.flags {
+		f.Name = name
+		store2.flags[name] = f
+	}
+
+	// Verify flag states match
+	if store2.Enabled("flag_a") {
+		t.Error("flag_a should be disabled after reload")
+	}
+	if !store2.Enabled("flag_b") {
+		t.Error("flag_b should be enabled after reload")
+	}
+
+	// Verify descriptions are preserved
+	flags := store2.List()
+	for _, f := range flags {
+		if f.Name == "flag_a" && f.Description != "Description A" {
+			t.Errorf("flag_a description = %q, want 'Description A'", f.Description)
+		}
+		if f.Name == "flag_b" && f.Description != "Description B" {
+			t.Errorf("flag_b description = %q, want 'Description B'", f.Description)
+		}
+	}
+}
+
+// ─── Upstream Quality: JSON roundtrip integrity ──────────────────────────────
+
+func TestFeatureFlagJSONRoundtrip(t *testing.T) {
+	flags := map[string]FeatureFlag{
+		"test_flag": {Name: "test_flag", Enabled: true, Description: "test desc"},
+	}
+	data, err := json.Marshal(flags)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	var decoded map[string]FeatureFlag
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	if f, ok := decoded["test_flag"]; !ok {
+		t.Error("test_flag missing after roundtrip")
+	} else {
+		// Name has json:"-" so it won't survive roundtrip
+		// That's expected — Name is derived from map key
+		if f.Name != "" {
+			t.Errorf("Name should be empty after JSON roundtrip (has json:\"-\" tag), got %q", f.Name)
+		}
+		if !f.Enabled {
+			t.Error("Enabled should be true after roundtrip")
+		}
+		if f.Description != "test desc" {
+			t.Errorf("Description = %q, want 'test desc'", f.Description)
+		}
+	}
+}
+
+// ─── Upstream Quality: Save failure recovery ─────────────────────────────────
+
+func TestFeatureFlagStoreSaveInvalidPath(t *testing.T) {
+	store := &FeatureFlagStore{
+		file:  "/nonexistent_dir_12345/feature_flags.json",
+		flags: make(map[string]FeatureFlag),
+	}
+
+	// Save to invalid path should not crash
+	store.Enable("test", "test")
+	// Should silently fail (no panic)
+}
+
+// ─── Upstream Quality: Load corrupted file ───────────────────────────────────
+
+func TestFeatureFlagStoreLoadCorruptedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	// Write invalid JSON
+	os.WriteFile(file, []byte("not valid json{{{"), 0o644)
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+	rawData, _ := os.ReadFile(file)
+	json.Unmarshal(rawData, &store.flags)
+	for name, f := range store.flags {
+		f.Name = name
+		store.flags[name] = f
+	}
+
+	// Store should be empty (corrupted file should not crash)
+	flags := store.List()
+	if len(flags) != 0 {
+		t.Errorf("expected 0 flags from corrupted file, got %d", len(flags))
+	}
+}
+
+// ─── Upstream Quality: Enable with empty description ─────────────────────────
+
+func TestFeatureFlagStoreEmptyDescription(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "feature_flags.json")
+
+	store := &FeatureFlagStore{
+		file:  file,
+		flags: make(map[string]FeatureFlag),
+	}
+
+	store.Enable("empty_desc", "")
+	flags := store.List()
+	if len(flags) != 1 {
+		t.Fatalf("expected 1 flag, got %d", len(flags))
+	}
+	if flags[0].Description != "" {
+		t.Errorf("expected empty description, got %q", flags[0].Description)
 	}
 }

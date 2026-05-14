@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -361,5 +362,138 @@ func TestHookJSONRoundTrip(t *testing.T) {
 
 	if decoded["HookType"] != "pre_tool_use" {
 		t.Errorf("decoded[HookType] = %v, want pre_tool_use", decoded["HookType"])
+	}
+}
+
+// ─── Upstream Quality: hookGlobMatch edge cases ──────────────────────────────
+
+func TestHookGlobMatchEdgeCases(t *testing.T) {
+	tests := []struct {
+		pattern  string
+		text     string
+		expected bool
+	}{
+		// Empty pattern/text
+		{"", "", true},
+		{"", "Bash", false},
+		{"*", "", true},
+		// Multiple wildcards
+		{"*Use*", "PreToolUse", true},
+		{"B*a*h", "Bash", true},
+		// Question mark edge cases
+		{"?", "", false},
+		{"?", "x", true},
+		{"??", "xy", true},
+		{"??", "xyz", false},
+		// No match
+		{"Bash", "Edit", false},
+		{"Edit*", "Bash", false},
+		// Case sensitivity
+		{"bash", "Bash", false},
+	}
+	for _, tt := range tests {
+		got := hookGlobMatch(tt.pattern, tt.text)
+		if got != tt.expected {
+			t.Errorf("hookGlobMatch(%q, %q) = %v, want %v", tt.pattern, tt.text, got, tt.expected)
+		}
+	}
+}
+
+// ─── Upstream Quality: HookShellResult empty stdout ──────────────────────────
+
+func TestHookShellResultEmptyStdout(t *testing.T) {
+	r := &HookShellResult{RawStdout: ""}
+	r.ParseStdout()
+	if r.ShouldBlock() {
+		t.Error("empty stdout should not block")
+	}
+	if r.ShouldAsk() {
+		t.Error("empty stdout should not ask")
+	}
+}
+
+// ─── Upstream Quality: HookShellResult malformed JSON ────────────────────────
+
+func TestHookShellResultMalformedJSON(t *testing.T) {
+	r := &HookShellResult{RawStdout: "{invalid json"}
+	r.ParseStdout()
+	// Should not crash, should not block
+	if r.ShouldBlock() {
+		t.Error("malformed JSON should not block")
+	}
+}
+
+// ─── Upstream Quality: HookShellResult multiple decisions ────────────────────
+
+func TestHookShellResultBlockWithReason(t *testing.T) {
+	r := &HookShellResult{RawStdout: `{"decision":"block","reason":"security policy","systemMessage":"blocked by policy"}`}
+	r.ParseStdout()
+	if !r.ShouldBlock() {
+		t.Error("block decision should block")
+	}
+	if r.BlockReason() != "security policy" {
+		t.Errorf("BlockReason = %q, want 'security policy'", r.BlockReason())
+	}
+}
+
+// ─── Upstream Quality: LoadHooksFromSettings with all event types ─────────────
+
+func TestLoadHooksFromSettingsAllEventTypes(t *testing.T) {
+	content := `{
+		"hooks": {
+			"PreToolUse": [{"matcher": "Bash", "command": "echo pre"}],
+			"PostToolUse": [{"matcher": "Write", "command": "echo post"}],
+			"PreCompact": [{"matcher": "*", "command": "echo compact"}],
+			"PostCompact": [{"matcher": "*", "command": "echo done"}],
+			"Notification": [{"matcher": "*", "command": "echo notify"}],
+			"Stop": [{"matcher": "*", "command": "echo stop"}]
+		}
+	}`
+
+	tmpFile, err := os.CreateTemp("", "settings-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.WriteString(content)
+	tmpFile.Close()
+
+	hooks, err := LoadHooksFromSettings(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("LoadHooksFromSettings() error: %v", err)
+	}
+
+	eventTypes := []string{"PreToolUse", "PostToolUse", "PreCompact", "PostCompact", "Notification", "Stop"}
+	for _, eventType := range eventTypes {
+		if _, ok := hooks[eventType]; !ok {
+			t.Errorf("expected hooks for event type %q", eventType)
+		}
+	}
+}
+
+// ─── Upstream Quality: HookCommand timeout default ───────────────────────────
+
+func TestHookCommandTimeoutDefault(t *testing.T) {
+	// HookCommand with zero timeout should use default
+	hook := HookCommand{Matcher: "Bash", Command: "echo hi", Timeout: 0}
+	if hook.Timeout != 0 {
+		t.Errorf("expected Timeout=0 (default handled by executor), got %d", hook.Timeout)
+	}
+}
+
+// ─── Upstream Quality: buildHookEnv no duplicate keys ────────────────────────
+
+func TestBuildHookEnvNoDuplicateKeys(t *testing.T) {
+	env := buildHookEnv(nil)
+	keys := make(map[string]int)
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		key := parts[0]
+		keys[key]++
+	}
+	for key, count := range keys {
+		if count > 1 && (strings.HasPrefix(key, "CLAUDE_") || key == "CLAUDE_PROJECT_DIR" || key == "CLAUDE_CWD") {
+			t.Errorf("duplicate CLAUDE env key: %q appears %d times", key, count)
+		}
 	}
 }

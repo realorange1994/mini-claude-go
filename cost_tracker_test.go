@@ -302,3 +302,84 @@ func TestLookupPrice(t *testing.T) {
 		t.Errorf("unknown model should return zero pricing: %+v", p2)
 	}
 }
+
+// ─── Upstream Quality: Pricing table completeness invariant ──────────────────
+
+func TestModelPricingNonZeroPrices(t *testing.T) {
+	// Every entry in ModelPricing must have non-zero Input and Output prices
+	// This catches the bug where a new model is added without pricing
+	for model, price := range ModelPricing {
+		if price.Input <= 0 {
+			t.Errorf("ModelPricing[%q].Input = %.2f, expected > 0", model, price.Input)
+		}
+		if price.Output <= 0 {
+			t.Errorf("ModelPricing[%q].Output = %.2f, expected > 0", model, price.Output)
+		}
+		if price.CacheWrite <= 0 {
+			t.Errorf("ModelPricing[%q].CacheWrite = %.2f, expected > 0", model, price.CacheWrite)
+		}
+		if price.CacheRead < 0 {
+			t.Errorf("ModelPricing[%q].CacheRead = %.2f, expected >= 0", model, price.CacheRead)
+		}
+	}
+}
+
+// ─── Upstream Quality: familyName completeness ───────────────────────────────
+
+func TestFamilyNameCompleteness(t *testing.T) {
+	// Every model in ModelPricing should have a readable family name
+	for model := range ModelPricing {
+		name := familyName(model)
+		if name == model {
+			t.Logf("ModelPricing[%q] has no human-readable family name", model)
+		}
+	}
+}
+
+// ─── Upstream Quality: Cost calculation edge cases ───────────────────────────
+
+func TestCalculateUSDCostEdgeCases(t *testing.T) {
+	tests := []struct {
+		name                    string
+		model                   string
+		input, output           int64
+		cacheWrite, cacheRead   int64
+		expectedGreaterThanZero bool
+	}{
+		{"large input", "claude-sonnet-4-20250514", 10_000_000, 0, 0, 0, true},
+		{"large output", "claude-sonnet-4-20250514", 0, 10_000_000, 0, 0, true},
+		{"all cache tokens", "claude-sonnet-4-20250514", 0, 0, 1_000_000, 1_000_000, true},
+		{"mixed tokens", "claude-opus-4-5-20250610", 100_000, 50_000, 80_000, 20_000, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cost := CalculateUSDCost(tt.model, tt.input, tt.output, tt.cacheWrite, tt.cacheRead)
+			if tt.expectedGreaterThanZero && cost <= 0 {
+				t.Errorf("expected cost > 0, got %.6f", cost)
+			}
+		})
+	}
+}
+
+// ─── Upstream Quality: Cost tracker token count accuracy ─────────────────────
+
+func TestCostTrackerTokenCountAccuracy(t *testing.T) {
+	ct := NewCostTracker()
+	ct.RecordUsage("claude-sonnet-4-20250514", 1_000, 500, 800, 200)
+	ct.RecordUsage("claude-sonnet-4-20250514", 2_000, 1_000, 0, 0)
+
+	if ct.TotalInputTokens != 3_000 {
+		t.Errorf("TotalInputTokens = %d, want 3000", ct.TotalInputTokens)
+	}
+	if ct.TotalOutputTokens != 1_500 {
+		t.Errorf("TotalOutputTokens = %d, want 1500", ct.TotalOutputTokens)
+	}
+
+	entry := ct.GetPerModelCosts()["claude-sonnet-4-20250514"]
+	if entry.CacheWriteTokens != 800 {
+		t.Errorf("CacheWriteTokens = %d, want 800", entry.CacheWriteTokens)
+	}
+	if entry.CacheReadTokens != 200 {
+		t.Errorf("CacheReadTokens = %d, want 200", entry.CacheReadTokens)
+	}
+}

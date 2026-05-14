@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -172,4 +174,121 @@ func containsStr(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// ─── Upstream Quality: No-duplicate beta headers invariant ───────────────────
+
+func TestBuildBetaHeadersNoDuplicates(t *testing.T) {
+	// BuildBetaHeaders must never return duplicate entries — invariant from upstream
+	models := []string{
+		"claude-sonnet-4-20250514",
+		"claude-sonnet-4-20250514[1m]",
+		"claude-opus-4-5-20250610",
+		"claude-opus-4-5-20250610[1m]",
+		"claude-haiku-4-5-20250610",
+		"M2.7",
+	}
+	for _, m := range models {
+		betas := BuildBetaHeaders(m)
+		seen := make(map[string]bool)
+		for _, b := range betas {
+			if seen[b] {
+				t.Errorf("BuildBetaHeaders(%q) returned duplicate beta header %q", m, b)
+			}
+			seen[b] = true
+		}
+	}
+}
+
+// ─── Upstream Quality: Beta header count invariant ────────────────────────────
+
+func TestBuildBetaHeadersCountInvariant(t *testing.T) {
+	// Default: 6 betas (claude-code, caching, interleaved-thinking, context-mgmt, max-tokens, token-counting)
+	// [1m] adds one more (context-1m)
+	// computer-use is NOT added unconditionally in BuildBetaHeaders
+	betas := BuildBetaHeaders("claude-sonnet-4-20250514")
+	if len(betas) != 6 {
+		t.Errorf("expected 6 default beta headers, got %d", len(betas))
+	}
+
+	// With [1m]: 7 betas (adds context-1m)
+	betas1m := BuildBetaHeaders("claude-sonnet-4-20250514[1m]")
+	if len(betas1m) != 7 {
+		t.Errorf("expected 7 beta headers with [1m], got %d", len(betas1m))
+	}
+
+	// With both env vars disabled and [1m]: 5 betas
+	origThinking := os.Getenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING")
+	origToken := os.Getenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING")
+	defer func() {
+		os.Setenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING", origThinking)
+		os.Setenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING", origToken)
+	}()
+	os.Setenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING", "1")
+	os.Setenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING", "1")
+	betas = BuildBetaHeaders("claude-sonnet-4-20250514[1m]")
+	if len(betas) != 5 {
+		t.Errorf("expected 5 beta headers with [1m] + 2 disabled, got %d", len(betas))
+	}
+}
+
+// ─── Upstream Quality: All model families coverage ────────────────────────────
+
+func TestBuildBetaHeadersAllFamilies(t *testing.T) {
+	// Every model family should get the same base set of beta headers
+	families := []string{
+		"claude-sonnet-4-20250514",
+		"claude-opus-4-5-20250610",
+		"claude-haiku-4-5-20250610",
+		"claude-3-5-sonnet-20241022",
+	}
+	for _, m := range families {
+		betas := BuildBetaHeaders(m)
+		// All should contain the core betas
+		for _, required := range []string{BetaHeaderClaudeCode, BetaHeaderPromptCaching, BetaHeaderMaxTokens} {
+			if !containsStr(betas, required) {
+				t.Errorf("BuildBetaHeaders(%q) missing required beta: %q", m, required)
+			}
+		}
+		// None should have [1m] without suffix
+		if containsStr(betas, BetaHeaderContext1M) {
+			t.Errorf("BuildBetaHeaders(%q) should NOT include context-1m without [1m] suffix", m)
+		}
+	}
+}
+
+// ─── Upstream Quality: BuildBetaHeaders sorted output ─────────────────────────
+
+func TestBuildBetaHeadersOrder(t *testing.T) {
+	// Beta headers should be returned in a deterministic order
+	betas1 := BuildBetaHeaders("claude-sonnet-4-20250514")
+	betas2 := BuildBetaHeaders("claude-sonnet-4-20250514")
+	if len(betas1) != len(betas2) {
+		t.Fatalf("same model should produce same number of betas")
+	}
+	for i := range betas1 {
+		if betas1[i] != betas2[i] {
+			t.Errorf("beta header order mismatch at index %d: %q vs %q", i, betas1[i], betas2[i])
+		}
+	}
+}
+
+// ─── Upstream Quality: FormatBetaHeader roundtrip ─────────────────────────────
+
+func TestFormatBetaHeaderRoundtrip(t *testing.T) {
+	// BuildBetaHeaders → FormatBetaHeader → split should recover all betas
+	model := "claude-sonnet-4-20250514[1m]"
+	betas := BuildBetaHeaders(model)
+	formatted := FormatBetaHeader(betas)
+	parts := strings.Split(formatted, ",")
+	sort.Strings(parts)
+	sort.Strings(betas)
+	if len(parts) != len(betas) {
+		t.Fatalf("roundtrip length mismatch: original=%d, formatted=%d", len(betas), len(parts))
+	}
+	for i := range betas {
+		if parts[i] != betas[i] {
+			t.Errorf("roundtrip mismatch at %d: expected %q, got %q", i, betas[i], parts[i])
+		}
+	}
 }
