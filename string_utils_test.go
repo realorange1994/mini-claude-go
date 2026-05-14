@@ -171,6 +171,13 @@ func TestFirstLineOfThreeLines(t *testing.T) {
 	}
 }
 
+// Upstream: returns empty string for leading newline
+func TestFirstLineOfLeadingNewline(t *testing.T) {
+	if firstLineOf("\nline2") != "" {
+		t.Errorf("expected '', got %q", firstLineOf("\nline2"))
+	}
+}
+
 // ─── countCharInString ──────────────────────────────────────────────────
 // Ported from upstream stringUtils.test.ts
 
@@ -207,6 +214,20 @@ func TestCountCharInStringAllSame(t *testing.T) {
 func TestCountCharInStringOffsetBeyond(t *testing.T) {
 	if countCharInString("hi", "h", 10) != 0 {
 		t.Errorf("expected 0 when offset beyond string, got %d", countCharInString("hi", "h", 10))
+	}
+}
+
+// Upstream: counts from start offset (aabaa, 'a', offset 2)
+func TestCountCharInStringUpstreamOffset(t *testing.T) {
+	if countCharInString("aabaa", "a", 2) != 2 {
+		t.Errorf("expected 2 for 'aabaa' from offset 2, got %d", countCharInString("aabaa", "a", 2))
+	}
+}
+
+// Upstream: "hello world" count "l" = 3
+func TestCountCharInStringUpstream(t *testing.T) {
+	if countCharInString("hello world", "l") != 3 {
+		t.Errorf("expected 3 for 'hello world' count 'l', got %d", countCharInString("hello world", "l"))
 	}
 }
 
@@ -321,7 +342,29 @@ func TestTruncateToLinesZeroMaxLines(t *testing.T) {
 	}
 }
 
-// ─── safeJoinLines ───────────────────────────────────────────────────────
+// Upstream: preserves intentional empty lines between content
+func TestSafeJoinLinesPreservesIntentionalEmptyLines(t *testing.T) {
+	result := safeJoinLines([]string{"first", "", "second", "", "third"}, "\n", 100)
+	if result != "first\n\nsecond\n\nthird" {
+		t.Errorf("expected intentional empty lines preserved, got %q", result)
+	}
+}
+
+// Upstream: handles string with only newlines (using \n delimiter to match upstream)
+func TestSafeJoinLinesOnlyNewlines(t *testing.T) {
+	result := safeJoinLines([]string{"\n", "\n"}, "\n", 100)
+	if result != "\n\n\n" {
+		t.Errorf("expected \\n\\n\\n, got %q", result)
+	}
+}
+
+// Upstream: single empty line
+func TestSafeJoinLinesSingleEmpty(t *testing.T) {
+	result := safeJoinLines([]string{""}, ",", 100)
+	if result != "" {
+		t.Errorf("expected empty, got %q", result)
+	}
+}
 // Ported from upstream stringUtils.test.ts
 
 func TestSafeJoinLinesBasic(t *testing.T) {
@@ -431,5 +474,31 @@ func TestEndTruncatingAccumulatorTotalBytes(t *testing.T) {
 	acc.Append("hello world")
 	if acc.TotalBytes() != 11 {
 		t.Errorf("expected 11 total bytes, got %d", acc.TotalBytes())
+	}
+}
+
+// Upstream: stops accepting data once truncated and full
+func TestEndTruncatingAccumulatorStopsAfterFull(t *testing.T) {
+	acc := NewEndTruncatingAccumulator(5)
+	acc.Append("12345")
+	acc.Append("67890")
+	if acc.Length() != 5 {
+		t.Errorf("expected length 5 after first truncation, got %d", acc.Length())
+	}
+	acc.Append("more")
+	if acc.Length() != 5 {
+		t.Errorf("expected length still 5 after additional append, got %d", acc.Length())
+	}
+}
+
+// Upstream: truncate flag set after exceeding maxSize with large single append
+func TestEndTruncatingAccumulatorTruncateFlagOnLargeAppend(t *testing.T) {
+	acc := NewEndTruncatingAccumulator(10)
+	acc.Append("12345678901234567890")
+	if !acc.Truncated() {
+		t.Error("should be truncated after large append")
+	}
+	if acc.Length() != 10 {
+		t.Errorf("expected length 10 (maxSize), got %d", acc.Length())
 	}
 }

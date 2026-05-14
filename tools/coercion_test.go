@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -603,5 +604,327 @@ func TestCoerceArgumentsStringToIntegerWithFloat(t *testing.T) {
 	CoerceArguments(schema, args)
 	if args["count"] != 42 {
 		t.Errorf("expected count=42, got %v", args["count"])
+	}
+}
+
+// ─── Ported from upstream semanticBoolean.test.ts ─────────────────────────
+
+func TestCoerceBooleanFromStringTrue(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"flag": map[string]any{"type": "boolean"},
+		},
+	}
+
+	tests := []struct {
+		input  string
+		expect bool
+	}{
+		// Upstream: parses string 'true' to true
+		{"true", true},
+		// Upstream: parses string 'false' to false
+		{"false", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			args := map[string]any{"flag": tt.input}
+			warnings := CoerceArguments(schema, args)
+			if len(warnings) == 0 {
+				t.Errorf("expected coercion warning for %q", tt.input)
+			}
+			if args["flag"] != tt.expect {
+				t.Errorf("expected flag=%v, got %v", tt.expect, args["flag"])
+			}
+		})
+	}
+}
+
+// Upstream: rejects boolean true/false (no coercion needed — type matches)
+func TestCoerceBooleanFromNativeBoolean(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"flag": map[string]any{"type": "boolean"},
+		},
+	}
+
+	for _, input := range []bool{true, false} {
+		t.Run(fmt.Sprintf("%v", input), func(t *testing.T) {
+			args := map[string]any{"flag": input}
+			warnings := CoerceArguments(schema, args)
+			// Native bool -> bool should require no coercion
+			if len(warnings) != 0 {
+				t.Errorf("native bool should not trigger coercion, got %d warnings", len(warnings))
+			}
+			if args["flag"] != input {
+				t.Errorf("expected flag=%v, got %v", input, args["flag"])
+			}
+		})
+	}
+}
+
+// Upstream: rejects "TRUE"/"FALSE" (case-sensitive).
+// Go coerceToBoolean uses ToLower, so "TRUE" and "FALSE" are accepted.
+// This test documents the design difference.
+func TestCoerceBooleanCaseInsensitive(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"flag": map[string]any{"type": "boolean"},
+		},
+	}
+
+	// Go accepts "TRUE" and "FALSE" (case-insensitive) — unlike upstream Zod
+	args := map[string]any{"flag": "TRUE"}
+	warnings := CoerceArguments(schema, args)
+	if len(warnings) == 0 {
+		t.Error("expected coercion warning for 'TRUE'")
+	}
+	if args["flag"] != true {
+		t.Errorf("expected flag=true for 'TRUE', got %v", args["flag"])
+	}
+
+	args = map[string]any{"flag": "FALSE"}
+	warnings = CoerceArguments(schema, args)
+	if len(warnings) == 0 {
+		t.Error("expected coercion warning for 'FALSE'")
+	}
+	if args["flag"] != false {
+		t.Errorf("expected flag=false for 'FALSE', got %v", args["flag"])
+	}
+}
+
+// Upstream: rejects number 1 (no number -> bool coercion in upstream)
+// Go does coerce number -> bool (0=false, non-zero=true)
+func TestCoerceBooleanFromNumber(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"flag": map[string]any{"type": "boolean"},
+		},
+	}
+
+	// Go: number 1 coerces to true
+	args := map[string]any{"flag": 1}
+	warnings := CoerceArguments(schema, args)
+	if len(warnings) == 0 {
+		t.Error("expected coercion warning for 1")
+	}
+	if args["flag"] != true {
+		t.Errorf("expected flag=true for 1, got %v", args["flag"])
+	}
+
+	// Go: number 0 coerces to false
+	args = map[string]any{"flag": 0}
+	warnings = CoerceArguments(schema, args)
+	if len(warnings) == 0 {
+		t.Error("expected coercion warning for 0")
+	}
+	if args["flag"] != false {
+		t.Errorf("expected flag=false for 0, got %v", args["flag"])
+	}
+}
+
+// Additional edge cases for boolean coercion
+func TestCoerceBooleanStringOneZero(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"flag": map[string]any{"type": "boolean"},
+		},
+	}
+
+	// "1" -> true (per coerceToBoolean: "1" is a truthy string)
+	args := map[string]any{"flag": "1"}
+	CoerceArguments(schema, args)
+	if args["flag"] != true {
+		t.Errorf("expected flag=true for '1', got %v", args["flag"])
+	}
+
+	// "0" -> false
+	args = map[string]any{"flag": "0"}
+	CoerceArguments(schema, args)
+	if args["flag"] != false {
+		t.Errorf("expected flag=false for '0', got %v", args["flag"])
+	}
+}
+
+func TestCoerceBooleanStringTF(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"flag": map[string]any{"type": "boolean"},
+		},
+	}
+
+	// "t" -> true (per strconv.ParseBool fallback)
+	args := map[string]any{"flag": "t"}
+	CoerceArguments(schema, args)
+	if args["flag"] != true {
+		t.Errorf("expected flag=true for 't', got %v", args["flag"])
+	}
+
+	// "f" -> false
+	args = map[string]any{"flag": "f"}
+	CoerceArguments(schema, args)
+	if args["flag"] != false {
+		t.Errorf("expected flag=false for 'f', got %v", args["flag"])
+	}
+}
+
+// Upstream: rejects null (Go: null value in args is ignored)
+func TestCoerceBooleanFromNull(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"flag": map[string]any{"type": "boolean"},
+		},
+	}
+
+	// nil should be handled — no type switch matches nil
+	args := map[string]any{"flag": nil}
+	warnings := CoerceArguments(schema, args)
+	// nil doesn't match any case in coerceToBoolean, so no coercion
+	if len(warnings) != 0 {
+		t.Errorf("nil should not trigger coercion, got %d warnings", len(warnings))
+	}
+}
+
+// ─── Ported from upstream semanticNumber.test.ts ─────────────────────────
+
+func TestCoerceNumberFromNumber(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"val": map[string]any{"type": "number"},
+		},
+	}
+
+	// Upstream: parses number 42
+	// Go: JSON numbers are float64, so passing 42.0 is the typical case
+	args := map[string]any{"val": 42.0}
+	warnings := CoerceArguments(schema, args)
+	// Native float64 -> number needs no coercion
+	if len(warnings) != 0 {
+		t.Errorf("native number should not trigger coercion, got %d warnings", len(warnings))
+	}
+	if args["val"] != 42.0 {
+		t.Errorf("expected val=42, got %v", args["val"])
+	}
+}
+
+// Upstream: parses string '42' to 42
+func TestCoerceNumberFromString(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"val": map[string]any{"type": "number"},
+		},
+	}
+
+	tests := []struct {
+		input  string
+		expect float64
+	}{
+		{"42", 42},
+		{"0", 0},
+		{"-5", -5},
+		{"3.14", 3.14},
+		{"-7.5", -7.5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			args := map[string]any{"val": tt.input}
+			warnings := CoerceArguments(schema, args)
+			if len(warnings) == 0 {
+				t.Errorf("expected coercion warning for %q", tt.input)
+			}
+			got, ok := args["val"].(float64)
+			if !ok {
+				t.Fatalf("expected float64, got %T", args["val"])
+			}
+			if got != tt.expect {
+				t.Errorf("expected val=%v, got %v", tt.expect, got)
+			}
+		})
+	}
+}
+
+// Upstream: rejects string 'abc' (Go: does not coerce, leaves as-is)
+func TestCoerceNumberInvalidString(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"val": map[string]any{"type": "number"},
+		},
+	}
+
+	args := map[string]any{"val": "abc"}
+	warnings := CoerceArguments(schema, args)
+	// "abc" is not a number, so no coercion should happen
+	if len(warnings) != 0 {
+		t.Errorf("invalid string should not coerce, got %d warnings", len(warnings))
+	}
+	if args["val"] != "abc" {
+		t.Errorf("invalid string should remain unchanged, got %v", args["val"])
+	}
+}
+
+// Upstream: rejects empty string ''
+func TestCoerceNumberEmptyString(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"val": map[string]any{"type": "number"},
+		},
+	}
+
+	args := map[string]any{"val": ""}
+	CoerceArguments(schema, args)
+	// Empty string: strconv.ParseFloat("") returns error, so no coercion
+	if args["val"] != "" {
+		t.Errorf("empty string should remain unchanged, got %v", args["val"])
+	}
+}
+
+// Upstream: rejects null
+func TestCoerceNumberNull(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"val": map[string]any{"type": "number"},
+		},
+	}
+
+	args := map[string]any{"val": nil}
+	CoerceArguments(schema, args)
+	// nil should remain nil
+	if args["val"] != nil {
+		t.Errorf("nil should remain unchanged, got %v", args["val"])
+	}
+}
+
+// Upstream: rejects boolean true
+func TestCoerceNumberFromBool(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"val": map[string]any{"type": "number"},
+		},
+	}
+
+	// Go doesn't coerce bool -> number (no case in coerceToNumber for bool when expected type is number)
+	// Wait, let me check — yes it does: coerceToNumber has a bool case
+	args := map[string]any{"val": true}
+	warnings := CoerceArguments(schema, args)
+	// Go: bool -> number coerces to 1.0
+	if len(warnings) == 0 {
+		t.Error("expected coercion warning for true")
+	}
+	if args["val"] != 1.0 {
+		t.Errorf("expected val=1.0 for true, got %v", args["val"])
 	}
 }
