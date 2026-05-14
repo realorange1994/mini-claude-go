@@ -29,6 +29,25 @@ import (
 	"miniclaudecode-go/transcript"
 )
 
+// LoopTransitionReason identifies why the agent loop continues to the next turn.
+// Matching upstream's structured continue paths — each `continue` in the main
+// loop carries an explicit reason for observability and debugging.
+type LoopTransitionReason string
+
+const (
+	TransitionModelFallback    LoopTransitionReason = "model_fallback"        // 529 overload triggered model switch
+	TransitionModelConfused    LoopTransitionReason = "model_confused"        // malformed response, retry with hint
+	TransitionToolPairing      LoopTransitionReason = "tool_pairing_error"    // 2013 error, repaired context
+	TransitionTruncatedArgs    LoopTransitionReason = "truncated_arguments"   // tool args cut off, retry with hint
+	TransitionStreamStalled    LoopTransitionReason = "stream_stalled"       // safety timeout, truncation recovery
+	TransitionContextOverflow  LoopTransitionReason = "context_overflow"     // precise token-gap reactive compact
+	TransitionContextExceeded  LoopTransitionReason = "context_exceeded"     // context length error, aggressive compact
+	TransitionEmptyResponse    LoopTransitionReason = "empty_response"       // thinking-only, nudge for output
+	TransitionMaxTokens        LoopTransitionReason = "max_tokens_escalation" // max_tokens hit, escalate and retry
+	TransitionRefusal          LoopTransitionReason = "content_refusal"      // content policy violation
+	TransitionNone             LoopTransitionReason = ""                     // normal turn (no special transition)
+)
+
 // IterationBudget manages the turn budget for the agent loop.
 type IterationBudget struct {
 	max         int
@@ -345,6 +364,7 @@ type AgentLoop struct {
 	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
 	errorReporter              *ErrorReporter            // captures error events for analysis
 	featureFlags               *FeatureFlagStore         // feature flag store
+	lastTransition          LoopTransitionReason       // reason for the most recent loop continue
 	telemetry                  *TelemetryManager         // telemetry event tracking
 }
 
@@ -365,6 +385,18 @@ func (a *AgentLoop) handle529Error() bool {
 	return true
 }
 
+
+// handleRefusal checks if stopReason is "refusal" (content policy filter) and
+// returns an error message if so. Matching upstream's getErrorMessageIfRefusal()
+// in errors.ts:1187.
+func (a *AgentLoop) handleRefusal(stopReason string) string {
+	if stopReason != "refusal" {
+		return ""
+	}
+	a.out("\n[refusal] Claude Code is unable to respond to this request, which appears to violate our Usage Policy.\n")
+	return "Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). Please double press esc to edit your last message or start a new session for Claude Code to assist with a different task."
+}
+
 // trackStreamFailure increments the consecutive stream failure counter.
 // After 3 consecutive failures, it disables streaming for the rest of the session
 // and falls back to non-streaming API calls.
@@ -376,6 +408,18 @@ func (a *AgentLoop) trackStreamFailure() {
 		a.useStream = false
 		a.consecutiveStreamFailures = 0
 	}
+}
+
+// LastTransition returns the reason for the most recent loop continue, for observability.
+func (a *AgentLoop) LastTransition() LoopTransitionReason {
+	return a.lastTransition
+}
+
+func (r LoopTransitionReason) String() string {
+	if r == "" {
+		return "normal"
+	}
+	return string(r)
 }
 
 // handle429Error determines whether a 429 rate-limit error should be retried
@@ -1171,6 +1215,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 	}
 
 	for a.budget.Consume() {
+		a.lastTransition = TransitionNone // reset per-turn
 		// Check for cancelCtx (set by sub-agent Kill) at the start of each turn
 		if a.cancelCtx != nil {
 			select {
@@ -1351,12 +1396,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 				var fbErr *FallbackTriggeredError
 				if errors.As(err, &fbErr) {
 					a.out("\n[Fallback] %v -- continuing with %s\n", fbErr, fbErr.FallbackModel)
+					a.lastTransition = TransitionModelFallback
 					continue
 				}
 			if strings.Contains(errMsg, "model confused") {
 				a.out("\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
 				a.context.AddUserMessage("ERROR: Your previous response was malformed. Do NOT output tool syntax as text. Use proper tool calls only.")
+				a.lastTransition = TransitionModelConfused
 				continue
 			}
 			// 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
@@ -1366,12 +1413,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 				a.context.FixRoleAlternation()
 				// Inject a recovery hint so the model produces properly sequenced tool calls
 				a.context.AddUserMessage("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.")
+				a.lastTransition = TransitionToolPairing
 				continue
 			}
 			// Truncated tool arguments -- model cut off mid-tool-call
 			if strings.Contains(errMsg, "truncated") || strings.Contains(errMsg, "incomplete JSON") {
 				a.out("\n[WARN] Tool arguments truncated, injecting corrective hint...\n")
 				a.context.AddUserMessage("ERROR: Your tool call arguments was cut off due to length limits. Do NOT repeat the truncated tool call. If you need to make multiple tool calls, make them one at a time with shorter arguments.")
+				a.lastTransition = TransitionTruncatedArgs
 				continue
 			}
 			// Stream stalled -- safety timeout fired; recover with truncation
@@ -1395,6 +1444,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 					a.context.MinimumHistory()
 				}
 				a.injectTruncationContinuation(preTokens)
+				a.lastTransition = TransitionStreamStalled
 				continue
 			}
 			if isContextLengthError(errMsg) {
@@ -1415,6 +1465,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 						targetTokens := currentTokens - overflowTokens - safetyMargin
 						a.reactiveCompact(targetTokens)
 						contextErrors = 0
+						a.lastTransition = TransitionContextOverflow
 						continue
 					}
 				}
@@ -1437,6 +1488,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 					a.injectTruncationContinuation(preTokens)
 				}
 				a.consecutiveContextErrors = 0
+				a.lastTransition = TransitionContextExceeded
 				continue
 			}
 			return fmt.Sprintf("API error: %v", err)
@@ -1463,6 +1515,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 					consecutiveEmptyResponses, maxEmptyResponses)
 				// Inject hint to encourage actual output
 				a.context.AddUserMessage("Please continue and provide your response in text or use a tool.")
+				a.lastTransition = TransitionEmptyResponse
 				continue
 			}
 			// Genuine final answer with text
@@ -2259,6 +2312,15 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		return nil, nil, fmt.Errorf("stream ended without receiving any events")
 	}
 
+
+	// Check for content policy refusal (stop_reason: "refusal").
+	// Matching upstream's getErrorMessageIfRefusal() in errors.ts:1187.
+	if collect.IsRefusal() {
+		msg := a.handleRefusal("refusal")
+		a.lastTransition = TransitionRefusal
+		return nil, []string{msg}, nil
+	}
+
 	// Check for tool-as-text echo and truncated arguments
 	if collect.IsToolUseAsText() {
 		a.out("\n[WARN] Model echoed tool syntax as text -- recovering\n")
@@ -2284,6 +2346,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 			prev := a.currentMaxTokens.Load()
 			a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
 			a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+			a.lastTransition = TransitionMaxTokens
 		} else if fr == "max_tokens" {
 			// Already at escalated level -- inject recovery message for next turn.
 			// Matches upstream's MAX_OUTPUT_TOKENS_RECOVERY path.
@@ -2398,12 +2461,18 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 			}
 			// Mark that cache_edits were included in this API call (prevents double-send).
 			a.cachedMC.MarkSentToAPI()
+			// Detect content policy refusal (stop_reason: "refusal").
+			if msg := a.handleRefusal(stopReason); msg != "" {
+				a.lastTransition = TransitionRefusal
+				return nil, []string{msg}, nil
+			}
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
 				prev := a.currentMaxTokens.Load()
 				a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
 				a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+				a.lastTransition = TransitionMaxTokens
 			} else if stopReason == "max_tokens" {
 				// Already at escalated level -- inject recovery message for next turn.
 				a.context.AddUserMessage("Output token limit reached. Resume directly -- no apology, no recap. Pick up mid-thought and break remaining work into smaller pieces.")
@@ -2499,12 +2568,18 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			}
 			// Mark that cache_edits were included in this API call (prevents double-send).
 			a.cachedMC.MarkSentToAPI()
+			// Detect content policy refusal (stop_reason: "refusal").
+			if msg := a.handleRefusal(stopReason); msg != "" {
+				a.lastTransition = TransitionRefusal
+				return nil, []string{msg}, nil
+			}
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
 				prev := a.currentMaxTokens.Load()
 				a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
 				a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+				a.lastTransition = TransitionMaxTokens
 			} else if stopReason == "max_tokens" {
 				// Already at escalated level -- inject recovery message for next turn.
 				a.context.AddUserMessage("Output token limit reached. Resume directly -- no apology, no recap. Pick up mid-thought and break remaining work into smaller pieces.")

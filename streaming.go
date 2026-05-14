@@ -29,6 +29,7 @@ const (
 	ChunkTypeError    ChunkType = "error"        // Error occurred
 	ChunkTypeDone     ChunkType = "done"         // Stream complete
 	ChunkTypeBlockStop ChunkType = "block_stop"  // Content block finished
+	ChunkTypeRefusal  ChunkType = "refusal"      // stop_reason: refusal (content policy)
 )
 
 // StreamChunk is a single event emitted during a streaming response.
@@ -68,6 +69,7 @@ type CollectHandler struct {
 	ChunksCollect int
 	toolUseAsText bool // detects model echoing tool syntax as text
 	finishReason  string // captured from MessageDeltaEvent.stop_reason
+	isRefusal     bool   // true when stop_reason is "refusal"
 	// toolCallDoneCh is an optional channel that receives the index of a
 	// completed tool call when its content block finishes during streaming.
 	// This enables pipelined tool execution: tools start as their arguments
@@ -198,6 +200,9 @@ func (h *CollectHandler) Handle(chunk StreamChunk) error {
 				}
 			}
 		}
+
+	case ChunkTypeRefusal:
+		h.isRefusal = true
 	}
 
 	return nil
@@ -235,6 +240,13 @@ func (h *CollectHandler) FinishReason() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.finishReason
+}
+
+// IsRefusal returns true when stop_reason was "refusal" (content policy filter).
+func (h *CollectHandler) IsRefusal() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.isRefusal
 }
 
 // HasPartialToolCall checks if the last tool call has no arguments yet
@@ -904,6 +916,13 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 			// Carries stop_reason and cumulative usage info (matching Hermes finish_reason tracking)
 			if e.Delta.StopReason != "" {
 				sa.finishReason = string(e.Delta.StopReason)
+				// Detect content policy refusal (stop_reason: "refusal").
+				// Matching upstream's getErrorMessageIfRefusal() in errors.ts:1187.
+				if string(e.Delta.StopReason) == "refusal" {
+					if err := wrapped(StreamChunk{Type: ChunkTypeRefusal}); err != nil {
+						return err
+					}
+				}
 			}
 			usage := e.Usage
 			if usage.InputTokens > 0 || usage.OutputTokens > 0 {
