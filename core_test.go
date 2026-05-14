@@ -2215,6 +2215,63 @@ func TestExtractSummaryFromCompactOutputWhitespace(t *testing.T) {
 	}
 }
 
+// ─── Additional extractSummary patterns from upstream prompt.test.ts ─────────
+
+func TestExtractSummaryMultilineAnalysis(t *testing.T) {
+	// From upstream: "handles multiline analysis content"
+	input := "<analysis>\nline1\nline2\nline3\n</analysis><summary>ok</summary>"
+	got := extractSummaryFromCompactOutput(input)
+	if strings.Contains(got, "line1") {
+		t.Error("multiline analysis content should be stripped")
+	}
+	if got != "ok" {
+		t.Errorf("expected 'ok', got %q", got)
+	}
+}
+
+func TestExtractSummaryContentBetweenAnalysisAndSummary(t *testing.T) {
+	// From upstream: "preserves content between analysis and summary"
+	input := "<analysis>thoughts</analysis>middle text<summary>final</summary>"
+	got := extractSummaryFromCompactOutput(input)
+	if got != "final" {
+		t.Errorf("expected 'final', got %q (content between tags is not extracted, only summary tag content)", got)
+	}
+}
+
+func TestExtractSummaryEmptyString(t *testing.T) {
+	got := extractSummaryFromCompactOutput("")
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestExtractSummarySummaryWithoutAnalysis(t *testing.T) {
+	// From upstream: "handles summary without analysis"
+	input := "<summary>just the summary</summary>"
+	got := extractSummaryFromCompactOutput(input)
+	if got != "just the summary" {
+		t.Errorf("expected 'just the summary', got %q", got)
+	}
+}
+
+func TestExtractSummaryAnalysisWithoutSummary(t *testing.T) {
+	// From upstream: "handles analysis without summary"
+	input := "<analysis>just analysis</analysis>and some text"
+	got := extractSummaryFromCompactOutput(input)
+	// Go implementation returns the text as-is (no <summary> tags found)
+	if got != "and some text" {
+		t.Errorf("expected 'and some text', got %q", got)
+	}
+}
+
+func TestExtractSummaryNestedNewlines(t *testing.T) {
+	input := "<summary>line one\nline two\nline three</summary>"
+	got := extractSummaryFromCompactOutput(input)
+	if got != "line one\nline two\nline three" {
+		t.Errorf("expected multiline summary, got %q", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // estimateSingleMessageTokens — compact.go:1973
 // ---------------------------------------------------------------------------

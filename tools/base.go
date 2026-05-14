@@ -51,8 +51,13 @@ func canonicalPath(path string) string {
 // InternalToUpstreamName maps an internal tool name to its upstream name.
 // Returns the input unchanged if no alias exists.
 func InternalToUpstreamName(internal string) string {
-	if upstream, ok := UpstreamToolAliases[internal]; ok {
-		return upstream
+	if internal == "" {
+		return ""
+	}
+	for upstream, internalName := range UpstreamToolAliases {
+		if internalName == internal {
+			return upstream
+		}
 	}
 	return internal
 }
