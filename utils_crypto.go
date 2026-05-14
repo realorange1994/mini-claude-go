@@ -2,8 +2,170 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync/atomic"
 )
+
+// ═══════════════════════════════════════════════════════════
+// Section: Hash Functions (from hash.go)
+// ═══════════════════════════════════════════════════════════
+
+// djb2Hash computes a DJB2 hash of a string, returning a signed 32-bit integer.
+// Deterministic across runtimes. Ported from upstream TypeScript hash.ts.
+func djb2Hash(str string) int32 {
+	var hash int32 = 0
+	for i := 0; i < len(str); i++ {
+		hash = (hash<<5 - hash) + int32(str[i])
+	}
+	return hash
+}
+
+// hashContent hashes arbitrary content for change detection using SHA-256.
+// Returns a hex string. Ported from upstream hashContent().
+func hashContent(content string) string {
+	h := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", h)
+}
+
+// hashPair hashes two strings disambiguating ("ts","code") vs ("tsc","ode").
+// Uses a null separator to ensure different splits produce different hashes.
+// Ported from upstream hashPair().
+func hashPair(a string, b string) string {
+	h := sha256.New()
+	h.Write([]byte(a))
+	h.Write([]byte{0}) // null separator
+	h.Write([]byte(b))
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// ═══════════════════════════════════════════════════════════
+// Section: Fingerprint (from fingerprint.go)
+// ═══════════════════════════════════════════════════════════
+
+// FingerprintSalt is the hardcoded salt for fingerprint validation.
+// Must match the backend's expected value.
+const FingerprintSalt = "59cf53e54c78"
+
+// computeFingerprint computes a 3-character fingerprint for Claude Code attribution.
+// Algorithm: SHA256(SALT + msg[4] + msg[7] + msg[20] + version)[:3]
+// IMPORTANT: Do not change this without careful coordination with API providers.
+// Ported from upstream TypeScript fingerprint.ts.
+func computeFingerprint(messageText string, version string) string {
+	// Extract chars at indices [4, 7, 20], use "0" if index not found
+	indices := []int{4, 7, 20}
+	chars := ""
+	for _, i := range indices {
+		if i < len(messageText) {
+			chars += string(messageText[i])
+		} else {
+			chars += "0"
+		}
+	}
+
+	input := FingerprintSalt + chars + version
+
+	// SHA256 hash, return first 3 hex chars
+	hash := sha256.Sum256([]byte(input))
+	return fmt.Sprintf("%x", hash)[:3]
+}
+
+// ═══════════════════════════════════════════════════════════
+// Section: UUID & Agent ID (from uuid.go)
+// ═══════════════════════════════════════════════════════════
+
+// uuidRegex matches standard UUID format: 8-4-4-4-12 hex digits.
+var uuidRegex = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// validateUUID checks if a string is a valid UUID and returns the string if valid,
+// or an empty string if not. Ported from upstream TypeScript validateUuid().
+func validateUUID(maybeUUID string) (string, bool) {
+	if maybeUUID == "" {
+		return "", false
+	}
+	if uuidRegex.MatchString(maybeUUID) {
+		return maybeUUID, true
+	}
+	return "", false
+}
+
+// createAgentId generates a new agent ID with prefix for consistency with task IDs.
+// Format: a{label-}{16 hex chars}
+// Example: acompact-a3f2c1b4d5e6f7a8, aa3f2c1b4d5e6f7a8
+// Ported from upstream TypeScript createAgentId().
+func createAgentId(label string) string {
+	suffix := randomHex(8) // 8 bytes = 16 hex chars
+	if label != "" {
+		return fmt.Sprintf("a%s-%s", label, suffix)
+	}
+	return fmt.Sprintf("a%s", suffix)
+}
+
+// randomHex generates a random hex string of the given byte length.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return fmt.Sprintf("%0*x", n*2, b)
+}
+
+// ═══════════════════════════════════════════════════════════
+// Section: Tagged ID (from tagged_id.go)
+// ═══════════════════════════════════════════════════════════
+
+var taggedIDCounter uint64
+
+// ToTaggedID creates a tagged ID string of the form "tag_counter_randomHex".
+// Upstream: toTaggedId() in taggedId.ts
+func ToTaggedID(tag string) string {
+	counter := atomic.AddUint64(&taggedIDCounter, 1)
+	randomBytes := make([]byte, 4)
+	rand.Read(randomBytes)
+	randomHex := hex.EncodeToString(randomBytes)
+	return fmt.Sprintf("%s_%d_%s", tag, counter, randomHex)
+}
+
+// ParseTaggedID extracts the tag portion from a tagged ID.
+// Returns the tag and true if valid, or empty string and false if invalid.
+// Upstream: parsing logic from taggedId.ts
+func ParseTaggedID(id string) (string, bool) {
+	parts := strings.SplitN(id, "_", 3)
+	if len(parts) < 2 {
+		return "", false
+	}
+	return parts[0], true
+}
+
+// GetTaggedIDCounter extracts the counter portion from a tagged ID.
+// Upstream: parsing logic from taggedId.ts
+func GetTaggedIDCounter(id string) (uint64, bool) {
+	parts := strings.SplitN(id, "_", 3)
+	if len(parts) < 2 {
+		return 0, false
+	}
+	counter, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return counter, true
+}
+
+// ValidateTaggedID checks if a string is a valid tagged ID with the given tag.
+// Upstream: validation patterns from taggedId.ts
+func ValidateTaggedID(id string, expectedTag string) bool {
+	tag, ok := ParseTaggedID(id)
+	if !ok {
+		return false
+	}
+	return tag == expectedTag
+}
+
+// ═══════════════════════════════════════════════════════════
+// Section: Word Lists & Slug Generation (from words.go)
+// ═══════════════════════════════════════════════════════════
 
 // Adjectives for slug generation - whimsical and delightful
 // Ported from upstream words.ts

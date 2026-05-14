@@ -8,6 +8,31 @@ import (
 	"sync"
 )
 
+// ============================================================================
+// Config constants ported from upstream: src/utils/configConstants.ts
+// ============================================================================
+
+// NotificationChannels lists the available notification channel options.
+var NotificationChannels = []string{
+	"auto",
+	"iterm2",
+	"iterm2_with_bell",
+	"terminal_bell",
+	"kitty",
+	"ghostty",
+	"notifications_disabled",
+}
+
+// EditorModes lists the valid editor modes.
+var EditorModes = []string{"normal", "vim"}
+
+// TeammateModes lists the valid teammate modes for spawning.
+var TeammateModes = []string{"auto", "tmux", "in-process"}
+
+// ============================================================================
+// Feature flags
+// ============================================================================
+
 // FeatureFlag is a boolean feature flag with a name.
 type FeatureFlag struct {
 	Name        string `json:"-"`
@@ -17,8 +42,8 @@ type FeatureFlag struct {
 
 // FeatureFlagStore persists feature flags to a JSON file in .claude/.
 type FeatureFlagStore struct {
-	mu   sync.Mutex
-	file string
+	mu    sync.Mutex
+	file  string
 	flags map[string]FeatureFlag
 }
 
