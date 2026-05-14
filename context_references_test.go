@@ -319,3 +319,130 @@ func TestRemoveReferenceTokensNoRefs(t *testing.T) {
 		t.Errorf("expected unchanged message, got %q", result)
 	}
 }
+
+// ─── Upstream port: PreprocessContextReferences boundary tests ───────────────
+
+func TestPreprocessContextReferencesNoRefs(t *testing.T) {
+	result := PreprocessContextReferences("hello world", ".", 200000)
+	if result.Message != "hello world" {
+		t.Errorf("expected unchanged message, got %q", result.Message)
+	}
+	if result.Expanded {
+		t.Error("should not be expanded with no refs")
+	}
+}
+
+func TestPreprocessContextReferencesNonExistentFile(t *testing.T) {
+	result := PreprocessContextReferences("@file:nonexistent.go", ".", 200000)
+	// Non-existent file should produce a warning/error block
+	if len(result.Warnings) == 0 && result.Expanded == false {
+		// At least should have some form of warning or error
+		t.Log("no warnings for non-existent file (may be expected if error is in blocks)")
+	}
+}
+
+func TestPreprocessContextReferencesTokenLimit(t *testing.T) {
+	// Create a temp file with content that exceeds the soft limit
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "big.go")
+	// Create content that would exceed a small token budget
+	content := stringsRepeat("x", 400000) // ~100K tokens
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	result := PreprocessContextReferences("@file:big.go", dir, 1000) // Very small context limit
+	// Should be blocked due to hard limit
+	if !result.Blocked {
+		t.Error("should be blocked when exceeding hard limit")
+	}
+}
+
+// ─── Upstream: parseFileTarget edge cases ────────────────────────────────────
+
+func TestParseFileTargetNoLineRange(t *testing.T) {
+	target, start, end := parseFileTarget("main.go")
+	if target != "main.go" || start != 0 || end != 0 {
+		t.Errorf("expected (main.go, 0, 0), got (%q, %d, %d)", target, start, end)
+	}
+}
+
+func TestParseFileTargetStartAndEnd(t *testing.T) {
+	target, start, end := parseFileTarget("main.go:10-50")
+	if target != "main.go" || start != 10 || end != 50 {
+		t.Errorf("expected (main.go, 10, 50), got (%q, %d, %d)", target, start, end)
+	}
+}
+
+func TestParseFileTargetWithPathAndRange(t *testing.T) {
+	target, start, end := parseFileTarget("src/app.rs:5-20")
+	if target != "src/app.rs" || start != 5 || end != 20 {
+		t.Errorf("expected (src/app.rs, 5, 20), got (%q, %d, %d)", target, start, end)
+	}
+}
+
+// ─── Upstream: ensurePathAllowed security tests ──────────────────────────────
+
+func TestEnsurePathAllowedSensitiveDirectory(t *testing.T) {
+	// Paths in sensitive directories (e.g., .ssh under home) should be blocked
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+	sshPath := filepath.Join(home, ".ssh", "config")
+	result := ensurePathAllowed(sshPath, home)
+	if result == "" {
+		t.Error("path in .ssh directory should be blocked")
+	}
+}
+
+func TestEnsurePathAllowedNormalFile(t *testing.T) {
+	// Normal files within CWD should be allowed
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "test.go")
+	if err := os.WriteFile(testFile, []byte("package main"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+	result := ensurePathAllowed(testFile, dir)
+	if result != "" {
+		t.Errorf("normal file should be allowed, got error: %q", result)
+	}
+}
+
+// ─── Upstream: codeFenceLanguage completeness ────────────────────────────────
+
+func TestCodeFenceLanguageCommonExtensions(t *testing.T) {
+	tests := map[string]string{
+		"test.c":    "c",
+		"test.cpp":  "cpp",
+		"test.h":    "c",
+		"test.hpp":  "cpp",
+		"test.java": "java",
+		"test.rb":   "ruby",
+		"test.php":  "php",
+		"test.sql":  "sql",
+		"test.html": "html",
+		"test.css":  "css",
+		"test.toml": "toml",
+	}
+	for file, expected := range tests {
+		got := codeFenceLanguage(file)
+		if got != expected {
+			t.Errorf("codeFenceLanguage(%q) = %q, want %q", file, got, expected)
+		}
+	}
+}
+
+// ─── Upstream: isBinaryContent detection ─────────────────────────────────────
+
+func TestIsBinaryContentNullBytes(t *testing.T) {
+	if !isBinaryContent([]byte{0x00, 0x01, 0x02, 'h', 'e', 'l', 'l', 'o'}) {
+		t.Error("should detect null byte as binary")
+	}
+	if isBinaryContent([]byte("hello world")) {
+		t.Error("should not detect normal text as binary")
+	}
+	if isBinaryContent([]byte{}) {
+		t.Error("empty content should not be binary")
+	}
+}

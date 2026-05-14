@@ -401,3 +401,392 @@ func TestEstimateEntriesTokens(t *testing.T) {
 		t.Errorf("expected positive token count, got %d", tokens)
 	}
 }
+
+// ─── groupMessagesByRound boundary tests ────────────────────────────────────
+// Ported from upstream grouping.test.ts
+
+func TestGroupByRoundSingleUser(t *testing.T) {
+	msgs := []CompactionMessage{{Role: "user", Content: "hello"}}
+	rounds := groupMessagesByRound(msgs)
+	if len(rounds) != 1 {
+		t.Fatalf("expected 1 round, got %d", len(rounds))
+	}
+	if len(rounds[0].messages) != 1 {
+		t.Errorf("expected 1 message in round, got %d", len(rounds[0].messages))
+	}
+}
+
+func TestGroupByRoundAllUserMessages(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: "q1"},
+		{Role: "user", Content: "q2"},
+	}
+	rounds := groupMessagesByRound(msgs)
+	// In the Go implementation, each user message starts a new round,
+	// so consecutive users produce separate rounds
+	if len(rounds) != 2 {
+		t.Fatalf("expected 2 rounds for consecutive user messages, got %d", len(rounds))
+	}
+}
+
+func TestGroupByRoundSystemMessage(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "system", Content: "system prompt"},
+		{Role: "assistant", Content: "response"},
+	}
+	rounds := groupMessagesByRound(msgs)
+	if len(rounds) < 1 {
+		t.Fatalf("expected at least 1 round, got %d", len(rounds))
+	}
+}
+
+func TestGroupByRoundAlternating(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "q2"},
+		{Role: "assistant", Content: "a2"},
+		{Role: "user", Content: "q3"},
+		{Role: "assistant", Content: "a3"},
+	}
+	rounds := groupMessagesByRound(msgs)
+	if len(rounds) != 3 {
+		t.Errorf("expected 3 rounds for 3 user+assistant pairs, got %d", len(rounds))
+	}
+}
+
+func TestGroupByRoundPreservesOrder(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "second"},
+	}
+	rounds := groupMessagesByRound(msgs)
+	if len(rounds) != 1 {
+		t.Fatalf("expected 1 round, got %d", len(rounds))
+	}
+	if rounds[0].messages[0].Content != "first" {
+		t.Errorf("expected first message 'first', got %q", rounds[0].messages[0].Content)
+	}
+	if rounds[0].messages[1].Content != "second" {
+		t.Errorf("expected second message 'second', got %q", rounds[0].messages[1].Content)
+	}
+}
+
+func TestGroupByRoundToolCallDetection(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: `{"type": "tool_result", "tool_use_id": "abc"}`},
+		{Role: "assistant", Content: `{"type": "tool_use", "id": "abc"}`},
+	}
+	rounds := groupMessagesByRound(msgs)
+	if len(rounds) != 1 {
+		t.Fatalf("expected 1 round, got %d", len(rounds))
+	}
+	if !rounds[0].isToolCall {
+		t.Error("expected tool call detection in round")
+	}
+}
+
+// ─── DetectContentType tests ───────────────────────────────────────────────
+
+func TestDetectContentTypeJSON(t *testing.T) {
+	if DetectContentType(`{"key": "value"}`) != "json" {
+		t.Error("should detect JSON content")
+	}
+	if DetectContentType(`[1, 2, 3]`) != "json" {
+		t.Error("should detect JSON array content")
+	}
+}
+
+func TestDetectContentTypeCode(t *testing.T) {
+	codeExamples := []string{
+		"func main() {}",
+		"var x int = 0",
+		"const PI = 3.14",
+		"type Foo struct{}",
+		"class Bar {}",
+		"def foo(): pass",
+		"import os",
+		"package main",
+	}
+	for _, code := range codeExamples {
+		if got := DetectContentType(code); got != "code" {
+			t.Errorf("DetectContentType(%q) = %q, want 'code'", code, got)
+		}
+	}
+}
+
+func TestDetectContentTypeNatural(t *testing.T) {
+	if DetectContentType("hello world") != "natural" {
+		t.Error("should detect natural language")
+	}
+	if DetectContentType("This is a regular sentence.") != "natural" {
+		t.Error("should detect natural language")
+	}
+}
+
+func TestDetectContentTypeEmpty(t *testing.T) {
+	result := DetectContentType("")
+	if result != "natural" && result != "code" && result != "json" {
+		t.Errorf("expected valid content type for empty, got %q", result)
+	}
+}
+
+// ─── EstimateContentTokens tests ─────────────────────────────────────────────
+
+func TestEstimateContentTokensCode(t *testing.T) {
+	text := stringsRepeat("func test() { return true }\n", 10)
+	tokens := EstimateContentTokens(text, "code")
+	if tokens <= 0 {
+		t.Error("expected positive token count for code")
+	}
+}
+
+func TestEstimateContentTokensJSON(t *testing.T) {
+	text := stringsRepeat(`{"key": "value"}`, 10)
+	tokens := EstimateContentTokens(text, "json")
+	if tokens <= 0 {
+		t.Error("expected positive token count for JSON")
+	}
+}
+
+func TestEstimateContentTokensToolUse(t *testing.T) {
+	text := `{"type": "tool_use", "id": "abc", "name": "Read"}`
+	tokens := EstimateContentTokens(text, "tool_use")
+	if tokens <= 0 {
+		t.Error("expected positive token count for tool_use")
+	}
+}
+
+func TestEstimateContentTokensToolResult(t *testing.T) {
+	text := `{"type": "tool_result", "tool_use_id": "abc", "content": "ok"}`
+	tokens := EstimateContentTokens(text, "tool_result")
+	if tokens <= 0 {
+		t.Error("expected positive token count for tool_result")
+	}
+}
+
+func TestEstimateContentTokensEmpty(t *testing.T) {
+	if EstimateContentTokens("", "code") != 0 {
+		t.Error("expected 0 tokens for empty content")
+	}
+}
+
+func TestEstimateContentTokensDefault(t *testing.T) {
+	text := "hello world this is natural language"
+	tokens := EstimateContentTokens(text, "default")
+	expected := len(text) / 4
+	if tokens < expected-1 || tokens > expected+1 {
+		t.Errorf("expected ~%d tokens for natural language, got %d", expected, tokens)
+	}
+}
+
+// ─── Compact boundary conditions ────────────────────────────────────────────
+// Ported from upstream compact test patterns
+
+func TestCompactSingleMessage(t *testing.T) {
+	msgs := []CompactionMessage{{Role: "user", Content: "hello"}}
+	cfg := DefaultCompactionConfig()
+	cfg.KeepRounds = 1
+	result, err := Compact(msgs, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.OmittedCount != 0 {
+		t.Errorf("expected 0 omitted for single message, got %d", result.OmittedCount)
+	}
+}
+
+func TestCompactSystemMessagePreserved(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "system", Content: "You are a helpful assistant."},
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi there"},
+	}
+	cfg := DefaultCompactionConfig()
+	cfg.KeepRounds = 2
+	result, err := Compact(msgs, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	systemFound := false
+	for _, m := range result.Messages {
+		if m.Role == "system" && strings.Contains(m.Content, "helpful assistant") {
+			systemFound = true
+			break
+		}
+	}
+	if !systemFound {
+		t.Error("system message should be preserved after compaction")
+	}
+}
+
+func TestCompactKeepsRecentRounds(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: "oldest question"},
+		{Role: "assistant", Content: "oldest answer"},
+		{Role: "user", Content: "middle question"},
+		{Role: "assistant", Content: "middle answer"},
+		{Role: "user", Content: "latest question"},
+		{Role: "assistant", Content: "latest answer"},
+	}
+	cfg := DefaultCompactionConfig()
+	cfg.KeepRounds = 2
+	cfg.OmissionMarker = OmissionMarker
+	result, err := Compact(msgs, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	keptContent := ""
+	for _, m := range result.Messages {
+		keptContent += m.Content
+	}
+	if !strings.Contains(keptContent, "latest") {
+		t.Error("latest round should be kept")
+	}
+}
+
+func TestCompactOmissionMarkerInsertedUpstream(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: "old1"},
+		{Role: "assistant", Content: "old1a"},
+		{Role: "user", Content: "old2"},
+		{Role: "assistant", Content: "old2a"},
+		{Role: "user", Content: "old3"},
+		{Role: "assistant", Content: "old3a"},
+		{Role: "user", Content: "old4"},
+		{Role: "assistant", Content: "old4a"},
+		{Role: "user", Content: "latest"},
+		{Role: "assistant", Content: "latest answer"},
+	}
+	cfg := DefaultCompactionConfig()
+	cfg.KeepRounds = 2
+	cfg.OmissionMarker = OmissionMarker
+	result, err := Compact(msgs, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.OmittedCount > 0 {
+		found := false
+		for _, m := range result.Messages {
+			if m.Role == "system" && strings.Contains(m.Content, "omitted") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("omission marker should be present when messages are omitted")
+		}
+	}
+}
+
+// ─── NeedsCompaction boundary conditions ────────────────────────────────────
+
+func TestNeedsCompactionZeroMaxTokens(t *testing.T) {
+	msgs := []CompactionMessage{{Role: "user", Content: "hello"}}
+	cfg := DefaultCompactionConfig()
+	cfg.MaxContextTokens = 0
+	if NeedsCompaction(msgs, cfg) {
+		t.Error("should not compact when MaxContextTokens is 0")
+	}
+}
+
+func TestNeedsCompactionAtThreshold(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: stringsRepeat("a", 300)},
+		{Role: "assistant", Content: stringsRepeat("b", 300)},
+	}
+	cfg := DefaultCompactionConfig()
+	cfg.MaxContextTokens = 150
+	cfg.Threshold = 1.0
+	if !NeedsCompaction(msgs, cfg) {
+		t.Error("should need compaction at threshold")
+	}
+}
+
+func TestNeedsCompactionBelowThreshold(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+	}
+	cfg := DefaultCompactionConfig()
+	cfg.MaxContextTokens = 100000
+	cfg.Threshold = 0.75
+	if NeedsCompaction(msgs, cfg) {
+		t.Error("should not need compaction below threshold")
+	}
+}
+
+// ─── totalTokens / messageTokens invariants ─────────────────────────────────
+
+func TestMessageTokensNonNegative(t *testing.T) {
+	msg := CompactionMessage{Role: "user", Content: ""}
+	if messageTokens(msg) < 0 {
+		t.Error("messageTokens should never be negative")
+	}
+}
+
+func TestTotalTokensAdditive(t *testing.T) {
+	msgs := []CompactionMessage{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "world"},
+	}
+	total := totalTokens(msgs)
+	indiv1 := messageTokens(msgs[0])
+	indiv2 := messageTokens(msgs[1])
+	if total != indiv1+indiv2 {
+		t.Errorf("totalTokens(%d) != sum of individual(%d + %d = %d)", total, indiv1, indiv2, indiv1+indiv2)
+	}
+}
+
+func TestTotalTokensEmptyMessages(t *testing.T) {
+	if totalTokens([]CompactionMessage{}) != 0 {
+		t.Error("totalTokens of empty slice should be 0")
+	}
+}
+
+func TestRoundTokensNonNegative(t *testing.T) {
+	round := apiRound{
+		messages: []CompactionMessage{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "hi"},
+		},
+	}
+	if roundTokens(round) < 0 {
+		t.Error("roundTokens should never be negative")
+	}
+}
+
+// ─── ContextInfo tests ──────────────────────────────────────────────────────
+
+func TestContextInfoNonEmpty(t *testing.T) {
+	msgs := []CompactionMessage{{Role: "user", Content: "hello"}}
+	info := ContextInfo(msgs, 200000)
+	if info == "" {
+		t.Error("ContextInfo should not be empty")
+	}
+	if !strings.Contains(info, "Context:") {
+		t.Errorf("ContextInfo should contain 'Context:', got %q", info)
+	}
+	if !strings.Contains(info, "tokens") {
+		t.Errorf("ContextInfo should contain 'tokens', got %q", info)
+	}
+}
+
+func TestContextInfoZeroMaxTokens(t *testing.T) {
+	msgs := []CompactionMessage{{Role: "user", Content: "hello"}}
+	info := ContextInfo(msgs, 0)
+	if info == "" {
+		t.Error("ContextInfo should not be empty for zero max tokens")
+	}
+}
+
+func TestContextInfoManyMessages(t *testing.T) {
+	var msgs []CompactionMessage
+	for i := 0; i < 100; i++ {
+		msgs = append(msgs, CompactionMessage{Role: "user", Content: "message"})
+	}
+	info := ContextInfo(msgs, 200000)
+	if !strings.Contains(info, "100 messages") {
+		t.Errorf("ContextInfo should report 100 messages, got %q", info)
+	}
+}

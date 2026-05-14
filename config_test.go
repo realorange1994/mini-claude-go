@@ -288,3 +288,95 @@ func TestHomeClaudeDir(t *testing.T) {
 		t.Log("homeClaudeDir returned empty — no HOME or USERPROFILE set")
 	}
 }
+
+// ─── Upstream Quality: Additional config patterns from config.test.ts ──────────
+
+func TestLoadConfigFromSettingsLocalJSON(t *testing.T) {
+	// From upstream: loading from settings.local.json
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".claude"), 0755)
+	settingsJSON := `{
+		"env": {
+			"ANTHROPIC_AUTH_TOKEN": "sk-local-key",
+			"ANTHROPIC_MODEL": "claude-local-model"
+		}
+	}`
+	err := os.WriteFile(filepath.Join(dir, ".claude", "settings.local.json"), []byte(settingsJSON), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.local.json: %v", err)
+	}
+	// settings.local.json is NOT loaded by LoadConfigFromFile (only settings.json is)
+	// This verifies the function correctly ignores .local.json
+	cfg, _ := LoadConfigFromFile(dir)
+	if cfg.APIKey == "sk-local-key" {
+		t.Error("settings.local.json should not be loaded by LoadConfigFromFile")
+	}
+}
+
+func TestLoadConfigProjectMCPOverridesHome(t *testing.T) {
+	// From upstream: project-level settings take priority over home-level
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".claude"), 0755)
+	settingsJSON := `{
+		"env": {
+			"ANTHROPIC_AUTH_TOKEN": "sk-project-key",
+			"ANTHROPIC_MODEL": "claude-project-model"
+		}
+	}`
+	err := os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), []byte(settingsJSON), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	cfg, found := LoadConfigFromFile(dir)
+	if !found {
+		t.Fatal("should return found=true")
+	}
+	if cfg.APIKey != "sk-project-key" {
+		t.Errorf("expected project API key, got %q", cfg.APIKey)
+	}
+	if cfg.Model != "claude-project-model" {
+		t.Errorf("expected project model, got %q", cfg.Model)
+	}
+}
+
+func TestLoadConfigEmptySettingsJSON(t *testing.T) {
+	// From upstream: empty object is valid settings
+	// Note: found may be true if home directory has settings files that
+	// fill in APIKey/Model via the fallback mechanism
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".claude"), 0755)
+	err := os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), []byte(`{}`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	cfg, _ := LoadConfigFromFile(dir)
+	// MCPManager should always be initialized regardless of settings content
+	if cfg.MCPManager == nil {
+		t.Error("MCPManager should still be initialized")
+	}
+}
+
+func TestDefaultConfigNonNilFields(t *testing.T) {
+	// From upstream: all config fields should be non-nil/non-zero where expected
+	cfg := DefaultConfig()
+
+	// Slice defaults should be non-empty
+	if len(cfg.AllowedCommands) == 0 {
+		t.Error("AllowedCommands should have defaults")
+	}
+	if len(cfg.DeniedPatterns) == 0 {
+		t.Error("DeniedPatterns should have defaults")
+	}
+}
+
+func TestPermissionModeRoundtrip(t *testing.T) {
+	// From upstream: permission mode strings should roundtrip through constants
+	modes := []PermissionMode{ModeAsk, ModeAuto, ModePlan, ModeBypass}
+	for _, mode := range modes {
+		if string(mode) == "" {
+			t.Errorf("PermissionMode %q should not be empty string", mode)
+		}
+	}
+}

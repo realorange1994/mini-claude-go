@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"runtime"
 	"testing"
 )
 
@@ -174,6 +175,25 @@ func TestPathsEqualDotSegments(t *testing.T) {
 func TestPathsEqualDifferent(t *testing.T) {
 	if PathsEqual("/a/b", "/a/c") {
 		t.Error("PathsEqual(/a/b, /a/c) should be false")
+	}
+}
+
+func TestPathsEqualBackslashOnWindows(t *testing.T) {
+	// From upstream: pathsEqual with backslash vs forward slash
+	if runtime.GOOS == "windows" {
+		// On Windows, forward slash and backslash should be equivalent
+		if !PathsEqual(`/a/b/c`, `\a\b\c`) {
+			t.Error("PathsEqual should treat / and \\ as equivalent on Windows")
+		}
+	}
+}
+
+func TestPathsEqualCaseInsensitiveOnWindows(t *testing.T) {
+	// From upstream: Windows case-insensitive file system
+	if runtime.GOOS == "windows" {
+		if !PathsEqual(`/A/B/C`, `/a/b/c`) {
+			t.Error("PathsEqual should be case-insensitive on Windows")
+		}
 	}
 }
 

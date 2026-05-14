@@ -93,3 +93,81 @@ func sliceContains(slice []string, val string) bool {
 	}
 	return false
 }
+
+// ─── Upstream Quality: Exact-value and ordering tests ─────────────────────────
+// Ported from upstream: configConstants.test.ts exact-value and ordering tests
+
+func TestEditorModesExactLength(t *testing.T) {
+	// From upstream: "has exactly 2 entries"
+	if len(EditorModes) != 2 {
+		t.Fatalf("expected EditorModes to have exactly 2 entries, got %d", len(EditorModes))
+	}
+}
+
+func TestEditorModesOrdering(t *testing.T) {
+	// From upstream: "is ordered: normal, vim"
+	if len(EditorModes) >= 2 {
+		if EditorModes[0] != "normal" {
+			t.Errorf("EditorModes[0]: expected 'normal', got %q", EditorModes[0])
+		}
+		if EditorModes[1] != "vim" {
+			t.Errorf("EditorModes[1]: expected 'vim', got %q", EditorModes[1])
+		}
+	}
+}
+
+func TestTeammateModesExactLength(t *testing.T) {
+	// From upstream: "has exactly 3 entries"
+	if len(TeammateModes) != 3 {
+		t.Fatalf("expected TeammateModes to have exactly 3 entries, got %d", len(TeammateModes))
+	}
+}
+
+func TestTeammateModesOrdering(t *testing.T) {
+	// From upstream: "is ordered: auto, tmux, in-process"
+	if len(TeammateModes) >= 3 {
+		if TeammateModes[0] != "auto" {
+			t.Errorf("TeammateModes[0]: expected 'auto', got %q", TeammateModes[0])
+		}
+		if TeammateModes[1] != "tmux" {
+			t.Errorf("TeammateModes[1]: expected 'tmux', got %q", TeammateModes[1])
+		}
+		if TeammateModes[2] != "in-process" {
+			t.Errorf("TeammateModes[2]: expected 'in-process', got %q", TeammateModes[2])
+		}
+	}
+}
+
+func TestNotificationChannelsExactLength(t *testing.T) {
+	// From upstream: length assertion pattern
+	expected := []string{
+		"auto",
+		"iterm2",
+		"iterm2_with_bell",
+		"terminal_bell",
+		"kitty",
+		"ghostty",
+		"notifications_disabled",
+	}
+	if len(NotificationChannels) != len(expected) {
+		t.Fatalf("expected NotificationChannels to have %d entries, got %d", len(expected), len(NotificationChannels))
+	}
+}
+
+func TestNotificationChannelsExactValues(t *testing.T) {
+	// From upstream: exact value array match
+	expected := []string{
+		"auto",
+		"iterm2",
+		"iterm2_with_bell",
+		"terminal_bell",
+		"kitty",
+		"ghostty",
+		"notifications_disabled",
+	}
+	for i, ch := range NotificationChannels {
+		if ch != expected[i] {
+			t.Errorf("NotificationChannels[%d]: expected %q, got %q", i, expected[i], ch)
+		}
+	}
+}

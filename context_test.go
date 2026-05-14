@@ -1273,3 +1273,124 @@ func TestSanitizeToolIDProducesValidFilename(t *testing.T) {
 		}
 	}
 }
+
+// ─── Upstream port: generatePreview boundary tests ─────────────────────────
+// Ported from upstream toolResultTruncation.test.ts patterns
+
+func TestGeneratePreviewShortContent(t *testing.T) {
+	preview, hasMore := generatePreview("hello world", 2000)
+	if preview != "hello world" {
+		t.Errorf("expected full content, got %q", preview)
+	}
+	if hasMore {
+		t.Error("short content should not have hasMore")
+	}
+}
+
+func TestGeneratePreviewLongContent(t *testing.T) {
+	long := stringsRepeat("x", 5000)
+	preview, hasMore := generatePreview(long, 2000)
+	if len(preview) > 2000 {
+		t.Errorf("preview exceeds max, got %d chars", len(preview))
+	}
+	if !hasMore {
+		t.Error("long content should have hasMore=true")
+	}
+}
+
+func TestGeneratePreviewNewlineBoundary(t *testing.T) {
+	// Content that exceeds limit in the middle of a line should truncate at newline
+	content := "line1\nline2\nline3\n" + stringsRepeat("x", 3000)
+	preview, hasMore := generatePreview(content, 2000)
+	if !hasMore {
+		t.Error("should have more content")
+	}
+	// Preview should end at or before the 2000 byte boundary
+	if len(preview) > 2000 {
+		t.Errorf("preview too long: %d chars", len(preview))
+	}
+}
+
+func TestGeneratePreviewEmptyContent(t *testing.T) {
+	preview, hasMore := generatePreview("", 2000)
+	if preview != "" {
+		t.Errorf("expected empty preview, got %q", preview)
+	}
+	if hasMore {
+		t.Error("empty content should not have hasMore")
+	}
+}
+
+func TestGeneratePreviewExactSize(t *testing.T) {
+	content := stringsRepeat("a", 2000)
+	preview, hasMore := generatePreview(content, 2000)
+	if len(preview) != 2000 {
+		t.Errorf("expected 2000 chars, got %d", len(preview))
+	}
+	// Content is exactly at limit, no more
+	if hasMore {
+		t.Error("content at exact limit should not have hasMore")
+	}
+}
+
+// ─── Upstream port: ToolResultStore persistence boundary tests ──────────────
+
+func TestToolResultStorePersistAndRead(t *testing.T) {
+	dir := t.TempDir()
+	store := NewToolResultStore(dir, "session1")
+
+	result := store.maybePersistToolResult("toolu_abc123", "Bash", "command output here", 10)
+	if result == "" {
+		t.Error("expected persisted result for content exceeding threshold")
+	}
+
+	// Read back
+	content, err := store.Read("toolu_abc123")
+	if err != nil {
+		t.Fatalf("failed to read persisted result: %v", err)
+	}
+	if content != "command output here" {
+		t.Errorf("expected original content, got %q", content)
+	}
+}
+
+func TestToolResultStoreReadNotFound(t *testing.T) {
+	dir := t.TempDir()
+	store := NewToolResultStore(dir, "session1")
+
+	_, err := store.Read("nonexistent_tool")
+	if err == nil {
+		t.Error("expected error for non-existent tool result")
+	}
+}
+
+func TestToolResultStoreMaybePersistBelowThreshold(t *testing.T) {
+	dir := t.TempDir()
+	store := NewToolResultStore(dir, "session1")
+
+	// Content below threshold should return original content (not persist)
+	result := store.maybePersistToolResult("toolu_xyz", "Read", "short", 50000)
+	if result != "short" {
+		t.Errorf("short content should return original, got %q", result)
+	}
+}
+
+func TestToolResultStorePersistJSON(t *testing.T) {
+	dir := t.TempDir()
+	store := NewToolResultStore(dir, "session1")
+
+	jsonContent := `{"results": [{"file": "main.go", "line": 42}]}`
+	result := store.maybePersistToolResult("toolu_json", "Grep", jsonContent, 10)
+	if result == "" {
+		t.Error("expected persisted result for JSON content")
+	}
+
+	// Should be persisted as JSON
+	content, err := store.Read("toolu_json")
+	if err != nil {
+		t.Fatalf("failed to read: %v", err)
+	}
+	if content != jsonContent {
+		t.Errorf("expected JSON content, got %q", content)
+	}
+}

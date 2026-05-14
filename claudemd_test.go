@@ -194,3 +194,43 @@ func containsAt(s, substr string, start int) bool {
 	}
 	return false
 }
+
+// ─── Upstream Quality: StripHtmlComments invariant tests ────────────────────────
+
+func TestStripHtmlCommentsIdempotent(t *testing.T) {
+	// From upstream: stripping comments twice should give same result
+	input := "text\n<!-- comment -->\nmore"
+	result1, _ := StripHtmlComments(input)
+	result2, stripped2 := StripHtmlComments(result1)
+	if result1 != result2 {
+		t.Errorf("StripHtmlComments not idempotent: %q != %q", result1, result2)
+	}
+	if stripped2 != false {
+		t.Error("second strip should return stripped=false (no comments left)")
+	}
+}
+
+func TestStripHtmlCommentsPreservesNonCommentContent(t *testing.T) {
+	// From upstream: content without comments is unchanged
+	input := "regular markdown\nno html comments\n## heading"
+	result, stripped := StripHtmlComments(input)
+	if result != input {
+		t.Errorf("non-comment content should be unchanged, got %q", result)
+	}
+	if stripped != false {
+		t.Error("should report stripped=false for content without comments")
+	}
+}
+
+func TestStripHtmlCommentsCodeBlockIdempotent(t *testing.T) {
+	// From upstream: code block comments survive multiple passes
+	input := "text\n```html\n<!-- preserved -->\n```\nmore"
+	result1, _ := StripHtmlComments(input)
+	result2, _ := StripHtmlComments(result1)
+	if result1 != result2 {
+		t.Errorf("code block comment preservation should be idempotent")
+	}
+	if !contains(result2, "<!-- preserved -->") {
+		t.Error("code block comment should still be preserved after second pass")
+	}
+}
