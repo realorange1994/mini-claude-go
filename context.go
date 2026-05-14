@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,44 +25,174 @@ func generateUUID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// --- Tool Result Persistence (matching upstream toolResultStorage.ts) ---
+
+const (
+	// PERSISTED_OUTPUT_TAG is the XML tag used to wrap persisted output messages.
+	PERSISTED_OUTPUT_TAG        = "<persisted-output>"
+	PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
+	// PREVIEW_SIZE_BYTES is the preview size in bytes for the reference message.
+	PREVIEW_SIZE_BYTES = 2000
+	// TOOL_RESULT_CLEARED_MESSAGE is used when tool result content was cleared without persisting.
+	TOOL_RESULT_CLEARED_MESSAGE = "[Old tool result content cleared]"
+	// DEFAULT_MAX_RESULT_SIZE_CHARS is the default threshold before persistence kicks in.
+	DEFAULT_MAX_RESULT_SIZE_CHARS = 50000
+	// MAX_TOOL_RESULTS_PER_MESSAGE_CHARS is the per-message aggregate budget limit.
+	MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 100000
+)
+
+// PersistedToolResult holds information about a persisted tool result.
+type PersistedToolResult struct {
+	Filepath     string
+	OriginalSize int
+	IsJSON       bool
+	Preview      string
+	HasMore      bool
+}
+
 // ToolResultStore persists oversized tool results to disk so they can be
 // re-read on demand after micro-compact clears them from context.
-// Matching upstream's tool result persistence pattern: large results are
-// saved to .claude/tool_results/ and replaced with XML tag references.
+// Matching upstream's toolResultStorage.ts:
+//   - Storage path: {projectDir}/{sessionId}/tool-results/{toolUseId}.{txt|json}
+//   - XML tag: <persisted-output>...preview...</persisted-output>
+//   - 'wx' flag for atomic writes (skip if exists)
+//   - Preview truncated at newline boundary (2000 bytes)
 type ToolResultStore struct {
-	dir string // base directory for persisted results
+	dir       string // session-specific tool results directory
+	projectDir string
+	sessionID string
 }
 
-// NewToolResultStore creates a store rooted at .claude/tool_results/ under projectDir.
-func NewToolResultStore(projectDir string) *ToolResultStore {
-	dir := filepath.Join(projectDir, ".claude", "tool_results")
-	_ = os.MkdirAll(dir, 0755) // create if not exists
-	return &ToolResultStore{dir: dir}
-}
-
-// Persist saves a tool result's text content to disk and returns an XML
-// reference tag that replaces the original content in context.
-// The tag format: <tool_result_ref id="TOOL_USE_ID" path=".claude/tool_results/FILE"/>
-func (s *ToolResultStore) Persist(toolUseID string, content string) string {
-	if s.dir == "" || content == "" {
-		return content // no persistence if store not configured or content empty
+// NewToolResultStore creates a store rooted at {projectDir}/{sessionId}/tool-results/.
+// If sessionID is empty, uses {projectDir}/tool-results/ as a fallback.
+func NewToolResultStore(projectDir string, sessionID string) *ToolResultStore {
+	var dir string
+	if sessionID != "" {
+		dir = filepath.Join(projectDir, sessionID, "tool-results")
+	} else {
+		dir = filepath.Join(projectDir, "tool-results")
 	}
-	// Use toolUseID as filename base (sanitize for filesystem)
-	safeID := strings.Map(func(r rune) rune {
+	_ = os.MkdirAll(dir, 0755) // create if not exists
+	return &ToolResultStore{dir: dir, projectDir: projectDir, sessionID: sessionID}
+}
+
+// sanitizeToolID makes a toolUseID safe for use as a filename.
+func sanitizeToolID(toolUseID string) string {
+	return strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
 			return r
 		}
 		return '_'
 	}, toolUseID)
-	filename := safeID + ".txt"
+}
+
+// Persist saves a tool result to disk and returns metadata about the persisted file.
+// Uses 'wx' flag for atomic writes — if the file already exists (from a prior turn),
+// it is skipped (EEXIST is not an error). This matches upstream's idempotency guard.
+func (s *ToolResultStore) Persist(toolUseID string, content string) *PersistedToolResult {
+	if s.dir == "" || content == "" {
+		return nil
+	}
+
+	safeID := sanitizeToolID(toolUseID)
+	// Detect if content looks like JSON (starts with { or [)
+	isJSON := len(content) > 0 && (content[0] == '{' || content[0] == '[')
+	ext := "txt"
+	if isJSON {
+		ext = "json"
+	}
+	filename := safeID + "." + ext
 	path := filepath.Join(s.dir, filename)
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		// Fallback: if write fails, just return the original content
+
+	// Use 'wx' flag — skip if file already exists (idempotent across turns)
+	fd, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		if !os.IsExist(err) {
+			// Real error (not EEXIST) — return nil to signal failure
+			return nil
+		}
+		// EEXIST: already persisted on a prior turn, fall through to generate preview
+	} else {
+		fd.Write([]byte(content))
+		fd.Close()
+	}
+
+	preview, hasMore := generatePreview(content, PREVIEW_SIZE_BYTES)
+	return &PersistedToolResult{
+		Filepath:     path,
+		OriginalSize: len(content),
+		IsJSON:       isJSON,
+		Preview:      preview,
+		HasMore:      hasMore,
+	}
+}
+
+// generatePreview truncates content at a newline boundary when possible,
+// matching upstream's generatePreview().
+func generatePreview(content string, maxBytes int) (preview string, hasMore bool) {
+	if len(content) <= maxBytes {
+		return content, false
+	}
+	truncated := content[:maxBytes]
+	lastNewline := strings.LastIndex(truncated, "\n")
+	// If we found a newline reasonably close to the limit, use it
+	cutPoint := maxBytes
+	if lastNewline > maxBytes/2 {
+		cutPoint = lastNewline
+	}
+	return content[:cutPoint], true
+}
+
+// buildLargeToolResultMessage formats a persisted tool result into the
+// <persisted-output> XML message that the model sees, matching upstream exactly.
+func buildLargeToolResultMessage(result *PersistedToolResult) string {
+	var sb strings.Builder
+	sb.WriteString(PERSISTED_OUTPUT_TAG + "\n")
+	sb.WriteString(fmt.Sprintf("Output too large (%s). Full output saved to: %s\n\n",
+		formatFileSize(result.OriginalSize), result.Filepath))
+	sb.WriteString(fmt.Sprintf("Preview (first %s):\n", formatFileSize(PREVIEW_SIZE_BYTES)))
+	sb.WriteString(result.Preview)
+	if result.HasMore {
+		sb.WriteString("\n...\n")
+	} else {
+		sb.WriteString("\n")
+	}
+	sb.WriteString(PERSISTED_OUTPUT_CLOSING_TAG)
+	return sb.String()
+}
+
+// formatFileSize returns a human-readable file size string.
+func formatFileSize(bytes int) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d bytes", bytes)
+	}
+	if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024.0)
+	}
+	return fmt.Sprintf("%.1f MB", float64(bytes)/(1024.0*1024.0))
+}
+
+// isToolResultContentEmpty returns true if content is empty or whitespace-only.
+// Matching upstream's isToolResultContentEmpty().
+func isToolResultContentEmpty(content string) bool {
+	return strings.TrimSpace(content) == ""
+}
+
+// maybePersistToolResult checks if a tool result should be persisted based on
+// size threshold. Returns the modified content string if persisted, or the
+// original if not. Matching upstream's maybePersistLargeToolResult().
+func (s *ToolResultStore) maybePersistToolResult(toolUseID string, toolName string, content string, threshold int) string {
+	if isToolResultContentEmpty(content) {
+		return fmt.Sprintf("(%s completed with no output)", toolName)
+	}
+	if len(content) <= threshold {
 		return content
 	}
-	// Return XML reference tag with relative path for the model to re-read
-	relPath := filepath.Join(".claude", "tool_results", filename)
-	return fmt.Sprintf("<tool_result_ref id=\"%s\" path=\"%s\"/>", toolUseID, relPath)
+	result := s.Persist(toolUseID, content)
+	if result == nil {
+		return content // persistence failed, return original
+	}
+	return buildLargeToolResultMessage(result)
 }
 
 // Read loads a persisted tool result from disk by its toolUseID.
@@ -69,18 +200,346 @@ func (s *ToolResultStore) Read(toolUseID string) (string, error) {
 	if s.dir == "" {
 		return "", fmt.Errorf("tool result store not configured")
 	}
-	safeID := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
+	// Try both .txt and .json extensions
+	safeID := sanitizeToolID(toolUseID)
+	for _, ext := range []string{".txt", ".json"} {
+		path := filepath.Join(s.dir, safeID+ext)
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return string(data), nil
 		}
-		return '_'
-	}, toolUseID)
-	path := filepath.Join(s.dir, safeID+".txt")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("tool result not found on disk: %w", err)
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("tool result read error: %w", err)
+		}
 	}
-	return string(data), nil
+	return "", fmt.Errorf("tool result not found on disk: %s", toolUseID)
+}
+
+// --- Content Replacement State (matching upstream toolResultStorage.ts) ---
+//
+// Tracks replacement state across turns so enforceToolResultBudget makes the
+// same choices every time (preserves prompt cache prefix).
+// Once seen, a result's fate is frozen for the conversation.
+
+// ContentReplacementState tracks per-conversation-thread state for the aggregate
+// tool result budget. Matching upstream's ContentReplacementState type.
+//   - seenIds: results that have passed through the budget check (replaced or not).
+//     Once seen, a result's fate is frozen.
+//   - replacements: subset of seenIds that were persisted to disk and replaced
+//     with previews, mapped to the exact preview string shown to the model.
+type ContentReplacementState struct {
+	mu           sync.RWMutex
+	seenIds      map[string]bool
+	replacements map[string]string // toolUseId -> exact replacement string
+}
+
+// NewContentReplacementState creates a fresh ContentReplacementState.
+func NewContentReplacementState() *ContentReplacementState {
+	return &ContentReplacementState{
+		seenIds:      make(map[string]bool),
+		replacements: make(map[string]string),
+	}
+}
+
+// CloneContentReplacementState creates a copy for cache-sharing forks.
+func CloneContentReplacementState(source *ContentReplacementState) *ContentReplacementState {
+	source.mu.RLock()
+	defer source.mu.RUnlock()
+	seenIds := make(map[string]bool, len(source.seenIds))
+	for k, v := range source.seenIds {
+		seenIds[k] = v
+	}
+	replacements := make(map[string]string, len(source.replacements))
+	for k, v := range source.replacements {
+		replacements[k] = v
+	}
+	return &ContentReplacementState{seenIds: seenIds, replacements: replacements}
+}
+
+// ContentReplacementRecord is a serializable record of one content-replacement
+// decision, matching upstream's ContentReplacementRecord type.
+type ContentReplacementRecord struct {
+	Kind        string `json:"kind"`         // always "tool-result"
+	ToolUseID   string `json:"toolUseId"`
+	Replacement string `json:"replacement"` // exact string the model saw
+}
+
+// toolResultCandidate represents a tool result block eligible for budget enforcement.
+type toolResultCandidate struct {
+	toolUseID   string
+	content     string
+	size        int
+	entryIdx    int // index in the entries slice
+	blockIdx    int // index within the ToolResultContent
+	replacement string // cached replacement string for mustReapply
+}
+
+// enforceToolResultBudget enforces the per-message budget on aggregate tool result
+// size. Matching upstream's enforceToolResultBudget().
+//
+// For each user message whose tool_result blocks together exceed the per-message
+// limit, the largest FRESH (never-before-seen) results are persisted to disk and
+// replaced with <persisted-output> previews.
+//
+// State is tracked by tool_use_id in state. Once a result is seen its fate is
+// frozen: previously-replaced results get the same replacement re-applied every
+// turn (zero I/O, byte-identical), and previously-unreplaced results are never
+// replaced later (would break prompt cache).
+//
+// Returns the number of newly replaced results.
+func (c *ConversationContext) enforceToolResultBudget(
+	state *ContentReplacementState,
+	store *ToolResultStore,
+	limit int,
+	skipToolNames map[string]bool,
+) int {
+	if state == nil || store == nil || limit <= 0 {
+		return 0
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	// Build tool_use_id -> tool_name mapping from ToolUseContent entries
+	toolNameMap := make(map[string]string)
+	for _, entry := range c.entries {
+		blocks, ok := entry.content.(ToolUseContent)
+		if !ok {
+			continue
+		}
+		for _, b := range blocks {
+			if b.OfToolUse != nil && b.OfToolUse.ID != "" {
+				toolNameMap[b.OfToolUse.ID] = b.OfToolUse.Name
+			}
+		}
+	}
+
+	newlyReplaced := 0
+
+	// Process each ToolResultContent entry (each represents one user message)
+	for entryIdx, entry := range c.entries {
+		results, ok := entry.content.(ToolResultContent)
+		if !ok {
+			continue
+		}
+
+		// Collect candidates from this message
+		var candidates []toolResultCandidate
+		for blockIdx, r := range results {
+			// Extract text content
+			contentText := ""
+			for _, cb := range r.Content {
+				if cb.OfText != nil {
+					contentText += cb.OfText.Text
+				}
+			}
+			if contentText == "" || strings.HasPrefix(contentText, PERSISTED_OUTPUT_TAG) {
+				continue // skip empty or already-compacted
+			}
+			candidates = append(candidates, toolResultCandidate{
+				toolUseID: r.ToolUseID,
+				content:   contentText,
+				size:      len(contentText),
+				entryIdx:  entryIdx,
+				blockIdx:  blockIdx,
+			})
+		}
+
+		if len(candidates) == 0 {
+			continue
+		}
+
+		// Partition by prior decision state
+		var mustReapply []toolResultCandidate // previously replaced -> re-apply
+		var frozen []toolResultCandidate      // previously seen and left unreplaced
+		var fresh []toolResultCandidate       // never seen -> eligible
+
+		for _, c := range candidates {
+			if repl, ok := state.replacements[c.toolUseID]; ok {
+				c.replacement = repl // store for re-apply
+				mustReapply = append(mustReapply, c)
+			} else if state.seenIds[c.toolUseID] {
+				frozen = append(frozen, c)
+			} else {
+				fresh = append(fresh, c)
+			}
+		}
+
+		// Re-apply cached replacements (zero I/O, byte-identical)
+		if len(mustReapply) > 0 {
+			resultsCopy := make([]anthropic.ToolResultBlockParam, len(results))
+			copy(resultsCopy, results)
+			for _, c := range mustReapply {
+				resultsCopy[c.blockIdx] = anthropic.ToolResultBlockParam{
+					ToolUseID: c.toolUseID,
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: c.replacement}},
+					},
+					IsError: resultsCopy[c.blockIdx].IsError,
+				}
+			}
+			c.entries[entryIdx].content = ToolResultContent(resultsCopy)
+		}
+
+		// Mark all non-fresh IDs as seen
+		for _, c := range mustReapply {
+			state.seenIds[c.toolUseID] = true
+		}
+		for _, c := range frozen {
+			state.seenIds[c.toolUseID] = true
+		}
+
+		if len(fresh) == 0 {
+			continue
+		}
+
+		// Skip tools in skipToolNames (e.g., Read with Infinity threshold)
+		var eligible []toolResultCandidate
+		for _, c := range fresh {
+			toolName := toolNameMap[c.toolUseID]
+			if skipToolNames[toolName] {
+				state.seenIds[c.toolUseID] = true // freeze without replacement
+			} else {
+				eligible = append(eligible, c)
+			}
+		}
+
+		if len(eligible) == 0 {
+			continue
+		}
+
+		// Calculate total size: frozen + eligible
+		frozenSize := 0
+		for _, c := range frozen {
+			frozenSize += c.size
+		}
+		freshSize := 0
+		for _, c := range eligible {
+			freshSize += c.size
+		}
+
+		// If total exceeds limit, select largest fresh results to replace
+		if frozenSize+freshSize <= limit {
+			// Under budget — mark all as seen (frozen) without replacement
+			for _, c := range eligible {
+				state.seenIds[c.toolUseID] = true
+			}
+			continue
+		}
+
+		// Sort eligible by size descending (replace largest first)
+		sort.Slice(eligible, func(i, j int) bool {
+			return eligible[i].size > eligible[j].size
+		})
+
+		// Select candidates to replace until under budget
+		remaining := frozenSize + freshSize
+		var selected []toolResultCandidate
+		for _, c := range eligible {
+			if remaining <= limit {
+				break
+			}
+			selected = append(selected, c)
+			remaining -= c.size
+		}
+
+		// Mark non-selected as seen (frozen)
+		selectedSet := make(map[string]bool, len(selected))
+		for _, c := range selected {
+			selectedSet[c.toolUseID] = true
+		}
+		for _, c := range eligible {
+			if !selectedSet[c.toolUseID] {
+				state.seenIds[c.toolUseID] = true
+			}
+		}
+
+		if len(selected) == 0 {
+			continue
+		}
+
+		// Persist selected results and apply replacements
+		resultsCopy := make([]anthropic.ToolResultBlockParam, len(results))
+		copy(resultsCopy, results)
+
+		for _, c := range selected {
+			persisted := store.Persist(c.toolUseID, c.content)
+			if persisted == nil {
+				// Persistence failed — mark as seen but unreplaced (frozen)
+				state.seenIds[c.toolUseID] = true
+				continue
+			}
+			replacement := buildLargeToolResultMessage(persisted)
+			state.seenIds[c.toolUseID] = true
+			state.replacements[c.toolUseID] = replacement
+			newlyReplaced++
+
+			resultsCopy[c.blockIdx] = anthropic.ToolResultBlockParam{
+				ToolUseID: c.toolUseID,
+				Content: []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: replacement}},
+				},
+				IsError: resultsCopy[c.blockIdx].IsError,
+			}
+		}
+
+		c.entries[entryIdx].content = ToolResultContent(resultsCopy)
+	}
+
+	return newlyReplaced
+}
+
+// applyToolResultBudget is the query-loop integration point for the aggregate budget.
+// Gates on state (nil means feature disabled), applies enforcement.
+// Returns true if any replacements were made.
+func (c *ConversationContext) applyToolResultBudget(
+	state *ContentReplacementState,
+	store *ToolResultStore,
+) bool {
+	if state == nil || store == nil {
+		return false
+	}
+	return c.enforceToolResultBudget(state, store, MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, nil) > 0
+}
+
+// reconstructContentReplacementState rebuilds state from records loaded from
+// the transcript, matching upstream's reconstructContentReplacementState().
+func reconstructContentReplacementState(
+	entries []conversationEntry,
+	records []ContentReplacementRecord,
+) *ContentReplacementState {
+	state := NewContentReplacementState()
+
+	// Collect all candidate tool_use_ids from entries
+	candidateIDs := make(map[string]bool)
+	for _, entry := range entries {
+		results, ok := entry.content.(ToolResultContent)
+		if !ok {
+			continue
+		}
+		for _, r := range results {
+			if r.ToolUseID != "" {
+				candidateIDs[r.ToolUseID] = true
+			}
+		}
+	}
+
+	// Mark all candidates as seen
+	for id := range candidateIDs {
+		state.seenIds[id] = true
+	}
+
+	// Apply records for replacements
+	for _, r := range records {
+		if r.Kind == "tool-result" && candidateIDs[r.ToolUseID] {
+			state.replacements[r.ToolUseID] = r.Replacement
+		}
+	}
+
+	return state
 }
 
 // EntryContent is a sealed interface for conversation entry content types.
@@ -361,6 +820,9 @@ type ConversationContext struct {
 	// toolResultStore persists oversized tool results to disk during micro-compact,
 	// so they can be re-read on demand without re-executing tools.
 	toolResultStore *ToolResultStore
+	// contentReplacementState tracks replacement decisions across turns for
+	// prompt cache stability. Matching upstream's ContentReplacementState.
+	contentReplacementState *ContentReplacementState
 }
 
 // NewConversationContext creates a new context.
@@ -480,11 +942,34 @@ func (c *ConversationContext) SetRedactedThinkingData(data []string) {
 
 // SetToolResultStore configures the disk persistence store for tool results.
 // When set, MicroCompactEntries will persist cleared results to disk and
-// replace them with XML reference tags.
+// replace them with <persisted-output> XML tags.
 func (c *ConversationContext) SetToolResultStore(store *ToolResultStore) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.toolResultStore = store
+}
+
+// SetContentReplacementState configures the state tracker for prompt cache
+// stability. When set, enforceToolResultBudget will make consistent replacement
+// decisions across turns, preserving the prompt cache prefix.
+func (c *ConversationContext) SetContentReplacementState(state *ContentReplacementState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.contentReplacementState = state
+}
+
+// GetContentReplacementState returns the state tracker, or nil if not configured.
+func (c *ConversationContext) GetContentReplacementState() *ContentReplacementState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.contentReplacementState
+}
+
+// GetToolResultStore returns the tool result store, or nil if not configured.
+func (c *ConversationContext) GetToolResultStore() *ToolResultStore {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.toolResultStore
 }
 
 // AddUserMessage appends a user text message.
@@ -1497,13 +1982,14 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 					}
 					diskRef := ""
 					if c.toolResultStore != nil && contentText != "" {
-						diskRef = c.toolResultStore.Persist(r.ToolUseID, contentText)
+						result := c.toolResultStore.Persist(r.ToolUseID, contentText)
+						if result != nil {
+							diskRef = buildLargeToolResultMessage(result)
+						}
 					}
-					// Use disk reference tag as the placeholder. If persistence
-					// succeeded, the placeholder includes an XML ref the model can use.
-					blockText := placeholder
-					if diskRef != "" && diskRef != contentText {
-						blockText = placeholder + " " + diskRef
+					blockText := diskRef
+					if blockText == "" {
+						blockText = placeholder
 					}
 					clearedResults = append(clearedResults, anthropic.ToolResultBlockParam{
 						ToolUseID: r.ToolUseID,

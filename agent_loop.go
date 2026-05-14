@@ -565,13 +565,14 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	client := anthropic.NewClient(opts...)
 
 	ctx := NewConversationContext(cfg)
-	// Initialize tool result disk persistence store
+	// Initialize transcript writer first to get sessionID
+	sessionID := time.Now().Format("20060102-150405")
+	// Initialize tool result disk persistence store with session-scoped directory
 	if cfg.ProjectDir != "" {
-		ctx.SetToolResultStore(NewToolResultStore(cfg.ProjectDir))
+		ctx.SetToolResultStore(NewToolResultStore(cfg.ProjectDir, sessionID))
+		ctx.SetContentReplacementState(NewContentReplacementState())
 	}
 
-	// Initialize transcript writer
-	sessionID := time.Now().Format("20060102-150405")
 	transcriptDir := filepath.Join(".claude", "transcripts")
 	tw := transcript.NewWriter(sessionID, filepath.Join(transcriptDir, sessionID+".jsonl"))
 	_ = tw.Write(transcript.Entry{Type: "system", Content: fmt.Sprintf("model=%s, mode=%s", cfg.Model, cfg.PermissionMode)})
@@ -887,7 +888,9 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config) *ConversationContext {
 	ctx := NewConversationContext(cfg)
 	if cfg.ProjectDir != "" {
-		ctx.SetToolResultStore(NewToolResultStore(cfg.ProjectDir))
+		store := NewToolResultStore(cfg.ProjectDir, "") // sessionID not available in this path
+		ctx.SetToolResultStore(store)
+		ctx.SetContentReplacementState(NewContentReplacementState())
 	}
 
 	var pendingToolUses []map[string]any
@@ -1943,6 +1946,15 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	// causing endless 2013 repair loops.
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
+
+	// Apply per-message budget enforcement on tool results. Large results
+	// are persisted to disk and replaced with <persisted-output> previews.
+	// This matches upstream's applyToolResultBudget() which runs before
+	// sending messages to the API.
+	a.context.applyToolResultBudget(
+		a.context.GetContentReplacementState(),
+		a.context.GetToolResultStore(),
+	)
 
 	messages := a.context.BuildMessages()
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
