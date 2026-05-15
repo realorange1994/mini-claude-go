@@ -28,7 +28,8 @@ func (*FileEncodingTool) Description() string {
 		"- detect: Only detect the encoding, returns encoding name and a preview\n" +
 		"- read: Read the file, decode from specified/ detected encoding to UTF-8\n" +
 		"- write: Write content to the file, encode with the specified encoding\n" +
-		"- edit: Search-and-replace in the file, preserves original encoding\n\n" +
+		"- edit: Single search-and-replace, preserves original encoding\n" +
+		"- multi_edit: Multiple search-and-replace edits applied atomically, preserves original encoding\n\n" +
 		"Common encoding names: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, " +
 		"iso-8859-1 (latin-1), windows-1252, windows-1251."
 }
@@ -43,8 +44,8 @@ func (*FileEncodingTool) InputSchema() map[string]any {
 			},
 			"operation": map[string]any{
 				"type":        "string",
-				"enum":        []string{"read", "write", "edit", "detect"},
-				"description": "Operation to perform: read (decode and return content), write (encode and write content), edit (search-and-replace), detect (detect encoding only). Default: read.",
+				"enum":        []string{"read", "write", "edit", "multi_edit", "detect"},
+				"description": "Operation to perform: read (decode and return content), write (encode and write content), edit (single search-and-replace), multi_edit (multiple search-and-replace edits applied atomically), detect (detect encoding only). Default: read.",
 			},
 			"encoding": map[string]any{
 				"type":        "string",
@@ -65,6 +66,28 @@ func (*FileEncodingTool) InputSchema() map[string]any {
 			"replace_all": map[string]any{
 				"type":        "boolean",
 				"description": "Replace all occurrences of old_string (for edit operation, default: false).",
+			},
+			"edits": map[string]any{
+				"type":        "array",
+				"description": "List of {old_string, new_string} edit operations (required for multi_edit operation).",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"old_string": map[string]any{
+							"type":        "string",
+							"description": "Exact text to find.",
+						},
+						"new_string": map[string]any{
+							"type":        "string",
+							"description": "Text to replace it with.",
+						},
+						"replace_all": map[string]any{
+							"type":        "boolean",
+							"description": "Replace all occurrences of this old_string (default: false).",
+						},
+					},
+					"required": []string{"old_string", "new_string"},
+				},
 			},
 		},
 		"required": []string{"path"},
@@ -99,8 +122,10 @@ func (e *FileEncodingTool) Execute(params map[string]any) ToolResult {
 		return e.write(pathStr, params)
 	case "edit":
 		return e.edit(pathStr, params)
+	case "multi_edit":
+		return e.multiEdit(pathStr, params)
 	default:
-		return ToolResult{Output: fmt.Sprintf("Error: unknown operation %q. Supported: read, write, edit, detect", op), IsError: true}
+		return ToolResult{Output: fmt.Sprintf("Error: unknown operation %q. Supported: read, write, edit, multi_edit, detect", op), IsError: true}
 	}
 }
 
@@ -338,6 +363,164 @@ func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResul
 	}
 
 	return ToolResult{Output: fmt.Sprintf("Successfully edited %s (encoding: %s, applied 1 edit)", fp, encName)}
+}
+
+func (e *FileEncodingTool) multiEdit(pathStr string, params map[string]any) ToolResult {
+	fp := expandPath(pathStr)
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	// Parse edits
+	editsRaw, ok := params["edits"]
+	if !ok {
+		return ToolResult{Output: "Error: edits is required for multi_edit operation", IsError: true}
+	}
+	editsSlice, ok := editsRaw.([]any)
+	if !ok {
+		return ToolResult{Output: "Error: edits must be an array", IsError: true}
+	}
+	if len(editsSlice) == 0 {
+		return ToolResult{Output: "Error: edits must not be empty", IsError: true}
+	}
+
+	type editOp struct {
+		old        string
+		new        string
+		replaceAll bool
+	}
+	var edits []editOp
+	for i, ev := range editsSlice {
+		m, ok := ev.(map[string]any)
+		if !ok {
+			return ToolResult{Output: fmt.Sprintf("Error: edit %d must be an object", i+1), IsError: true}
+		}
+		oldStr, _ := m["old_string"].(string)
+		newStr, _ := m["new_string"].(string)
+		replaceAll, _ := m["replace_all"].(bool)
+		if oldStr == "" {
+			return ToolResult{Output: fmt.Sprintf("Error: edit %d: old_string must not be empty", i+1), IsError: true}
+		}
+		edits = append(edits, editOp{old: oldStr, new: newStr, replaceAll: replaceAll})
+	}
+
+	// Read file
+	data, err := os.ReadFile(fp)
+	if os.IsNotExist(err) {
+		return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", pathStr), IsError: true}
+	}
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
+	}
+
+	// Detect encoding
+	encName := getEncodingParam(params)
+	if encName == "" {
+		encName, _ = DetectCharset(data, "")
+		if encName == "unknown" {
+			return ToolResult{Output: "Error: Could not auto-detect encoding. Specify the encoding parameter explicitly.", IsError: true}
+		}
+	}
+
+	// Decode
+	content, err := DecodeWithEncoding(data, encName)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error decoding file with encoding %s: %v", encName, err), IsError: true}
+	}
+
+	// Normalize CRLF for matching
+	hasCRLF := strings.Contains(content, "\r\n")
+	if hasCRLF {
+		content = strings.ReplaceAll(content, "\r\n", "\n")
+		for i := range edits {
+			edits[i].old = strings.ReplaceAll(edits[i].old, "\r\n", "\n")
+			edits[i].new = strings.ReplaceAll(edits[i].new, "\r\n", "\n")
+		}
+	}
+
+	// Normalize curly quotes (matching multi_edit behavior)
+	content = normalizeQuotes(content)
+	for i := range edits {
+		edits[i].old = normalizeQuotes(edits[i].old)
+		edits[i].new = normalizeQuotes(edits[i].new)
+	}
+
+	// Track applied new strings for overlapping edit detection
+	var appliedNewStrings []string
+
+	// Dry run + apply all edits sequentially
+	for i, ev := range edits {
+		oldTrimmed := strings.TrimRight(ev.old, "\n")
+
+		// Overlapping edit detection
+		for _, prevNew := range appliedNewStrings {
+			if oldTrimmed != "" && strings.Contains(prevNew, oldTrimmed) {
+				return ToolResult{
+					Output: fmt.Sprintf("Error: edit %d failed: old_string is a substring of a new_string from a previous edit", i+1),
+					IsError: true,
+				}
+			}
+		}
+
+		// Find location (exact match, then with trailing newlines stripped)
+		idx := findEditLocation(content, ev.old)
+		if idx < 0 {
+			// Try desanitized version
+			desanitizedOld := desanitize(ev.old)
+			desanitizedNew := desanitize(ev.new)
+			idx = findEditLocation(content, desanitizedOld)
+			if idx >= 0 {
+				edits[i].old = desanitizedOld
+				edits[i].new = desanitizedNew
+			}
+		}
+		if idx < 0 {
+			return ToolResult{
+				Output: fmt.Sprintf("Error: edit %d failed: old_text not found: %q", i+1, truncate(ev.old, 80)),
+				IsError: true,
+			}
+		}
+
+		// Reject ambiguous edits when replace_all is false
+		if !ev.replaceAll {
+			cnt := countOccurrences(content, ev.old)
+			if cnt > 1 {
+				return ToolResult{
+					Output: fmt.Sprintf("Error: edit %d failed: old_string has multiple matches; set replace_all to true or provide more context", i+1),
+					IsError: true,
+				}
+			}
+		}
+
+		// Apply edit
+		if ev.replaceAll {
+			content = strings.ReplaceAll(content, ev.old, ev.new)
+		} else {
+			content = strings.Replace(content, ev.old, ev.new, 1)
+		}
+		appliedNewStrings = append(appliedNewStrings, ev.new)
+	}
+
+	// Restore CRLF if original file had it
+	if hasCRLF {
+		content = restoreCRLF(content)
+	}
+
+	// Encode back and write atomically
+	encoded, err := EncodeWithEncoding(content, encName)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error encoding content with encoding %s: %v", encName, err), IsError: true}
+	}
+
+	if err := WriteFileAtomically(fp, encoded); err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
+	}
+
+	if e.registry != nil {
+		e.registry.MarkFileRead(fp)
+	}
+
+	return ToolResult{Output: fmt.Sprintf("Successfully edited %s (encoding: %s, applied %d edits)", fp, encName, len(edits))}
 }
 
 func getEncodingParam(params map[string]any) string {
