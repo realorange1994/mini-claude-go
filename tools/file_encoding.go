@@ -1,0 +1,371 @@
+package tools
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// FileEncodingTool reads, writes, and edits files with arbitrary text encodings.
+// Supports: GBK, GB18030, Latin-1, Windows-1252, Shift-JIS, Big5, EUC-KR, etc.
+type FileEncodingTool struct {
+	registry *Registry
+}
+
+func NewFileEncodingTool(registry *Registry) *FileEncodingTool {
+	return &FileEncodingTool{registry: registry}
+}
+
+func (*FileEncodingTool) Name() string { return "file_encoding" }
+
+func (*FileEncodingTool) Description() string {
+	return "Read, write, or edit files with arbitrary text encodings (GBK, GB18030, Latin-1, " +
+		"Shift-JIS, Big5, EUC-KR, etc.). Use when read_file/edit_file show garbled text or " +
+		"report unsupported encoding. Auto-detects encoding if not specified. " +
+		"Encoding detection uses byte-pattern analysis from golang.org/x/net/html/charset.\n\n" +
+		"Operations:\n" +
+		"- detect: Only detect the encoding, returns encoding name and a preview\n" +
+		"- read: Read the file, decode from specified/ detected encoding to UTF-8\n" +
+		"- write: Write content to the file, encode with the specified encoding\n" +
+		"- edit: Search-and-replace in the file, preserves original encoding\n\n" +
+		"Common encoding names: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, " +
+		"iso-8859-1 (latin-1), windows-1252, windows-1251."
+}
+
+func (*FileEncodingTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "Absolute path to the file to operate on.",
+			},
+			"operation": map[string]any{
+				"type":        "string",
+				"enum":        []string{"read", "write", "edit", "detect"},
+				"description": "Operation to perform: read (decode and return content), write (encode and write content), edit (search-and-replace), detect (detect encoding only). Default: read.",
+			},
+			"encoding": map[string]any{
+				"type":        "string",
+				"description": "Encoding name (optional, auto-detected if omitted for read/detect/edit). Examples: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, iso-8859-1, windows-1252.",
+			},
+			"content": map[string]any{
+				"type":        "string",
+				"description": "Content to write (required for write operation, or new_string for edit operation).",
+			},
+			"old_string": map[string]any{
+				"type":        "string",
+				"description": "Text to find and replace (required for edit operation).",
+			},
+			"new_string": map[string]any{
+				"type":        "string",
+				"description": "Replacement text (for edit operation, defaults to content if not provided).",
+			},
+			"replace_all": map[string]any{
+				"type":        "boolean",
+				"description": "Replace all occurrences of old_string (for edit operation, default: false).",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (*FileEncodingTool) CheckPermissions(params map[string]any) PermissionResult {
+	pathStr, _ := params["path"].(string)
+	if pathStr == "" {
+		return PermissionResultPassthrough()
+	}
+	return CheckPathSafetyForAutoEdit(pathStr)
+}
+
+func (e *FileEncodingTool) Execute(params map[string]any) ToolResult {
+	pathStr, _ := params["path"].(string)
+	if pathStr == "" {
+		return ToolResult{Output: "Error: path is required", IsError: true}
+	}
+
+	op, _ := params["operation"].(string)
+	if op == "" {
+		op = "read"
+	}
+
+	switch op {
+	case "detect":
+		return e.detect(pathStr)
+	case "read":
+		return e.read(pathStr, params)
+	case "write":
+		return e.write(pathStr, params)
+	case "edit":
+		return e.edit(pathStr, params)
+	default:
+		return ToolResult{Output: fmt.Sprintf("Error: unknown operation %q. Supported: read, write, edit, detect", op), IsError: true}
+	}
+}
+
+func (e *FileEncodingTool) detect(pathStr string) ToolResult {
+	fp := expandPath(pathStr)
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	info, err := os.Stat(fp)
+	if os.IsNotExist(err) {
+		return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", pathStr), IsError: true}
+	}
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+	}
+	if info.IsDir() {
+		return ToolResult{Output: fmt.Sprintf("Error: not a file: %s", pathStr), IsError: true}
+	}
+
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
+	}
+
+	encName, certain := DetectCharset(data, "")
+	if encName == "unknown" {
+		encName = "unknown (not UTF-8, not detectable)"
+		certain = false
+	}
+
+	var lines []string
+	lines = append(lines, fmt.Sprintf("Detected encoding: %s (certain: %v)", encName, certain))
+	lines = append(lines, fmt.Sprintf("File size: %d bytes", len(data)))
+
+	// Preview: decode and show first 200 characters
+	if IsSupportedEncoding(encName) {
+		decoded, err := DecodeWithEncoding(data, encName)
+		if err == nil {
+			decoded = strings.ReplaceAll(decoded, "\r\n", "\n")
+			preview := decoded
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
+			lines = append(lines, "")
+			lines = append(lines, "Preview (first 200 chars):")
+			lines = append(lines, preview)
+		}
+	}
+
+	return ToolResult{Output: strings.Join(lines, "\n")}
+}
+
+func (e *FileEncodingTool) read(pathStr string, params map[string]any) ToolResult {
+	fp := expandPath(pathStr)
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	info, err := os.Stat(fp)
+	if os.IsNotExist(err) {
+		return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", pathStr), IsError: true}
+	}
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+	}
+	if info.IsDir() {
+		return ToolResult{Output: fmt.Sprintf("Error: not a file: %s", pathStr), IsError: true}
+	}
+
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
+	}
+
+	encName := getEncodingParam(params)
+	if encName == "" {
+		encName, _ = DetectCharset(data, "")
+		if encName == "unknown" {
+			return ToolResult{Output: "Error: Could not auto-detect encoding. This file does not appear to be UTF-8 and no BOM was found. Specify the encoding parameter explicitly.", IsError: true}
+		}
+	}
+
+	decoded, err := DecodeWithEncoding(data, encName)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error decoding file with encoding %s: %v", encName, err), IsError: true}
+	}
+
+	// Normalize line endings
+	decoded = strings.ReplaceAll(decoded, "\r\n", "\n")
+	lines := strings.Split(decoded, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	total := len(lines)
+
+	var numbered strings.Builder
+	for i, line := range lines {
+		numbered.WriteString(fmt.Sprintf("%d\t%s\n", i+1, line))
+	}
+
+	result := numbered.String()
+	if total > 0 {
+		result += fmt.Sprintf("\n\n(End of file - %d lines total, encoding: %s)", total, encName)
+	}
+
+	return ToolResult{Output: strings.TrimRight(result, "\n")}
+}
+
+func (e *FileEncodingTool) write(pathStr string, params map[string]any) ToolResult {
+	fp := expandPath(pathStr)
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	content, _ := params["content"].(string)
+	if content == "" {
+		return ToolResult{Output: "Error: content is required for write operation", IsError: true}
+	}
+
+	encName := getEncodingParam(params)
+	if encName == "" {
+		encName = "utf-8"
+	}
+
+	// Check if encoding is supported
+	if !IsSupportedEncoding(encName) {
+		return ToolResult{Output: fmt.Sprintf("Error: unsupported encoding %q. Supported: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, iso-8859-1, windows-1252, and more.", encName), IsError: true}
+	}
+
+	encoded, err := EncodeWithEncoding(content, encName)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error encoding content with encoding %s: %v", encName, err), IsError: true}
+	}
+
+	// Create parent directories
+	dir := filepath.Dir(fp)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error creating directory: %v", err), IsError: true}
+	}
+
+	if err := WriteFileAtomically(fp, encoded); err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
+	}
+
+	if e.registry != nil {
+		e.registry.MarkFileReadWithContent(fp, content)
+	}
+
+	return ToolResult{Output: fmt.Sprintf("Wrote %d chars to %s (encoding: %s)", len(content), fp, encName)}
+}
+
+func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResult {
+	fp := expandPath(pathStr)
+	if isUncPath(fp) {
+		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	oldStr, _ := params["old_string"].(string)
+	if oldStr == "" {
+		return ToolResult{Output: "Error: old_string is required for edit operation", IsError: true}
+	}
+	newStr := getParam(params, "new_string", "content")
+
+	replaceAll, _ := params["replace_all"].(bool)
+
+	// Read file
+	data, err := os.ReadFile(fp)
+	if os.IsNotExist(err) {
+		return ToolResult{Output: fmt.Sprintf("Error: file not found: %s", pathStr), IsError: true}
+	}
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
+	}
+
+	// Detect encoding
+	encName := getEncodingParam(params)
+	if encName == "" {
+		encName, _ = DetectCharset(data, "")
+		if encName == "unknown" {
+			return ToolResult{Output: "Error: Could not auto-detect encoding. Specify the encoding parameter explicitly.", IsError: true}
+		}
+	}
+
+	// Decode
+	content, err := DecodeWithEncoding(data, encName)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error decoding file with encoding %s: %v", encName, err), IsError: true}
+	}
+
+	// Normalize CRLF for matching
+	hasCRLF := strings.Contains(content, "\r\n")
+	if hasCRLF {
+		content = strings.ReplaceAll(content, "\r\n", "\n")
+		oldStr = strings.ReplaceAll(oldStr, "\r\n", "\n")
+		newStr = strings.ReplaceAll(newStr, "\r\n", "\n")
+	}
+
+	// Apply replacement
+	count := strings.Count(content, oldStr)
+	if count == 0 {
+		return ToolResult{Output: fmt.Sprintf("Error: old_text not found in %s. Verify the file content.", pathStr), IsError: true}
+	}
+	if count > 1 && !replaceAll {
+		return ToolResult{
+			Output: fmt.Sprintf("Warning: old_text appears %d times. Provide more context or set replace_all=true.", count),
+			IsError: true,
+		}
+	}
+
+	if replaceAll {
+		content = strings.ReplaceAll(content, oldStr, newStr)
+	} else {
+		content = strings.Replace(content, oldStr, newStr, 1)
+	}
+
+	// Restore CRLF if original file had it
+	if hasCRLF {
+		content = restoreCRLF(content)
+	}
+
+	// Encode back
+	encoded, err := EncodeWithEncoding(content, encName)
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error encoding content with encoding %s: %v", encName, err), IsError: true}
+	}
+
+	if err := WriteFileAtomically(fp, encoded); err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
+	}
+
+	if e.registry != nil {
+		e.registry.MarkFileRead(fp)
+	}
+
+	return ToolResult{Output: fmt.Sprintf("Successfully edited %s (encoding: %s, applied 1 edit)", fp, encName)}
+}
+
+func getEncodingParam(params map[string]any) string {
+	enc, _ := params["encoding"].(string)
+	enc = strings.ToLower(strings.TrimSpace(enc))
+	// Normalize common aliases
+	switch enc {
+	case "latin-1", "latin1", "iso8859-1":
+		return "iso-8859-1"
+	case "gb2312":
+		return "gbk"
+	case "cp1252", "cp-1252", "win1252":
+		return "windows-1252"
+	case "cp936", "cp-936":
+		return "gbk"
+	case "cp950", "cp-950":
+		return "big5"
+	}
+	return enc
+}
+
+func getParam(params map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := params[key]; ok {
+			if s, ok := v.(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}

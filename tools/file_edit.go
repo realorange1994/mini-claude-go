@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf16"
 )
 
 // FileEditTool edits a file by replacing an exact string with a new string.
@@ -143,18 +142,15 @@ func (e *FileEditTool) ExecuteContext(ctx context.Context, params map[string]any
 		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
 	}
 
-	// Detect encoding from BOM (matching upstream: UTF-16 LE support)
-	var content string
-	var isUTF16LE bool
-	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
-		// UTF-16 LE BOM detected — decode to UTF-8 string
-		isUTF16LE = true
-		u16s := bytesToUint16LE(data[2:])
-		content = string(utf16.Decode(u16s))
-	} else {
-		content = string(data)
+	// Detect encoding from BOM and decode (using shared encoding utilities)
+	content, fileMeta := DecodeFileContent(data)
+
+	// Check if file is likely non-UTF-8 and reject with a hint
+	if encHint := IsLikelyNonUTF8(data); encHint != "" {
+		return ToolResult{Output: fmt.Sprintf("Error: This file appears to be encoded in %s, which is not supported by edit_file. Use the file_encoding tool with operation=\"edit\", encoding=%q to edit this file.", encHint, encHint), IsError: true}
 	}
-	hasCRLF := strings.Contains(content, "\r\n")
+
+	hasCRLF := fileMeta.LineEndings == LineEndingCRLF
 
 	// Strip trailing whitespace from new_string (except .md/.mdx) matching official
 	ext := strings.ToLower(filepath.Ext(fp))
@@ -221,13 +217,8 @@ func (e *FileEditTool) ExecuteContext(ctx context.Context, params map[string]any
 		contentNorm = restoreCRLF(contentNorm)
 	}
 
-	// Write file (preserve original encoding)
-	var out []byte
-	if isUTF16LE {
-		out = encodeUTF16LE(contentNorm)
-	} else {
-		out = []byte(contentNorm)
-	}
+	// Write file (preserve original encoding and line endings)
+	out := EncodeFileContent(contentNorm, fileMeta)
 	if err := WriteFileAtomically(fp, out); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
@@ -378,44 +369,3 @@ func stripTrailingWhitespace(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// restoreCRLF replaces \n with \r\n only where not already preceded by \r.
-func restoreCRLF(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + len(s)/10)
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' && (i == 0 || s[i-1] != '\r') {
-			b.WriteString("\r\n")
-		} else {
-			b.WriteByte(s[i])
-		}
-	}
-	return b.String()
-}
-
-// encodeUTF16LE encodes a Go string as UTF-16 LE with BOM prefix.
-// Used to preserve the original file encoding when writing back.
-func encodeUTF16LE(s string) []byte {
-	runes := []rune(s)
-	u16s := utf16.Encode(runes)
-	// BOM + UTF-16 LE (little-endian): 2 bytes per uint16
-	out := make([]byte, 2+2*len(u16s))
-	out[0] = 0xFF // BOM low byte
-	out[1] = 0xFE // BOM high byte
-	for i, v := range u16s {
-		out[2+2*i] = byte(v)        // low byte
-		out[2+2*i+1] = byte(v >> 8) // high byte
-	}
-	return out
-}
-
-// bytesToUint16LE converts a little-endian byte slice to []uint16.
-func bytesToUint16LE(b []byte) []uint16 {
-	if len(b)%2 != 0 {
-		b = b[:len(b)-1] // drop trailing odd byte
-	}
-	u16s := make([]uint16, len(b)/2)
-	for i := range u16s {
-		u16s[i] = uint16(b[2*i]) | uint16(b[2*i+1])<<8
-	}
-	return u16s
-}

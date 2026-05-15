@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 )
 
 const maxFileSize = 256 * 1024 // 256 KB, matching Claude Code official
@@ -194,20 +193,16 @@ func (t *FileReadTool) ExecuteContext(ctx context.Context, params map[string]any
 		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
 	}
 
-	// Detect encoding from BOM (matching upstream: UTF-16 LE support)
-	var content string
-	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
-		// UTF-16 LE BOM — decode to UTF-8 string
-		u16s := bytesToUint16LE(data[2:])
-		content = string(utf16.Decode(u16s))
-	} else {
-		content = string(data)
+	// Detect encoding from BOM and decode (using shared encoding utilities)
+	content, _ := DecodeFileContent(data)
+
+	// Check if file is likely non-UTF-8 and add a hint for the agent
+	encHint := IsLikelyNonUTF8(data)
+	encHintMsg := ""
+	if encHint != "" {
+		encHintMsg = fmt.Sprintf("\n\n⚠ This file appears to be encoded in %s (not UTF-8). If the content shows garbled text, use the file_encoding tool with encoding=%q to read it correctly.", encHint, encHint)
 	}
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	// Strip UTF-8 BOM (matching official Claude Code behavior)
-	if strings.HasPrefix(content, "\xEF\xBB\xBF") {
-		content = content[3:]
-	}
+
 	lines := strings.Split(content, "\n")
 	// Remove trailing empty element from split
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
@@ -268,7 +263,7 @@ func (t *FileReadTool) ExecuteContext(ctx context.Context, params map[string]any
 		t.registry.MarkFileReadWithParams(fp, offset, limit, readContent, isPartial, true) // fromRead=true
 	}
 
-	return ToolResult{Output: strings.TrimRight(result, "\n")}
+	return ToolResult{Output: strings.TrimRight(result, "\n") + encHintMsg}
 }
 
 func (t *FileReadTool) Execute(params map[string]any) ToolResult {

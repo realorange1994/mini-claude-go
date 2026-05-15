@@ -164,7 +164,7 @@ func WithTimeout[R any](fn func() (R, error), timeout time.Duration, timeoutMsg 
 		if len(timeoutMsg) > 0 {
 			msg = timeoutMsg[0]
 		}
-		return zero, fmt.Errorf(msg)
+		return zero, fmt.Errorf("%s", msg)
 	}
 }
 

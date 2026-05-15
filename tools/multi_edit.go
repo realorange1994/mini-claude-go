@@ -152,11 +152,16 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("Error reading file: %v", err), IsError: true}
 	}
 
-	// Normalize CRLF
-	content := string(data)
-	hasCRLF := strings.Contains(content, "\r\n")
+	// Decode file content and detect encoding (using shared utilities)
+	content, fileMeta := DecodeFileContent(data)
+
+	// Check if file is likely non-UTF-8 and reject with a hint
+	if encHint := IsLikelyNonUTF8(data); encHint != "" {
+		return ToolResult{Output: fmt.Sprintf("Error: This file appears to be encoded in %s, which is not supported by multi_edit. Use the file_encoding tool with operation=\"edit\", encoding=%q to edit this file.", encHint, encHint), IsError: true}
+	}
+
+	hasCRLF := fileMeta.LineEndings == LineEndingCRLF
 	if hasCRLF {
-		content = strings.ReplaceAll(content, "\r\n", "\n")
 		for i := range edits {
 			edits[i].old = strings.ReplaceAll(edits[i].old, "\r\n", "\n")
 			edits[i].new = strings.ReplaceAll(edits[i].new, "\r\n", "\n")
@@ -228,10 +233,8 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 	}
 
 	// Apply atomically (temp-file-then-rename)
-	if hasCRLF {
-		content = RestoreCRLF(content)
-	}
-	if err := WriteFileAtomically(fp, []byte(content)); err != nil {
+	outBytes := EncodeFileContent(content, fileMeta)
+	if err := WriteFileAtomically(fp, outBytes); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
 

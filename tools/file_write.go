@@ -110,7 +110,20 @@ func (w *FileWriteTool) ExecuteContext(ctx context.Context, params map[string]an
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error creating directory: %v", err), IsError: true}
 	}
-	if err := WriteFileAtomically(fp, []byte(content)); err != nil {
+
+	// Detect existing file encoding to preserve it on write-back.
+	// New files default to UTF-8 (matching upstream behavior).
+	fileMeta := FileMetadata{Encoding: EncodingUTF8, LineEndings: LineEndingLF}
+	if existingData, err := os.ReadFile(fp); err == nil {
+		_, fileMeta = DecodeFileContent(existingData)
+	}
+
+	// Upstream: write_file intentionally does NOT preserve line endings —
+	// it always writes LF. But it DOES preserve encoding (UTF-16 LE).
+	fileMeta.LineEndings = LineEndingLF
+
+	outBytes := EncodeFileContent(content, fileMeta)
+	if err := WriteFileAtomically(fp, outBytes); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
 	}
 	// Update registry so subsequent writes are allowed without re-reading
