@@ -21,9 +21,14 @@ func (*FileEncodingTool) Name() string { return "file_encoding" }
 
 func (*FileEncodingTool) Description() string {
 	return "Read, write, or edit files with arbitrary text encodings (GBK, GB18030, Latin-1, " +
-		"Shift-JIS, Big5, EUC-KR, etc.). Use when read_file/edit_file show garbled text or " +
-		"report unsupported encoding. Auto-detects encoding if not specified. " +
-		"Encoding detection uses byte-pattern analysis from golang.org/x/net/html/charset.\n\n" +
+		"Shift-JIS, Big5, EUC-KR, etc.).\n\n" +
+		"IMPORTANT: This is a fallback tool. ALWAYS prefer read_file + edit_file/multi_edit + " +
+		"write_file for coding and file manipulation. Only use file_encoding when those tools " +
+		"fail due to encoding issues (garbled text, non-UTF-8 detection, unsupported charset). " +
+		"Do not use this tool for routine coding tasks unless the existing tools report encoding " +
+		"errors.\n\n" +
+		"Auto-detects encoding if not specified. Encoding detection uses byte-pattern analysis " +
+		"from golang.org/x/net/html/charset.\n\n" +
 		"Operations:\n" +
 		"- detect: Only detect the encoding, returns encoding name and a preview\n" +
 		"- read: Read the file, decode from specified/ detected encoding to UTF-8\n" +
