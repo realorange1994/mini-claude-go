@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"miniclaudecode-go/microlisp"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,6 +20,8 @@ import (
 )
 
 func main() {
+	// Initialize the embedded Lisp interpreter for lisp_eval tool
+	microlisp.InitGlobalEnv()
 	model := flag.String("model", "", "Anthropic model to use")
 	apiKey := flag.String("api-key", "", "API key (overrides ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN env and config file)")
 	baseURL := flag.String("base-url", "", "Custom API base URL (overrides config file)")
