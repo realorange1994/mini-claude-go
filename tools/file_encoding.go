@@ -30,7 +30,8 @@ func (*FileEncodingTool) Description() string {
 		"Auto-detects encoding if not specified. Encoding detection uses byte-pattern analysis " +
 		"from golang.org/x/net/html/charset.\n\n" +
 		"Usage:\n" +
-		"- For read/edit/multi_edit: auto-detects encoding if not specified.\n" +
+		"- detect: Only detect the encoding, returns encoding name and a preview.\n" +
+			"- For read/edit/multi_edit: auto-detects encoding if not specified.\n" +
 		"- For write: follows write_file convention — you MUST use file_encoding read first for existing files. New files default to UTF-8.\n" +
 		"- edit/multi_edit: follows edit_file/multi_edit convention — read-before-write validation.\n\n" +
 		"Common encoding names: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, " +
