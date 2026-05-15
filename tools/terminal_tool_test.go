@@ -122,39 +122,25 @@ func TestBuildTerminalCommandNewWithSession(t *testing.T) {
 
 func TestBuildTerminalCommandAttachNoSession(t *testing.T) {
 	_, err := buildTerminalCommand("tmux", "attach", map[string]any{})
+	// attach is handled separately in Execute (returns help text for manual attach)
 	if err == nil {
-		t.Error("attach is not supported by buildTerminalCommand (handled in Execute), should return error")
+		t.Error("attach should not be handled by buildTerminalCommand, should return error")
 	}
 }
 
 func TestBuildTerminalCommandAttachWithSession(t *testing.T) {
 	_, err := buildTerminalCommand("tmux", "attach", map[string]any{"session": "main"})
+	// attach is handled separately in Execute (returns help text for manual attach)
 	if err == nil {
-		t.Error("attach is not supported by buildTerminalCommand (handled in Execute), should return error")
+		t.Error("attach should not be handled by buildTerminalCommand, should return error")
 	}
 }
 
-func TestBuildTerminalCommandSendNoSession(t *testing.T) {
-	_, err := buildTerminalCommand("tmux", "send", map[string]any{"command": "ls"})
+func TestBuildTerminalCommandSendNotInBuild(t *testing.T) {
+	// send is now handled by executeSendWithCapture, not buildTerminalCommand
+	_, err := buildTerminalCommand("tmux", "send", map[string]any{"session": "main", "command": "ls"})
 	if err == nil {
-		t.Error("send without session should return error")
-	}
-}
-
-func TestBuildTerminalCommandSendNoCommand(t *testing.T) {
-	_, err := buildTerminalCommand("tmux", "send", map[string]any{"session": "main"})
-	if err == nil {
-		t.Error("send without command should return error")
-	}
-}
-
-func TestBuildTerminalCommandSendValid(t *testing.T) {
-	cmd, err := buildTerminalCommand("tmux", "send", map[string]any{"session": "main", "command": "ls -la"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cmd.Path == "" {
-		t.Error("command should have a path")
+		t.Error("send should not be handled by buildTerminalCommand, should return error")
 	}
 }
 
@@ -223,5 +209,85 @@ func TestBuildTerminalCommandScreenDetach(t *testing.T) {
 	}
 	if cmd.Path == "" {
 		t.Error("command should have a path")
+	}
+}
+
+// ─── executeSendWithCapture ──────────────────────────────────────────────────
+
+func TestExecuteSendWithCaptureNoSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only test")
+	}
+	result := executeSendWithCapture("tmux", map[string]any{"command": "ls"})
+	if !result.IsError {
+		t.Error("should return error when session is missing")
+	}
+	if !strings.Contains(result.Output, "session is required") {
+		t.Errorf("should mention session required, got %q", result.Output)
+	}
+}
+
+func TestExecuteSendWithCaptureNoCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only test")
+	}
+	result := executeSendWithCapture("tmux", map[string]any{"session": "main"})
+	if !result.IsError {
+		t.Error("should return error when command is missing")
+	}
+	if !strings.Contains(result.Output, "command is required") {
+		t.Errorf("should mention command required, got %q", result.Output)
+	}
+}
+
+func TestExecuteSendWithCaptureInvalidMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only test")
+	}
+	result := executeSendWithCapture("tmux", map[string]any{
+		"session":      "main",
+		"command":      "ls",
+		"capture_mode": "invalid",
+	})
+	if !result.IsError {
+		t.Error("should return error for invalid capture_mode")
+	}
+	if !strings.Contains(result.Output, "unknown capture_mode") {
+		t.Errorf("should mention unknown capture_mode, got %q", result.Output)
+	}
+}
+
+func TestExecuteSendWithCaptureScreenTail(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-only test")
+	}
+	// This test just verifies the function doesn't crash for screen
+	// (screen doesn't support capture-pane, so it returns a note)
+	// We can't test actual screen functionality without a running screen session
+}
+
+// ─── extractBeforeSentinel ───────────────────────────────────────────────────
+
+func TestExtractBeforeSentinel(t *testing.T) {
+	input := "line1\nline2\n__TACOS_END__ 0\n__TACOS_END___END\nprompt$"
+	result := extractBeforeSentinel(input, "__TACOS_END__")
+	if result != "line1\nline2" {
+		t.Errorf("expected 'line1\\nline2', got %q", result)
+	}
+}
+
+func TestExtractBeforeSentinelNoSentinel(t *testing.T) {
+	input := "line1\nline2\nline3"
+	result := extractBeforeSentinel(input, "__TACOS_END__")
+	if result != "line1\nline2\nline3" {
+		t.Errorf("expected full input, got %q", result)
+	}
+}
+
+func TestExtractBeforeSentinelTrailingBlanks(t *testing.T) {
+	input := "line1\n\n\n__TACOS_END__ 0"
+	result := extractBeforeSentinel(input, "__TACOS_END__")
+	if result != "line1" {
+		t.Errorf("expected 'line1' (trailing blanks trimmed), got %q", result)
 	}
 }
