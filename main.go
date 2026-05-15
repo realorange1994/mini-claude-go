@@ -10,13 +10,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 )
 
 func main() {
@@ -216,56 +214,13 @@ func main() {
 	runInteractive(agent, history, sessionID)
 }
 
-// ensureConsoleInputMode ensures the Windows console input mode has the
-// required flags for interactive input. MCP child processes (node.exe) may
-// alter the console input mode when they start, breaking ReadString.
-func ensureConsoleInputMode() {
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	getStdHandle := kernel32.NewProc("GetStdHandle")
-	getConsoleMode := kernel32.NewProc("GetConsoleMode")
-	setConsoleMode := kernel32.NewProc("SetConsoleMode")
-
-	const STD_INPUT_HANDLE = ^uintptr(10) // -10
-	const (
-		ENABLE_PROCESSED_INPUT    = 0x0001
-		ENABLE_LINE_INPUT         = 0x0002
-		ENABLE_ECHO_INPUT         = 0x0004
-		ENABLE_EXTENDED_FLAGS     = 0x0080
-		ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
-	)
-
-	h, _, _ := getStdHandle.Call(uintptr(STD_INPUT_HANDLE))
-	if h == 0 {
-		return
-	}
-
-	var mode uint32
-	ret, _, _ := getConsoleMode.Call(h, uintptr(unsafe.Pointer(&mode)))
-	if ret == 0 {
-		return
-	}
-
-	// Ensure the critical flags are set
-	needMode := mode
-	needMode |= ENABLE_PROCESSED_INPUT
-	needMode |= ENABLE_LINE_INPUT
-	needMode |= ENABLE_ECHO_INPUT
-	needMode &^= ENABLE_VIRTUAL_TERMINAL_INPUT
-	needMode |= ENABLE_EXTENDED_FLAGS
-
-	if needMode != mode {
-		setConsoleMode.Call(h, uintptr(needMode))
-	}
-}
-
 func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) {
 	defer agent.Close()
 
 	// On Windows, ensure console input mode has ENABLE_PROCESSED_INPUT and
 	// ENABLE_LINE_INPUT. MCP child processes may have altereded the console mode.
-	if runtime.GOOS == "windows" {
-		ensureConsoleInputMode()
-	}
+	// This is a no-op on Unix (see main_unix.go).
+	ensureConsoleInputMode()
 
 	// Detect if stdin is a terminal (interactive) or piped
 	isTerminal := func() bool {
@@ -331,6 +286,9 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 		for sig := range signalCh {
 			if sig == syscall.SIGINT {
 				agent.SetInterrupted(true)
+				// Set SIGINT flag for Unix input loop to detect.
+				// On Windows, this is a no-op (Ctrl+C unblocks ReadString directly).
+				interruptStdin()
 			} else {
 				// SIGTERM/SIGHUP -- graceful shutdown
 				printResumeHint(agent)
@@ -385,20 +343,9 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 		return
 	}
 
-	reopenStdin := func() *bufio.Reader {
-		var f *os.File
-		var err error
-		f, err = os.OpenFile("CONIN$", os.O_RDWR, 0)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Failed to reopen stdin (CONIN$): %v\n", err)
-			return nil
-		}
-		return bufio.NewReader(f)
-	}
-
 	var lastCtrlC time.Time
 
-	for {
+		for {
 		// Drain async sub-agent notifications and display them
 		if notifications := agent.DrainNotifications(); len(notifications) > 0 {
 			fmt.Println("\n--- Sub-agent notifications ---")
@@ -416,18 +363,24 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 
 		fmt.Print("\n> ")
 
-		// Read input synchronously — no goroutine, no channel.
-		// On Windows console, ReadString blocks until Enter is pressed or
-		// Ctrl+C interrupts the blocking call (returning an error).
-		// This matches the old working version's approach.
-		line, err := stdinReader.ReadString('\n')
-		if err != nil {
-			// Read error — on Windows Ctrl+C, stdin is closed and we get EOF.
+		// Read input. On Windows, ReadString blocks and Ctrl+C
+		// unblocks it directly. On Unix, we use a goroutine+select
+		// approach to detect SIGINT via the sigintFlag.
+		var line string
+		var err error
+		if checkAndClearSigint() {
+			// SIGINT was received before we started reading
+			err = fmt.Errorf("interrupted")
+		} else {
+			line, err = readLineInterruptible(stdinReader)
+		}
+		if err != nil || checkAndClearSigint() {
+			// Input was interrupted (Ctrl+C or read error)
 			if interactive {
 				// Check if this was a recent Ctrl+C
 				now := time.Now()
-				if !lastCtrlC.IsZero() && now.Sub(lastCtrlC) < 2*time.Second {
-					// Double Ctrl+C within 2s -- exit
+				if !lastCtrlC.IsZero() && now.Sub(lastCtrlC) < 3*time.Second {
+					// Double Ctrl+C within 3s -- exit
 					printResumeHint(agent)
 					agent.Close()
 					os.Exit(0)
@@ -435,7 +388,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 				lastCtrlC = now
 				agent.SetInterrupted(false)
 				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
-				// Reopen stdin via CONIN$ (Windows console input device)
+				// Reopen stdin (platform-specific: CONIN$ on Windows, /dev/tty on Unix)
 				if newReader := reopenStdin(); newReader != nil {
 					stdinReader = newReader
 				}
