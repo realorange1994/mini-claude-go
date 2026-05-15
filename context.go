@@ -1128,6 +1128,14 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 		}
 	}
 
+	// Fix orphaned tool_results: when the compact boundary drops tool_use
+	// entries that precede it, their matching tool_results in the kept tail
+	// become orphaned. EnsureToolResultPairing would silently strip these,
+	// and then insert "Tool execution was interrupted" for the missing results.
+	// Instead, inject synthetic tool_use blocks for any tool_result whose
+	// tool_use_id is not present in any assistant message's tool_use blocks.
+	merged = fixOrphanedToolResults(merged)
+
 	return merged
 }
 
@@ -2070,6 +2078,78 @@ func LoadProjectInstructions(projectDir string) string {
 // 1. Orphaned tool_results: result references a tool_use that was removed → delete result
 // 2. Orphaned tool_uses: tool_use has no matching result (result was truncated) →
 //    insert stub result or delete the tool_use block
+
+// fixOrphanedToolResults fixes tool_result entries whose matching tool_use was
+// dropped by the compact boundary in BuildMessages. Without this, orphaned
+// tool_results are silently stripped by EnsureToolResultPairing, and synthetic
+// "Tool execution was interrupted" errors are inserted instead, causing the LLM
+// to believe tools are broken.
+//
+// For each orphaned tool_result, we inject a synthetic tool_use block into the
+// preceding assistant message (using inferred tool name from result content).
+// This preserves the real tool result while satisfying EnsureToolResultPairing.
+func fixOrphanedToolResults(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	// Step 1: Collect all tool_use IDs from assistant messages
+	allToolUseIDs := make(map[string]bool)
+	for _, msg := range messages {
+		if msg.Role != anthropic.MessageParamRoleAssistant {
+			continue
+		}
+		for _, block := range msg.Content {
+			if block.OfToolUse != nil && block.OfToolUse.ID != "" {
+				allToolUseIDs[block.OfToolUse.ID] = true
+			}
+		}
+	}
+
+	// Step 2: Find orphaned tool_results and pair them with their preceding
+	// assistant message by injecting synthetic tool_use blocks
+	result := make([]anthropic.MessageParam, len(messages))
+	copy(result, messages)
+
+	for i, msg := range result {
+		if msg.Role != anthropic.MessageParamRoleUser {
+			continue
+		}
+		// Find orphaned tool_results in this user message
+		var orphaned []anthropic.ToolResultBlockParam
+		for _, block := range msg.Content {
+			if block.OfToolResult != nil {
+				id := block.OfToolResult.ToolUseID
+				if id != "" && !allToolUseIDs[id] {
+					orphaned = append(orphaned, *block.OfToolResult)
+					allToolUseIDs[id] = true // mark as handled so we don't double-inject
+				}
+			}
+		}
+		if len(orphaned) == 0 {
+			continue
+		}
+
+		// Inject synthetic tool_use into preceding assistant message
+		if i > 0 && result[i-1].Role == anthropic.MessageParamRoleAssistant {
+			synthBlocks := make([]anthropic.ContentBlockParamUnion, 0, len(orphaned))
+			for _, o := range orphaned {
+				toolName := inferToolNameFromResult(o)
+				synthBlocks = append(synthBlocks, anthropic.ContentBlockParamUnion{
+					OfToolUse: &anthropic.ToolUseBlockParam{
+						ID:    o.ToolUseID,
+						Name:  toolName,
+						Input: map[string]any{},
+					},
+				})
+			}
+			// Prepend synthetic tool_use blocks to the existing content
+			newContent := make([]anthropic.ContentBlockParamUnion, 0, len(synthBlocks)+len(result[i-1].Content))
+			newContent = append(newContent, synthBlocks...)
+			newContent = append(newContent, result[i-1].Content...)
+			result[i-1].Content = newContent
+		}
+	}
+
+	return result
+}
+
 // inferToolNameFromResult attempts to infer a tool name from an orphaned tool_result.
 // Since the original tool_use is missing, we use content heuristics to provide
 // a meaningful placeholder that preserves conversation context.
