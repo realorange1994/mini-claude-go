@@ -60,6 +60,9 @@ func readLineInterruptible(_ *bufio.Reader) (string, error) {
 
 		n, err := syscall.Select(fd+1, rfds, nil, nil, tv)
 		if err != nil {
+			if err == syscall.EINTR {
+				continue // interrupted by signal, retry
+			}
 			return "", err
 		}
 
@@ -69,6 +72,9 @@ func readLineInterruptible(_ *bufio.Reader) (string, error) {
 			buf := make([]byte, 1)
 			nr, err := os.Stdin.Read(buf)
 			if err != nil {
+				if err == syscall.EINTR {
+					continue // interrupted, retry
+				}
 				return string(line), err
 			}
 			if nr == 0 {

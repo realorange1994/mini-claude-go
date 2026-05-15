@@ -364,18 +364,22 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 		fmt.Print("\n> ")
 
 		// Read input. On Windows, ReadString blocks and Ctrl+C
-		// unblocks it directly. On Unix, we use a goroutine+select
-		// approach to detect SIGINT via the sigintFlag.
+		// unblocks it directly. On Unix interactive mode, we use
+		// select-based polling to detect SIGINT via sigintFlag.
+		// Non-interactive (piped) mode uses simple ReadString.
 		var line string
-		var err error
-		if checkAndClearSigint() {
+		var readErr error
+		if !interactive {
+			// Non-interactive (piped input): use simple ReadString
+			line, readErr = stdinReader.ReadString('\n')
+		} else if checkAndClearSigint() {
 			// SIGINT was received before we started reading
-			err = fmt.Errorf("interrupted")
+			readErr = fmt.Errorf("interrupted")
 		} else {
-			line, err = readLineInterruptible(stdinReader)
+			line, readErr = readLineInterruptible(stdinReader)
 		}
-		if err != nil || checkAndClearSigint() {
-			// Input was interrupted (Ctrl+C or read error)
+		if readErr != nil {
+			// Read error or interrupt
 			if interactive {
 				// Check if this was a recent Ctrl+C
 				now := time.Now()
@@ -387,7 +391,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 				}
 				lastCtrlC = now
 				agent.SetInterrupted(false)
-				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 2s to exit)\n")
+				fmt.Fprintf(os.Stderr, "\n[WARN] Interrupting... (press Ctrl+C again within 3s to exit)\n")
 				// Reopen stdin (platform-specific: CONIN$ on Windows, /dev/tty on Unix)
 				if newReader := reopenStdin(); newReader != nil {
 					stdinReader = newReader
