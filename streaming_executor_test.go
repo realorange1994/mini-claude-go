@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -234,7 +235,7 @@ func TestDispatchUnknownTool(t *testing.T) {
 
 	exec.dispatch(0, &toolCalls)
 
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -267,7 +268,7 @@ func TestDispatchKnownSafeTool(t *testing.T) {
 
 	exec.dispatch(0, &toolCalls)
 
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -300,7 +301,7 @@ func TestDispatchKnownUnsafeTool(t *testing.T) {
 
 	exec.dispatch(0, &toolCalls)
 
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -361,7 +362,7 @@ func TestExecuteMalformedJSON(t *testing.T) {
 
 	exec.dispatch(0, &toolCalls)
 
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -397,7 +398,7 @@ func TestExecuteEmptyArguments(t *testing.T) {
 
 	exec.dispatch(0, &toolCalls)
 
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -427,7 +428,7 @@ func TestExecuteEmptyJSONObject(t *testing.T) {
 
 	exec.dispatch(0, &toolCalls)
 
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -454,7 +455,7 @@ func TestExecutePanicRecovery(t *testing.T) {
 
 	exec.dispatch(0, &toolCalls)
 
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -484,7 +485,7 @@ func TestExecuteEmptyToolUseIDGuard(t *testing.T) {
 
 	exec.dispatch(0, &toolCalls)
 
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -573,7 +574,7 @@ func TestNonBashErrorDoesNotCancelSiblings(t *testing.T) {
 	// Dispatch glob (safe tool) second
 	executor.dispatch(1, &toolCalls)
 
-	results := executor.Wait(2)
+	results := executor.Wait(context.Background(), 2)
 
 	// Non-Bash error should NOT set hasErrored
 	if executor.hasErrored.Load() {
@@ -724,7 +725,7 @@ func TestStartAndStop(t *testing.T) {
 	doneCh <- 2
 	close(doneCh)
 
-	results := exec.Wait(3)
+	results := exec.Wait(context.Background(),3)
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}
@@ -835,7 +836,7 @@ func TestWaitReturnsOrderedResults(t *testing.T) {
 	}()
 	wg.Wait()
 
-	results := exec.Wait(2)
+	results := exec.Wait(context.Background(),2)
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
@@ -872,7 +873,7 @@ func TestToolResultPreservesIndexOnConcurrentExecution(t *testing.T) {
 	}
 	wg.Wait()
 
-	results := exec.Wait(5)
+	results := exec.Wait(context.Background(),5)
 	if len(results) != 5 {
 		t.Fatalf("expected 5 results, got %d", len(results))
 	}
@@ -951,7 +952,7 @@ func TestJSONRoundTripToolArguments(t *testing.T) {
 
 			exec.dispatch(0, &toolCalls)
 
-			results := exec.Wait(1)
+			results := exec.Wait(context.Background(),1)
 
 			if tc.expectErr {
 				if len(results) == 0 {
@@ -1054,7 +1055,7 @@ func TestProcessQueueOrdersSafeTools(t *testing.T) {
 	exec.dispatch(1, &toolCalls)
 	exec.dispatch(2, &toolCalls)
 
-	results := exec.Wait(3)
+	results := exec.Wait(context.Background(),3)
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}
@@ -1108,7 +1109,7 @@ func TestCancelRemainingOnBashError(t *testing.T) {
 	executor.dispatch(1, &toolCalls)
 
 	// Should have result for exec error, read_file dispatch was skipped
-	results := executor.Wait(1)
+	results := executor.Wait(context.Background(), 1)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result (exec error), got %d", len(results))
 	}
@@ -1144,7 +1145,7 @@ func TestWaitErrorReturnsQuickly(t *testing.T) {
 
 	start := time.Now()
 	exec.dispatch(0, &toolCalls)
-	results := exec.Wait(1)
+	results := exec.Wait(context.Background(),1)
 	elapsed := time.Since(start)
 
 	if elapsed > 2*time.Second {

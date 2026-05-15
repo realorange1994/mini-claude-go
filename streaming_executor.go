@@ -553,8 +553,11 @@ func (e *StreamingToolExecutor) recordResult(r toolExecResult) {
 
 // Wait blocks until all dispatched tool calls have completed, then returns
 // results in tool call index order.
-func (e *StreamingToolExecutor) Wait(totalCalls int) []toolExecResult {
+// If ctx is cancelled (e.g. user Ctrl+C), Wait returns early with whatever
+// results have been collected so far.
+func (e *StreamingToolExecutor) Wait(ctx context.Context, totalCalls int) []toolExecResult {
 	deadline := time.Now().Add(5 * time.Minute)
+	graceDeadline := time.Now().Add(1 * time.Second)
 	for {
 		e.mu.Lock()
 		if e.discarded {
@@ -562,6 +565,21 @@ func (e *StreamingToolExecutor) Wait(totalCalls int) []toolExecResult {
 			break
 		}
 		e.mu.Unlock()
+
+		// Check for external cancellation (user Ctrl+C, parent context, etc.)
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				e.mu.Lock()
+				e.discarded = true
+				e.mu.Unlock()
+				break
+			default:
+			}
+		}
+		if e.discarded {
+			break
+		}
 
 		completed := e.completed.Load()
 		dispatched := e.dispatched.Load()
@@ -574,6 +592,14 @@ func (e *StreamingToolExecutor) Wait(totalCalls int) []toolExecResult {
 		}
 		// Error: all dispatched tools have finished (including cancelled ones)
 		if e.hasErrored.Load() && int(completed) >= int(dispatched) {
+			break
+		}
+		// If nothing was dispatched after a grace period, the Start
+		// goroutine has likely exited (channel closed before Wait) or
+		// never started. Break to avoid a 5-minute hang.
+		// We give a 1-second grace period because the Start goroutine
+		// may not have processed items yet.
+		if dispatched == 0 && time.Now().After(graceDeadline) {
 			break
 		}
 		if time.Now().After(deadline) {

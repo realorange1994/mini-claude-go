@@ -1372,7 +1372,9 @@ func (a *AgentLoop) Run(userMessage string) string {
 				a.context.AddAssistantToolCalls(toolCalls)
 				toolCallsAddedToContext = true // streaming path already added tool_use
 
-				streamingResults := executor.Wait(len(toolCalls))
+				waitCtx, waitCancel := a.interruptCtx(context.Background(), 5*time.Minute)
+				streamingResults := executor.Wait(waitCtx, len(toolCalls))
+				waitCancel()
 				if len(streamingResults) > 0 {
 					// Streaming executor completed all tool calls — use results directly
 					streamingExecDone = true
