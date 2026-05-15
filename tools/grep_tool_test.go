@@ -3,6 +3,8 @@ package tools
 import (
 	"strings"
 	"testing"
+
+	"miniclaudecode-go/tools/rgrep"
 )
 
 // ─── splitGlobPatterns ─────────────────────────────────────────────────────
@@ -103,11 +105,11 @@ func TestParseIntParamWrongType(t *testing.T) {
 	}
 }
 
-// ─── truncateLine ──────────────────────────────────────────────────────────
+// ─── rgrep truncateLine ─────────────────────────────────────────────────────
 
 func TestTruncateLineShort(t *testing.T) {
 	line := strings.Repeat("x", 100)
-	result := truncateLine(line)
+	result := rgrep.TruncateLine(line)
 	if result != line {
 		t.Error("short line should not be truncated")
 	}
@@ -115,8 +117,8 @@ func TestTruncateLineShort(t *testing.T) {
 
 func TestTruncateLineLong(t *testing.T) {
 	line := strings.Repeat("x", 600)
-	result := truncateLine(line)
-	if len(result) > maxGrepLineLen+3 {
+	result := rgrep.TruncateLine(line)
+	if len(result) > rgrep.MaxGrepLineLen+3 {
 		t.Errorf("truncated line too long: %d chars", len(result))
 	}
 	if !strings.HasSuffix(result, "...") {
@@ -125,48 +127,48 @@ func TestTruncateLineLong(t *testing.T) {
 }
 
 func TestTruncateLineExact(t *testing.T) {
-	line := strings.Repeat("x", maxGrepLineLen)
-	result := truncateLine(line)
+	line := strings.Repeat("x", rgrep.MaxGrepLineLen)
+	result := rgrep.TruncateLine(line)
 	if result != line {
 		t.Error("exact max length should not be truncated")
 	}
 }
 
-// ─── typeMap ───────────────────────────────────────────────────────────────
+// ─── rgrep DefaultTypes ────────────────────────────────────────────────────
 
 func TestTypeMapGo(t *testing.T) {
-	exts := typeMap["go"]
+	exts := rgrep.ExtensionsForType("go")
 	if len(exts) != 1 || exts[0] != ".go" {
 		t.Errorf("expected [.go], got %v", exts)
 	}
 }
 
 func TestTypeMapPy(t *testing.T) {
-	exts := typeMap["py"]
+	exts := rgrep.ExtensionsForType("py")
 	if len(exts) != 2 || exts[0] != ".py" || exts[1] != ".pyi" {
 		t.Errorf("expected [.py, .pyi], got %v", exts)
 	}
 }
 
 func TestTypeMapTs(t *testing.T) {
-	exts := typeMap["ts"]
+	exts := rgrep.ExtensionsForType("ts")
 	if len(exts) != 4 {
 		t.Errorf("ts should have 4 extensions, got %d", len(exts))
 	}
 }
 
 func TestTypeMapYaml(t *testing.T) {
-	exts := typeMap["yaml"]
+	exts := rgrep.ExtensionsForType("yaml")
 	if len(exts) != 2 {
 		t.Errorf("yaml should have 2 extensions, got %d", len(exts))
 	}
 }
 
 func TestTypeMapCaseInsensitive(t *testing.T) {
-	// typeMap is used with strings.ToLower, so "Go" -> "go"
-	exts := typeMap["Go"]
+	// ExtensionsForType is used with strings.ToLower, so "Go" -> "go"
+	exts := rgrep.ExtensionsForType("Go")
 	if len(exts) != 0 {
-		t.Error("typeMap keys are lowercase only, Go should not be found directly")
+		t.Error("ExtensionsForType keys are lowercase only, Go should not be found directly")
 	}
 }
 
@@ -176,8 +178,8 @@ func TestGrepToolConstants(t *testing.T) {
 	if maxGrepMatches != 250 {
 		t.Errorf("expected maxGrepMatches=250, got %d", maxGrepMatches)
 	}
-	if maxGrepLineLen != 500 {
-		t.Errorf("expected maxGrepLineLen=500, got %d", maxGrepLineLen)
+	if rgrep.MaxGrepLineLen != 500 {
+		t.Errorf("expected rgrep.MaxGrepLineLen=500, got %d", rgrep.MaxGrepLineLen)
 	}
 }
 

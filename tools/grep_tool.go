@@ -3,15 +3,13 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"regexp"
 	"strings"
+
+	"miniclaudecode-go/tools/rgrep"
 )
 
 const maxGrepMatches = 250
-const maxGrepLineLen = 500
 
 // GrepTool searches file contents using regex. Uses ripgrep if available, otherwise Go regexp.
 type GrepTool struct{}
@@ -103,7 +101,7 @@ func (*GrepTool) InputSchema() map[string]any {
 			},
 			"max_filesize": map[string]any{
 				"type":        "string",
-				"description": "Maximum file size to search (e.g. '1M', '500K', '100B'). Files larger than this are skipped. Only applies when ripgrep is available.",
+				"description": "Maximum file size to search (e.g. '1M', '500K', '100B'). Files larger than this are skipped.",
 			},
 			"head_limit": map[string]any{
 				"type":        "integer",
@@ -155,7 +153,6 @@ func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) To
 		}
 	}
 	fixedStrings, _ := params["fixed_strings"].(bool)
-	countMatches, _ := params["count_matches"].(bool)
 	multiline, _ := params["multiline"].(bool)
 	showLineNumbers, _ := params["-n"].(bool)
 	// -n defaults to true, so only false if explicitly set
@@ -196,7 +193,11 @@ func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) To
 	}
 
 	// Parse max_filesize
-	maxFilesize, _ := params["max_filesize"].(string)
+	maxFilesizeStr, _ := params["max_filesize"].(string)
+	maxFilesizeBytes := int64(0)
+	if maxFilesizeStr != "" {
+		maxFilesizeBytes = parseFilesize(maxFilesizeStr)
+	}
 
 	// Parse offset
 	offset := 0
@@ -233,9 +234,30 @@ func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) To
 	}
 
 	if _, err := exec.LookPath("rg"); err == nil {
-		return rgSearch(ctx, pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, showLineNumbers, multiline, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesize)
+		return rgSearch(ctx, pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, showLineNumbers, multiline, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesizeStr)
 	}
-	return goSearch(ctx, pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, headLimit, offset, ctxCombined, countMatches, maxDepth)
+
+	// Pure Go fallback using rgrep engine
+	rgrepCfg := rgrep.SearchConfig{
+		Pattern:         pattern,
+		Path:            searchPath,
+		Glob:            include,
+		TypeFilter:      typeFilter,
+		CaseInsensitive: caseInsensitive,
+		FixedStrings:    fixedStrings,
+		OutputMode:      rgrep.OutputMode(outputMode),
+		ShowLineNums:    showLineNumbers,
+		Multiline:       multiline,
+		ContextBefore:   ctxBefore,
+		ContextAfter:    ctxAfter,
+		HeadLimit:       headLimit,
+		Offset:          offset,
+		MaxDepth:        maxDepth,
+		MaxFilesize:     maxFilesizeBytes,
+		Ctx:             ctx,
+	}
+	sr := rgrep.Search(rgrepCfg)
+	return ToolResult{Output: rgrep.FormatResult(sr, rgrepCfg)}
 }
 
 func (t *GrepTool) Execute(params map[string]any) ToolResult {
@@ -283,21 +305,6 @@ func splitGlobPatterns(glob string) []string {
 	return parts
 }
 
-var typeMap = map[string][]string{
-	"py":     {".py", ".pyi"},
-	"python": {".py", ".pyi"},
-	"js":     {".js", ".jsx", ".mjs", ".cjs"},
-	"ts":     {".ts", ".tsx", ".mts", ".cts"},
-	"go":     {".go"},
-	"rust":   {".rs"},
-	"java":   {".java"},
-	"sh":     {".sh", ".bash"},
-	"yaml":   {".yaml", ".yml"},
-	"json":   {".json"},
-	"md":     {".md", ".mdx"},
-	"html":   {".html", ".htm"},
-	"css":    {".css", ".scss", ".sass"},
-}
 
 func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, showLineNumbers, multiline bool, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string) ToolResult {
 	args := []string{"--hidden", "--max-columns", "500"}
@@ -352,7 +359,7 @@ func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, ca
 	// pagination because rg returns headLimit results but then offset
 	// slices off the front, returning fewer than expected.
 	if typeFilter != "" {
-		if exts, ok := typeMap[strings.ToLower(typeFilter)]; ok {
+		if exts := rgrep.ExtensionsForType(strings.ToLower(typeFilter)); len(exts) > 0 {
 			for _, e := range exts {
 				glob := e
 				if !strings.HasPrefix(glob, "*") {
@@ -407,244 +414,33 @@ func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, ca
 	return ToolResult{Output: strings.Join(lines, "\n")}
 }
 
-func goSearch(ctx context.Context, pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, headLimit, offset, ctxLines int, countMatches bool, maxDepth int) ToolResult {
-	searchPattern := pattern
-	if fixedStrings {
-		searchPattern = regexp.QuoteMeta(searchPattern)
-	}
-	if caseInsensitive {
-		searchPattern = "(?i)" + searchPattern
+// parseFilesize parses a file size string like "1M", "500K", "100B" into bytes.
+func parseFilesize(s string) int64 {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return 0
 	}
 
-	re, err := regexp.Compile(searchPattern)
-	if err != nil {
-		return ToolResult{Output: fmt.Sprintf("Invalid regex: %v", err), IsError: true}
+	var multiplier int64 = 1
+	last := strings.ToLower(string(s[len(s)-1]))
+	numStr := s
+
+	switch last {
+	case "b":
+		multiplier = 1
+		numStr = s[:len(s)-1]
+	case "k":
+		multiplier = 1024
+		numStr = s[:len(s)-1]
+	case "m":
+		multiplier = 1024 * 1024
+		numStr = s[:len(s)-1]
+	case "g":
+		multiplier = 1024 * 1024 * 1024
+		numStr = s[:len(s)-1]
 	}
 
-	var allowedExts []string
-	if typeFilter != "" {
-		if exts, ok := typeMap[strings.ToLower(typeFilter)]; ok {
-			allowedExts = exts
-		}
-	}
-
-	var files []string
-	info, err := os.Stat(path)
-	if err != nil {
-		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
-	}
-
-	if info.Mode().IsRegular() {
-		files = []string{path}
-	} else {
-		baseDepth := strings.Count(filepath.Clean(path), string(filepath.Separator))
-		_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
-			// Check for context cancellation
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			if err != nil || d.IsDir() {
-				// Enforce max_depth
-				if maxDepth > 0 {
-					curDepth := strings.Count(filepath.Clean(p), string(filepath.Separator)) - baseDepth
-					if curDepth >= maxDepth {
-						return filepath.SkipDir
-					}
-				}
-				if isIgnoredDir(d.Name()) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if include != "" {
-				matched, _ := filepath.Match(include, d.Name())
-				if !matched {
-					return nil
-				}
-			}
-			if len(allowedExts) > 0 {
-				ext := strings.ToLower(filepath.Ext(p))
-				allowed := false
-				for _, e := range allowedExts {
-					if ext == e {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					return nil
-				}
-			}
-			ext := strings.ToLower(filepath.Ext(p))
-			if ext == ".exe" || ext == ".dll" || ext == ".so" || ext == ".bin" {
-				return nil
-			}
-			files = append(files, p)
-			return nil
-		})
-	}
-
-	// Check if walk was cancelled
-	select {
-	case <-ctx.Done():
-		return ToolResult{Output: fmt.Sprintf("Error: grep timed out scanning %s", path), IsError: true}
-	default:
-	}
-
-	filesSearched := len(files)
-
-	switch outputMode {
-	case "files_with_matches":
-		return goSearchFilesOnly(re, files, headLimit, offset, filesSearched)
-	case "count":
-		return goSearchCount(re, files, headLimit, offset, filesSearched)
-	default:
-		return goSearchContent(re, files, headLimit, offset, ctxLines, countMatches, filesSearched)
-	}
-}
-
-// truncateLine truncates a line to maxGrepLineLen characters.
-func truncateLine(line string) string {
-	if len(line) <= maxGrepLineLen {
-		return line
-	}
-	return line[:maxGrepLineLen] + "..."
-}
-
-func goSearchContent(re *regexp.Regexp, files []string, headLimit, offset, ctxLines int, countMatches bool, filesSearched int) ToolResult {
-	var matches []string
-	skipped := 0
-	totalMatchCount := 0
-	for _, fp := range files {
-		data, err := os.ReadFile(fp)
-		if err != nil {
-			continue
-		}
-		lines := strings.Split(string(data), "\n")
-		for i, line := range lines {
-			loc := re.FindStringIndex(line)
-			if loc == nil {
-				continue
-			}
-			totalMatchCount++
-			if skipped < offset {
-				skipped++
-				continue
-			}
-			relPath, _ := filepath.Rel(".", fp)
-			if countMatches {
-				count := len(re.FindAllStringIndex(line, -1))
-				if ctxLines > 0 {
-					start := max(0, i-ctxLines)
-					end := min(len(lines)-1, i+ctxLines)
-					for j := start; j <= end; j++ {
-						prefix := "    "
-						if j == i {
-							prefix = ">>> "
-						}
-						matches = append(matches, fmt.Sprintf("%s:%d: %s%s", relPath, j+1, prefix, truncateLine(lines[j])))
-					}
-					matches = append(matches, fmt.Sprintf("  [%d match(es) on this line]", count))
-				} else {
-					matches = append(matches, fmt.Sprintf("%s:%d:[%d] %s", relPath, i+1, count, truncateLine(line)))
-				}
-			} else {
-				if ctxLines > 0 {
-					start := max(0, i-ctxLines)
-					end := min(len(lines)-1, i+ctxLines)
-					for j := start; j <= end; j++ {
-						prefix := "    "
-						if j == i {
-							prefix = ">>> "
-						}
-						matches = append(matches, fmt.Sprintf("%s:%d: %s%s", relPath, j+1, prefix, truncateLine(lines[j])))
-					}
-				} else {
-					matches = append(matches, fmt.Sprintf("%s:%d:%s", relPath, i+1, truncateLine(line)))
-				}
-			}
-			if len(matches) >= headLimit {
-				matches = append(matches, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
-				return ToolResult{Output: strings.Join(matches, "\n")}
-			}
-		}
-	}
-
-	if len(matches) == 0 {
-		if offset > 0 && skipped > 0 {
-			return ToolResult{Output: fmt.Sprintf("No matches after skipping first %d results. (Searched %d files, %d matches total)", offset, filesSearched, totalMatchCount)}
-		}
-		return ToolResult{Output: fmt.Sprintf("No matches found. (Searched %d files)", filesSearched)}
-	}
-
-	summary := fmt.Sprintf("(Searched %d files, %d matches", filesSearched, totalMatchCount)
-	if len(matches) < totalMatchCount {
-		summary += fmt.Sprintf(", showing first %d", len(matches))
-	}
-	summary += ")"
-
-	return ToolResult{Output: strings.Join(matches, "\n") + "\n" + summary}
-}
-
-func goSearchFilesOnly(re *regexp.Regexp, files []string, headLimit, offset int, filesSearched int) ToolResult {
-	var found []string
-	skipped := 0
-	for _, fp := range files {
-		if len(found) >= headLimit {
-			break
-		}
-		data, err := os.ReadFile(fp)
-		if err != nil {
-			continue
-		}
-		if re.Match(data) {
-			if skipped < offset {
-				skipped++
-				continue
-			}
-			relPath, _ := filepath.Rel(".", fp)
-			found = append(found, relPath)
-		}
-	}
-	if len(found) == 0 {
-		return ToolResult{Output: fmt.Sprintf("No matches found. (Searched %d files)", filesSearched)}
-	}
-	return ToolResult{Output: strings.Join(found, "\n") + fmt.Sprintf("\n(Searched %d files, %d matches)", filesSearched, len(found))}
-}
-
-func goSearchCount(re *regexp.Regexp, files []string, headLimit, offset int, filesSearched int) ToolResult {
-	var lines []string
-	totalMatches := 0
-	for _, fp := range files {
-		data, err := os.ReadFile(fp)
-		if err != nil {
-			continue
-		}
-		count := 0
-		for _, l := range strings.Split(string(data), "\n") {
-			if re.MatchString(l) {
-				count++
-			}
-		}
-		if count > 0 {
-			relPath, _ := filepath.Rel(".", fp)
-			lines = append(lines, fmt.Sprintf("%s:%d", relPath, count))
-			totalMatches += count
-		}
-	}
-	if len(lines) == 0 {
-		return ToolResult{Output: fmt.Sprintf("No matches found. (Searched %d files)", filesSearched)}
-	}
-
-	// Apply offset and head_limit (matching upstream behavior)
-	if offset > 0 && offset < len(lines) {
-		lines = lines[offset:]
-	}
-	if headLimit > 0 && len(lines) > headLimit {
-		lines = lines[:headLimit]
-		lines = append(lines, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
-	}
-	return ToolResult{Output: strings.Join(lines, "\n") + fmt.Sprintf("\n(Searched %d files, %d matching lines)", filesSearched, totalMatches)}
+	var val int64
+	fmt.Sscanf(numStr, "%d", &val)
+	return val * multiplier
 }
