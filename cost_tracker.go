@@ -8,177 +8,167 @@ import (
 	"sync"
 )
 
-// ModelPrice holds per-million-token pricing for a model (USD).
-type ModelPrice struct {
-	Input      float64 // per million input tokens
-	Output     float64 // per million output tokens
-	CacheWrite float64 // per million cache write tokens
-	CacheRead  float64 // per million cache read tokens
-}
-
-// ModelCostEntry holds accumulated token counts and USD cost for a single model.
-type ModelCostEntry struct {
-	InputTokens    int64
-	OutputTokens   int64
-	CacheWriteTokens int64
-	CacheReadTokens  int64
-	CostUSD        float64
-}
-
-// CostTracker tracks per-model USD cost across a session.
+// CostTracker tracks token usage across models.
+// Instead of computing dollar amounts (which vary by provider and pricing tier),
+// it tracks raw token counts — a more stable and universally meaningful metric.
 type CostTracker struct {
 	mu               sync.Mutex
-	TotalCost        float64
-	PerModel         map[string]ModelCostEntry // model ID -> cost breakdown
 	TotalInputTokens  int64
 	TotalOutputTokens int64
+	PerModel          map[string]*ModelUsage
 }
 
-// ModelPricing is the pricing table (USD per million tokens) for supported Claude models.
-var ModelPricing = map[string]ModelPrice{
-	// Sonnet family
-	"claude-sonnet-4-20250514":   {Input: 3.0, Output: 15.0, CacheWrite: 3.75, CacheRead: 0.30},
-	"claude-3-5-sonnet-20241022": {Input: 3.0, Output: 15.0, CacheWrite: 3.75, CacheRead: 0.30},
-	// Opus 4/4.1 family
-	"claude-opus-4-20250514":     {Input: 15.0, Output: 75.0, CacheWrite: 18.75, CacheRead: 1.50},
-	// Opus 4.5+ family
-	"claude-opus-4-5-20250610":   {Input: 5.0, Output: 25.0, CacheWrite: 6.25, CacheRead: 0.50},
-	// Haiku 3.5
-	"claude-3-5-haiku-20241022":  {Input: 0.80, Output: 4.0, CacheWrite: 1.0, CacheRead: 0.08},
-	// Haiku 4.5+
-	"claude-haiku-4-5-20250610":  {Input: 1.0, Output: 5.0, CacheWrite: 1.25, CacheRead: 0.10},
+// ModelUsage tracks per-model token consumption.
+type ModelUsage struct {
+	InputTokens  int64
+	OutputTokens int64
 }
 
-// familyName returns a human-readable family label for a model ID.
-func familyName(model string) string {
-	model = strings.ToLower(model)
-	switch {
-	case strings.Contains(model, "opus-4-5"):
-		return "Opus 4.5"
-	case strings.Contains(model, "opus-4"):
-		return "Opus 4"
-	case strings.Contains(model, "sonnet-4"):
-		return "Sonnet 4"
-	case strings.Contains(model, "3-5-sonnet"):
-		return "Sonnet 3.5"
-	case strings.Contains(model, "haiku-4-5"):
-		return "Haiku 4.5"
-	case strings.Contains(model, "3-5-haiku"):
-		return "Haiku 3.5"
-	default:
-		return model
-	}
-}
-
-// lookupPrice returns the pricing for a model, or a zero struct if unknown.
-func lookupPrice(model string) ModelPrice {
-	if p, ok := ModelPricing[model]; ok {
-		return p
-	}
-	return ModelPrice{}
-}
-
-// NewCostTracker creates a fresh CostTracker.
 func NewCostTracker() *CostTracker {
 	return &CostTracker{
-		PerModel: make(map[string]ModelCostEntry),
+		PerModel: make(map[string]*ModelUsage),
 	}
 }
 
-// CalculateUSDCost computes the USD cost for a single API call.
-// Prices are per million tokens.
-func CalculateUSDCost(model string, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int64) float64 {
-	p := lookupPrice(model)
-	cost := float64(inputTokens)/1_000_000.0*p.Input +
-		float64(outputTokens)/1_000_000.0*p.Output +
-		float64(cacheWriteTokens)/1_000_000.0*p.CacheWrite +
-		float64(cacheReadTokens)/1_000_000.0*p.CacheRead
-	return cost
-}
-
-// RecordUsage records usage for a single API call and accumulates totals.
-func (ct *CostTracker) RecordUsage(model string, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int64) {
-	cost := CalculateUSDCost(model, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens)
-
+// AddUsage records token usage from an API response.
+func (ct *CostTracker) AddUsage(model string, inputTokens, outputTokens int64) {
+	if inputTokens == 0 && outputTokens == 0 {
+		return
+	}
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 
-	ct.TotalCost += cost
 	ct.TotalInputTokens += inputTokens
 	ct.TotalOutputTokens += outputTokens
 
-	entry := ct.PerModel[model]
+	entry, ok := ct.PerModel[model]
+	if !ok {
+		entry = &ModelUsage{}
+		ct.PerModel[model] = entry
+	}
 	entry.InputTokens += inputTokens
 	entry.OutputTokens += outputTokens
-	entry.CacheWriteTokens += cacheWriteTokens
-	entry.CacheReadTokens += cacheReadTokens
-	entry.CostUSD += cost
-	ct.PerModel[model] = entry
 }
 
-// GetTotalCost returns the total USD cost accumulated this session.
-func (ct *CostTracker) GetTotalCost() float64 {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	return ct.TotalCost
-}
-
-// GetPerModelCosts returns a copy of the per-model cost breakdown.
-func (ct *CostTracker) GetPerModelCosts() map[string]ModelCostEntry {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	out := make(map[string]ModelCostEntry, len(ct.PerModel))
-	for k, v := range ct.PerModel {
-		out[k] = v
-	}
-	return out
-}
-
-// FormatCostDisplay returns a human-readable summary string.
-// Example: "Total: $0.05 | Sonnet 4: $0.03, Opus 4: $0.02"
+// FormatCostDisplay returns a human-readable summary string of token usage.
+// Example: "Total: 150k tokens (100k in, 50k out) | Sonnet 4: 80k in, 30k out, m2.7: 20k in, 20k out"
 func (ct *CostTracker) FormatCostDisplay() string {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 
 	if len(ct.PerModel) == 0 {
-		return "Total: $0.00"
+		return "Total: 0 tokens"
 	}
 
 	// Aggregate by family
-	families := make(map[string]float64)
+	type famTokens struct {
+		input  int64
+		output int64
+	}
+	families := make(map[string]famTokens)
 	for model, entry := range ct.PerModel {
 		fam := familyName(model)
-		families[fam] += entry.CostUSD
+		f := families[fam]
+		f.input += entry.InputTokens
+		f.output += entry.OutputTokens
+		families[fam] = f
 	}
+
+	totalTokens := ct.TotalInputTokens + ct.TotalOutputTokens
 
 	// Build family breakdown string
 	var parts []string
-	for fam, cost := range families {
-		parts = append(parts, fmt.Sprintf("%s: $%.2f", fam, cost))
+	for fam, tokens := range families {
+		parts = append(parts, fmt.Sprintf("%s: %s in, %s out", fam, formatTokenCount(tokens.input), formatTokenCount(tokens.output)))
 	}
 
-	return fmt.Sprintf("Total: $%.2f | %s", ct.TotalCost, strings.Join(parts, ", "))
+	return fmt.Sprintf("Total: %s tokens (%s in, %s out) | %s",
+		formatTokenCount(totalTokens),
+		formatTokenCount(ct.TotalInputTokens),
+		formatTokenCount(ct.TotalOutputTokens),
+		strings.Join(parts, ", "))
+}
+
+// formatTokenCount renders token counts with k/M suffixes for readability.
+func formatTokenCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// familyName maps a full model ID to a short display name.
+func familyName(model string) string {
+	// Handle common model ID patterns
+	switch {
+	case strings.Contains(model, "opus"):
+		return "Opus"
+	case strings.Contains(model, "sonnet"):
+		return "Sonnet"
+	case strings.Contains(model, "haiku"):
+		return "Haiku"
+	case strings.Contains(model, "m2.7") || strings.Contains(model, "M2.7"):
+		return "m2.7"
+	case strings.Contains(model, "m2.5") || strings.Contains(model, "M2.5"):
+		return "m2.5"
+	case strings.Contains(model, "m2.1") || strings.Contains(model, "M2.1"):
+		return "m2.1"
+	case strings.Contains(model, "deepseek"):
+		return "DeepSeek"
+	case strings.Contains(model, "kimi"):
+		return "Kimi"
+	case strings.Contains(model, "glm"):
+		return "GLM"
+	case strings.Contains(model, "qwen"):
+		return "Qwen"
+	case strings.Contains(model, "doubao"):
+		return "Doubao"
+	default:
+		// Trim provider prefix and version suffix for unknown models
+		parts := strings.Split(model, "-")
+		if len(parts) > 2 {
+			return strings.Join(parts[:2], "-")
+		}
+		return model
+	}
+}
+
+// GetPerModelUsage returns a copy of the per-model usage breakdown.
+func (ct *CostTracker) GetPerModelUsage() map[string]ModelUsage {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	out := make(map[string]ModelUsage, len(ct.PerModel))
+	for k, v := range ct.PerModel {
+		if v != nil {
+			out[k] = *v
+		}
+	}
+	return out
 }
 
 // costTrackerFile is the on-disk representation.
 type costTrackerFile struct {
-	TotalCost        float64
-	PerModel         map[string]ModelCostEntry
 	TotalInputTokens  int64
 	TotalOutputTokens int64
+	PerModel          map[string]ModelUsage
 }
 
 // SaveToFile persists the cost tracker state to a JSON file.
 func (ct *CostTracker) SaveToFile(path string) error {
 	ct.mu.Lock()
 	data := costTrackerFile{
-		TotalCost:        ct.TotalCost,
-		PerModel:         make(map[string]ModelCostEntry),
 		TotalInputTokens:  ct.TotalInputTokens,
 		TotalOutputTokens: ct.TotalOutputTokens,
+		PerModel:          make(map[string]ModelUsage, len(ct.PerModel)),
 	}
 	for k, v := range ct.PerModel {
-		data.PerModel[k] = v
+		if v != nil {
+			data.PerModel[k] = *v
+		}
 	}
 	ct.mu.Unlock()
 
@@ -209,9 +199,14 @@ func (ct *CostTracker) LoadFromFile(path string) error {
 
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
-	ct.TotalCost = data.TotalCost
-	ct.PerModel = data.PerModel
 	ct.TotalInputTokens = data.TotalInputTokens
 	ct.TotalOutputTokens = data.TotalOutputTokens
+	for k, v := range data.PerModel {
+		v := v // copy to avoid loop variable capture
+		ct.PerModel[k] = &ModelUsage{
+			InputTokens:  v.InputTokens,
+			OutputTokens: v.OutputTokens,
+		}
+	}
 	return nil
 }

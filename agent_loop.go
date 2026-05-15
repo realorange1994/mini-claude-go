@@ -454,12 +454,11 @@ func (a *AgentLoop) recordTokenUsage(inputTokens, outputTokens int64) {
 		a.totalOutputTokens.Add(outputTokens)
 	}
 	if a.costTracker != nil {
-		a.costTracker.RecordUsage(a.config.Model, inputTokens, outputTokens, 0, 0)
+		a.costTracker.AddUsage(a.config.Model, inputTokens, outputTokens)
 	}
 }
 
-// recordTokenUsageWithCache accumulates API token usage including cache tokens
-// and records per-model USD cost.
+// recordTokenUsageWithCache accumulates API token usage including cache tokens.
 func (a *AgentLoop) recordTokenUsageWithCache(inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int64) {
 	if inputTokens > 0 {
 		a.totalInputTokens.Add(inputTokens)
@@ -476,7 +475,7 @@ func (a *AgentLoop) recordTokenUsageWithCache(inputTokens, outputTokens, cacheWr
 		a.totalCacheReadTokens.Add(cacheReadTokens)
 	}
 	if a.costTracker != nil {
-		a.costTracker.RecordUsage(a.config.Model, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens)
+		a.costTracker.AddUsage(a.config.Model, inputTokens, outputTokens)
 	}
 }
 
