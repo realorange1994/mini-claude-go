@@ -484,6 +484,19 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 		e.executePostToolUseHooks(tc, input, result)
 	}
 
+	// Mark the tracked tool as completed so subsequent tools can start.
+	// This was a subtle bug: execute() incremented completed but never
+	// updated status from toolExecuting to toolCompleted, causing
+	// canExecuteToolLocked() to think an unsafe tool was still running.
+	e.mu.Lock()
+	for _, t := range e.tools {
+		if t.index == idx && t.status == toolExecuting {
+			t.status = toolCompleted
+			break
+		}
+	}
+	e.mu.Unlock()
+
 	// CRITICAL: Only Bash errors cancel sibling tools.
 	// Matching upstream (StreamingToolExecutor.ts:368):
 	// "Only Bash errors cancel siblings. Bash commands often have implicit
@@ -573,7 +586,8 @@ func (e *StreamingToolExecutor) Wait(ctx context.Context, totalCalls int) []tool
 				e.mu.Lock()
 				e.discarded = true
 				e.mu.Unlock()
-				break
+				// Note: Go's 'break' in select only breaks the select, not the for loop.
+				// The discarded check at the top of the loop will catch this on next iteration.
 			default:
 			}
 		}

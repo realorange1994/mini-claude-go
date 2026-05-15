@@ -1124,6 +1124,119 @@ func TestCancelRemainingOnBashError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: multiple unsafe toolcalls must not hang
+// (Bug: execute() never set tracked.status = toolCompleted, so
+// canExecuteToolLocked() thought an unsafe tool was still running
+// and blocked all subsequent tools from starting.)
+// ---------------------------------------------------------------------------
+
+func TestSequentialUnsafeToolsDoNotHang(t *testing.T) {
+	reg := tools.NewRegistry()
+
+	var execOrder []int
+	var mu sync.Mutex
+
+	// Register an unsafe tool (write_file) that records execution order
+	writeTool := &mockExecTool{
+		name: "write_file",
+		executeFn: func(params map[string]any) tools.ToolResult {
+			mu.Lock()
+			// Extract index from the "file_path" param to track order
+			idx, _ := params["file_path"].(string)
+			execOrder = append(execOrder, int(idx[0]-'0'))
+			mu.Unlock()
+			return tools.ToolResult{Output: "written", IsError: false}
+		},
+	}
+	reg.Register(writeTool)
+
+	executor := NewStreamingToolExecutor(reg, nil, nil)
+
+	// Dispatch 3 unsafe tools sequentially via Start
+	doneCh := make(chan int, 3)
+	toolCalls := []ToolCallInfo{
+		{ID: "toolu_1", Name: "write_file", Arguments: `{"file_path":"/0","content":"a"}`},
+		{ID: "toolu_2", Name: "write_file", Arguments: `{"file_path":"/1","content":"b"}`},
+		{ID: "toolu_3", Name: "write_file", Arguments: `{"file_path":"/2","content":"c"}`},
+	}
+
+	executor.Start(doneCh, &toolCalls)
+
+	doneCh <- 0
+	doneCh <- 1
+	doneCh <- 2
+	close(doneCh)
+
+	// This would hang forever before the fix
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	results := executor.Wait(ctx, 3)
+
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if r.isError {
+			t.Errorf("result[%d] unexpected error: %s", i, r.output)
+		}
+	}
+
+	mu.Lock()
+	if len(execOrder) != 3 {
+		t.Errorf("expected 3 executions, got %d", len(execOrder))
+	}
+	mu.Unlock()
+}
+
+func TestMixedSafeUnsafeToolsDoNotHang(t *testing.T) {
+	reg := tools.NewRegistry()
+
+	readTool := &mockExecTool{
+		name: "read_file",
+		executeFn: func(params map[string]any) tools.ToolResult {
+			return tools.ToolResult{Output: "contents", IsError: false}
+		},
+	}
+	writeTool := &mockExecTool{
+		name: "write_file",
+		executeFn: func(params map[string]any) tools.ToolResult {
+			return tools.ToolResult{Output: "written", IsError: false}
+		},
+	}
+	reg.Register(readTool)
+	reg.Register(writeTool)
+
+	executor := NewStreamingToolExecutor(reg, nil, nil)
+
+	doneCh := make(chan int, 3)
+	toolCalls := []ToolCallInfo{
+		{ID: "toolu_1", Name: "write_file", Arguments: `{"file_path":"/a","content":"x"}`},
+		{ID: "toolu_2", Name: "read_file", Arguments: `{"file_path":"/b"}`},
+		{ID: "toolu_3", Name: "write_file", Arguments: `{"file_path":"/c","content":"y"}`},
+	}
+
+	executor.Start(doneCh, &toolCalls)
+
+	doneCh <- 0
+	doneCh <- 1
+	doneCh <- 2
+	close(doneCh)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	results := executor.Wait(ctx, 3)
+
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if r.isError {
+			t.Errorf("result[%d] unexpected error: %s", i, r.output)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Wait error handling
 // ---------------------------------------------------------------------------
 
