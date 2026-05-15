@@ -49,7 +49,7 @@ func (*FileEncodingTool) InputSchema() map[string]any {
 			},
 			"encoding": map[string]any{
 				"type":        "string",
-				"description": "Encoding name (optional, auto-detected if omitted for read/detect/edit). Examples: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, iso-8859-1, windows-1252.",
+				"description": "Encoding name. Default: utf-8. For read/edit/multi_edit, auto-detects if omitted. For write, defaults to utf-8. Examples: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, iso-8859-1, windows-1252.",
 			},
 			"content": map[string]any{
 				"type":        "string",
@@ -249,7 +249,17 @@ func (e *FileEncodingTool) write(pathStr string, params map[string]any) ToolResu
 
 	encName := getEncodingParam(params)
 	if encName == "" {
-		encName = "utf-8"
+		// If file already exists, preserve its encoding; otherwise default to utf-8
+		existingData, err := os.ReadFile(fp)
+		if err == nil && len(existingData) > 0 {
+			detected, _ := DetectCharset(existingData, "")
+			if detected != "unknown" && detected != "" {
+				encName = detected
+			}
+		}
+		if encName == "" {
+			encName = "utf-8"
+		}
 	}
 
 	// Check if encoding is supported
