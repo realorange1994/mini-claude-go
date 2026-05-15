@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/encoding/htmlindex"
@@ -190,8 +192,10 @@ func detectUTF16BEWithoutBOM(data []byte) bool {
 // DetectCharset detects the charset of file content using multiple strategies:
 // 1. BOM detection (UTF-16 LE/BE, UTF-8 BOM)
 // 2. Heuristic UTF-16 LE/BE detection (null-byte patterns)
-// 3. charset.DetermineEncoding (byte-pattern analysis from golang.org/x/net/html/charset)
-// 4. UTF-8 validity check
+// 3. UTF-8 validity check
+// 4. East Asian encoding detection (GBK, Big5, Shift-JIS, EUC-KR, EUC-JP)
+//    via decode-and-score analysis
+// 5. charset.DetermineEncoding (byte-pattern analysis from golang.org/x/net/html/charset)
 //
 // Returns the detected encoding name (lowercase, e.g. "gbk", "utf-8", "shift_jis")
 // and whether the detection is considered certain.
@@ -215,24 +219,240 @@ func DetectCharset(data []byte, hint string) (encName string, certain bool) {
 		return "utf-16be", false
 	}
 
+	// Check if content is valid UTF-8 before other detection
+	if utf8.Valid(data) {
+		return "utf-8", true
+	}
+
+	// Try East Asian encoding detection via decode-and-score
+	if eastAsian := detectEastAsianEncoding(data); eastAsian != "" {
+		return eastAsian, false
+	}
+
 	// Use charset.DetermineEncoding for byte-pattern analysis
 	e, name, certain := charset.DetermineEncoding(data, hint)
 	if e != nil && name != "" {
 		return name, certain
 	}
 
-	// Check if content is valid UTF-8
+	// XML-like header hints
 	if bytes.HasPrefix(data, []byte("<?xml")) || bytes.HasPrefix(data, []byte("<!DOCTYPE")) {
 		return "utf-8", false
 	}
 
-	// Default: assume UTF-8 if it passes validity check
-	if isValidUTF8(data) {
-		return "utf-8", true
-	}
-
 	// Not valid UTF-8 — likely some other encoding, but we can't determine which
 	return "unknown", false
+}
+
+// detectEastAsianEncoding uses a combination of byte-pattern analysis and
+// decode-and-score analysis to identify East Asian multi-byte encodings that
+// charset.DetermineEncoding misidentifies as windows-1252.
+//
+// Phase 1: Byte-pattern analysis to narrow candidates:
+//   - Shift-JIS: lead bytes 0x81-0x9F (below EUC range) — distinctive
+//   - Big5: trail bytes 0x40-0x7E (below 0x80) — distinctive
+//   - GBK: broadest range, lead 0x81-0xFE, trail 0x40-0xFE
+//
+// Phase 2: Script-based scoring to confirm and disambiguate:
+//   - EUC-KR: Hangul characters (unique to Korean) — checked when byte pattern is "gbk"
+//   - Shift-JIS/EUC-JP: Hiragana/Katakana (unique to Japanese)
+//   - GBK/Big5: Han characters (Chinese, also used in Japanese/Korean)
+func detectEastAsianEncoding(data []byte) string {
+	// Phase 1: Byte-pattern analysis
+	bytePattern := detectEastAsianByBytePattern(data)
+
+	// Phase 2: Script-based scoring for confirmation
+	type candidate struct {
+		name     string
+		scripts  []*unicode.RangeTable
+		priority int // Hangul=3, Kana=2, Han=1
+	}
+	candidates := []candidate{
+		{name: "euc-kr", scripts: []*unicode.RangeTable{unicode.Hangul}, priority: 3},
+		{name: "shift_jis", scripts: []*unicode.RangeTable{unicode.Hiragana, unicode.Katakana}, priority: 2},
+		{name: "euc-jp", scripts: []*unicode.RangeTable{unicode.Hiragana, unicode.Katakana}, priority: 2},
+		{name: "gbk", scripts: []*unicode.RangeTable{unicode.Han}, priority: 1},
+		{name: "big5", scripts: []*unicode.RangeTable{unicode.Han}, priority: 1},
+	}
+
+	// Only consider candidates that match the byte pattern hint
+	var filtered []candidate
+	for _, c := range candidates {
+		switch bytePattern {
+		case "shift_jis":
+			// Shift-JIS byte pattern — only consider SJIS and GBK
+			if c.name == "shift_jis" || c.name == "gbk" {
+				filtered = append(filtered, c)
+			}
+		case "big5":
+			// Big5 byte pattern — only consider Big5 and GBK
+			if c.name == "big5" || c.name == "gbk" {
+				filtered = append(filtered, c)
+			}
+		case "gbk":
+			// GBK byte pattern — could be GBK, Big5, or EUC-KR
+			// (EUC-KR bytes are a subset of GBK range)
+			if c.name == "gbk" || c.name == "big5" || c.name == "euc-kr" {
+				filtered = append(filtered, c)
+			}
+		default:
+			// No clear byte pattern — consider all
+			filtered = append(filtered, c)
+		}
+	}
+
+	type scored struct {
+		name     string
+		score    float64
+		priority int
+	}
+	var results []scored
+
+	for _, c := range filtered {
+		enc, err := htmlindex.Get(c.name)
+		if err != nil {
+			continue
+		}
+
+		decoder := enc.NewDecoder()
+		decoded, err := decoder.Bytes(data)
+		if err != nil {
+			continue
+		}
+
+		totalNonASCII := 0
+		matchingRunes := 0
+		for _, r := range string(decoded) {
+			if r <= 0x7F {
+				continue
+			}
+			totalNonASCII++
+			for _, table := range c.scripts {
+				if unicode.Is(table, r) {
+					matchingRunes++
+					break
+				}
+			}
+		}
+
+		if totalNonASCII == 0 {
+			continue
+		}
+
+		score := float64(matchingRunes) / float64(totalNonASCII)
+		if score > 0.5 {
+			results = append(results, scored{name: c.name, score: score, priority: c.priority})
+		}
+	}
+
+	if len(results) == 0 {
+		// No script match — fall back to byte pattern result
+		return bytePattern
+	}
+
+	// Pick the best: prefer higher score first, then higher priority as tiebreaker
+	best := results[0]
+	for _, r := range results[1:] {
+		if r.score > best.score || (r.score == best.score && r.priority > best.priority) {
+			best = r
+		}
+	}
+
+	// Disambiguate GBK vs Big5 (both priority=1, Han script)
+	if best.name == "gbk" || best.name == "big5" {
+		// Check for GBK-exclusive pattern: trail bytes 0x80-0x9F
+		// Big5 trail bytes: 0x40-0x7E or 0xA1-0xFE (no 0x80-0xA0 range)
+		// GBK trail bytes: 0x40-0xFE (excluding 0x7F), including 0x80-0x9F
+		gbkTrailMid := 0
+		i := 0
+		for i < len(data)-1 {
+			if data[i] < 0x80 {
+				i++
+				continue
+			}
+			if data[i] >= 0x81 && data[i] <= 0xFE && data[i+1] >= 0x80 && data[i+1] <= 0x9F {
+				gbkTrailMid++
+				i += 2
+			} else {
+				i++
+			}
+		}
+		if gbkTrailMid > 0 {
+			return "gbk"
+		}
+		// No GBK-exclusive pattern found — check if byte pattern suggested Big5
+		bp := detectEastAsianByBytePattern(data)
+		if bp == "big5" {
+			return "big5"
+		}
+		return "gbk"
+	}
+
+	return best.name
+}
+
+// detectEastAsianByBytePattern uses byte-range frequency analysis to narrow
+// down the encoding candidate. Returns one of: "euc-kr", "shift_jis", "big5", "gbk", or "".
+// detectEastAsianByBytePattern uses byte-range frequency analysis to narrow
+// down the encoding candidate. Returns one of: "shift_jis", "big5", "gbk", or "".
+//
+// Key distinctive patterns:
+//   - Shift-JIS: lead bytes 0x81-0x9F (below EUC range) — distinctive
+//   - Big5: trail bytes 0x40-0x7E (below 0x80) — distinctive, not valid in GBK/EUC-KR
+//   - GBK: broadest range, lead 0x81-0xFE, trail 0x40-0xFE
+//
+// Note: EUC-KR byte pattern (both bytes >= 0xA1) is fully contained within GBK.
+// For files using only these bytes, GBK and EUC-KR are byte-range indistinguishable.
+// We return "gbk" and rely on script-based scoring in detectEastAsianEncoding
+// to disambiguate (EUC-KR produces Hangul, GBK produces Han).
+func detectEastAsianByBytePattern(data []byte) string {
+	sjisStylePairs := 0 // lead 0x81-0x9F (SJIS distinctive, below EUC range)
+	big5TrailLow := 0   // trail bytes 0x40-0x7E (Big5 distinctive, below 0x80)
+	totalPairs := 0
+
+	i := 0
+	for i < len(data)-1 {
+		b1 := data[i]
+		b2 := data[i+1]
+
+		if b1 < 0x80 {
+			i++
+			continue
+		}
+
+		totalPairs++
+
+		// Shift-JIS distinctive: lead byte 0x81-0x9F (below EUC range)
+		if b1 >= 0x81 && b1 <= 0x9F &&
+			(b2 >= 0x40 && b2 <= 0x7E || b2 >= 0x80 && b2 <= 0xFC) {
+			sjisStylePairs++
+		}
+
+		// Big5 distinctive: trail byte 0x40-0x7E (below 0x80, not valid in GBK/EUC-KR)
+		if b1 >= 0xA1 && b1 <= 0xFE && b2 >= 0x40 && b2 <= 0x7E {
+			big5TrailLow++
+		}
+
+		i += 2
+	}
+
+	if totalPairs == 0 {
+		return ""
+	}
+
+	// Shift-JIS: lead bytes 0x81-0x9F are distinctive (below EUC-KR/Big5 range)
+	if sjisStylePairs > 0 && float64(sjisStylePairs)/float64(totalPairs) > 0.3 {
+		return "shift_jis"
+	}
+
+	// Big5: trail bytes 0x40-0x7E are distinctive (below 0x80, not valid in GBK/EUC-KR)
+	if big5TrailLow > 0 && float64(big5TrailLow)/float64(totalPairs) > 0.2 {
+		return "big5"
+	}
+
+	// For all other multi-byte data: default to GBK
+	// This covers actual GBK files AND EUC-KR files (which are byte-range indistinguishable)
+	return "gbk"
 }
 
 // DecodeWithEncoding decodes file bytes using a named encoding (e.g. "gbk", "shift_jis").
@@ -266,6 +486,7 @@ func DecodeWithEncoding(data []byte, encName string) (string, error) {
 }
 
 // EncodeWithEncoding encodes a UTF-8 Go string to bytes using a named encoding.
+// Returns a descriptive error when the content contains characters unsupported by the target encoding.
 func EncodeWithEncoding(content string, encName string) ([]byte, error) {
 	switch encName {
 	case "utf-16le":
@@ -285,7 +506,20 @@ func EncodeWithEncoding(content string, encName string) ([]byte, error) {
 	encoder := enc.NewEncoder()
 	encoded, err := encoder.Bytes([]byte(content))
 	if err != nil {
-		return nil, err
+		// Find the first unsupported rune for a helpful error message
+		for _, r := range content {
+			if r > 0x7F {
+				testBuf := make([]byte, 4)
+				n := utf8.EncodeRune(testBuf, r)
+				_, testErr := encoder.Bytes(testBuf[:n])
+				if testErr != nil {
+					return nil, fmt.Errorf("character %q (U+%04X) is not supported by encoding %q. "+
+						"Consider using a Unicode encoding (utf-8, utf-16le) or an encoding that covers this character's script",
+						r, r, encName)
+				}
+			}
+		}
+		return nil, fmt.Errorf("encoding %q: %w", encName, err)
 	}
 
 	return encoded, nil

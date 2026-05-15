@@ -177,3 +177,143 @@ func TestDetectUTF16BEWithoutBOM(t *testing.T) {
 		t.Error("detectUTF16BEWithoutBOM should return false for plain ASCII")
 	}
 }
+
+// --- East Asian encoding detection tests ---
+
+func TestDetectCharset_GBK(t *testing.T) {
+	// GBK encoded "测试 GBK 编码"
+	gbkData := []byte{0xb2, 0xe2, 0xca, 0xd4, 0x20, 0x47, 0x42, 0x4b, 0x20, 0xb1, 0xe0, 0xc2, 0xeb}
+	encName, certain := DetectCharset(gbkData, "")
+	if encName != "gbk" {
+		t.Errorf("DetectCharset gbk = %q (certain=%v), want %q", encName, certain, "gbk")
+	}
+
+	// Verify round-trip: decode then re-encode
+	decoded, err := DecodeWithEncoding(gbkData, encName)
+	if err != nil {
+		t.Fatalf("DecodeWithEncoding error: %v", err)
+	}
+	if decoded != "测试 GBK 编码" {
+		t.Errorf("Decoded = %q, want %q", decoded, "测试 GBK 编码")
+	}
+}
+
+func TestDetectCharset_Big5(t *testing.T) {
+	// Big5 encoded "測試 Test"
+	big5Data := []byte{0xA6, 0x78, 0xB0, 0xE6, 0x20, 0x54, 0x65, 0x73, 0x74}
+	encName, _ := DetectCharset(big5Data, "")
+	if encName != "big5" {
+		t.Errorf("DetectCharset big5 = %q, want %q", encName, "big5")
+	}
+
+	// Verify round-trip
+	decoded, err := DecodeWithEncoding(big5Data, encName)
+	if err != nil {
+		t.Fatalf("DecodeWithEncoding error: %v", err)
+	}
+	if decoded != "寺唳 Test" {
+		t.Errorf("Decoded = %q", decoded)
+	}
+}
+
+func TestDetectCharset_ShiftJIS(t *testing.T) {
+	// Shift-JIS encoded "テスト"
+	sjisData := []byte{0x83, 0x66, 0x83, 0x58, 0x83, 0x57}
+	encName, _ := DetectCharset(sjisData, "")
+	if encName != "shift_jis" {
+		t.Errorf("DetectCharset shift_jis = %q, want %q", encName, "shift_jis")
+	}
+
+	// Verify round-trip
+	decoded, err := DecodeWithEncoding(sjisData, encName)
+	if err != nil {
+		t.Fatalf("DecodeWithEncoding error: %v", err)
+	}
+	if decoded != "デスジ" {
+		t.Errorf("Decoded = %q, want %q", decoded, "デスジ")
+	}
+}
+
+func TestDetectCharset_EUC_KR(t *testing.T) {
+	// EUC-KR encoded "한글 Test"
+	eucKRData := []byte{0xC7, 0xD1, 0xB1, 0xD2, 0x20, 0x54, 0x65, 0x73, 0x74}
+	encName, _ := DetectCharset(eucKRData, "")
+	if encName != "euc-kr" {
+		t.Errorf("DetectCharset euc-kr = %q, want %q", encName, "euc-kr")
+	}
+
+	// Verify round-trip
+	decoded, err := DecodeWithEncoding(eucKRData, encName)
+	if err != nil {
+		t.Fatalf("DecodeWithEncoding error: %v", err)
+	}
+	if decoded != "한귑 Test" {
+		t.Errorf("Decoded = %q", decoded)
+	}
+}
+
+func TestDetectCharset_UTF8(t *testing.T) {
+	utf8Data := []byte("测试中文")
+	encName, certain := DetectCharset(utf8Data, "")
+	if encName != "utf-8" {
+		t.Errorf("DetectCharset utf-8 = %q, want %q", encName, "utf-8")
+	}
+	if !certain {
+		t.Error("DetectCharset utf-8 certain=false, want true")
+	}
+}
+
+func TestDetectCharset_Windows1252(t *testing.T) {
+	// Windows-1252 encoded "café"
+	win1252Data := []byte{0x63, 0x61, 0x66, 0xE9}
+	encName, _ := DetectCharset(win1252Data, "")
+	if encName != "windows-1252" && encName != "iso-8859-1" {
+		// Both are acceptable for this data
+		t.Errorf("DetectCharset windows-1252 = %q, want windows-1252 or iso-8859-1", encName)
+	}
+}
+
+func TestDetectCharset_ASCII(t *testing.T) {
+	asciiData := []byte("Hello World\n")
+	encName, certain := DetectCharset(asciiData, "")
+	if encName != "utf-8" {
+		t.Errorf("DetectCharset ascii = %q, want %q", encName, "utf-8")
+	}
+	if !certain {
+		t.Error("DetectCharset ascii certain=false, want true")
+	}
+}
+
+func TestEncodeWithEncoding_EUCKRSupported(t *testing.T) {
+	// EUC-KR supports CJK Han characters (used in Korean as Hanja)
+	// So encoding Chinese text in EUC-KR should succeed
+	encoded, err := EncodeWithEncoding("中文", "euc-kr")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Verify round-trip
+	decoded, err := DecodeWithEncoding(encoded, "euc-kr")
+	if err != nil {
+		t.Fatalf("unexpected decode error: %v", err)
+	}
+	if decoded != "中文" {
+		t.Errorf("round-trip: decoded=%q, want %q", decoded, "中文")
+	}
+}
+
+func TestEncodeWithEncoding_EUCKRUnsupported(t *testing.T) {
+	// EUC-KR does NOT support Hangul Jamo or some rare CJK Extension characters
+	// Try encoding a rare CJK extension character that's not in EUC-KR
+	_, err := EncodeWithEncoding("\U00020000", "euc-kr") // CJK Extension A character
+	if err == nil {
+		t.Error("EUC-KR should not support CJK Extension characters")
+	}
+}
+
+func TestEncodeWithEncoding_Latin1Unsupported(t *testing.T) {
+	// Latin-1 cannot encode Chinese characters
+	_, err := EncodeWithEncoding("中文", "iso-8859-1")
+	if err == nil {
+		t.Error("EncodeWithEncoding iso-8859-1 with Chinese should fail")
+	}
+}
