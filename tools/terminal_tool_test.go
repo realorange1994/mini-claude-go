@@ -123,17 +123,14 @@ func TestBuildTerminalCommandNewWithSession(t *testing.T) {
 func TestBuildTerminalCommandAttachNoSession(t *testing.T) {
 	_, err := buildTerminalCommand("tmux", "attach", map[string]any{})
 	if err == nil {
-		t.Error("attach without session should return error")
+		t.Error("attach is not supported by buildTerminalCommand (handled in Execute), should return error")
 	}
 }
 
 func TestBuildTerminalCommandAttachWithSession(t *testing.T) {
-	cmd, err := buildTerminalCommand("tmux", "attach", map[string]any{"session": "main"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cmd.Path == "" {
-		t.Error("command should have a path")
+	_, err := buildTerminalCommand("tmux", "attach", map[string]any{"session": "main"})
+	if err == nil {
+		t.Error("attach is not supported by buildTerminalCommand (handled in Execute), should return error")
 	}
 }
 

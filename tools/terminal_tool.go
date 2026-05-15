@@ -93,6 +93,22 @@ func (*TerminalTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: "Error: operation is required", IsError: true}
 	}
 
+	// attach requires a real TTY, which the agent process does not have.
+	// Return instructions for the user to attach manually.
+	if operation == "attach" {
+		session, _ := params["session"].(string)
+		if session == "" {
+			if manager == "tmux" {
+				return ToolResult{Output: "To attach to a tmux session, run:\n  tmux attach\n  or: tmux attach -t <session-name>"}
+			}
+			return ToolResult{Output: "To attach to a screen session, run:\n  screen -r\n  or: screen -r <session-name>"}
+		}
+		if manager == "tmux" {
+			return ToolResult{Output: fmt.Sprintf("To attach to tmux session %q, run:\n  tmux attach -t %s", session, session)}
+		}
+		return ToolResult{Output: fmt.Sprintf("To attach to screen session %q, run:\n  screen -r %s", session, session)}
+	}
+
 	cmd, err := buildTerminalCommand(manager, operation, params)
 	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
@@ -153,16 +169,6 @@ func buildTerminalCommand(manager, operation string, params map[string]any) (*ex
 			}
 			// screen: cwd must be set via Dir field, not -c flag
 			cmd.Dir = cwd
-		}
-
-	case "attach":
-		if session == "" {
-			return nil, fmt.Errorf("session name is required for attach")
-		}
-		if manager == "tmux" {
-			cmd = exec.Command("tmux", "attach-session", "-t", session)
-		} else {
-			cmd = exec.Command("screen", "-r", session)
 		}
 
 	case "detach":
