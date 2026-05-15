@@ -12,7 +12,23 @@ type TerminalTool struct{}
 
 func (*TerminalTool) Name() string    { return "terminal" }
 func (*TerminalTool) Description() string {
-	return "Terminal session management via tmux or screen. Supports list, new, detach, attach, send, kill, and rename operations. Unix/Linux only."
+	if runtime.GOOS == "windows" {
+		return "Terminal session management: NOT AVAILABLE on Windows (requires tmux/screen, Unix-only)."
+	}
+	// Pre-check: verify at least one terminal manager is available
+	hasTmux := exec.Command("tmux", "-V").Run() == nil
+	hasScreen := exec.Command("screen", "--version").Run() == nil
+	if !hasTmux && !hasScreen {
+		return "Terminal session management: NOT AVAILABLE — neither tmux nor screen found in PATH."
+	}
+	var avail []string
+	if hasTmux {
+		avail = append(avail, "tmux")
+	}
+	if hasScreen {
+		avail = append(avail, "screen")
+	}
+	return fmt.Sprintf("Terminal session management via tmux or screen. Available: %s. Supports list, new, detach, attach, send, kill, and rename operations.", strings.Join(avail, ", "))
 }
 
 func (*TerminalTool) InputSchema() map[string]any {
@@ -67,6 +83,11 @@ func (*TerminalTool) Execute(params map[string]any) ToolResult {
 		manager = "tmux"
 	}
 
+	// Verify the requested manager is actually installed
+	if err := checkManagerAvailable(manager); err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+	}
+
 	operation, _ := params["operation"].(string)
 	if operation == "" {
 		return ToolResult{Output: "Error: operation is required", IsError: true}
@@ -83,6 +104,23 @@ func (*TerminalTool) Execute(params map[string]any) ToolResult {
 		return ToolResult{Output: output, IsError: true}
 	}
 	return ToolResult{Output: output}
+}
+
+// checkManagerAvailable verifies that the requested terminal manager binary exists.
+func checkManagerAvailable(manager string) error {
+	var cmd *exec.Cmd
+	switch manager {
+	case "tmux":
+		cmd = exec.Command("tmux", "-V")
+	case "screen":
+		cmd = exec.Command("screen", "--version")
+	default:
+		return fmt.Errorf("unknown terminal manager: %s", manager)
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s is not available in PATH (or returned non-zero exit code)", manager)
+	}
+	return nil
 }
 
 func buildTerminalCommand(manager, operation string, params map[string]any) (*exec.Cmd, error) {
@@ -103,16 +141,18 @@ func buildTerminalCommand(manager, operation string, params map[string]any) (*ex
 			sessionName = "main"
 		}
 		if manager == "tmux" {
-			cmd = exec.Command("tmux", "new-session", "-s", sessionName)
+			// -d: detached mode (no TTY required)
+			cmd = exec.Command("tmux", "new-session", "-d", "-s", sessionName)
 		} else {
-			cmd = exec.Command("screen", "-S", sessionName)
+			// -dm: detached mode, -S: session name
+			cmd = exec.Command("screen", "-dmS", sessionName)
 		}
 		if cwd, ok := params["cwd"].(string); ok && cwd != "" {
 			if manager == "tmux" {
 				cmd.Args = append(cmd.Args, "-c", cwd)
-			} else {
-				cmd.Args = append(cmd.Args, "-c", cwd)
 			}
+			// screen: cwd must be set via Dir field, not -c flag
+			cmd.Dir = cwd
 		}
 
 	case "attach":
