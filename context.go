@@ -625,6 +625,11 @@ type ToolStateTracker struct {
 	readFiles      map[string]fileState // absolute path -> (epoch, mtimeMs) when read
 	searchQueries  map[string]int // pattern -> epoch when search was run
 	conclusions    []string       // key findings claimed by the agent
+	// activeTask tracks what the agent is currently working on, derived from
+	// the most recent user message and recent tool calls. This is injected
+	// into the system prompt each turn to prevent "task drift" — the LLM
+	// losing track of what it was doing and jumping back to old topics.
+	activeTask     string         // brief description of current work
 }
 
 // NewToolStateTracker creates a tracker.
@@ -647,6 +652,23 @@ func (t *ToolStateTracker) RecordFileRead(path string) {
 		mtimeMs = info.ModTime().UnixMilli()
 	}
 	t.readFiles[abs] = fileState{epoch: t.compactionEpoch, mtime: mtimeMs}
+}
+
+// SetActiveTask records what the agent is currently working on, derived from
+// the most recent user message. This is injected into the system prompt each
+// turn to prevent "task drift" — the LLM losing track of its current task
+// and jumping back to old topics.
+func (t *ToolStateTracker) SetActiveTask(task string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.activeTask = task
+}
+
+// GetActiveTask returns the current active task description.
+func (t *ToolStateTracker) GetActiveTask() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.activeTask
 }
 
 // FileWasRead returns true if the file has been read in the current epoch.
@@ -756,10 +778,15 @@ func (t *ToolStateTracker) BuildSessionStateNote() string {
 	}
 	conclusions := make([]string, len(t.conclusions))
 	copy(conclusions, t.conclusions)
+	activeTask := t.activeTask
 	t.mu.RUnlock()
 
 	var sb strings.Builder
 	sb.WriteString("## Session State\n")
+	if activeTask != "" {
+		sb.WriteString("Current task (STAY FOCUSED on this — do NOT jump to other topics):\n")
+		sb.WriteString("  " + activeTask + "\n")
+	}
 	if len(freshFiles) > 0 {
 		sb.WriteString("Files already read — content is in context (do NOT re-read):\n")
 		for _, f := range freshFiles {
@@ -902,6 +929,41 @@ func (c *ConversationContext) SetSystemPrompt(prompt string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.systemPrompt = prompt
+}
+
+// LatestUserMessage returns the text of the most recent user message
+// (excluding tool_result messages). Used to derive the "active task"
+// for task drift prevention.
+func (c *ConversationContext) LatestUserMessage() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		entry := c.entries[i]
+		if entry.role != "user" {
+			continue
+		}
+		// Skip tool_result user messages
+		if _, ok := entry.content.(ToolResultContent); ok {
+			continue
+		}
+		// Extract text from TextContent or ToolUseContent
+		switch v := entry.content.(type) {
+		case TextContent:
+			return string(v)
+		case ToolUseContent:
+			// Mixed content — extract text parts
+			var textParts []string
+			for _, block := range v {
+				if block.OfText != nil {
+					textParts = append(textParts, block.OfText.Text)
+				}
+			}
+			if len(textParts) > 0 {
+				return strings.Join(textParts, "\n")
+			}
+		}
+	}
+	return ""
 }
 
 // LastAssistantTime returns the timestamp of the last assistant message.

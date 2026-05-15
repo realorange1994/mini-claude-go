@@ -1294,6 +1294,21 @@ func (a *AgentLoop) Run(userMessage string) string {
 			a.context.SetSystemPrompt(sysPrompt)
 		}
 
+		// Update active task from the most recent user message. This prevents
+		// "task drift" — the LLM losing track of what it was doing and jumping
+		// back to old topics. The active task is injected into the system prompt
+		// via BuildSessionStateNote.
+		if a.toolStateTracker != nil {
+			if latestUser := a.context.LatestUserMessage(); latestUser != "" {
+				// Truncate to avoid very long messages from bloating the prompt
+				task := latestUser
+				if len(task) > 500 {
+					task = task[:500] + "..."
+				}
+				a.toolStateTracker.SetActiveTask(task)
+			}
+		}
+
 		// Inject tool state tracker session state into system prompt.
 		// This gives the agent visibility into what it has already done,
 		// preventing redundant reads and searches.
