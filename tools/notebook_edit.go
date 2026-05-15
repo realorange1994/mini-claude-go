@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -81,7 +82,13 @@ type nbDocument struct {
 	Metadata    any      `json:"metadata,omitempty"`
 }
 
-func (t *NotebookEditTool) Execute(params map[string]any) ToolResult {
+func (t *NotebookEditTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: notebook_edit timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	notebookPath, _ := params["notebook_path"].(string)
 	if notebookPath == "" {
 		return ToolResult{Output: "Error: notebook_path is required", IsError: true}
@@ -206,6 +213,10 @@ func (t *NotebookEditTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return result
+}
+
+func (t *NotebookEditTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
 
 func findCellIndex(cells []nbCell, cellID string) int {

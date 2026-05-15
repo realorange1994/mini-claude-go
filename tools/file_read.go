@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,7 +65,13 @@ func (t *FileReadTool) CheckPermissions(params map[string]any) PermissionResult 
 	return PermissionResultPassthrough()
 }
 
-func (t *FileReadTool) Execute(params map[string]any) ToolResult {
+func (t *FileReadTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: read_file timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		return ToolResult{Output: "Error: file_path is required", IsError: true}
@@ -262,6 +269,10 @@ func (t *FileReadTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return ToolResult{Output: strings.TrimRight(result, "\n")}
+}
+
+func (t *FileReadTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
 
 func expandPath(p string) string {

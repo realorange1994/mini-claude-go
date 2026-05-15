@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,7 +74,13 @@ func (*FileWriteTool) CheckPermissions(params map[string]any) PermissionResult {
 	return CheckPathSafetyForAutoEdit(pathStr)
 }
 
-func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
+func (w *FileWriteTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: write_file timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		return ToolResult{Output: "Error: file_path is required", IsError: true}
@@ -121,4 +128,8 @@ func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
 		out += fmt.Sprintf("\n[WARN] Large file written (%.1f MB). Confirm with the user before proceeding.", sizeMB)
 	}
 	return ToolResult{Output: out}
+}
+
+func (w *FileWriteTool) Execute(params map[string]any) ToolResult {
+	return w.ExecuteContext(context.Background(), params)
 }

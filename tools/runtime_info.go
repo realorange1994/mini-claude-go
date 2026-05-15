@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -22,7 +23,13 @@ func (*RuntimeInfoTool) InputSchema() map[string]any {
 
 func (*RuntimeInfoTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
-func (*RuntimeInfoTool) Execute(params map[string]any) ToolResult {
+func (t *RuntimeInfoTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: runtime_info timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	wd, _ := os.Getwd()
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
@@ -48,4 +55,8 @@ Memory Sys: %.1f MB`,
 	)
 
 	return ToolResult{Output: info}
+}
+
+func (t *RuntimeInfoTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }

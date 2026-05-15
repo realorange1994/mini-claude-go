@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,7 +63,13 @@ func (*FileEditTool) CheckPermissions(params map[string]any) PermissionResult {
 	return CheckPathSafetyForAutoEdit(pathStr)
 }
 
-func (e *FileEditTool) Execute(params map[string]any) ToolResult {
+func (e *FileEditTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: edit_file timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		return ToolResult{Output: "Error: file_path is required", IsError: true}
@@ -230,6 +237,10 @@ func (e *FileEditTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return ToolResult{Output: fmt.Sprintf("Successfully edited %s", fp)}
+}
+
+func (e *FileEditTool) Execute(params map[string]any) ToolResult {
+	return e.ExecuteContext(context.Background(), params)
 }
 
 // applyReplacement performs string replacement on normalized content.

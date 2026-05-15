@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -32,7 +33,13 @@ func (t *BriefTool) InputSchema() map[string]any {
 
 func (t *BriefTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
-func (t *BriefTool) Execute(params map[string]any) ToolResult {
+func (t *BriefTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: brief timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	task, _ := params["task"].(string)
 	if task == "" {
 		return ToolResult{Output: "Error: task parameter is required", IsError: true}
@@ -52,4 +59,8 @@ func (t *BriefTool) Execute(params map[string]any) ToolResult {
 Task: ` + task
 
 	return ToolResult{Output: fmt.Sprintf("## Brief: Communication Guidance\n\n%s", guidelines)}
+}
+
+func (t *BriefTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -36,7 +37,13 @@ func (t *EnterPlanModeTool) CheckPermissions(params map[string]any) PermissionRe
 	return PermissionResultPassthrough() // auto-approved
 }
 
-func (t *EnterPlanModeTool) Execute(params map[string]any) ToolResult {
+func (t *EnterPlanModeTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: enter_plan_mode timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	currentMode := t.GetMode()
 	if currentMode == "plan" {
 		return ToolResultOK("Already in plan mode. Continue planning — use ExitPlanMode when ready to implement.")
@@ -58,4 +65,8 @@ func (t *EnterPlanModeTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return ToolResultOK(msg)
+}
+
+func (t *EnterPlanModeTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }

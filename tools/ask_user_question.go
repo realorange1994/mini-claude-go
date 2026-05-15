@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -67,7 +68,14 @@ func (*AskUserQuestionTool) CheckPermissions(params map[string]any) PermissionRe
 	return PermissionResultPassthrough() // Always allowed - user must interact to proceed
 }
 
-func (*AskUserQuestionTool) Execute(params map[string]any) ToolResult {
+func (t *AskUserQuestionTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	// Check context early
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: AskUserQuestion timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	questionsRaw, ok := params["questions"].([]any)
 	if !ok {
 		return ToolResultError("questions must be an array")
@@ -139,6 +147,12 @@ func (*AskUserQuestionTool) Execute(params map[string]any) ToolResult {
 		fmt.Printf("└─────────────────────────────────────────────\n")
 
 		for {
+			// Check context before reading input
+			select {
+			case <-ctx.Done():
+				return ToolResult{Output: fmt.Sprintf("Error: AskUserQuestion timed out waiting for user input"), IsError: true}
+			default:
+			}
 			input, err := reader.ReadString('\n')
 			if err != nil {
 				return ToolResultError(fmt.Sprintf("failed to read input: %v", err))
@@ -169,6 +183,10 @@ func (*AskUserQuestionTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return ToolResultOK(sb.String())
+}
+
+func (t *AskUserQuestionTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
 
 func parseNumber(s string) (int, error) {

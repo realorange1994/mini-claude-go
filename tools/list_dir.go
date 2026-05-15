@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,7 +41,13 @@ func (*ListDirTool) InputSchema() map[string]any {
 
 func (*ListDirTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
-func (*ListDirTool) Execute(params map[string]any) ToolResult {
+func (t *ListDirTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: list_dir timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	pathStr, _ := params["path"].(string)
 	if pathStr == "" {
 		pathStr = "."
@@ -84,6 +91,10 @@ func (*ListDirTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return ToolResult{Output: result}
+}
+
+func (t *ListDirTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
 
 func listDirSimple(dir string, maxEntries int) ([]string, int) {

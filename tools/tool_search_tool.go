@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -43,7 +44,13 @@ func (t *ToolSearchTool) InputSchema() map[string]any {
 
 func (t *ToolSearchTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
-func (t *ToolSearchTool) Execute(params map[string]any) ToolResult {
+func (t *ToolSearchTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: tool_search timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	if t.Registry == nil {
 		return ToolResult{Output: "Error: tool registry not available", IsError: true}
 	}
@@ -87,6 +94,10 @@ func (t *ToolSearchTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return t.searchTools(searchTerms, requirePrefix, maxResults)
+}
+
+func (t *ToolSearchTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
 
 // selectTools returns full definitions for specific tool names

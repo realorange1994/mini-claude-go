@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -119,7 +120,14 @@ func (*GrepTool) InputSchema() map[string]any {
 
 func (*GrepTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
-func (*GrepTool) Execute(params map[string]any) ToolResult {
+func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	// Check context early
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: grep timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	pattern, _ := params["pattern"].(string)
 	if pattern == "" {
 		return ToolResult{Output: "Error: pattern is required", IsError: true}
@@ -225,9 +233,13 @@ func (*GrepTool) Execute(params map[string]any) ToolResult {
 	}
 
 	if _, err := exec.LookPath("rg"); err == nil {
-		return rgSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, showLineNumbers, multiline, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesize)
+		return rgSearch(ctx, pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, showLineNumbers, multiline, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesize)
 	}
-	return goSearch(pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, headLimit, offset, ctxCombined, countMatches, maxDepth)
+	return goSearch(ctx, pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, headLimit, offset, ctxCombined, countMatches, maxDepth)
+}
+
+func (t *GrepTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
 
 func parseIntParam(params map[string]any, key string) int {
@@ -287,7 +299,7 @@ var typeMap = map[string][]string{
 	"css":    {".css", ".scss", ".sass"},
 }
 
-func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, showLineNumbers, multiline bool, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string) ToolResult {
+func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, showLineNumbers, multiline bool, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string) ToolResult {
 	args := []string{"--hidden", "--max-columns", "500"}
 
 	// Exclude VCS directories (matching official Claude Code behavior)
@@ -367,7 +379,7 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	}
 	args = append(args, path)
 
-	cmd := exec.Command("rg", args...)
+	cmd := exec.CommandContext(ctx, "rg", args...)
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 	if output == "" {
@@ -395,7 +407,7 @@ func rgSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	return ToolResult{Output: strings.Join(lines, "\n")}
 }
 
-func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, headLimit, offset, ctxLines int, countMatches bool, maxDepth int) ToolResult {
+func goSearch(ctx context.Context, pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, headLimit, offset, ctxLines int, countMatches bool, maxDepth int) ToolResult {
 	searchPattern := pattern
 	if fixedStrings {
 		searchPattern = regexp.QuoteMeta(searchPattern)
@@ -427,6 +439,12 @@ func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 	} else {
 		baseDepth := strings.Count(filepath.Clean(path), string(filepath.Separator))
 		_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 			if err != nil || d.IsDir() {
 				// Enforce max_depth
 				if maxDepth > 0 {
@@ -466,6 +484,13 @@ func goSearch(pattern, path, include, typeFilter string, caseInsensitive, fixedS
 			files = append(files, p)
 			return nil
 		})
+	}
+
+	// Check if walk was cancelled
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: grep timed out scanning %s", path), IsError: true}
+	default:
 	}
 
 	filesSearched := len(files)

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 
 	"miniclaudecode-go/microlisp"
@@ -38,7 +39,14 @@ func (*LispEvalTool) CheckPermissions(params map[string]any) PermissionResult {
 	return PermissionResultPassthrough()
 }
 
-func (*LispEvalTool) Execute(params map[string]any) ToolResult {
+func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	// Check context early
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: lisp_eval timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	op, _ := params["operation"].(string)
 	expr, _ := params["expression"].(string)
 
@@ -57,15 +65,36 @@ func (*LispEvalTool) Execute(params map[string]any) ToolResult {
 		if expr == "" {
 			return ToolResult{Output: "Error: expression is required. Examples: (+ 1 2) => 3, (car '(1 2 3)) => 1", IsError: true}
 		}
-		result, err := microlisp.SafeEvalString(expr)
-		if err != nil {
-			return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+		// Run eval in a goroutine so we can respect context cancellation.
+		// The microlisp interpreter holds evalMu during execution, so
+		// we can't cancel mid-evaluation, but we can abort waiting for it.
+		type evalResult struct {
+			output string
+			err    error
 		}
-		if result == "" {
-			result = "NIL"
+		ch := make(chan evalResult, 1)
+		go func() {
+			result, err := microlisp.SafeEvalString(expr)
+			ch <- evalResult{result, err}
+		}()
+		select {
+		case <-ctx.Done():
+			return ToolResult{Output: fmt.Sprintf("Error: lisp_eval timed out evaluating expression"), IsError: true}
+		case r := <-ch:
+			if r.err != nil {
+				return ToolResult{Output: fmt.Sprintf("Error: %v", r.err), IsError: true}
+			}
+			result := r.output
+			if result == "" {
+				result = "NIL"
+			}
+			return ToolResult{Output: result}
 		}
-		return ToolResult{Output: result}
 	}
+}
+
+func (t *LispEvalTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
 
 // lispHelp returns the usage manual. If topic is non-empty, shows that topic specifically.

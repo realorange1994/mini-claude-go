@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -155,7 +156,14 @@ func (t *AgentTool) InputSchema() map[string]any {
 
 func (t *AgentTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
-func (t *AgentTool) Execute(params map[string]any) ToolResult {
+func (t *AgentTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	// Check context early
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: agent timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	if t.SpawnFunc == nil {
 		return ToolResultError("agent system not initialized")
 	}
@@ -192,19 +200,35 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 	// Always disallow recursive agent spawning
 	disallowedTools = append(disallowedTools, "agent")
 
-	// Sync mode: run in current goroutine, return result directly
+	// Sync mode: run in goroutine so we can respect context cancellation
 	if mode == AgentModeSync {
-		if t.SpawnSyncFunc == nil {
-			// Fall back to regular spawn func — it may handle sync internally
-			agentID, result, errText, _, toolsUsed, durationMs := t.SpawnFunc(
+		type syncResult struct {
+			agentID    string
+			result     string
+			errText    string
+			toolsUsed  int
+			durationMs int64
+		}
+		ch := make(chan syncResult, 1)
+		spawnFn := t.SpawnFunc
+		if t.SpawnSyncFunc != nil {
+			spawnFn = AgentSpawnFunc(t.SpawnSyncFunc)
+		}
+		go func() {
+			agentID, result, errText, _, toolsUsed, durationMs := spawnFn(
 				description, prompt, subagentType, model, false,
 				allowedTools, disallowedTools, inheritContext, int(maxTurns), nil,
 			)
-			if errText != "" {
-				return ToolResultError(fmt.Sprintf("sync agent failed: %s", errText))
+			ch <- syncResult{agentID, result, errText, toolsUsed, durationMs}
+		}()
+		select {
+		case <-ctx.Done():
+			return ToolResult{Output: fmt.Sprintf("Error: agent timed out (sync mode)"), IsError: true}
+		case r := <-ch:
+			if r.errText != "" {
+				return ToolResultError(fmt.Sprintf("sync agent failed: %s", r.errText))
 			}
-			// Run handoff classifier on the result
-			safeResult, safe := SanitizeHandoffOutput(result)
+			safeResult, safe := SanitizeHandoffOutput(r.result)
 			if !safe {
 				return ToolResultOK(fmt.Sprintf(
 					"Sync agent completed (handoff filtered).\n\n"+
@@ -213,33 +237,11 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 						"Description: %s\n"+
 						"Duration: %dms, Tools used: %d\n\n"+
 						"%s",
-					agentID, description, durationMs, toolsUsed, safeResult,
+					r.agentID, description, r.durationMs, r.toolsUsed, safeResult,
 				))
 			}
-			return ToolResultOK(formatAgentResult(safeResult, agentID, subagentType, toolsUsed, durationMs, false))
+			return ToolResultOK(formatAgentResult(safeResult, r.agentID, subagentType, r.toolsUsed, r.durationMs, false))
 		}
-
-		agentID, result, errText, _, toolsUsed, durationMs := t.SpawnSyncFunc(
-			description, prompt, subagentType, model, false,
-			allowedTools, disallowedTools, inheritContext, int(maxTurns), nil,
-		)
-		if errText != "" {
-			return ToolResultError(fmt.Sprintf("sync agent failed: %s", errText))
-		}
-		// Run handoff classifier on the result
-		safeResult, safe := SanitizeHandoffOutput(result)
-		if !safe {
-			return ToolResultOK(fmt.Sprintf(
-				"Sync agent completed (handoff filtered).\n\n"+
-					"agentId: %s\n"+
-					"Status: completed (filtered)\n"+
-					"Description: %s\n"+
-					"Duration: %dms, Tools used: %d\n\n"+
-					"%s",
-				agentID, description, durationMs, toolsUsed, safeResult,
-			))
-		}
-		return ToolResultOK(formatAgentResult(safeResult, agentID, subagentType, toolsUsed, durationMs, false))
 	}
 
 	// Async mode (default): run in background, return immediately with agent ID
@@ -281,6 +283,10 @@ func (t *AgentTool) Execute(params map[string]any) ToolResult {
 			"Briefly tell the user what you launched, then end your response. The notification will arrive in a separate turn.",
 		agentID, outputFile, description,
 	))
+}
+
+func (t *AgentTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
 
 // isValidAgentName checks that the name is alphanumeric with hyphens/underscores, max 32 chars.

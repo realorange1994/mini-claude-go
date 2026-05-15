@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +58,14 @@ func (*GlobTool) InputSchema() map[string]any {
 
 func (*GlobTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
 
-func (*GlobTool) Execute(params map[string]any) ToolResult {
+func (t *GlobTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+	// Check context early
+	select {
+	case <-ctx.Done():
+		return ToolResult{Output: fmt.Sprintf("Error: glob timed out: %v", ctx.Err()), IsError: true}
+	default:
+	}
+
 	pattern, _ := params["pattern"].(string)
 
 	// Support path (official) and directory (legacy alias)
@@ -121,8 +129,15 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 		hasDoubleStar = true
 	}
 
+	var walkErr error
 	var matches []string
 	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		// Check for context cancellation on every entry
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err != nil {
 			return nil
 		}
@@ -164,7 +179,13 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 		return nil
 	})
 	if err != nil {
-		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+		if err == context.Canceled || err == context.DeadlineExceeded {
+			return ToolResult{Output: fmt.Sprintf("Error: glob timed out scanning %s", dir), IsError: true}
+		}
+		walkErr = err
+	}
+	if walkErr != nil {
+		return ToolResult{Output: fmt.Sprintf("Error: %v", walkErr), IsError: true}
 	}
 
 	if len(matches) == 0 {
@@ -203,4 +224,8 @@ func (*GlobTool) Execute(params map[string]any) ToolResult {
 	}
 
 	return ToolResult{Output: strings.Join(lines, "\n")}
+}
+
+func (t *GlobTool) Execute(params map[string]any) ToolResult {
+	return t.ExecuteContext(context.Background(), params)
 }
