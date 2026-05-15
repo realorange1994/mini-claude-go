@@ -324,14 +324,29 @@ func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResul
 		return ToolResult{Output: "Error: old_string is required for edit operation", IsError: true}
 	}
 	newStr := getParam(params, "new_string", "content")
-
 	replaceAll, _ := params["replace_all"].(bool)
+
+	// Check for identical old/new strings
+	if oldStr == newStr {
+		return ToolResult{Output: "Error: old_string and new_string must be different", IsError: true}
+	}
 
 	// Read-before-write validation and concurrent modification detection
 	if e.registry != nil {
 		if staleMsg := e.registry.CheckFileStale(fp); staleMsg != "" {
 			return ToolResult{Output: staleMsg, IsError: true}
 		}
+	}
+
+	// Reject .ipynb files
+	if strings.HasSuffix(strings.ToLower(fp), ".ipynb") {
+		return ToolResult{Output: "Error: file is a Jupyter Notebook (.ipynb). Jupyter notebooks cannot be edited with the file_encoding tool — use the notebook tool instead.", IsError: true}
+	}
+
+	// 1 GiB file size guard
+	const maxEditSize = 1 << 30 // 1 GiB
+	if info, err := os.Stat(fp); err == nil && info.Size() > maxEditSize {
+		return ToolResult{Output: fmt.Sprintf("Error: file too large (%d bytes, max %d bytes). Use offset/limit to read portions.", info.Size(), maxEditSize), IsError: true}
 	}
 
 	// Read file
@@ -358,16 +373,45 @@ func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResul
 		return ToolResult{Output: fmt.Sprintf("Error decoding file with encoding %s: %v", encName, err), IsError: true}
 	}
 
-	// Normalize CRLF for matching
+	// Detect CRLF and original encoding metadata for write-back
+	fileMeta := FileMetadata{Encoding: encName}
 	hasCRLF := strings.Contains(content, "\r\n")
+	if hasCRLF {
+		fileMeta.LineEndings = LineEndingCRLF
+	}
+
+	// Strip trailing whitespace from new_string (except .md/.mdx)
+	ext := strings.ToLower(filepath.Ext(fp))
+	if ext != ".md" && ext != ".mdx" {
+		newStr = stripTrailingWhitespace(newStr)
+	}
+
+	// Normalize CRLF for matching
 	if hasCRLF {
 		content = strings.ReplaceAll(content, "\r\n", "\n")
 		oldStr = strings.ReplaceAll(oldStr, "\r\n", "\n")
 		newStr = strings.ReplaceAll(newStr, "\r\n", "\n")
 	}
 
+	// Normalize curly quotes for matching (matching edit_file behavior)
+	contentNorm := normalizeQuotes(content)
+	oldStrNorm := normalizeQuotes(oldStr)
+	newStrNorm := normalizeQuotes(newStr)
+
 	// Apply replacement
-	count := strings.Count(content, oldStr)
+	count := strings.Count(contentNorm, oldStrNorm)
+	if count == 0 {
+		// Try desanitized version (matching edit_file: reverse sanitized tokens)
+		desanitizedOld := desanitize(oldStrNorm)
+		desanitizedNew := desanitize(newStrNorm)
+		if desanitizedOld != oldStrNorm {
+			count = strings.Count(contentNorm, desanitizedOld)
+			if count > 0 {
+				oldStrNorm = desanitizedOld
+				newStrNorm = desanitizedNew
+			}
+		}
+	}
 	if count == 0 {
 		return ToolResult{Output: fmt.Sprintf("Error: old_text not found in %s. Verify the file content.", pathStr), IsError: true}
 	}
@@ -378,19 +422,30 @@ func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResul
 		}
 	}
 
-	if replaceAll {
-		content = strings.ReplaceAll(content, oldStr, newStr)
+	// Apply quote style preservation (matching edit_file)
+	styledNewStr := preserveQuoteStyle(contentNorm, oldStr, newStr, oldStrNorm)
+
+	// Apply replacement — handle deletion line trailing \n (matching edit_file)
+	if styledNewStr == "" && !strings.HasSuffix(oldStrNorm, "\n") {
+		oldWithLF := oldStrNorm + "\n"
+		if replaceAll {
+			contentNorm = strings.ReplaceAll(contentNorm, oldWithLF, styledNewStr)
+		} else if idx := strings.Index(contentNorm, oldWithLF); idx >= 0 {
+			contentNorm = contentNorm[:idx] + styledNewStr + contentNorm[idx+len(oldWithLF):]
+		} else {
+			contentNorm = applyReplacement(contentNorm, oldStrNorm, styledNewStr, replaceAll)
+		}
 	} else {
-		content = strings.Replace(content, oldStr, newStr, 1)
+		contentNorm = applyReplacement(contentNorm, oldStrNorm, styledNewStr, replaceAll)
 	}
 
 	// Restore CRLF if original file had it
 	if hasCRLF {
-		content = restoreCRLF(content)
+		contentNorm = restoreCRLF(contentNorm)
 	}
 
-	// Encode back
-	encoded, err := EncodeWithEncoding(content, encName)
+	// Encode back with original encoding
+	encoded, err := EncodeWithEncoding(contentNorm, encName)
 	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error encoding content with encoding %s: %v", encName, err), IsError: true}
 	}
@@ -400,7 +455,7 @@ func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResul
 	}
 
 	if e.registry != nil {
-		e.registry.MarkFileRead(fp)
+		e.registry.MarkFileReadWithContent(fp, contentNorm)
 	}
 
 	return ToolResult{Output: fmt.Sprintf("Successfully edited %s (encoding: %s, applied 1 edit)", fp, encName)}
@@ -417,6 +472,17 @@ func (e *FileEncodingTool) multiEdit(pathStr string, params map[string]any) Tool
 		if staleMsg := e.registry.CheckFileStale(fp); staleMsg != "" {
 			return ToolResult{Output: staleMsg, IsError: true}
 		}
+	}
+
+	// Reject .ipynb files
+	if strings.HasSuffix(strings.ToLower(fp), ".ipynb") {
+		return ToolResult{Output: "Error: file is a Jupyter Notebook (.ipynb). Jupyter notebooks cannot be edited with the file_encoding tool — use the notebook tool instead.", IsError: true}
+	}
+
+	// 1 GiB file size guard
+	const maxEditSize = 1 << 30 // 1 GiB
+	if info, err := os.Stat(fp); err == nil && info.Size() > maxEditSize {
+		return ToolResult{Output: fmt.Sprintf("Error: file too large (%d bytes, max %d bytes). Use offset/limit to read portions.", info.Size(), maxEditSize), IsError: true}
 	}
 
 	// Parse edits
@@ -483,6 +549,14 @@ func (e *FileEncodingTool) multiEdit(pathStr string, params map[string]any) Tool
 		for i := range edits {
 			edits[i].old = strings.ReplaceAll(edits[i].old, "\r\n", "\n")
 			edits[i].new = strings.ReplaceAll(edits[i].new, "\r\n", "\n")
+		}
+	}
+
+	// Strip trailing whitespace from new_string (except .md/.mdx)
+	ext := strings.ToLower(filepath.Ext(fp))
+	if ext != ".md" && ext != ".mdx" {
+		for i := range edits {
+			edits[i].new = stripTrailingWhitespace(edits[i].new)
 		}
 	}
 
@@ -565,7 +639,7 @@ func (e *FileEncodingTool) multiEdit(pathStr string, params map[string]any) Tool
 	}
 
 	if e.registry != nil {
-		e.registry.MarkFileRead(fp)
+		e.registry.MarkFileReadWithContent(fp, content)
 	}
 
 	return ToolResult{Output: fmt.Sprintf("Successfully edited %s (encoding: %s, applied %d edits)", fp, encName, len(edits))}
