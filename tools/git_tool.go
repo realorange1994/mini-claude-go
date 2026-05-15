@@ -16,7 +16,11 @@ type GitTool struct{}
 
 func (*GitTool) Name() string    { return "git" }
 func (*GitTool) Description() string {
-	return "Execute Git version control operations (clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, worktree, rm, mv, restore, switch, cherry-pick, revert, clean, blame, reflog, shortlog, info) and read-only GitHub CLI (gh) operations (pr view/list/diff/checks/status, issue view/list/status, run list/view, auth status, release list/view, search repos/issues/prs). Use operation='info' to get current repository state (branch, commit, dirty status, default branch, git root)."
+	return "Execute Git version control operations. Supports: clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, worktree, rm, mv, restore, switch, cherry-pick, revert, clean, blame, reflog, shortlog, info. " +
+		"Also supports read-only GitHub CLI (gh) operations: pr view/list/diff/checks/status, issue view/list/status, run list/view, auth status, release list/view, search repos/issues/prs. " +
+		"Use operation='info' for quick repo state summary. " +
+		"Flags are validated against a whitelist per operation — rejected flags will list the allowed set. " +
+		"Destructive operations (reset --hard, push --force, clean -f, branch -D) are blocked."
 }
 
 func (*GitTool) InputSchema() map[string]interface{} {
@@ -736,7 +740,11 @@ func validateGitFlags(operation string, flags []string) error {
 			expectedType, exists = config[flagName]
 		}
 		if !exists {
-			return fmt.Errorf("invalid flag '%s' for git %s: flag not in allowed list", flag, operation)
+			allowedFlags := make([]string, 0, len(config))
+			for f := range config {
+				allowedFlags = append(allowedFlags, f)
+			}
+			return fmt.Errorf("invalid flag '%s' for git %s. Allowed flags: %s", flag, operation, strings.Join(allowedFlags, ", "))
 		}
 
 		// Validate based on expected type

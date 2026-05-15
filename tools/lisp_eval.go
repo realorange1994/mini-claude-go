@@ -14,7 +14,13 @@ type LispEvalTool struct{}
 func (*LispEvalTool) Name() string { return "lisp_eval" }
 
 func (*LispEvalTool) Description() string {
-	return `Evaluate Common Lisp expressions. Use for arithmetic (+ 2 3), list operations (car '(1 2 3)), string manipulation, hash tables, arrays, format strings, recursion, lambda functions, CLOS objects, and more. Also provides help/manual (operation="help"), code examples (operation="examples"), and state reset (operation="reset").`
+	return "Evaluate Common Lisp expressions for precise computation, logic, and data manipulation. " +
+		"Supports: arbitrary-precision integers, rationals, complex numbers, lists, strings, hash tables, " +
+		"lambda, macros, CLOS, conditions/restarts, format directives, and sequence operations. " +
+		"Use for: math calculations, string processing, list manipulation, algorithm prototyping. " +
+		"State persists between calls (defvar, defun survive). " +
+		"Thread-safe: concurrent calls are serialized. " +
+		"Limitations: no filesystem I/O, no network, no FFI — pure computation only."
 }
 
 func (*LispEvalTool) InputSchema() map[string]any {

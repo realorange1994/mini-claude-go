@@ -19,7 +19,12 @@ type WebFetchTool struct{}
 
 func (*WebFetchTool) Name() string { return "web_fetch" }
 func (*WebFetchTool) Description() string {
-	return "Fetch a URL and extract readable text content. Strips HTML, removes scripts/styles, extracts title and meta description."
+	return "Fetch a URL and extract readable text content from web pages. " +
+		"Use this AFTER web_search to read the full content of a specific page. " +
+		"Strips HTML, removes scripts/styles, extracts title and meta description. " +
+		"Supports extraction in 'text', 'markdown' (default), or 'json' format. " +
+		"Limitations: 1MB body limit, 30s timeout, no authenticated/private URLs, " +
+		"some sites (baidu, zhihu, weibo) may return limited content due to anti-scraping."
 }
 
 func (*WebFetchTool) InputSchema() map[string]any {
@@ -103,7 +108,7 @@ func (*WebFetchTool) Execute(params map[string]any) ToolResult {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return ToolResult{Output: fmt.Sprintf("Error: HTTP %d: %s", resp.StatusCode, http.StatusText(resp.StatusCode)), IsError: true}
+		return ToolResult{Output: fmt.Sprintf("Error: HTTP %d %s from %s", resp.StatusCode, http.StatusText(resp.StatusCode), rawURL), IsError: true}
 	}
 
 	// Handle compressed responses
@@ -145,6 +150,8 @@ func (*WebFetchTool) Execute(params map[string]any) ToolResult {
 	description := extractHTMLMeta(string(body), "description")
 
 	var result strings.Builder
+	// Always include source URL so the agent knows where content came from
+	result.WriteString(fmt.Sprintf("Source: %s\n\n", rawURL))
 	if title != "" {
 		result.WriteString("Title: " + title + "\n\n")
 	}

@@ -42,7 +42,7 @@ func (t *ReadSkillTool) Execute(params map[string]any) ToolResult {
 
 	content := t.Loader.LoadSkill(name)
 	if content == "" {
-		return ToolResult{Output: fmt.Sprintf("Error: Skill not found: %s", name), IsError: true}
+		return ToolResult{Output: fmt.Sprintf("Skill %q not found. Use list_skills to see available skills or search_skills to find skills by topic.", name), IsError: true}
 	}
 
 	return ToolResult{Output: content}

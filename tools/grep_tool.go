@@ -19,7 +19,9 @@ func (*GrepTool) Description() string {
 	return "ALWAYS use grep for content search tasks. NEVER invoke grep or rg via exec. " +
 		"A powerful search tool built on ripgrep — cheap operation, use liberally. " +
 		"Supports full regex syntax. Filter files with glob parameter. " +
-		"Output modes: 'content' shows matching lines, 'files_with_matches' shows file paths, 'count' shows match counts."
+		"Output modes: 'content' shows matching lines, 'files_with_matches' shows file paths, 'count' shows match counts. " +
+		"Case-insensitive: use -i, ignore_case, or case_insensitive (all equivalent). " +
+		"Literal text search: use fixed_strings=true instead of escaping regex chars."
 }
 
 func (*GrepTool) InputSchema() map[string]any {

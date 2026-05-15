@@ -213,7 +213,7 @@ func (t *TodoWriteTool) Execute(params map[string]any) ToolResult {
 
 	// Matching upstream: reinforce that the model should use the todo list
 	// to track progress and proceed with the current task.
-	return ToolResultOK("Todos have been successfully. Ensure that you use the todo list to track your progress. Please proceed with the current tasks as applicable")
+	return ToolResultOK("Todos updated. Ensure that you use the todo list to track your progress. Please proceed with the current tasks as applicable")
 }
 
 func strVal(m map[string]any, key string) string {

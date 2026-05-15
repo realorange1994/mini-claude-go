@@ -50,7 +50,7 @@ func (*FileReadTool) InputSchema() map[string]any {
 			},
 			"offset": map[string]any{
 				"type":        "integer",
-				"description": "The line number to start reading from. Only provide if the file is too large to read at once.",
+				"description": "The line number to start reading from (1-based, default: 1). Only provide if the file is too large to read at once.",
 			},
 			"limit": map[string]any{
 				"type":        "integer",

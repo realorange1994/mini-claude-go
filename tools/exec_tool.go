@@ -42,7 +42,9 @@ func (*ExecTool) Description() string {
 		"Commands run in the current working directory. " +
 		"On Windows, uses Git Bash if available, otherwise PowerShell. On Unix, use bash syntax. " +
 		"Supports running commands in the background with run_in_background=true. " +
-		"SAFETY: Commands targeting system directories (/etc, /usr, /bin, etc.) or using destructive patterns (rm -rf /, rm -rf ~) will be blocked. When deleting files, prefer targeted deletion over broad patterns."
+		"On timeout, the process continues running in the background — use task_output to check results later. " +
+		"SAFETY: Commands targeting system directories or using destructive patterns will be blocked. " +
+		"Use the env parameter to set environment variables (e.g. env={\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"})."
 }
 
 func (*ExecTool) InputSchema() map[string]any {
@@ -63,11 +65,16 @@ func (*ExecTool) InputSchema() map[string]any {
 			},
 			"timeout": map[string]any{
 				"type":        "integer",
-				"description": "Timeout in milliseconds (max 600000 / 10 minutes). Default: 120000 (2 minutes).",
+				"description": "Timeout in milliseconds (max 600000 / 10 min). Default: 120000 (2 min). On timeout, the process continues in the background — use task_output to check results.",
 			},
 			"run_in_background": map[string]any{
 				"type":        "boolean",
 				"description": "Set to true to run this command in the background. Returns immediately with a task ID. Use task_output to read results later.",
+			},
+			"env": map[string]any{
+				"type":        "object",
+				"description": "Environment variables to set for the command. Keys are variable names, values are strings. Example: {\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}. Only safe variables are allowed (PATH, HOME, etc. are NOT settable via this param — use shell syntax like PATH=/usr/bin cmd instead).",
+				"additionalProperties": map[string]any{"type": "string"},
 			},
 		},
 		"required": []string{"command"},
@@ -310,6 +317,17 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	cmd.Dir = wd
 	cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
 
+	// Set environment variables from env parameter
+	if envParams, ok := params["env"].(map[string]any); ok && len(envParams) > 0 {
+		// Build env list: inherit current env + override with provided vars
+		cmdEnv := os.Environ()
+		for k, v := range envParams {
+			valStr, _ := v.(string)
+			cmdEnv = append(cmdEnv, k+"="+valStr)
+		}
+		cmd.Env = cmdEnv
+	}
+
 	// Set up process group on Unix so we can kill the entire tree on user interrupt.
 	// No-op on Windows.
 	setupProcessGroup(cmd)
@@ -443,7 +461,7 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		// Fallback: no callback — return timeout info (process continues)
 		return ToolResult{
 			Output: fmt.Sprintf(
-				"Error: command timed out after %dms and is continuing in the background.",
+				"Error: command timed out after %dms and is continuing in the background.\nIncrease timeout or use run_in_background=true for long-running commands.",
 				timeoutMs),
 			IsError: true,
 		}

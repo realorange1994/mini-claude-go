@@ -35,7 +35,10 @@ type WebSearchTool struct{}
 
 func (*WebSearchTool) Name() string { return "web_search_scraper" }
 func (*WebSearchTool) Description() string {
-	return "Search the web using Bing/360 HTML scraping. Fallback search when web_search fails."
+	return "Search the web for information. Use this tool when you need current data, documentation, error solutions, or any information not in your training data. " +
+		"Returns titles, URLs, and snippets. Use web_fetch to get full content from a specific URL. " +
+		"Uses Bing with 360 (so.com) fallback for China. " +
+		"Limitations: cannot search authenticated/private sites; results may be stale for very recent events."
 }
 
 func (*WebSearchTool) InputSchema() map[string]any {
@@ -44,11 +47,11 @@ func (*WebSearchTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"query": map[string]any{
 				"type":        "string",
-				"description": "Search query",
+				"description": "Search query. Use specific, targeted keywords for best results.",
 			},
 			"count": map[string]any{
 				"type":        "integer",
-				"description": "Number of results (1-10, default: 10)",
+				"description": "Number of results to return (1-10, default: 10). More results = more context tokens used.",
 			},
 		},
 		"required": []string{"query"},

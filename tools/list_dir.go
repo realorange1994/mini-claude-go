@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ListDirTool lists directory contents with optional recursion.
@@ -13,9 +14,11 @@ type ListDirTool struct{}
 
 func (*ListDirTool) Name() string        { return "list_dir" }
 func (*ListDirTool) Description() string {
-	return "List directory contents. Shows files and subdirectories. " +
+	return "List directory contents with file details. " +
 		"ALWAYS use list_dir to explore directories. Prefer over exec('ls') or exec('dir'). " +
-		"Supports recursive listing with ignored directories (.git, node_modules, etc.)."
+		"Shows file type (file/directory/symlink), size in bytes, and last modification time. " +
+		"Supports recursive listing with ignored directories (.git, node_modules, etc.). " +
+		"Use show_hidden=true to include dotfiles and hidden entries."
 }
 
 func (*ListDirTool) InputSchema() map[string]any {
@@ -33,6 +36,10 @@ func (*ListDirTool) InputSchema() map[string]any {
 			"max_entries": map[string]any{
 				"type":        "integer",
 				"description": "Maximum number of entries to return (default: 200).",
+			},
+			"show_hidden": map[string]any{
+				"type":        "boolean",
+				"description": "Include hidden entries (dotfiles/dotdirs like .gitignore). Default: false.",
 			},
 		},
 		"required": []string{},
@@ -53,6 +60,7 @@ func (t *ListDirTool) ExecuteContext(ctx context.Context, params map[string]any)
 		pathStr = "."
 	}
 	recursive, _ := params["recursive"].(bool)
+	showHidden, _ := params["show_hidden"].(bool)
 
 	maxEntries := 200
 	if me, ok := params["max_entries"]; ok {
@@ -76,9 +84,9 @@ func (t *ListDirTool) ExecuteContext(ctx context.Context, params map[string]any)
 	var entries []string
 	total := 0
 	if recursive {
-		entries, total = listDirRecursive(dir, maxEntries)
+		entries, total = listDirRecursive(dir, maxEntries, showHidden)
 	} else {
-		entries, total = listDirSimple(dir, maxEntries)
+		entries, total = listDirSimple(dir, maxEntries, showHidden)
 	}
 
 	if len(entries) == 0 && total == 0 {
@@ -97,7 +105,7 @@ func (t *ListDirTool) Execute(params map[string]any) ToolResult {
 	return t.ExecuteContext(context.Background(), params)
 }
 
-func listDirSimple(dir string, maxEntries int) ([]string, int) {
+func listDirSimple(dir string, maxEntries int, showHidden bool) ([]string, int) {
 	f, err := os.Open(dir)
 	if err != nil {
 		return nil, 0
@@ -112,6 +120,10 @@ func listDirSimple(dir string, maxEntries int) ([]string, int) {
 			break
 		}
 		for _, name := range names {
+			// Skip hidden entries unless showHidden is true
+			if !showHidden && strings.HasPrefix(name, ".") {
+				continue
+			}
 			total++
 			if len(entries) >= maxEntries {
 				continue
@@ -122,9 +134,9 @@ func listDirSimple(dir string, maxEntries int) ([]string, int) {
 				continue
 			}
 			if info.IsDir() {
-				entries = append(entries, name+"/")
+				entries = append(entries, fmt.Sprintf("%-40s  DIR  %s", name+"/", info.ModTime().Format(time.RFC3339)))
 			} else {
-				entries = append(entries, name)
+				entries = append(entries, fmt.Sprintf("%-40s  %8d  %s", name, info.Size(), info.ModTime().Format(time.RFC3339)))
 			}
 		}
 		if len(names) < 100 {
@@ -134,7 +146,7 @@ func listDirSimple(dir string, maxEntries int) ([]string, int) {
 	return entries, total
 }
 
-func listDirRecursive(root string, maxEntries int) ([]string, int) {
+func listDirRecursive(root string, maxEntries int, showHidden bool) ([]string, int) {
 	var entries []string
 	total := 0
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -148,6 +160,14 @@ func listDirRecursive(root string, maxEntries int) ([]string, int) {
 		if rel == "." {
 			return nil
 		}
+		// Skip hidden entries unless showHidden is true
+		baseName := filepath.Base(path)
+		if !showHidden && strings.HasPrefix(baseName, ".") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		// Skip ignored directories
 		if info.IsDir() {
 			dirName := filepath.Base(path)
@@ -158,9 +178,9 @@ func listDirRecursive(root string, maxEntries int) ([]string, int) {
 		total++
 		if len(entries) < maxEntries {
 			if info.IsDir() {
-				entries = append(entries, rel+"/")
+				entries = append(entries, fmt.Sprintf("%-50s  DIR  %s", rel+"/", info.ModTime().Format(time.RFC3339)))
 			} else {
-				entries = append(entries, rel)
+				entries = append(entries, fmt.Sprintf("%-50s  %8d  %s", rel, info.Size(), info.ModTime().Format(time.RFC3339)))
 			}
 		}
 		return nil
