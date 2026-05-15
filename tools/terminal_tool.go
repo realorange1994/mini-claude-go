@@ -28,7 +28,7 @@ func (*TerminalTool) Description() string {
 	if hasScreen {
 		avail = append(avail, "screen")
 	}
-	return fmt.Sprintf("Terminal session management via tmux or screen. Available: %s. Supports list, new, detach, attach, send, kill, and rename operations.", strings.Join(avail, ", "))
+	return fmt.Sprintf("Terminal session management via tmux or screen. Available: %s. Supports list, new, send, kill, and rename operations. (attach/detach require a real TTY — agent returns instructions)", strings.Join(avail, ", "))
 }
 
 func (*TerminalTool) InputSchema() map[string]any {
@@ -116,6 +116,16 @@ func (*TerminalTool) Execute(params map[string]any) ToolResult {
 
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
+
+	// detach in a non-interactive agent context: "no current client" is expected
+	// (the agent process is never attached to a tmux/screen session)
+	if operation == "detach" && err != nil {
+		if strings.Contains(output, "no current client") || strings.Contains(output, "No current client") {
+			return ToolResult{Output: "No client attached to detach (this is normal — the agent process does not attach to sessions)."}
+		}
+		return ToolResult{Output: output, IsError: true}
+	}
+
 	if err != nil {
 		return ToolResult{Output: output, IsError: true}
 	}
