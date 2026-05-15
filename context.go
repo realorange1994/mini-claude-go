@@ -1217,10 +1217,12 @@ func (c *ConversationContext) truncateIfNeeded() {
 		// in Summary/Attachment entries were permanently dropped).
 		c.entries = append(first, recent...)
 
-		// After truncation, validate tool pairing and fix role alternation.
-		// Naive slice truncation can orphan tool_results and leave
-		// consecutive same-role messages, both causing API error 2013.
-		c.ValidateToolPairing()
+		// After truncation, fix role alternation.
+		// Do NOT call ValidateToolPairing here — it fires from AddAssistantToolCalls()
+		// BEFORE AddToolResults() has been called, causing Pass 3 to see "missing"
+		// tool_results (which are merely pending) and insert error placeholders.
+		// ValidateToolPairing is called by BuildMessages() just before the API request,
+		// when all tool results are present.
 		c.FixRoleAlternation()
 	}
 }

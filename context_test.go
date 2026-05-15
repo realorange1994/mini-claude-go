@@ -1380,7 +1380,9 @@ func TestToolResultStorePersistJSON(t *testing.T) {
 	store := NewToolResultStore(dir, "session1")
 
 	jsonContent := `{"results": [{"file": "main.go", "line": 42}]}`
-	result := store.maybePersistToolResult("toolu_json", "Grep", jsonContent, 10)
+
+	// Persist JSON result using maybePersistToolResult (threshold=0 forces persist)
+	result := store.maybePersistToolResult("toolu_json", "Grep", jsonContent, 0)
 	if result == "" {
 		t.Error("expected persisted result for JSON content")
 	}
@@ -1392,5 +1394,73 @@ func TestToolResultStorePersistJSON(t *testing.T) {
 	}
 	if content != jsonContent {
 		t.Errorf("expected JSON content, got %q", content)
+	}
+}
+
+// TestTruncateAfterToolUseDoesNotInsertError verifies that calling
+// AddAssistantToolCalls followed by truncateIfNeeded() does NOT insert
+// "[Tool result missing due to internal error]" placeholders. The tool_use
+// is pending — results are expected from AddToolResults(). Inserting
+// placeholders at this point was the root cause of the "internal error" bug.
+func TestTruncateAfterToolUseDoesNotInsertError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MaxContextMsgs = 4 // Small limit to force truncation
+	ctx := NewConversationContext(cfg)
+
+	// Fill up with messages to trigger truncation on next add
+	ctx.AddUserMessage("msg1")
+	ctx.AddAssistantText("resp1")
+	ctx.AddUserMessage("msg2")
+	ctx.AddAssistantText("resp2")
+
+	// Add tool_use — this triggers truncateIfNeeded() which previously
+	// would have called ValidateToolPairing() and inserted error placeholders
+	// because the tool_result hadn't arrived yet.
+	ctx.AddAssistantToolCalls([]map[string]any{
+		{"id": "call_abc", "name": "lisp_eval", "input": map[string]any{}},
+	})
+
+	// Verify no synthetic error results were inserted into entries
+	for i, e := range ctx.entries {
+		if e.role == "user" {
+			if results, ok := e.content.(ToolResultContent); ok {
+				for _, r := range results {
+					for _, c := range r.Content {
+						if c.OfText != nil && c.OfText.Text == "[Tool result missing due to internal error]" {
+							t.Fatalf("found premature error placeholder in entry %d — ValidateToolPairing() must NOT run before tool_results are added", i)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Now add the tool_result and verify pairing is valid
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "call_abc", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "42"}},
+		}},
+	})
+
+	// ValidateToolPairing should now see a valid pair
+	ctx.ValidateToolPairing()
+
+	// Count entries — should still be valid, no synthetic error placeholders
+	syntheticCount := 0
+	for _, e := range ctx.entries {
+		if e.role == "user" {
+			if results, ok := e.content.(ToolResultContent); ok {
+				for _, r := range results {
+					for _, c := range r.Content {
+						if c.OfText != nil && c.OfText.Text == "[Tool result missing due to internal error]" {
+							syntheticCount++
+						}
+					}
+				}
+			}
+		}
+	}
+	if syntheticCount > 0 {
+		t.Errorf("found %d synthetic error placeholders after valid pair was added", syntheticCount)
 	}
 }

@@ -1350,6 +1350,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		// Streaming vs non-streaming decision
 		streamingExecDone := false // set true when streaming executor handled tool calls
+		toolCallsAddedToContext := false // tracks if AddAssistantToolCalls was already called
 		if a.useStream {
 			// Create streaming tool executor for pipelined tool execution.
 			// Tools start executing as their content blocks complete during streaming,
@@ -1370,6 +1371,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				// If we add results first, BuildMessages produces user(tool_result)
 				// before assistant(tool_use), causing API error 2013.
 				a.context.AddAssistantToolCalls(toolCalls)
+				toolCallsAddedToContext = true // streaming path already added tool_use
 
 				streamingResults := executor.Wait(len(toolCalls))
 				if len(streamingResults) > 0 {
@@ -1605,8 +1607,8 @@ func (a *AgentLoop) Run(userMessage string) string {
 			})
 		}
 
-		// Add tool_use blocks to context (skip if streaming executor already added them)
-		if !streamingExecDone {
+		// Add tool_use blocks to context (skip if already added by streaming path)
+		if !toolCallsAddedToContext {
 			a.context.AddAssistantToolCalls(toolCalls)
 		}
 
