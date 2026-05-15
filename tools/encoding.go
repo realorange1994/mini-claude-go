@@ -389,10 +389,19 @@ func isValidUTF8(data []byte) bool {
 	return true
 }
 
-// stripBOM removes a BOM of the specified size from the beginning of data.
+// stripBOM removes a BOM from the beginning of data only if it matches the expected BOM bytes.
 func stripBOM(data []byte, bomSize int) []byte {
-	if len(data) >= bomSize {
-		return data[bomSize:]
+	switch bomSize {
+	case 2:
+		// UTF-16 LE BOM: FF FE, or UTF-16 BE BOM: FE FF
+		if len(data) >= 2 && ((data[0] == 0xFF && data[1] == 0xFE) || (data[0] == 0xFE && data[1] == 0xFF)) {
+			return data[2:]
+		}
+	case 3:
+		// UTF-8 BOM: EF BB BF
+		if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+			return data[3:]
+		}
 	}
 	return data
 }
