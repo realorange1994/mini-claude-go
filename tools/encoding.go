@@ -26,6 +26,7 @@ const (
 type FileMetadata struct {
 	Encoding    string // "utf-8" or "utf-16le" (BOM-based, matching upstream)
 	LineEndings string // "LF" or "CRLF"
+	HasBOM      bool   // true if the original file had a UTF-8 BOM (EF BB BF)
 }
 
 // DecodeFileContent reads raw file bytes, detects encoding via BOM, decodes
@@ -34,7 +35,8 @@ type FileMetadata struct {
 //
 // This matches upstream's readFileSyncWithMetadata() behavior:
 //   - UTF-16 LE BOM (FF FE) → decode via utf16, encoding="utf-16le"
-//   - UTF-8 BOM (EF BB BF) → strip BOM, encoding="utf-8"
+//   - UTF-16 LE without BOM → heuristic detection (null byte pattern), encoding="utf-16le"
+//   - UTF-8 BOM (EF BB BF) → strip BOM, encoding="utf-8", hasBOM=true
 //   - Otherwise → treat as UTF-8, encoding="utf-8"
 //   - CRLF → normalize to LF for internal use, lineEndings="CRLF"
 func DecodeFileContent(data []byte) (content string, meta FileMetadata) {
@@ -44,9 +46,14 @@ func DecodeFileContent(data []byte) (content string, meta FileMetadata) {
 	}
 
 	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
-		// UTF-16 LE BOM detected — decode to UTF-8 string
+		// UTF-16 LE BOM detected
 		meta.Encoding = EncodingUTF16LE
 		u16s := bytesToUint16LE(data[2:])
+		content = string(utf16.Decode(u16s))
+	} else if detectUTF16LEWithoutBOM(data) {
+		// UTF-16 LE without BOM (heuristic)
+		meta.Encoding = EncodingUTF16LE
+		u16s := bytesToUint16LE(data)
 		content = string(utf16.Decode(u16s))
 	} else {
 		content = string(data)
@@ -60,9 +67,10 @@ func DecodeFileContent(data []byte) (content string, meta FileMetadata) {
 	// Normalize CRLF to LF for internal processing
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 
-	// Strip UTF-8 BOM (matching official Claude Code behavior)
+	// Strip UTF-8 BOM but record that it existed (matching official behavior)
 	if strings.HasPrefix(content, "\xEF\xBB\xBF") {
 		content = content[3:]
+		meta.HasBOM = true
 	}
 
 	return content, meta
@@ -86,6 +94,11 @@ func EncodeFileContent(content string, meta FileMetadata) []byte {
 		return encodeUTF16LE(content)
 	}
 
+	// Restore UTF-8 BOM if the original file had one
+	if meta.HasBOM {
+		return append([]byte{0xEF, 0xBB, 0xBF}, []byte(content)...)
+	}
+
 	return []byte(content)
 }
 
@@ -97,6 +110,39 @@ func ReadFileWithMetadata(data []byte) (string, FileMetadata) {
 }
 
 // --- Arbitrary encoding support (golang.org/x/text) ---
+
+// detectUTF16LEWithoutBOM uses heuristics to detect UTF-16 LE files that lack a BOM.
+// UTF-16 LE has a distinctive pattern: ASCII characters appear as pairs where the
+// second byte is 0x00 (e.g., 'H' = 0x48 0x00, 'e' = 0x65 0x00).
+// Returns true if the data strongly resembles UTF-16 LE encoding.
+func detectUTF16LEWithoutBOM(data []byte) bool {
+	if len(data) < 4 || len(data)%2 != 0 {
+		return false
+	}
+
+	// Count how many 2-byte pairs have the pattern: non-zero byte followed by 0x00
+	// This is the signature of ASCII/low-Unicode chars in UTF-16 LE
+	nullSecond := 0
+	totalPairs := len(data) / 2
+	for i := 0; i < totalPairs; i++ {
+		lo := data[2*i]
+		hi := data[2*i+1]
+		// ASCII range: lo is printable ASCII (0x20-0x7E) or control chars (0x0A, 0x0D),
+		// hi is 0x00
+		if hi == 0x00 && (lo >= 0x20 && lo <= 0x7E || lo == 0x0A || lo == 0x0D || lo == 0x09) {
+			nullSecond++
+		}
+	}
+
+	// If more than 70% of pairs match the UTF-16 LE ASCII pattern, it's very likely UTF-16 LE
+	// This threshold avoids false positives on pure ASCII (where every byte is < 0x80)
+	// because in pure ASCII, the "hi" bytes would also be ASCII chars, not 0x00
+	if totalPairs > 0 && float64(nullSecond)/float64(totalPairs) > 0.70 {
+		return true
+	}
+
+	return false
+}
 
 // DetectCharset detects the charset of file content using multiple strategies:
 // 1. BOM detection (UTF-16 LE, UTF-8 BOM)
@@ -204,12 +250,17 @@ func IsSupportedEncoding(encName string) bool {
 
 // IsLikelyNonUTF8 checks if file content is likely not UTF-8 encoded.
 // Used by existing tools to detect when they should suggest the file_encoding tool.
-// Returns the detected encoding name if non-UTF-8, or empty string if likely UTF-8.
+// Returns the detected encoding name if non-UTF-8, or empty string if likely UTF-8
+// or if the encoding is handled by the existing tools (UTF-16 LE, with or without BOM).
 func IsLikelyNonUTF8(data []byte) string {
-	// BOM-based detection is handled by DecodeFileContent already
-	// (UTF-16 LE is supported by existing tools)
+	// UTF-16 LE with BOM is fully supported by existing tools
 	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
-		return "" // UTF-16 LE is supported
+		return ""
+	}
+
+	// UTF-16 LE without BOM is now supported by DecodeFileContent (heuristic detection)
+	if detectUTF16LEWithoutBOM(data) {
+		return ""
 	}
 
 	// Check if content is valid UTF-8
