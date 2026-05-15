@@ -29,12 +29,10 @@ func (*FileEncodingTool) Description() string {
 		"errors.\n\n" +
 		"Auto-detects encoding if not specified. Encoding detection uses byte-pattern analysis " +
 		"from golang.org/x/net/html/charset.\n\n" +
-		"Operations:\n" +
-		"- detect: Only detect the encoding, returns encoding name and a preview\n" +
-		"- read: Read the file, decode from specified/ detected encoding to UTF-8\n" +
-		"- write: Write content to the file, encode with the specified encoding\n" +
-		"- edit: Single search-and-replace, preserves original encoding\n" +
-		"- multi_edit: Multiple search-and-replace edits applied atomically, preserves original encoding\n\n" +
+		"Usage:\n" +
+		"- For read/edit/multi_edit: auto-detects encoding if not specified.\n" +
+		"- For write: follows write_file convention — you MUST use file_encoding read first for existing files. New files default to UTF-8.\n" +
+		"- edit/multi_edit: follows edit_file/multi_edit convention — read-before-write validation.\n\n" +
 		"Common encoding names: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, " +
 		"iso-8859-1 (latin-1), windows-1252, windows-1251."
 }
@@ -252,6 +250,19 @@ func (e *FileEncodingTool) write(pathStr string, params map[string]any) ToolResu
 		return ToolResult{Output: "Error: content is required for write operation", IsError: true}
 	}
 
+	// Size limit (matching write_file convention)
+	const maxWriteSize = 10 * 1024 * 1024 // 10MB
+	if len(content) > maxWriteSize {
+		return ToolResult{Output: fmt.Sprintf("Error: content too large (%d bytes, max %d bytes)", len(content), maxWriteSize), IsError: true}
+	}
+
+	// Read-before-write validation and concurrent modification detection
+	if e.registry != nil {
+		if staleMsg := e.registry.CheckFileStale(fp); staleMsg != "" {
+			return ToolResult{Output: staleMsg, IsError: true}
+		}
+	}
+
 	encName := getEncodingParam(params)
 	if encName == "" {
 		// If file already exists, preserve its encoding; otherwise default to utf-8
@@ -291,7 +302,14 @@ func (e *FileEncodingTool) write(pathStr string, params map[string]any) ToolResu
 		e.registry.MarkFileReadWithContent(fp, content)
 	}
 
-	return ToolResult{Output: fmt.Sprintf("Wrote %d chars to %s (encoding: %s)", len(content), fp, encName)}
+	out := fmt.Sprintf("Wrote %d chars to %s (encoding: %s)", len(content), fp, encName)
+	// Large file warning (matching write_file convention)
+	const warnThreshold = 1024 * 1024 // 1MB
+	if len(content) > warnThreshold {
+		sizeMB := float64(len(content)) / (1024 * 1024)
+		out += fmt.Sprintf("\n[WARN] Large file written (%.1f MB). Confirm with the user before proceeding.", sizeMB)
+	}
+	return ToolResult{Output: out}
 }
 
 func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResult {
@@ -307,6 +325,13 @@ func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResul
 	newStr := getParam(params, "new_string", "content")
 
 	replaceAll, _ := params["replace_all"].(bool)
+
+	// Read-before-write validation and concurrent modification detection
+	if e.registry != nil {
+		if staleMsg := e.registry.CheckFileStale(fp); staleMsg != "" {
+			return ToolResult{Output: staleMsg, IsError: true}
+		}
+	}
 
 	// Read file
 	data, err := os.ReadFile(fp)
@@ -384,6 +409,13 @@ func (e *FileEncodingTool) multiEdit(pathStr string, params map[string]any) Tool
 	fp := expandPath(pathStr)
 	if isUncPath(fp) {
 		return ToolResult{Output: fmt.Sprintf("Error: UNC path access deferred: %s", pathStr), IsError: true}
+	}
+
+	// Read-before-write validation and concurrent modification detection
+	if e.registry != nil {
+		if staleMsg := e.registry.CheckFileStale(fp); staleMsg != "" {
+			return ToolResult{Output: staleMsg, IsError: true}
+		}
 	}
 
 	// Parse edits
