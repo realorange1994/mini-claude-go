@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"miniclaudecode-go/permissions"
 	"miniclaudecode-go/tools"
 )
 
@@ -365,4 +366,203 @@ func gateCheck(t *testing.T, cfg Config, tool *mockTool, params map[string]any) 
 	t.Helper()
 	gate := NewPermissionGate(&cfg)
 	return gate.Check(tool, params)
+}
+
+// Regression test: switching from auto to bypass mode must restore stripped allow rules.
+// When in auto mode, Check() strips dangerous allow rules from the ruleStore and stashes
+// them in g.strippedRules. If the mode changes to bypass, those rules must be restored
+// so that bypass mode can actually allow everything. Without the fix, stripped rules were
+// never restored when leaving auto mode, causing bypass to still deny some tools.
+func TestPermissionGate_AutoToBypass_RestoresStrippedRules(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModeAuto
+	cfg.ShouldAvoidPermissionPrompts = true // avoid interactive prompts in test
+
+	gate := NewPermissionGate(&cfg)
+
+	// Add a ruleStore with a dangerous allow rule
+	rs := permissions.NewRuleStore()
+	rule, _ := permissions.ParseRule("Bash")
+	rule.Behavior = "allow"
+	rs.AddRules("session", "allow", []*permissions.ParsedRule{rule})
+	gate.WithRuleStore(rs, "/tmp")
+
+	// Verify the rule exists before stripping
+	if !rs.HasAllowRule("Bash") {
+		t.Fatal("allow rule should exist before auto mode check")
+	}
+
+	// Check in auto mode — this strips dangerous allow rules
+	tool := &mockTool{name: "Bash", permissions: tools.PermissionResultPassthrough()}
+	result := gate.Check(tool, map[string]any{"command": "python script.py"})
+	// In auto mode without classifier, should allow
+	if result != nil {
+		t.Logf("auto mode result: %s", result.Output)
+	}
+
+	// After auto mode check, dangerous allow rules should be stripped
+	// (they're stashed in gate.strippedRules, restored on exit from Check)
+	// But if mode stays auto, they may be stripped again on next call.
+	// The key test: switch to bypass mode
+
+	cfg.PermissionMode = ModeBypass
+
+	// Check in bypass mode — should allow everything
+	result = gate.Check(tool, map[string]any{"command": "python script.py"})
+	if result != nil {
+		t.Errorf("bypass mode should allow all tools, got denial: %s", result.Output)
+	}
+
+	// Verify stripped rules were restored
+	if gate.strippedRules != nil {
+		t.Error("strippedRules should be nil after switching away from auto mode")
+	}
+	if !rs.HasAllowRule("Bash") {
+		t.Error("allow rule should be restored after switching from auto to bypass")
+	}
+}
+
+// Test that switching from auto to ask mode also restores stripped rules.
+func TestPermissionGate_AutoToAsk_RestoresStrippedRules(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModeAuto
+	cfg.ShouldAvoidPermissionPrompts = true
+
+	gate := NewPermissionGate(&cfg)
+
+	rs := permissions.NewRuleStore()
+	rule, _ := permissions.ParseRule("Bash")
+	rule.Behavior = "allow"
+	rs.AddRules("session", "allow", []*permissions.ParsedRule{rule})
+	gate.WithRuleStore(rs, "/tmp")
+
+	// Check in auto mode first
+	tool := &mockTool{name: "Bash", permissions: tools.PermissionResultPassthrough()}
+	gate.Check(tool, map[string]any{"command": "python script.py"})
+
+	// Switch to ask mode
+	cfg.PermissionMode = ModeAsk
+
+	// Stripped rules should be restored on next Check() call
+	gate.Check(tool, map[string]any{"command": "python script.py"})
+
+	if gate.strippedRules != nil {
+		t.Error("strippedRules should be nil after switching from auto to ask")
+	}
+	if !rs.HasAllowRule("Bash") {
+		t.Error("allow rule should be restored after switching from auto to ask")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Regression: plan mode read_file blocked by path validation default denial.
+// ValidateReadPath() returns Allowed=false by default for paths without
+// allow rules. In plan mode, STEP 1c's else branch hard-denied these
+// "other" reason failures, causing read_file to reject all normal files.
+// Fix: plan mode skips path-based denials for read-only tools.
+// ---------------------------------------------------------------------------
+
+func TestPermissionGate_PlanMode_ReadFile_PathValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModePlan
+
+	// read_file with a file path — must not be blocked by path validation
+	tool := &mockTool{name: "read_file", permissions: tools.PermissionResultPassthrough()}
+	result := gateCheck(t, cfg, tool, map[string]any{"file_path": "/etc/hosts"})
+	if result != nil {
+		t.Errorf("plan mode must allow read_file with path, got: %s", result.Output)
+	}
+}
+
+func TestPermissionGate_PlanMode_Glob_PathValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModePlan
+
+	// glob does not trigger path validation (no file_path param), but
+	// verify it still works in plan mode
+	tool := &mockTool{name: "glob", permissions: tools.PermissionResultPassthrough()}
+	result := gateCheck(t, cfg, tool, map[string]any{"pattern": "**/*.go"})
+	if result != nil {
+		t.Errorf("plan mode must allow glob, got: %s", result.Output)
+	}
+}
+
+func TestPermissionGate_PlanMode_Grep_PathValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModePlan
+
+	// grep does not trigger path validation, but verify it still works
+	tool := &mockTool{name: "grep", permissions: tools.PermissionResultPassthrough()}
+	result := gateCheck(t, cfg, tool, map[string]any{"pattern": "TODO", "path": "/tmp"})
+	if result != nil {
+		t.Errorf("plan mode must allow grep, got: %s", result.Output)
+	}
+}
+
+func TestPermissionGate_PlanMode_ListDir_Allowed(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModePlan
+
+	// list_dir must be allowed in plan mode
+	tool := &mockTool{name: "list_dir", permissions: tools.PermissionResultPassthrough()}
+	result := gateCheck(t, cfg, tool, map[string]any{"path": "/tmp"})
+	if result != nil {
+		t.Errorf("plan mode must allow list_dir, got: %s", result.Output)
+	}
+}
+
+// Plan mode must still block write tools even when they have file paths
+// (path validation + plan mode write block should both deny).
+func TestPermissionGate_PlanMode_WriteFile_Blocked(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModePlan
+
+	tool := &mockTool{name: "write_file", permissions: tools.PermissionResultPassthrough()}
+	result := gateCheck(t, cfg, tool, map[string]any{"file_path": "/tmp/test.txt", "content": "hello"})
+	if result == nil {
+		t.Error("plan mode must block write_file")
+	}
+}
+
+func TestPermissionGate_PlanMode_EditFile_Blocked(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModePlan
+
+	tool := &mockTool{name: "edit_file", permissions: tools.PermissionResultPassthrough()}
+	result := gateCheck(t, cfg, tool, map[string]any{"file_path": "/tmp/test.txt"})
+	if result == nil {
+		t.Error("plan mode must block edit_file")
+	}
+}
+
+func TestPermissionGate_PlanMode_Exec_Blocked(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModePlan
+
+	tool := &mockTool{name: "exec", permissions: tools.PermissionResultPassthrough()}
+	result := gateCheck(t, cfg, tool, map[string]any{"command": "echo hello"})
+	if result == nil {
+		t.Error("plan mode must block exec")
+	}
+}
+
+// Plan mode + bypass mode inheritance: when the rule store has dangerous
+// allow rules, plan mode should allow read tools even through path validation.
+func TestPermissionGate_PlanMode_ReadFile_WithRuleStore(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PermissionMode = ModePlan
+
+	gate := NewPermissionGate(&cfg)
+	rs := permissions.NewRuleStore()
+	rule, _ := permissions.ParseRule("Bash")
+	rule.Behavior = "allow"
+	rs.AddRules("session", "allow", []*permissions.ParsedRule{rule})
+	gate.WithRuleStore(rs, "/tmp")
+
+	// read_file must still be allowed — Bash rule should not affect it
+	tool := &mockTool{name: "read_file", permissions: tools.PermissionResultPassthrough()}
+	result := gate.Check(tool, map[string]any{"file_path": "/etc/hosts"})
+	if result != nil {
+		t.Errorf("plan mode must allow read_file even with rule store, got: %s", result.Output)
+	}
 }

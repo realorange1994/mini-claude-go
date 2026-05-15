@@ -587,7 +587,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent := &AgentLoop{
 		config:            cfg,
 		registry:          registry,
-		gate:              NewPermissionGate(&cfg), // points to agent.config after assignment
+		gate:              nil, // set below to point to agent.config
 		context:           ctx,
 		client:            client,
 		snapshots:         cfg.FileHistory,
@@ -2854,66 +2854,34 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 		}
 	}
 
-	// Execute approved tool calls concurrently
-	type jobResult struct {
-		index  int
-		param  anthropic.ToolResultBlockParam
-		output string
-	}
-	ch := make(chan jobResult, len(entries))
-
+	// Execute approved tool calls sequentially to preserve LLM-intended order
 	for _, e := range entries {
-		go func(ent toolCallEntry) {
-			// Safe extraction of toolUseID (guard against missing id)
-			toolUseID, _ := ent.call["id"].(string)
-			if toolUseID == "" {
-				toolUseID = "synthetic_tool_use_id"
-			}
-			// Check for interrupt before starting each tool
-			if a.IsInterrupted() {
-				ch <- jobResult{
-					index: ent.index,
-					param: anthropic.ToolResultBlockParam{
-						ToolUseID: toolUseID,
-						Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "Interrupted by user"}}},
-						IsError:   param.NewOpt(true),
-					},
-					output: "Interrupted by user",
-				}
-				return
-			}
-			if ent.denied {
-				ch <- jobResult{
-					index: ent.index,
-					param: anthropic.ToolResultBlockParam{
-						ToolUseID: toolUseID,
-						Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: ent.errText}}},
-						IsError:   param.NewOpt(true),
-					},
-					output: ent.errText,
-				}
-				return
-			}
-			// Skip already-validated gate check in executeSingleTool
-			param, output := a.executeSingleToolApproved(ent.call)
-			ch <- jobResult{index: ent.index, param: param, output: output}
-		}(e)
-	}
-
-		// Collect results and sort by original index
-	collected := make([]jobResult, 0, len(entries))
-	for i := 0; i < len(entries); i++ {
-		jr := <-ch
-		collected = append(collected, jr)
-	}
-	// Sort by index to preserve original order
-	sort.Slice(collected, func(i, j int) bool {
-		return collected[i].index < collected[j].index
-	})
-
-	// Append results in order
-	for _, jr := range collected {
-		toolResults = append(toolResults, jr.param)
+		// Safe extraction of toolUseID (guard against missing id)
+		toolUseID, _ := e.call["id"].(string)
+		if toolUseID == "" {
+			toolUseID = "synthetic_tool_use_id"
+		}
+		// Check for interrupt before starting each tool
+		if a.IsInterrupted() {
+			toolResults = append(toolResults, anthropic.ToolResultBlockParam{
+				ToolUseID: toolUseID,
+				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "Interrupted by user"}}},
+				IsError:   param.NewOpt(true),
+			})
+			continue
+		}
+		if e.denied {
+			toolResults = append(toolResults, anthropic.ToolResultBlockParam{
+				ToolUseID: toolUseID,
+				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: e.errText}}},
+				IsError:   param.NewOpt(true),
+			})
+			continue
+		}
+		// Skip already-validated gate check in executeSingleTool
+		p, output := a.executeSingleToolApproved(e.call)
+		toolResults = append(toolResults, p)
+		_ = output
 	}
 
 	a.context.AddToolResults(toolResults)

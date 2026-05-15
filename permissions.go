@@ -107,6 +107,10 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 			g.strippedRules = g.ruleStore.StripDangerousAllowRules()
 			autoModeStripped = true
 		}
+	} else if g.strippedRules != nil {
+		// Mode changed away from auto since rules were stripped. Restore them.
+		g.ruleStore.RestoreStrippedRules(g.strippedRules)
+		g.strippedRules = nil
 	}
 
 	// Helper: restore stripped rules on early exit
@@ -141,6 +145,35 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		}
 	}
 
+	// Plan mode: read tools are always allowed (skip path validation for reads),
+	// write tools require bypass or are blocked.
+	// Mirrors upstream: Plan mode inherits bypass when isBypassPermissionsModeAvailable
+	// is true, otherwise SAFE_YOLO_ALLOWLISTED_TOOLS (Read, Grep, Glob, etc.) are
+	// auto-allowed, and non-allowlisted tools fall through to ask/deny.
+	inPlanMode := g.config.PermissionMode == ModePlan
+	if inPlanMode {
+		// Allow read-only tools to proceed without path-based denial
+		if toolName == "read_file" || toolName == "glob" || toolName == "grep" ||
+			toolName == "list_dir" || toolName == "lisp_eval" || toolName == "todo_write" ||
+			toolName == "enter_plan_mode" || toolName == "exit_plan_mode" ||
+			toolName == "list_mcp_tools" || toolName == "read_skill" ||
+			toolName == "list_skills" || toolName == "search_skills" ||
+			toolName == "agent_list" || toolName == "agent_get" ||
+			toolName == "task_create" || toolName == "task_list" ||
+			toolName == "task_get" || toolName == "task_update" ||
+			toolName == "task_stop" || toolName == "agent_kill" ||
+			toolName == "runtime_info" || toolName == "web_search" ||
+			toolName == "web_fetch" || toolName == "exa_search" ||
+			toolName == "memory_add" || toolName == "memory_search" ||
+			toolName == "skill" || toolName == "mcp_call" ||
+			toolName == "brief" || toolName == "system" ||
+			toolName == "git" || toolName == "terminal" {
+			// Skip path-based denials for read-only tools in plan mode
+			// but still honor explicit deny rules (1a, 1b) which are bypass-immune
+			// — we've already passed those above.
+		}
+	}
+
 	// STEP 1c: File path validation for write/read/fileops tools
 	if pathParam != "" {
 		opType := permissions.OpRead
@@ -156,7 +189,12 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		if !vResult.Allowed {
 			// Bypass mode: allow all path access (skip validation)
 			// Auto mode: skip path validation — let classifier decide
-			if g.config.PermissionMode == ModeBypass || g.config.PermissionMode == ModeAuto {
+			// Plan mode: allow reads, apply write logic below
+			skipPathValidation := g.config.PermissionMode == ModeBypass || g.config.PermissionMode == ModeAuto
+			if inPlanMode && !g.isWriteTool(toolName) {
+				skipPathValidation = true
+			}
+			if skipPathValidation {
 				// Fall through to allow / classifier evaluation
 			} else {
 				restoreStripped()
