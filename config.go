@@ -372,6 +372,7 @@ func DefaultRegistry() *tools.Registry {
 	r.Register(&tools.SystemTool{})
 	r.Register(&tools.TerminalTool{})
 	r.Register(&tools.LispEvalTool{})
+	r.Register(&tools.LispToolsTool{})
 	r.Register(tools.NewFileEncodingTool(r))
 	// ToolSearchTool's Registry field is nil here; it is set by the agent loop
 	// after the registry is fully populated.

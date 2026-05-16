@@ -98,10 +98,10 @@ func parsePathnameString(s string) *LispPathname {
 		s = s[colonIdx+1:]
 		// Logical pathnames use semicolons as directory separators
 		if len(s) > 0 && s[0] == ';' {
-			p.directory = list(vsym(":absolute"))
+			p.directory = list(vsym(":ABSOLUTE"))
 			s = s[1:]
 		} else {
-			p.directory = list(vsym(":relative"))
+			p.directory = list(vsym(":RELATIVE"))
 		}
 		// Split on semicolons (logical pathname directory separator)
 		parts := []string{}
@@ -149,13 +149,13 @@ func parsePathnameString(s string) *LispPathname {
 	}
 	// Determine absolute vs relative
 	if len(s) > 0 && (s[0] == '/' || s[0] == '\\') {
-		p.directory = list(vsym(":absolute"))
+		p.directory = list(vsym(":ABSOLUTE"))
 		// Skip leading separators
 		for len(s) > 0 && (s[0] == '/' || s[0] == '\\') {
 			s = s[1:]
 		}
 	} else {
-		p.directory = list(vsym(":relative"))
+		p.directory = list(vsym(":RELATIVE"))
 	}
 	// Split directory components
 	parts := []string{}

@@ -359,17 +359,17 @@ func builtinOpen(args []*Value) (*Value, error) {
 		arg := args[i]
 		if arg.typ == VSym {
 			switch arg.str {
-			case ":direction":
+			case ":DIRECTION":
 				if i+1 < len(args) {
 					i++
 					direction = primaryValue(args[i]).str
 				}
-			case ":if-exists":
+			case ":IF-EXISTS":
 				if i+1 < len(args) {
 					i++
 					ifExists = primaryValue(args[i]).str
 				}
-			case ":if-does-not-exist":
+			case ":IF-DOES-NOT-EXIST":
 				if i+1 < len(args) {
 					i++
 					ifNotExist = primaryValue(args[i]).str
@@ -378,16 +378,16 @@ func builtinOpen(args []*Value) (*Value, error) {
 		}
 	}
 
-	// Strip leading : from keyword values
-	dirStr := direction
+	// Strip leading : from keyword values and lowercase for case-insensitive matching
+	dirStr := strings.ToLower(direction)
 	if len(dirStr) > 0 && dirStr[0] == ':' {
 		dirStr = dirStr[1:]
 	}
-	existsStr := ifExists
+	existsStr := strings.ToLower(ifExists)
 	if len(existsStr) > 0 && existsStr[0] == ':' {
 		existsStr = existsStr[1:]
 	}
-	notExistStr := ifNotExist
+	notExistStr := strings.ToLower(ifNotExist)
 	if len(notExistStr) > 0 && notExistStr[0] == ':' {
 		notExistStr = notExistStr[1:]
 	}
