@@ -36,6 +36,11 @@ func (*LispEvalTool) InputSchema() map[string]any {
 				"enum":        []string{"eval", "reset", "help", "examples"},
 				"description": "Action to perform: 'eval' to evaluate a Lisp expression (default), 'reset' to clear interpreter state, 'help' to show usage manual, 'examples' to show code examples.",
 			},
+			"limits": map[string]any{
+				"type":        "string",
+				"enum":        []string{"default", "strict", "unlimited"},
+				"description": "Resource limit profile for safety: 'default' (1M steps, 30s, 256MB heap) for normal use; 'strict' (100K steps, 10s, 64MB heap) for untrusted code; 'unlimited' disables all limits (REPL mode only). Defaults to 'default'.",
+			},
 		},
 		"required": []string{},
 	}
@@ -55,6 +60,7 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 
 	op, _ := params["operation"].(string)
 	expr, _ := params["expression"].(string)
+	limitsProfile, _ := params["limits"].(string)
 
 	switch op {
 	case "reset":
@@ -71,6 +77,18 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		if expr == "" {
 			return ToolResult{Output: "Error: expression is required. Examples: (+ 1 2) => 3, (car '(1 2 3)) => 1", IsError: true}
 		}
+
+		// Select resource limits based on profile
+		var limits microlisp.ResourceLimits
+		switch limitsProfile {
+		case "strict":
+			limits = microlisp.StrictLimits()
+		case "unlimited":
+			limits = microlisp.UnlimitedLimits()
+		default:
+			limits = microlisp.DefaultLimits()
+		}
+
 		// Run eval in a goroutine so we can respect context cancellation.
 		// The microlisp interpreter holds evalMu during execution, so
 		// we can't cancel mid-evaluation, but we can abort waiting for it.
@@ -80,7 +98,7 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		}
 		ch := make(chan evalResult, 1)
 		go func() {
-			result, err := microlisp.SafeEvalString(expr)
+			result, err := microlisp.SafeEvalWithLimits(expr, limits)
 			ch <- evalResult{result, err}
 		}()
 		select {

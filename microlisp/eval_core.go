@@ -38,6 +38,10 @@ func Eval(v *Value, env *Env) (result *Value, err error) {
 	if v == nil {
 		return vnil(), nil
 	}
+	// Resource safety check — aborts if step/time/memory limits exceeded
+	if err := stepCheck(); err != nil {
+		return nil, err
+	}
 	evalDepth++
 	if evalDepth > maxEvalDepth {
 		evalDepth--
@@ -2901,6 +2905,10 @@ evalLoop:
 }
 
 func Apply(fn *Value, args *Value, env *Env) (result *Value, err error) {
+	// Resource safety check
+	if err := stepCheck(); err != nil {
+		return nil, err
+	}
 	switch fn.typ {
 	case VPrim:
 		argSlice := toSlice(args)

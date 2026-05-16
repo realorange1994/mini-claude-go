@@ -1419,6 +1419,10 @@ func seqToList(v *Value) []*Value {
 }
 
 func callFnOnSeq(fn *Value, args []*Value, env *Env) (*Value, error) {
+	// Resource safety check
+	if err := stepCheck(); err != nil {
+		return nil, err
+	}
 	// Build argument list
 	argList := vnil()
 	for i := len(args) - 1; i >= 0; i-- {
