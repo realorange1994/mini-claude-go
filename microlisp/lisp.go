@@ -22976,9 +22976,9 @@ func builtinLogtest(args []*Value) (*Value, error) {
 	a := int64(toNum(args[0]))
 	b := int64(toNum(args[1]))
 	if a&b != 0 {
-		return vsym("T"), nil
+		return vbool(true), nil
 	}
-	return vnil(), nil
+	return vbool(false), nil
 }
 
 // -------- copy-alist --------
