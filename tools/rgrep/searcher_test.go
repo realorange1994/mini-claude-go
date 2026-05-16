@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -338,5 +339,101 @@ func TestSearchCompilesRegexCorrectly(t *testing.T) {
 		if gotError != tt.expectError {
 			t.Errorf("pattern %q: expected error=%v, got error=%v (%v)", tt.pattern, tt.expectError, gotError, err)
 		}
+	}
+}
+
+// ─── Regression: count mode must output path:count, NOT path:lineNum:content ─
+// Bug 2: output_mode: count was returning 文件:行号:内容 format instead of
+// pure path:count format matching ripgrep --count.
+
+func TestCountModeOutputFormat(t *testing.T) {
+	dir := t.TempDir()
+	// File with multiple matches on the same line
+	os.WriteFile(filepath.Join(dir, "multi.txt"), []byte("hello world hello\nhello\n"), 0644)
+	// File with no matches
+	os.WriteFile(filepath.Join(dir, "empty.txt"), []byte("nothing here\n"), 0644)
+
+	cfg := SearchConfig{
+		Pattern:    "hello",
+		Path:       dir,
+		OutputMode: OutputCount,
+		Ctx:        context.Background(),
+	}
+	sr := Search(cfg)
+	if sr.Err != nil {
+		t.Fatalf("unexpected error: %v", sr.Err)
+	}
+	if len(sr.Results) == 0 {
+		t.Fatal("expected at least one result in count mode")
+	}
+
+	// Verify format via FormatResult
+	output := FormatResult(sr, cfg)
+	// Each result line should be "path:count" — must NOT contain a second colon
+	// (which would indicate path:lineNum:content format)
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "(") || line == "" {
+			continue // skip summary lines
+		}
+		// Should be path:number format — exactly one colon
+		parts := strings.Split(line, ":")
+		if len(parts) != 2 {
+			t.Errorf("count output line should be 'path:count', got: %q", line)
+		}
+	}
+	// Verify total match count is correct (multi.txt has 3 matches)
+	if sr.TotalMatches != 3 {
+		t.Errorf("expected 3 total matches, got %d", sr.TotalMatches)
+	}
+}
+
+func TestCountModeSingleMatchPerFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("foo bar foo\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("foo\n"), 0644)
+
+	cfg := SearchConfig{
+		Pattern:    "foo",
+		Path:       dir,
+		OutputMode: OutputCount,
+		Ctx:        context.Background(),
+	}
+	sr := Search(cfg)
+	if len(sr.Results) != 2 {
+		t.Fatalf("expected 2 files with matches, got %d", len(sr.Results))
+	}
+	// a.txt should have count 2, b.txt should have count 1
+	counts := make(map[string]int)
+	for _, r := range sr.Results {
+		counts[r.Path] = r.LineNum // LineNum reused for count
+	}
+	if counts["a.txt"] != 2 {
+		t.Errorf("a.txt should have 2 matches, got %d", counts["a.txt"])
+	}
+	if counts["b.txt"] != 1 {
+		t.Errorf("b.txt should have 1 match, got %d", counts["b.txt"])
+	}
+}
+
+func TestCountModeOutputDoesNotContainContent(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "test.txt"), []byte("the quick brown fox\n"), 0644)
+
+	cfg := SearchConfig{
+		Pattern:    "fox",
+		Path:       dir,
+		OutputMode: OutputCount,
+		Ctx:        context.Background(),
+	}
+	sr := Search(cfg)
+	output := FormatResult(sr, cfg)
+
+	// Output should NOT contain the content text "quick" or "brown"
+	if strings.Contains(output, "quick") {
+		t.Errorf("count output should not contain content: %s", output)
+	}
+	if strings.Contains(output, "brown") {
+		t.Errorf("count output should not contain content: %s", output)
 	}
 }

@@ -196,15 +196,18 @@ func searchCount(re *regexp.Regexp, entries []WalkEntry, cfg SearchConfig, files
 		}
 
 		var count int
+		// Always count all matches (not just matching lines) to match
+		// ripgrep's --count semantics
 		if cfg.Multiline {
 			count = len(re.FindAllIndex(data, -1))
 		} else {
+			// Count matches per-line using FindAllIndex on each line
 			scanner := bufio.NewScanner(strings.NewReader(string(data)))
 			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 			for scanner.Scan() {
-				if re.MatchString(scanner.Text()) {
-					count++
-				}
+				line := scanner.Text()
+				matches := re.FindAllStringIndex(line, -1)
+				count += len(matches)
 			}
 		}
 

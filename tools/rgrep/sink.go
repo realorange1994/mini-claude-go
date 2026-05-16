@@ -47,6 +47,7 @@ func formatCount(sr SearchResult, cfg SearchConfig) string {
 
 	var lines []string
 	for _, r := range sr.Results {
+		// Output format: path:count (matching ripgrep --count)
 		lines = append(lines, fmt.Sprintf("%s:%d", r.Path, r.LineNum))
 	}
 
@@ -54,7 +55,7 @@ func formatCount(sr SearchResult, cfg SearchConfig) string {
 		lines = append(lines, fmt.Sprintf("(showing first %d matches, truncated)", cfg.HeadLimit))
 	}
 
-	summary := fmt.Sprintf("\n(Searched %d files, %d matching lines)", sr.FilesSearched, sr.TotalMatches)
+	summary := fmt.Sprintf("\n(Searched %d files, %d matches total)", sr.FilesSearched, sr.TotalMatches)
 	return strings.Join(lines, "\n") + summary
 }
 
