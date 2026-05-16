@@ -1272,3 +1272,63 @@ func TestWaitErrorReturnsQuickly(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Regression: streaming executor must use ExecuteWithContext (not Execute)
+// so that context cancellation (sibling error / timeout / user interrupt)
+// propagates to tools implementing ContextTool.
+// Previously, execute() called tool.Execute(input) which ignored the
+// execCtx derived from siblingCtx, so ExecTool.ExecuteContext's
+// <-ctx.Done() case never fired and commands could hang indefinitely.
+// ---------------------------------------------------------------------------
+
+// mockContextTool wraps a mockExecTool to also implement ContextTool.
+type mockContextTool struct {
+	*mockExecTool
+	executeCtxFn func(ctx context.Context, params map[string]any) tools.ToolResult
+}
+
+func (m *mockContextTool) ExecuteContext(ctx context.Context, params map[string]any) tools.ToolResult {
+	return m.executeCtxFn(ctx, params)
+}
+
+func TestStreamingExecutorUsesExecuteWithContext(t *testing.T) {
+	contextCalled := false
+
+	ctxTool := &mockContextTool{
+		mockExecTool: &mockExecTool{
+			name: "test_ctx_tool",
+			executeFn: func(params map[string]any) tools.ToolResult {
+				return tools.ToolResult{Output: "Execute called (BUG)", IsError: true}
+			},
+		},
+		executeCtxFn: func(ctx context.Context, params map[string]any) tools.ToolResult {
+			contextCalled = true
+			_ = ctx // verify context is passed
+			return tools.ToolResult{Output: "ExecuteContext called OK", IsError: false}
+		},
+	}
+	// Verify mockContextTool implements tools.ContextTool
+	var _ tools.ContextTool = ctxTool
+
+	reg := tools.NewRegistry()
+	reg.Register(ctxTool)
+
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
+
+	toolCalls := []ToolCallInfo{
+		{ID: "toolu_ctx", Name: "test_ctx_tool", Arguments: `{"key": "value"}`},
+	}
+
+	exec.dispatch(0, &toolCalls)
+
+	results := exec.Wait(context.Background(), 1)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].isError {
+		t.Errorf("expected success via ExecuteContext, got error: %s", results[0].output)
+	}
+	if !contextCalled {
+		t.Error("ExecuteContext was NOT called — streaming executor may still be using plain Execute()")
+	}
+}

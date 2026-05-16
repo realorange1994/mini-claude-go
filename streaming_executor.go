@@ -373,7 +373,6 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	// (Most Go tools don't check context yet, but the structure matches upstream.)
 	execCtx, execCancel := context.WithCancel(e.siblingCtx)
 	defer execCancel()
-	_ = execCtx // reserved for future context-aware tool execution
 
 	// Guard against empty toolUseID
 	if tc.ID == "" {
@@ -450,7 +449,10 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 				}
 			}
 		}()
-		result = tool.Execute(input)
+		// Use ExecuteWithContext to support context-based cancellation.
+		// Tools implementing ContextTool (e.g. ExecTool.ExecuteContext) will
+		// receive the execCtx and can honour cancellation (sibling error / timeout).
+		result = tools.ExecuteWithContext(execCtx, tool, input)
 	}()
 
 	wasError := result.IsError
