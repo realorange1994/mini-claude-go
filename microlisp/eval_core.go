@@ -26,6 +26,11 @@ func EvalString(s string, env *Env) (*Value, error) {
 		if err != nil {
 			return nil, err
 		}
+		// readExpr returning nil value without error means an unmatched
+		// close parenthesis was encountered — report as syntax error.
+		if v == nil {
+			return nil, fmt.Errorf("syntax error: unmatched close parenthesis")
+		}
 		result, err = Eval(v, env)
 		if err != nil {
 			return nil, err
