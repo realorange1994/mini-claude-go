@@ -3011,14 +3011,9 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	}
 
 	// Auto-snapshot before write/edit tools
-	fmt.Fprintf(os.Stderr, "  [SNAP-EXEC] tool=%q snapshots=%v\n", toolName, a.snapshots != nil)
 	if a.snapshots != nil && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path := extractFilePath(input); path != "" {
-			if err := a.snapshots.TakeSnapshotWithDesc(path, "before "+toolName); err != nil {
-				a.out("  [SNAP] before-snapshot error: %v\n", err)
-			}
-		} else {
-			a.out("  [SNAP] no path extracted for tool=%q\n", toolName)
+			_ = a.snapshots.TakeSnapshotWithDesc(path, "before "+toolName)
 		}
 	}
 
@@ -3136,17 +3131,13 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		if path := extractFilePath(input); path != "" {
 			desc := toolName
 			if toolName == "edit_file" {
-				if oldStr, ok2 := input["old_string"].(string); ok2 {
-					if newStr, ok3 := input["new_string"].(string); ok3 {
-						oldPreview := limitStr(oldStr, 50)
-						newPreview := limitStr(newStr, 50)
-						desc = fmt.Sprintf("edit: '%s' -> '%s'", oldPreview, newPreview)
+				if oldStr, ok := input["old_string"].(string); ok {
+					if newStr, ok2 := input["new_string"].(string); ok2 {
+						desc = fmt.Sprintf("edit: '%s' -> '%s'", limitStr(oldStr, 50), limitStr(newStr, 50))
 					}
 				}
 			}
-			if err := a.snapshots.TakeSnapshotWithDesc(path, desc); err != nil {
-				a.out("  [SNAP] after-snapshot error: %v\n", err)
-			}
+			_ = a.snapshots.TakeSnapshotWithDesc(path, desc)
 		}
 	}
 
@@ -3169,11 +3160,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		if path := extractFilePath(input); path != "" {
 			if diffStr := diffLastTwoSnapshots(a.snapshots, path); diffStr != "" {
 				result.Output += "\n\n--- diff ---\n" + diffStr
-			} else {
-				a.out("  [SNAP] diff empty for %s (path=%q)\n", toolName, path)
 			}
-		} else {
-			a.out("  [SNAP] no path extracted for %s\n", toolName)
 		}
 	}
 

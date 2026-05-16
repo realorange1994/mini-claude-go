@@ -432,14 +432,9 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	}
 
 	// Auto-snapshot before write/edit tools (matches agent_loop.go)
-	fmt.Fprintf(os.Stderr, "  [SNAP-EXEC] tool=%q snapshots=%v\n", tc.Name, e.snapshots != nil)
 	if e.snapshots != nil && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "multi_edit") {
 		if path := extractFilePathStreaming(input); path != "" {
-			if err := e.snapshots.TakeSnapshotWithDesc(path, "before "+tc.Name); err != nil {
-				fmt.Fprintf(os.Stderr, "  [SNAP] before-snapshot error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "  [SNAP] no path extracted for tool=%q\n", tc.Name)
+			_ = e.snapshots.TakeSnapshotWithDesc(path, "before "+tc.Name)
 		}
 	}
 
@@ -460,7 +455,7 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 
 	wasError := result.IsError
 
-	// Post-snapshot for write/edit tools (matches agent_loop.go)
+	// Post-snapshot and diff for write/edit tools (matches agent_loop.go)
 	if e.snapshots != nil && !result.IsError && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "multi_edit") {
 		if path := extractFilePathStreaming(input); path != "" {
 			desc := tc.Name
@@ -471,22 +466,10 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 					}
 				}
 			}
-			if err := e.snapshots.TakeSnapshotWithDesc(path, desc); err != nil {
-				fmt.Fprintf(os.Stderr, "  [SNAP] after-snapshot error: %v\n", err)
-			}
-		}
-	}
-
-	// Append unified diff to tool result for write/edit tools
-	if e.snapshots != nil && !result.IsError && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "multi_edit") {
-		if path := extractFilePathStreaming(input); path != "" {
+			_ = e.snapshots.TakeSnapshotWithDesc(path, desc)
 			if diffStr := diffLastTwoSnapshots(e.snapshots, path); diffStr != "" {
 				result.Output += "\n\n--- diff ---\n" + diffStr
-			} else {
-				fmt.Fprintf(os.Stderr, "  [SNAP] diff empty for %s (path=%q)\n", tc.Name, path)
 			}
-		} else {
-			fmt.Fprintf(os.Stderr, "  [SNAP] no path extracted for %s\n", tc.Name)
 		}
 	}
 
