@@ -494,6 +494,33 @@ func (t *FileHistoryDiffTool) Execute(params map[string]any) tools.ToolResult {
 	return t.diffOutput(fullPath, fromVer, toVer, fromSnap.Content, toSnap.Content, mode, params)
 }
 
+// generateUnifiedDiff produces a unified diff string with added/removed line counts.
+func generateUnifiedDiff(fromContent, toContent string, fromLabel, toLabel string, contextLines int) string {
+	diff := difflib.UnifiedDiff{
+		A:        difflib.SplitLines(fromContent),
+		B:        difflib.SplitLines(toContent),
+		FromFile: fromLabel,
+		ToFile:   toLabel,
+		Context:  contextLines,
+	}
+	result, err := difflib.GetUnifiedDiffString(diff)
+	if err != nil {
+		return ""
+	}
+	if result == "" {
+		return ""
+	}
+	added, removed := 0, 0
+	for _, line := range strings.Split(result, "\n") {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			added++
+		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			removed++
+		}
+	}
+	return result + "\n+" + fmt.Sprintf("%d", added) + " -" + fmt.Sprintf("%d", removed) + " lines changed"
+}
+
 func (t *FileHistoryDiffTool) diffOutput(fullPath string, fromVer, toVer int, fromContent, toContent, mode string, params map[string]any) tools.ToolResult {
 	switch mode {
 	case "stat":
@@ -511,30 +538,11 @@ func (t *FileHistoryDiffTool) diffOutput(fullPath string, fromVer, toVer int, fr
 		if v, ok := params["context"].(float64); ok {
 			contextLines = int(v)
 		}
-		diff := difflib.UnifiedDiff{
-			A:        difflib.SplitLines(fromContent),
-			B:        difflib.SplitLines(toContent),
-			FromFile: fmt.Sprintf("v%d", fromVer),
-			ToFile:   fmt.Sprintf("v%d", toVer),
-			Context:  contextLines,
-		}
-		result, err := difflib.GetUnifiedDiffString(diff)
-		if err != nil {
-			return tools.ToolResult{Output: fmt.Sprintf("Diff error: %v", err), IsError: true}
-		}
-		if result == "" {
+		diffStr := generateUnifiedDiff(fromContent, toContent, fmt.Sprintf("v%d", fromVer), fmt.Sprintf("v%d", toVer), contextLines)
+		if diffStr == "" {
 			return tools.ToolResult{Output: "No differences found"}
 		}
-		added := 0
-		removed := 0
-		for _, line := range strings.Split(result, "\n") {
-			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-				added++
-			} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
-				removed++
-			}
-		}
-		return tools.ToolResult{Output: fmt.Sprintf("%s\n+%d -%d lines changed", result, added, removed)}
+		return tools.ToolResult{Output: diffStr}
 	}
 }
 
@@ -1048,19 +1056,12 @@ func (t *FileHistoryBatchTool) Execute(params map[string]any) tools.ToolResult {
 				sb.WriteString(fmt.Sprintf("  %s: no changes\n", filepath.Base(f)))
 				continue
 			}
-			diff := difflib.UnifiedDiff{
-				A:        difflib.SplitLines(fromSnap.Content),
-				B:        difflib.SplitLines(toSnap.Content),
-				FromFile: "previous",
-				ToFile:   "current",
-				Context:  3,
-			}
-			result, err := difflib.GetUnifiedDiffString(diff)
-			if err != nil {
-				sb.WriteString(fmt.Sprintf("  %s: diff error: %v\n", filepath.Base(f), err))
-				continue
-			}
-			sb.WriteString(fmt.Sprintf("  %s:\n%s\n", filepath.Base(f), result))
+			diffStr := generateUnifiedDiff(fromSnap.Content, toSnap.Content, "previous", "current", 3)
+				if diffStr == "" {
+					sb.WriteString(fmt.Sprintf("  %s: no differences\n", filepath.Base(f)))
+				} else {
+					sb.WriteString(fmt.Sprintf("  %s:\n%s\n", filepath.Base(f), diffStr))
+				}
 		}
 		return tools.ToolResult{Output: sb.String()}
 	default:

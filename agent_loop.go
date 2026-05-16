@@ -3156,6 +3156,16 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}
 	}
 
+	// Append unified diff to tool result for write/edit tools.
+	// Snapshots were taken before and after the tool execution above.
+	if !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
+		if path := extractFilePath(input); path != "" {
+			if diffStr := diffLastTwoSnapshots(a.snapshots, path); diffStr != "" {
+				result.Output += "\n\n--- diff ---\n" + diffStr
+			}
+		}
+	}
+
 	// Truncate long outputs
 	output := a.truncateOutput(result.Output)
 
@@ -3275,6 +3285,26 @@ func extractFilePath(input map[string]any) string {
 		return path
 	}
 	return ""
+}
+
+// diffLastTwoSnapshots returns a unified diff between the last two snapshots
+// for filePath. Returns empty string if insufficient snapshots or no changes.
+func diffLastTwoSnapshots(h *SnapshotHistory, filePath string) string {
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return ""
+	}
+	snaps := h.ListSnapshots(absPath)
+	n := len(snaps)
+	if n < 2 {
+		return ""
+	}
+	before := snaps[n-2]
+	after := snaps[n-1]
+	if before.Checksum == after.Checksum {
+		return ""
+	}
+	return generateUnifiedDiff(before.Content, after.Content, "before", "after", 3)
 }
 
 // formatToolArgs formats tool input as a compact string, showing file paths prominently.
