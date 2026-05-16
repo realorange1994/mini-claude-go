@@ -1,6 +1,11 @@
 package microlisp
 
-import "sync"
+import (
+	"bytes"
+	"io"
+	"os"
+	"sync"
+)
 
 // evalMu protects all microlisp evaluation from concurrent access.
 // The interpreter has extensive global mutable state (globalEnv, evalDepth,
@@ -17,6 +22,67 @@ func SafeEvalString(s string) (string, error) {
 		return "", err
 	}
 	return ToString(result), nil
+}
+
+// captureStdout captures output written to os.Stdout (fmt.Print etc.) during fn.
+// It returns the captured stdout text and the result from fn.
+func captureStdout(fn func() error) (output string, err error) {
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		io.Copy(&buf, r)
+		close(done)
+	}()
+
+	defer func() {
+		w.Close()
+		os.Stdout = oldStdout
+		<-done
+		output = buf.String()
+		r.Close()
+	}()
+
+	err = fn()
+	return
+}
+
+// SafeEvalStringCapture evaluates a Lisp expression and captures all stdout output
+// produced during evaluation (from display/newline etc.).
+// It returns (capturedStdout, returnValue, evalError).
+func SafeEvalStringCapture(s string) (captured, returnValue string, err error) {
+	evalMu.Lock()
+	defer evalMu.Unlock()
+
+	var result *Value
+	captured, evalErr := captureStdout(func() error {
+		var e error
+		result, e = EvalString(s, globalEnv)
+		return e
+	})
+	err = evalErr
+	if err == nil && result != nil {
+		returnValue = ToString(result)
+	}
+	return
+}
+
+// SafeLoadFile loads a Lisp source file with thread safety.
+// It captures all stdout output produced during loading (from display/newline etc.)
+// and returns it along with any error. InitGlobalEnv() must be called once before first use.
+func SafeLoadFile(fname string) (output string, err error) {
+	evalMu.Lock()
+	defer evalMu.Unlock()
+
+	output, loadErr := captureStdout(func() error {
+		_, e := LoadFile(fname, globalEnv)
+		return e
+	})
+	err = loadErr
+	return
 }
 
 // ResetGlobalEnv reinitializes the interpreter to its clean state.

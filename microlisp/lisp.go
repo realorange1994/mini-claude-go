@@ -5088,7 +5088,7 @@ evalLoop:
 					}
 					return nil, fmt.Errorf("load: open %s: %v", fname, statErr)
 				}
-				return loadFile(fname, env)
+				return LoadFile(fname, env)
 			case "WITH-OPEN-FILE":
 				// (with-open-file (var pathname &key direction ...) body...)
 				if v.cdr == nil || v.cdr.typ != VPair {
@@ -13814,7 +13814,7 @@ func builtinRequire(args []*Value) (*Value, error) {
 
 	// Try to load <name>.lisp
 	filename := name + ".lisp"
-	_, err := loadFile(filename, globalEnv)
+	_, err := LoadFile(filename, globalEnv)
 	if err != nil {
 		return nil, fmt.Errorf("require: cannot load %s: %v", filename, err)
 	}
@@ -25822,7 +25822,7 @@ func listToStringShared(v *Value, seen map[*Value]bool) string {
 }
 
 // -------- File loading --------
-func loadFile(fname string, env *Env) (*Value, error) {
+func LoadFile(fname string, env *Env) (*Value, error) {
 	data, err := os.ReadFile(fname)
 	if err != nil {
 		return nil, fmt.Errorf("load: %v", err)
@@ -27978,7 +27978,7 @@ func main() {
 		case "--test":
 			runTests()
 		default:
-			_, err := loadFile(os.Args[1], globalEnv)
+			_, err := LoadFile(os.Args[1], globalEnv)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				os.Exit(1)
