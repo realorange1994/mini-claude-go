@@ -206,15 +206,14 @@ func (t *GlobTool) ExecuteContext(ctx context.Context, params map[string]any) To
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].modified < files[j].modified })
 
-	// Output relative paths only (matching upstream)
-	cwd, _ := os.Getwd()
+	// Output absolute paths (matching upstream)
 	lines := make([]string, 0, len(files))
 	for _, f := range files {
-		if rel, err := filepath.Rel(cwd, f.path); err == nil {
-			lines = append(lines, rel)
-		} else {
-			lines = append(lines, f.path)
+		absPath, err := filepath.Abs(f.path)
+		if err != nil {
+			absPath = f.path
 		}
+		lines = append(lines, absPath)
 	}
 
 	totalMatches := len(lines)

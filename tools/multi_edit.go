@@ -178,7 +178,8 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 	// Track applied new strings for overlapping edit detection
 	var appliedNewStrings []string
 
-	// Dry run: validate all edits and detect overlapping
+	// Phase 1: Dry run on a clone to validate all edits without modifying real content
+	testContent := content
 	for i, e := range edits {
 		oldTrimmed := strings.TrimRight(e.old, "\n")
 
@@ -193,12 +194,12 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 		}
 
 		// Find the edit location
-		idx := findEditLocation(content, e.old)
+		idx := findEditLocation(testContent, e.old)
 		if idx < 0 {
 			// Try desanitized version of old_string
 			desanitizedOld := desanitize(e.old)
 			desanitizedNew := desanitize(e.new)
-			idx = findEditLocation(content, desanitizedOld)
+			idx = findEditLocation(testContent, desanitizedOld)
 			if idx >= 0 {
 				edits[i].old = desanitizedOld
 				edits[i].new = desanitizedNew
@@ -214,7 +215,7 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 		// When replace_all is false, reject ambiguous edits where old_string
 		// matches multiple locations — upstream returns an error in this case.
 		if !e.replaceAll {
-			cnt := countOccurrences(content, e.old)
+			cnt := countOccurrences(testContent, e.old)
 			if cnt > 1 {
 				return ToolResult{
 					Output: fmt.Sprintf("Error: edit %d failed: old_string has multiple matches; set replace_all to true to replace all, or provide more context to uniquely identify the location", i+1),
@@ -225,11 +226,20 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 
 		// Apply in test content
 		if e.replaceAll {
+			testContent = strings.ReplaceAll(testContent, e.old, e.new)
+		} else {
+			testContent = strings.Replace(testContent, e.old, e.new, 1)
+		}
+		appliedNewStrings = append(appliedNewStrings, e.new)
+	}
+
+	// Phase 2: Apply validated edits to real content (progressive, to support chained edits)
+	for _, e := range edits {
+		if e.replaceAll {
 			content = strings.ReplaceAll(content, e.old, e.new)
 		} else {
 			content = strings.Replace(content, e.old, e.new, 1)
 		}
-		appliedNewStrings = append(appliedNewStrings, e.new)
 	}
 
 	// Apply atomically (temp-file-then-rename)

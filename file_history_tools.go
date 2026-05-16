@@ -689,15 +689,15 @@ func (t *FileHistorySearchTool) Execute(params map[string]any) tools.ToolResult 
 		ignoreCase = v
 	}
 	fullPath := expandPath(pathVal)
-	results := t.History.Search(fullPath, query, mode, ignoreCase)
-	if len(results) == 0 {
-		return tools.ToolResult{Output: fmt.Sprintf("No %s results for %q in %s", params["mode"], query, fullPath)}
-	}
-	var sb strings.Builder
 	modeStr := "changed"
 	if m, ok := params["mode"].(string); ok {
 		modeStr = m
 	}
+	results := t.History.Search(fullPath, query, mode, ignoreCase)
+	if len(results) == 0 {
+		return tools.ToolResult{Output: fmt.Sprintf("No %s results for %q in %s", modeStr, query, fullPath)}
+	}
+	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Search results (%s: %q in %s):\n", modeStr, query, fullPath))
 	for _, r := range results {
 		sb.WriteString(fmt.Sprintf("  v%d:\n", r.Version))

@@ -146,3 +146,91 @@ func TestMultiEditMultipleMatchesWithReplaceAll(t *testing.T) {
 		t.Errorf("expected 2 occurrences of Foo(), got:\n%s", data)
 	}
 }
+
+// ─── Regression: multi_edit two-phase validation (Bug 7) ──────────────────────
+// Previously, the "dry run" loop actually applied edits to content progressively.
+// If a later edit failed, the earlier edits had already modified the content variable.
+// Now Phase 1 validates on a clone (testContent), Phase 2 applies to real content.
+// This ensures the original content is untouched if any edit fails validation.
+
+func TestMultiEditTwoPhaseValidationPreservesOriginal(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "twophase.go")
+	original := "package main\n\nfunc alpha() {}\n\nfunc beta() {}\n"
+	os.WriteFile(fp, []byte(original), 0644)
+
+	tool := &MultiEditTool{}
+	// First edit succeeds on testContent, second edit fails
+	result := tool.Execute(map[string]any{
+		"file_path": fp,
+		"edits": []any{
+			map[string]any{"old_string": "func alpha()", "new_string": "func Alpha()"},
+			map[string]any{"old_string": "func nonexistent()", "new_string": "func Nope()"},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for second edit failing")
+	}
+
+	// File should be completely unchanged (not partially modified)
+	data, _ := os.ReadFile(fp)
+	if string(data) != original {
+		t.Errorf("file should be completely unchanged after failed multi_edit:\n%s", data)
+	}
+}
+
+func TestMultiEditChainedEditsStillWork(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "chained.go")
+	os.WriteFile(fp, []byte("package main\n\nconst foo = \"hello\"\n\nfunc bar() { return 2 }\n"), 0644)
+
+	tool := &MultiEditTool{}
+	// Multiple independent edits that both succeed
+	result := tool.Execute(map[string]any{
+		"file_path": fp,
+		"edits": []any{
+			map[string]any{"old_string": "func bar()", "new_string": "func Bar()"},
+			map[string]any{"old_string": "\"hello\"", "new_string": "\"world\""},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+
+	data, _ := os.ReadFile(fp)
+	if !strings.Contains(string(data), "func Bar()") {
+		t.Errorf("expected first edit applied, got:\n%s", data)
+	}
+	if !strings.Contains(string(data), "\"world\"") {
+		t.Errorf("expected second edit applied, got:\n%s", data)
+	}
+}
+
+func TestMultiEditOverlappingDetectionOnOriginal(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "overlap.go")
+	os.WriteFile(fp, []byte("package main\n\nfunc foo() {}\n\nfunc bar() {}\n"), 0644)
+
+	tool := &MultiEditTool{}
+	// Edit 1 replaces "func foo()" with "func bar()", edit 2 tries to find "func bar()"
+	// which is now a substring of edit 1's output — overlapping detection should catch this
+	result := tool.Execute(map[string]any{
+		"file_path": fp,
+		"edits": []any{
+			map[string]any{"old_string": "func foo()", "new_string": "func bar()"},
+			map[string]any{"old_string": "func bar()", "new_string": "func baz()"},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for overlapping edit")
+	}
+	if !strings.Contains(result.Output, "substring") {
+		t.Errorf("expected overlapping edit detection message, got: %s", result.Output)
+	}
+
+	// File should be unchanged
+	data, _ := os.ReadFile(fp)
+	if !strings.Contains(string(data), "func foo()") || !strings.Contains(string(data), "func bar()") {
+		t.Errorf("file should be unchanged after overlapping edit rejection:\n%s", data)
+	}
+}

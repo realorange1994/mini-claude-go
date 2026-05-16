@@ -185,31 +185,28 @@ func searchCount(re *regexp.Regexp, entries []WalkEntry, cfg SearchConfig, files
 		default:
 		}
 
-		f, err := os.Open(entry.Path)
+		data, err := os.ReadFile(entry.Path)
 		if err != nil {
 			continue
 		}
 
-		scanner := bufio.NewScanner(f)
-		// Increase scanner buffer to handle long lines
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		// Binary detection
+		if strings.Contains(string(data), "\x00") {
+			continue
+		}
 
-		// Binary detection on first line
-		firstLine := true
-		count := 0
-		for scanner.Scan() {
-			line := scanner.Text()
-			if firstLine {
-				if strings.Contains(line, "\x00") {
-					break
+		var count int
+		if cfg.Multiline {
+			count = len(re.FindAllIndex(data, -1))
+		} else {
+			scanner := bufio.NewScanner(strings.NewReader(string(data)))
+			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				if re.MatchString(scanner.Text()) {
+					count++
 				}
-				firstLine = false
-			}
-			if re.MatchString(line) {
-				count++
 			}
 		}
-		f.Close()
 
 		if count > 0 {
 			totalMatches += count
@@ -257,71 +254,44 @@ func searchContent(re *regexp.Regexp, entries []WalkEntry, cfg SearchConfig, fil
 		default:
 		}
 
-		f, err := os.Open(entry.Path)
-		if err != nil {
-			continue
-		}
-
-		scanner := bufio.NewScanner(f)
-		// 64KB buffer matching ripgrep's default
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-		// Read all lines for context support
-		var lines []string
-		binary := false
-		for scanner.Scan() {
-			line := scanner.Text()
-			// Binary detection: check for null bytes
-			if strings.Contains(line, "\x00") {
-				binary = true
-				break
+		if cfg.Multiline {
+			data, err := os.ReadFile(entry.Path)
+			if err != nil {
+				continue
 			}
-			// Truncate long lines
-			if len(line) > MaxGrepLineLen {
-				line = line[:MaxGrepLineLen] + "..."
+			// Binary detection
+			if strings.Contains(string(data), "\x00") {
+				continue
 			}
-			lines = append(lines, line)
-		}
-		f.Close()
+			content := string(data)
 
-		if binary {
-			continue
-		}
+			// Find all matches with positions
+			matches := re.FindAllStringIndex(content, -1)
+			if matches == nil {
+				continue
+			}
+			relPath := makeRelative(cfg.Path, entry)
 
-		relPath := makeRelative(cfg.Path, entry)
-		afterLeft := 0 // tracks remaining after-context lines to print
-
-		for i, line := range lines {
-			if re.MatchString(line) {
+			for _, m := range matches {
+				matchText := content[m[0]:m[1]]
+				// Truncate long match text
+				if len(matchText) > MaxGrepLineLen {
+					matchText = matchText[:MaxGrepLineLen] + "..."
+				}
+				// Compute starting line number
+				lineNum := strings.Count(content[:m[0]], "\n") + 1
 				totalMatches++
 				if skipped < cfg.Offset {
 					skipped++
-					afterLeft = 0
 					continue
 				}
-
-				// Print before-context
-				if ctxBefore > 0 {
-					start := max(0, i-ctxBefore)
-					for j := start; j < i; j++ {
-						results = append(results, Result{
-							Path:    relPath,
-							LineNum: j + 1,
-							Line:    lines[j],
-						})
-					}
-				}
-
-				// Print the match line
+				// Normalize match text: replace internal newlines with \n for display
+				displayText := strings.ReplaceAll(matchText, "\n", "\\n")
 				results = append(results, Result{
 					Path:    relPath,
-					LineNum: i + 1,
-					Line:    line,
+					LineNum: lineNum,
+					Line:    displayText,
 				})
-
-				// Set after-context counter
-				afterLeft = ctxAfter
-
 				if cfg.HeadLimit > 0 && totalMatches-skipped >= cfg.HeadLimit {
 					return SearchResult{
 						Results:       results,
@@ -330,14 +300,90 @@ func searchContent(re *regexp.Regexp, entries []WalkEntry, cfg SearchConfig, fil
 						Truncated:     true,
 					}
 				}
-			} else if afterLeft > 0 {
-				// Print after-context line
-				results = append(results, Result{
-					Path:    relPath,
-					LineNum: i + 1,
-					Line:    line,
-				})
-				afterLeft--
+			}
+		} else {
+			f, err := os.Open(entry.Path)
+			if err != nil {
+				continue
+			}
+
+			scanner := bufio.NewScanner(f)
+			// 64KB buffer matching ripgrep's default
+			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+			// Read all lines for context support
+			var lines []string
+			binary := false
+			for scanner.Scan() {
+				line := scanner.Text()
+				// Binary detection: check for null bytes
+				if strings.Contains(line, "\x00") {
+					binary = true
+					break
+				}
+				// Truncate long lines
+				if len(line) > MaxGrepLineLen {
+					line = line[:MaxGrepLineLen] + "..."
+				}
+				lines = append(lines, line)
+			}
+			f.Close()
+
+			if binary {
+				continue
+			}
+
+			relPath := makeRelative(cfg.Path, entry)
+			afterLeft := 0 // tracks remaining after-context lines to print
+
+			for i, line := range lines {
+				if re.MatchString(line) {
+					totalMatches++
+					if skipped < cfg.Offset {
+						skipped++
+						afterLeft = 0
+						continue
+					}
+
+					// Print before-context
+					if ctxBefore > 0 {
+						start := max(0, i-ctxBefore)
+						for j := start; j < i; j++ {
+							results = append(results, Result{
+								Path:    relPath,
+								LineNum: j + 1,
+								Line:    lines[j],
+							})
+						}
+					}
+
+					// Print the match line
+					results = append(results, Result{
+						Path:    relPath,
+						LineNum: i + 1,
+						Line:    line,
+					})
+
+					// Set after-context counter
+					afterLeft = ctxAfter
+
+					if cfg.HeadLimit > 0 && totalMatches-skipped >= cfg.HeadLimit {
+						return SearchResult{
+							Results:       results,
+							FilesSearched: filesSearched,
+							TotalMatches:  totalMatches,
+							Truncated:     true,
+						}
+					}
+				} else if afterLeft > 0 {
+					// Print after-context line
+					results = append(results, Result{
+						Path:    relPath,
+						LineNum: i + 1,
+						Line:    line,
+					})
+					afterLeft--
+				}
 			}
 		}
 	}

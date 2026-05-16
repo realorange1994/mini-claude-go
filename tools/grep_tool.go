@@ -335,11 +335,18 @@ func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, ca
 	if multiline {
 		args = append(args, "-U", "--multiline-dotall")
 	}
-	if ctxBefore > 0 {
-		args = append(args, "-B", fmt.Sprintf("%d", ctxBefore))
-	}
-	if ctxAfter > 0 {
-		args = append(args, "-A", fmt.Sprintf("%d", ctxAfter))
+	// Context params only apply in content mode
+	if outputMode == "content" {
+		if ctxBefore > 0 {
+			args = append(args, "-B", fmt.Sprintf("%d", ctxBefore))
+		}
+		if ctxAfter > 0 {
+			args = append(args, "-A", fmt.Sprintf("%d", ctxAfter))
+		}
+		// Use null-data for multiline mode so records are NUL-delimited
+		if multiline {
+			args = append(args, "--null-data")
+		}
 	}
 
 	// Show line numbers only in content mode (matching official behavior)
@@ -402,7 +409,22 @@ func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, ca
 		return ToolResult{Output: "No matches found."}
 	}
 
-	lines := strings.Split(output, "\n")
+	var lines []string
+	if multiline && outputMode == "content" {
+		// NUL-delimited records when --null-data is used
+		lines = strings.Split(output, "\x00")
+		// Filter out empty entries
+		n := 0
+		for _, l := range lines {
+			if strings.TrimSpace(l) != "" {
+				lines[n] = l
+				n++
+			}
+		}
+		lines = lines[:n]
+	} else {
+		lines = strings.Split(output, "\n")
+	}
 
 	// Apply offset
 	if offset > 0 && offset < len(lines) {

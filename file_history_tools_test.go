@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -404,4 +405,66 @@ func TestGlobMatch(t *testing.T) {
 
 func containsInListing(s, sub string) bool {
 	return len(s) > 0 && len(sub) > 0 && (s == sub || (len(s) > len(sub) && (s[:len(sub)] == sub || s[len(s)-len(sub):] == sub || containsInListing(s[1:], sub))))
+}
+
+// ─── Regression: file_history_search format error (Bug 4) ────────────────────
+// Previously, when mode param was nil, the error message used params["mode"]
+// directly producing "No %!s(<nil>) results for ...".
+// Now modeStr is computed before the error check with a default of "changed".
+
+func TestFileHistorySearchNoModeInErrorMessage(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	os.WriteFile(fp, []byte("original content"), 0644)
+
+	sh := NewSnapshotHistory(dir)
+	sh.TakeSnapshot(fp)
+
+	tool := &FileHistorySearchTool{History: sh}
+	// Search for text that doesn't exist in any version
+	result := tool.Execute(map[string]any{
+		"path":  fp,
+		"query": "nonexistent_text_xyz",
+		// Note: no "mode" param provided
+	})
+	// Should return an error-like message (no results) but NOT with %!s(<nil>)
+	if result.Output == "" {
+		t.Fatal("expected non-empty output for no results")
+	}
+	if strings.Contains(result.Output, "%!s") {
+		t.Errorf("error message contains format error: %s", result.Output)
+	}
+	if strings.Contains(result.Output, "<nil>") {
+		t.Errorf("error message contains <nil>: %s", result.Output)
+	}
+	// Should mention "changed" as the default mode
+	if !strings.Contains(result.Output, "changed") {
+		t.Errorf("expected default mode 'changed' in message, got: %s", result.Output)
+	}
+}
+
+func TestFileHistorySearchExplicitModeInErrorMessage(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test2.txt")
+	os.WriteFile(fp, []byte("some content"), 0644)
+
+	sh := NewSnapshotHistory(dir)
+	sh.TakeSnapshot(fp)
+
+	tool := &FileHistorySearchTool{History: sh}
+	// Search with explicit "added" mode
+	result := tool.Execute(map[string]any{
+		"path":  fp,
+		"query": "nonexistent_text_xyz",
+		"mode":  "added",
+	})
+	if result.Output == "" {
+		t.Fatal("expected non-empty output")
+	}
+	if strings.Contains(result.Output, "%!s") || strings.Contains(result.Output, "<nil>") {
+		t.Errorf("error message has format issue: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "added") {
+		t.Errorf("expected mode 'added' in message, got: %s", result.Output)
+	}
 }

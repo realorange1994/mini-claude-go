@@ -362,7 +362,7 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	go func() {
 		data := readLimited(stderr, 25000)
 		select {
-		case outputCh <- readResult{"STDERR:\n" + data, true}:
+		case outputCh <- readResult{data, true}:
 		default:
 		}
 	}()
@@ -488,10 +488,11 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		if stdoutOut != "" {
 			result.WriteString(stdoutOut)
 		}
-		if stderrOut != "" && stderrOut != "STDERR:\n" {
+		if stderrOut != "" {
 			if result.Len() > 0 {
 				result.WriteString("\n")
 			}
+			result.WriteString("STDERR:\n")
 			result.WriteString(stderrOut)
 		}
 

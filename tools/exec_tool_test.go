@@ -1071,3 +1071,53 @@ func TestWindowsPathRoundtripPosixToWinToPosix(t *testing.T) {
 		t.Errorf("Roundtrip %q → %q → %q", original, win, back)
 	}
 }
+
+// ─── Regression: exec stderr format (Bug 1) ──────────────────────────────────
+// Previously, stderr was prefixed with "STDERR:\n" inside the goroutine,
+// causing it to be swallowed on success (checking stderrOut != "STDERR:\n").
+// Now stderr is consistently labeled with "STDERR:\n" header in output.
+
+func TestExecStderrOnSuccess(t *testing.T) {
+	tool := &ExecTool{}
+	// Command that writes to stderr but succeeds
+	result := tool.Execute(map[string]any{"command": "echo err >&2 && echo out"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "STDERR:") {
+		t.Errorf("expected 'STDERR:' in output when stderr has content, got:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "err") {
+		t.Errorf("expected stderr content 'err' in output, got:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "out") {
+		t.Errorf("expected stdout content 'out' in output, got:\n%s", result.Output)
+	}
+}
+
+func TestExecNoStderrOnSuccess(t *testing.T) {
+	tool := &ExecTool{}
+	// Command with only stdout, no stderr
+	result := tool.Execute(map[string]any{"command": "echo hello"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+	if strings.Contains(result.Output, "STDERR:") {
+		t.Errorf("expected no STDERR label when no stderr, got:\n%s", result.Output)
+	}
+}
+
+func TestExecStderrOnFailure(t *testing.T) {
+	tool := &ExecTool{}
+	// Command that fails with stderr
+	result := tool.Execute(map[string]any{"command": "echo fail >&2 && exit 1"})
+	if !result.IsError {
+		t.Error("expected error for exit 1")
+	}
+	if !strings.Contains(result.Output, "STDERR:") {
+		t.Errorf("expected 'STDERR:' in error output, got:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "fail") {
+		t.Errorf("expected stderr content 'fail' in error output, got:\n%s", result.Output)
+	}
+}

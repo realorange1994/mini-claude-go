@@ -313,3 +313,41 @@ func TestGlobTypeFilterInvalid(t *testing.T) {
 		t.Errorf("invalid type filter should not match files, got:\n%s", result.Output)
 	}
 }
+
+func TestGlobReturnsAbsolutePaths(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("y"), 0644)
+
+	tool := &GlobTool{}
+	result := tool.Execute(map[string]any{"pattern": "*.txt", "path": dir})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+
+	lines := strings.Split(strings.TrimSpace(result.Output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !filepath.IsAbs(line) {
+			t.Errorf("expected absolute path, got relative: %s", line)
+		}
+	}
+}
+
+func TestGlobAbsolutePathsContainFilename(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "unique_name_1234.txt"), []byte("x"), 0644)
+
+	tool := &GlobTool{}
+	result := tool.Execute(map[string]any{"pattern": "*.txt", "path": dir})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+
+	if !strings.Contains(result.Output, "unique_name_1234.txt") {
+		t.Errorf("expected filename in output, got:\n%s", result.Output)
+	}
+}
