@@ -91,7 +91,7 @@ func TestNotebookEditReplaceCell(t *testing.T) {
 	fp := createTestNotebook(t)
 
 	// Mark file as read (fromRead=true, simulating read_file)
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -124,7 +124,7 @@ func TestNotebookEditReplaceWithCellType(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -150,7 +150,7 @@ func TestNotebookEditInsertCell(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -184,7 +184,7 @@ func TestNotebookEditDeleteCell(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -211,7 +211,7 @@ func TestNotebookEditDeleteNotFound(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -228,7 +228,7 @@ func TestNotebookEditInsertRequiresCellType(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -246,7 +246,7 @@ func TestNotebookEditReplaceRequiresNewSource(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -263,7 +263,7 @@ func TestNotebookEditAutoPromoteReplaceToInsert(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	// Replace a cell that doesn't exist — should auto-promote to insert at end
 	result := tool.Execute(map[string]any{
@@ -290,7 +290,7 @@ func TestNotebookEditInvalidEditMode(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -308,7 +308,7 @@ func TestNotebookEditBackupCreated(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	tool.Execute(map[string]any{
 		"notebook_path": fp,
@@ -328,7 +328,7 @@ func TestNotebookEditClearsOutputsOnCodeReplace(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	// Replace a code cell — outputs should be cleared
 	result := tool.Execute(map[string]any{
@@ -355,7 +355,7 @@ func TestNotebookEditFileModifiedSinceRead(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 	fp := createTestNotebook(t)
 
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	// Modify the file after it was read — set mtime to future
 	futureTime := time.Now().Add(1 * time.Hour)
@@ -538,7 +538,7 @@ func TestNotebookEditMultipleCellsPreserved(t *testing.T) {
 	data, _ := json.MarshalIndent(nb, "", "  ")
 	fp := filepath.Join(dir, "test.ipynb")
 	os.WriteFile(fp, data, 0644)
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	// Edit middle cell
 	result := tool.Execute(map[string]any{
@@ -587,7 +587,7 @@ func TestNotebookEditPreservesCellTypes(t *testing.T) {
 	data, _ := json.MarshalIndent(nb, "", "  ")
 	fp := filepath.Join(dir, "test.ipynb")
 	os.WriteFile(fp, data, 0644)
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	// Edit markdown cell without specifying cell_type
 	result := tool.Execute(map[string]any{
@@ -627,7 +627,7 @@ func TestNotebookEditInsertAtEnd(t *testing.T) {
 	data, _ := json.MarshalIndent(nb, "", "  ")
 	fp := filepath.Join(dir, "test.ipynb")
 	os.WriteFile(fp, data, 0644)
-	r.MarkFileReadWithParams(fp, -1, -1, "", false, true)
+	r.MarkFileReadWithParams(fp, -1, -1, "", false, false, true)
 
 	result := tool.Execute(map[string]any{
 		"notebook_path": fp,

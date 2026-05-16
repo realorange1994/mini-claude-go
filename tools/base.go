@@ -281,19 +281,25 @@ func ValidateParams(tool Tool, params map[string]any) error {
 // fileReadInfo tracks both the file's mtime (for staleness checks) and when it was read (for recency sorting).
 // Also tracks the offset and limit used during read, for dedup detection (file_unchanged stub).
 type fileReadInfo struct {
-	mtime      time.Time // file modification time at read time
-	readTime   time.Time // when the file was read
-	readOffset int       // offset used when reading (-1 if from edit/write, not a read_file call)
-	readLimit  int       // limit used when reading (-1 if from edit/write, not a read_file call)
-	content    string    // file content at read time (for content-based staleness fallback)
-	isPartial  bool      // true if this entry represents a partial (offset/limit) read_file call
-	fromRead   bool      // true if this entry was created by a read_file call (vs edit/write)
+	mtime         time.Time // file modification time at read time
+	readTime      time.Time // when the file was read
+	readOffset    int       // offset used when reading (-1 if from edit/write, not a read_file call)
+	readLimit     int       // limit used when reading (-1 if from edit/write, not a read_file call)
+	content       string    // file content at read time (for content-based staleness fallback)
+	isPartial     bool      // true if this entry represents a partial (offset/limit) read_file call
+	isPartialView bool      // true for auto-injected files (CLAUDE.md, MEMORY.md) where content differs from disk
+	fromRead      bool      // true if this entry was created by a read_file call (vs edit/write)
 }
+
+const (
+	maxFileStateEntries = 100 // max entries in filesRead LRU cache (matching upstream FileStateCache)
+	maxFileStateBytes   = 25 * 1024 * 1024 // 25MB approximate content cache limit
+)
 
 // Registry collects tool instances and provides lookup + API schema generation.
 type Registry struct {
 	tools     map[string]Tool
-	filesRead map[string]fileReadInfo // tracks which files have been read by read_file
+	filesRead map[string]fileReadInfo // tracks which files have been read by read_file (LRU, max 100 entries)
 	mu        sync.RWMutex            // protects filesRead
 }
 
@@ -327,28 +333,58 @@ func (r *Registry) AllTools() []Tool {
 
 // MarkFileRead records that a file has been read by read_file, storing its current mtime.
 func (r *Registry) MarkFileRead(path string) {
-	r.MarkFileReadWithParams(path, -1, -1, "", false, false) // edit/write: not partial, not from read
+	r.MarkFileReadWithParams(path, -1, -1, "", false, false, false) // edit/write: not partial, not partialView, not from read
 }
 
 // MarkFileReadWithContent records a file read with content for staleness fallback.
 // Used by edit/write operations that know the post-write content.
 func (r *Registry) MarkFileReadWithContent(path string, content string) {
-	r.MarkFileReadWithParams(path, -1, -1, content, false, false) // edit/write: not partial, not from read
+	r.MarkFileReadWithParams(path, -1, -1, content, false, false, false) // edit/write: not partial, not partialView, not from read
+}
+
+// MarkFileReadAsPartialView marks a file as auto-injected with content that
+// may differ from disk (e.g., CLAUDE.md, MEMORY.md in certain contexts).
+// Edit/write tools will require a fresh read_file first.
+func (r *Registry) MarkFileReadAsPartialView(path, content string) {
+	r.MarkFileReadWithParams(path, -1, -1, content, false, true, false) // isPartialView=true
 }
 
 // MarkFileReadWithParams records that a file has been read, storing offset/limit
 // and content for dedup detection and content-based staleness fallback.
-// Use offset=-1, limit=-1, isPartial=false, fromRead=false for edit/write operations.
-func (r *Registry) MarkFileReadWithParams(path string, offset, limit int, content string, isPartial bool, fromRead bool) {
+// Use offset=-1, limit=-1, isPartial=false, isPartialView=false, fromRead=false for edit/write operations.
+func (r *Registry) MarkFileReadWithParams(path string, offset, limit int, content string, isPartial bool, isPartialView bool, fromRead bool) {
 	// Canonicalize the path to handle relative paths consistently.
 	normalized := canonicalPath(path)
 	r.mu.Lock()
 	if info, err := os.Stat(path); err == nil {
-		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now(), readOffset: offset, readLimit: limit, content: content, isPartial: isPartial, fromRead: fromRead}
+		r.filesRead[normalized] = fileReadInfo{mtime: info.ModTime(), readTime: time.Now(), readOffset: offset, readLimit: limit, content: content, isPartial: isPartial, isPartialView: isPartialView, fromRead: fromRead}
 	} else {
-		r.filesRead[normalized] = fileReadInfo{readTime: time.Now(), readOffset: offset, readLimit: limit, content: content, isPartial: isPartial, fromRead: fromRead} // new file, no mtime yet
+		r.filesRead[normalized] = fileReadInfo{readTime: time.Now(), readOffset: offset, readLimit: limit, content: content, isPartial: isPartial, isPartialView: isPartialView, fromRead: fromRead} // new file, no mtime yet
 	}
+	r.evictFileStateLRU()
 	r.mu.Unlock()
+}
+
+// evictFileStateLRU evicts oldest entries when the filesRead cache exceeds
+// maxFileStateEntries. Must be called with r.mu held.
+func (r *Registry) evictFileStateLRU() {
+	for len(r.filesRead) > maxFileStateEntries {
+		// Find the entry with the oldest readTime
+		var oldest string
+		var oldestTime time.Time
+		first := true
+		for k, info := range r.filesRead {
+			if first || info.readTime.Before(oldestTime) {
+				oldest = k
+				oldestTime = info.readTime
+				first = false
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(r.filesRead, oldest)
+	}
 }
 
 // HasFileBeenRead checks if a file has been read by read_file.
@@ -400,11 +436,18 @@ func (r *Registry) CheckFileStale(path string) string {
 		return "Error: file has not been read. For existing files, you MUST use read_file first before write_file/edit_file. For new files, write_file works directly without reading. To modify an existing file: 1) read_file to read it, 2) edit_file for small changes or write_file for complete rewrites."
 	}
 
-	// Partial-view check: if the file was only partially read (with
-	// offset/limit), the model must do a fresh full read before editing.
-	if storedInfo.isPartial {
-		return "Error: file was only partially read (with offset/limit). You must do a fresh full read (read_file without offset/limit parameters) before editing."
+	// isPartialView check: if the file was auto-injected (CLAUDE.md, MEMORY.md)
+	// and its content differs from disk, editing would be based on stale data.
+	// The model must do a fresh read_file first.
+	if storedInfo.isPartialView {
+		return "Error: file content was auto-injected and may differ from disk. You must do a fresh read_file before editing."
 	}
+
+	// Note: partial (offset/limit) reads do NOT block subsequent edits.
+	// Matching upstream: the edit tool re-reads the full file from disk during
+	// its call() phase, so partial reads are fully functional for edits.
+	// The mtime check below handles concurrent modification detection for both
+	// full and partial reads.
 
 	info, err := os.Stat(path)
 	if err != nil {

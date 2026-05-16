@@ -201,7 +201,7 @@ func TestCheckFileStale_CRLFContentMatch(t *testing.T) {
 	// Simulate a read_file call: store normalized content (LF) with old mtime
 	content, _ := DecodeFileContent(crlfData)
 	// content should be "line1\nline2\nline3\n" (LF normalized)
-	registry.MarkFileReadWithParams(fp, -1, -1, content, false, true)
+	registry.MarkFileReadWithParams(fp, -1, -1, content, false, false, true)
 
 	// Now simulate a stale check where the mtime has changed.
 	// We manually overwrite the stored mtime to force the content comparison path.
@@ -230,7 +230,7 @@ func TestCheckFileStale_ReallyModified(t *testing.T) {
 	}
 
 	registry := NewRegistry()
-	registry.MarkFileReadWithParams(fp, -1, -1, "original content\n", false, true)
+	registry.MarkFileReadWithParams(fp, -1, -1, "original content\n", false, false, true)
 
 	// Actually modify the file
 	if err := os.WriteFile(fp, []byte("modified content\n"), 0o644); err != nil {
@@ -275,7 +275,7 @@ func TestCheckFileStale_UTF16LEContentMatch(t *testing.T) {
 
 	// Simulate a read_file call: store decoded content
 	content, _ := DecodeFileContent(data)
-	registry.MarkFileReadWithParams(fp, -1, -1, content, false, true)
+	registry.MarkFileReadWithParams(fp, -1, -1, content, false, false, true)
 
 	// Force mtime mismatch
 	normalized := canonicalPath(fp)

@@ -361,6 +361,7 @@ type AgentLoop struct {
 	hooks                    *HookManager              // compact pre/post hook handlers
 	shellHooks               HookConfig                // shell command hooks from settings.json
 	consecutiveContextErrors int                       // tracks consecutive context overflow errors for reactive compact
+	consecutive2013Errors   int                       // tracks consecutive 2013 tool pairing errors
 	consecutive529Errors     int                       // tracks consecutive 529 overloaded errors for model fallback
 	modelCapabilities        *ModelCapabilitiesCache   // per-model context window and capability lookup
 	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
@@ -1449,11 +1450,35 @@ func (a *AgentLoop) Run(userMessage string) string {
 				a.lastTransition = TransitionModelConfused
 				continue
 			}
-			// 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
+			// 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry.
+			// Cap consecutive repairs to prevent infinite loops. After 3 failed
+			// repairs, the pairing issue is structural (e.g., BuildMessages merge
+			// logic breaking what entries-level repair fixed) — force aggressive
+			// compaction to break the cycle.
 			if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
-				a.out("\n[WARN] Tool pairing error (2013), repairing context...\n")
-				a.context.ValidateToolPairing()
-				a.context.FixRoleAlternation()
+				a.consecutive2013Errors++
+				if a.consecutive2013Errors > 3 {
+					a.out("\n[ERR] Tool pairing error after %d repair attempts, giving up.\n", a.consecutive2013Errors-1)
+					a.fireStopHook("tool_pairing_failed", a.budget.Consumed(), false)
+					return finalText
+				}
+				a.out("\n[WARN] Tool pairing error (2013), repairing context... (attempt %d/3)\n", a.consecutive2013Errors)
+				if a.toolStateTracker != nil {
+					a.toolStateTracker.OnCompaction()
+				}
+				// Escalating repair: first attempt validates entries, subsequent
+				// attempts force compaction to resolve structural pairing issues
+				// that BuildMessages() merge logic may introduce.
+				if a.consecutive2013Errors == 1 {
+					a.context.ValidateToolPairing()
+					a.context.FixRoleAlternation()
+				} else {
+					preTokens := a.context.EstimatedTokens()
+					a.context.MinimumHistory()
+					a.context.ValidateToolPairing()
+					a.context.FixRoleAlternation()
+					a.out("\n[WARN] 2013 repair: aggressive compaction applied (%d tokens)\n", preTokens)
+				}
 				// Inject a recovery hint so the model produces properly sequenced tool calls
 				a.context.AddUserMessage("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.")
 				a.lastTransition = TransitionToolPairing
@@ -1539,6 +1564,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		// Reset context error counter on successful API call
 		contextErrors = 0
+		a.consecutive2013Errors = 0
 
 		if len(textParts) > 0 {
 			finalText = strings.Join(textParts, "\n")

@@ -12,6 +12,8 @@ import (
 )
 
 const maxFileSize = 256 * 1024 // 256 KB, matching Claude Code official
+const defaultReadLines = 2000  // default max lines to return (matching upstream)
+const maxReadOutputBytes = 256 * 1024 // 256KB max output size (matching upstream)
 
 // FileUnchangedStub is the prefix of the "file unchanged" dedup stub returned by read_file
 // when the file hasn't changed since the last read. Used for both stub generation and detection.
@@ -33,6 +35,7 @@ func (*FileReadTool) Description() string {
 		"- The file_path parameter must be an absolute path, not a relative path\n" +
 		"- Small/medium files are read entirely. Files larger than 256KB require offset+limit to read in portions\n" +
 		"- You can optionally specify a line offset and limit to read specific portions of any file\n" +
+		"- By default, reads are limited to 2000 lines. Use offset+limit to read additional lines.\n" +
 		"- Results are returned using cat -n format, with line numbers starting at 1\n" +
 		"- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs\n" +
 		"- You must read a file before editing it with edit_file or write_file.\n" +
@@ -154,6 +157,7 @@ func (t *FileReadTool) ExecuteContext(ctx context.Context, params map[string]any
 
 	// limit: number of lines. -1 sentinel means "read entire file" (will be resolved after reading).
 	limit := -1
+	hasDefaultLimit := false // tracks if we applied the default 2000-line cap
 	if lim, ok := params["limit"]; ok {
 		hasExplicitLimit = true
 		switch v := lim.(type) {
@@ -211,9 +215,16 @@ func (t *FileReadTool) ExecuteContext(ctx context.Context, params map[string]any
 
 	total := len(lines)
 
-	// Resolve limit sentinel (-1 means entire file).
+	// Resolve limit sentinel (-1 means "read entire file").
+	// When no explicit limit is given, default to defaultReadLines (2000)
+	// for full-file reads (matching upstream DEFAULT_READ_LINES behavior).
 	if limit <= 0 {
-		limit = total
+		if !hasExplicitLimit {
+			limit = defaultReadLines
+			hasDefaultLimit = true
+		} else {
+			limit = total
+		}
 	}
 
 	if total == 0 {
@@ -242,6 +253,11 @@ func (t *FileReadTool) ExecuteContext(ctx context.Context, params map[string]any
 
 	result := numbered.String()
 
+	// Truncate output if it exceeds the byte limit (matching upstream).
+	if len(result) > maxReadOutputBytes {
+		result = result[:maxReadOutputBytes] + "\n... (output truncated due to size limit)"
+	}
+
 	// Add pagination hint
 	if end < total {
 		result += fmt.Sprintf("\n\n(Showing lines %d-%d of %d. Use offset=%d to continue.)", offset, end, total, end+1)
@@ -252,15 +268,17 @@ func (t *FileReadTool) ExecuteContext(ctx context.Context, params map[string]any
 	// Mark file as read in registry so write/edit checks pass
 	// Store full content for content-based staleness fallback (matching upstream).
 	// Only store content for full-file reads (when end >= total).
+	// When a default limit was applied (hasDefaultLimit), the read is partial
+	// even if the user didn't explicitly request offset/limit.
 	if t.registry != nil {
 		readContent := ""
 		isPartial := false
-		if end >= total {
+		if end >= total && !hasDefaultLimit {
 			readContent = content
 		} else {
 			isPartial = true
 		}
-		t.registry.MarkFileReadWithParams(fp, offset, limit, readContent, isPartial, true) // fromRead=true
+		t.registry.MarkFileReadWithParams(fp, offset, limit, readContent, isPartial, false, true) // isPartialView=false, fromRead=true
 	}
 
 	return ToolResult{Output: strings.TrimRight(result, "\n") + encHintMsg}
