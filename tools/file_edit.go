@@ -106,7 +106,7 @@ func (e *FileEditTool) ExecuteContext(ctx context.Context, params map[string]any
 			// Allow writing to an existing empty file (matching upstream behavior)
 			existingData, readErr := os.ReadFile(fp)
 			if readErr != nil || strings.TrimSpace(string(existingData)) != "" {
-				return ToolResult{Output: "Error: cannot create new file - file already exists with content", IsError: true}
+				return ToolResult{Output: fmt.Sprintf("Error: cannot create new file with empty old_string — file %q already exists with content. Use a non-empty old_string to edit existing files, or delete the file first.", fp), IsError: true}
 			}
 		}
 		dir := filepath.Dir(fp)

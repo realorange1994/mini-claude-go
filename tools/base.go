@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -423,9 +424,19 @@ func (r *Registry) CheckFileStale(path string) string {
 	// compare content as a fallback to avoid false positives.
 	isFullRead := !storedInfo.isPartial
 	if isFullRead && storedInfo.content != "" {
-		if currentContent, err := os.ReadFile(path); err == nil {
-			if string(currentContent) == storedInfo.content {
+		if currentData, err := os.ReadFile(path); err == nil {
+			// Decode the current file content the same way we decoded it
+			// during read_file (strip BOM, normalize CRLF→LF, decode UTF-16).
+			// This ensures we compare normalized content against normalized content,
+			// not raw bytes against normalized string.
+			currentContent, _ := DecodeFileContent(currentData)
+			if currentContent == storedInfo.content {
 				// Content unchanged despite timestamp change — safe to proceed
+				return ""
+			}
+			// Also compare raw bytes as a secondary check (handles cases where
+			// stored content came from edit/write which stores pre-encode content)
+			if bytes.Equal(currentData, []byte(storedInfo.content)) {
 				return ""
 			}
 		}
