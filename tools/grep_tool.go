@@ -107,7 +107,7 @@ func (*GrepTool) InputSchema() map[string]any {
 			},
 			"head_limit": map[string]any{
 				"type":        "integer",
-				"description": "Maximum number of results to return (default: 250).",
+				"description": "Maximum number of results to return (default: 250). Set to 0 for unlimited.",
 			},
 			"offset": map[string]any{
 				"type":        "integer",
@@ -165,6 +165,11 @@ func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) To
 	if outputMode == "" {
 		outputMode = "files_with_matches"
 	}
+	// Validate output_mode
+	validModes := map[string]bool{"content": true, "files_with_matches": true, "count": true}
+	if !validModes[outputMode] {
+		return ToolResult{Output: fmt.Sprintf("Error: invalid output_mode '%s'. Must be one of: content, files_with_matches, count", outputMode), IsError: true}
+	}
 	headLimit := maxGrepMatches
 	if hl, ok := params["head_limit"]; ok {
 		switch v := hl.(type) {
@@ -177,8 +182,7 @@ func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) To
 	if headLimit < 0 {
 		headLimit = maxGrepMatches
 	}
-	// Upstream: head_limit=0 means unlimited (escape hatch)
-	// For ripgrep: -m 0 means unlimited; for native: use MaxInt
+	// head_limit=0 means unlimited (matching upstream behavior)
 	if headLimit == 0 {
 		headLimit = 1<<31 - 1
 	}

@@ -3136,6 +3136,14 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 						desc = fmt.Sprintf("edit: '%s' -> '%s'", limitStr(oldStr, 50), limitStr(newStr, 50))
 					}
 				}
+			} else if toolName == "write_file" {
+				if content, ok := input["content"].(string); ok {
+					desc = fmt.Sprintf("write: %d bytes", len(content))
+				}
+			} else if toolName == "multi_edit" {
+				if edits, ok := input["edits"].([]any); ok {
+					desc = fmt.Sprintf("multi_edit: %d change(s)", len(edits))
+				}
 			}
 			_ = a.snapshots.TakeSnapshotWithDesc(path, desc)
 		}

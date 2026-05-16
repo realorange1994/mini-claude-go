@@ -468,3 +468,33 @@ func TestFileHistorySearchExplicitModeInErrorMessage(t *testing.T) {
 		t.Errorf("expected mode 'added' in message, got: %s", result.Output)
 	}
 }
+
+// ─── Regression: file_history_diff friendly error for non-existent versions (Bug 5) ────
+// Previously: "last1 is out of range (only 1 versions)" — exposes internals.
+// Now: "version 'last1' does not exist — this file only has 1 version(s)"
+
+func TestFileHistoryDiffFriendlyErrorForMissingVersion(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	os.WriteFile(fp, []byte("content"), 0644)
+
+	sh := NewSnapshotHistory(dir)
+	sh.TakeSnapshot(fp)
+
+	tool := &FileHistoryDiffTool{History: sh}
+	result := tool.Execute(map[string]any{
+		"path": fp,
+		"from": "last2",
+	})
+	if !result.IsError {
+		t.Error("expected error for non-existent version")
+	}
+	// Should NOT contain raw "out of range" technical language
+	if strings.Contains(result.Output, "out of range") {
+		t.Errorf("error should not contain technical 'out of range', got: %s", result.Output)
+	}
+	// Should contain user-friendly "does not exist"
+	if !strings.Contains(result.Output, "does not exist") {
+		t.Errorf("error should contain 'does not exist', got: %s", result.Output)
+	}
+}

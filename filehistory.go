@@ -544,7 +544,7 @@ func (h *SnapshotHistory) ResolveVersion(filePath, spec string) (int, error) {
 			if n > 0 && n < total {
 				return total - n, nil
 			}
-			return 0, fmt.Errorf("last%d is out of range (only %d versions)", n, total)
+			return 0, fmt.Errorf("version 'last%d' does not exist — this file only has %d version(s)", n, total)
 		}
 	}
 

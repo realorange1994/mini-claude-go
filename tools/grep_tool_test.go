@@ -226,3 +226,33 @@ func TestGrepToolPermissions(t *testing.T) {
 		t.Error("should passthrough permissions")
 	}
 }
+
+// ─── Regression: invalid output_mode must return error (Bug 3) ────────────────
+
+func TestGrepInvalidOutputMode(t *testing.T) {
+	tool := &GrepTool{}
+	result := tool.Execute(map[string]any{
+		"pattern":      "hello",
+		"output_mode":  "invalid_mode",
+	})
+	if !result.IsError {
+		t.Error("expected error for invalid output_mode")
+	}
+	if !strings.Contains(result.Output, "invalid output_mode") {
+		t.Errorf("error should mention invalid output_mode, got: %s", result.Output)
+	}
+}
+
+func TestGrepValidOutputModes(t *testing.T) {
+	for _, mode := range []string{"content", "files_with_matches", "count"} {
+		tool := &GrepTool{}
+		result := tool.Execute(map[string]any{
+			"pattern":      "nonexistent_xyz",
+			"output_mode":  mode,
+			"path":         t.TempDir(),
+		})
+		if result.IsError {
+			t.Errorf("valid mode '%s' should not error, got: %s", mode, result.Output)
+		}
+	}
+}
