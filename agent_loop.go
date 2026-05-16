@@ -3011,11 +3011,14 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	}
 
 	// Auto-snapshot before write/edit tools
+	a.out("  [SNAP] tool=%q snapshots=%v\n", toolName, a.snapshots != nil)
 	if a.snapshots != nil && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path := extractFilePath(input); path != "" {
 			if err := a.snapshots.TakeSnapshotWithDesc(path, "before "+toolName); err != nil {
 				a.out("  [SNAP] before-snapshot error: %v\n", err)
 			}
+		} else {
+			a.out("  [SNAP] no path extracted for tool=%q\n", toolName)
 		}
 	}
 
