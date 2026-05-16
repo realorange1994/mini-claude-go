@@ -1355,7 +1355,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			// Tools start executing as their content blocks complete during streaming,
 			// overlapping with remaining stream processing.
 			toolCallDoneCh := make(chan int, 20)
-			executor := NewStreamingToolExecutor(a.registry, a.gate, a.shellHooks)
+			executor := NewStreamingToolExecutor(a.registry, a.gate, a.shellHooks, a.snapshots)
 
 			toolCalls, textParts, err = a.callWithRetryAndFallbackStreaming(toolCallDoneCh, executor)
 
@@ -3011,7 +3011,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	}
 
 	// Auto-snapshot before write/edit tools
-	a.out("  [SNAP] tool=%q snapshots=%v\n", toolName, a.snapshots != nil)
+	fmt.Fprintf(os.Stderr, "  [SNAP-EXEC] tool=%q snapshots=%v\n", toolName, a.snapshots != nil)
 	if a.snapshots != nil && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path := extractFilePath(input); path != "" {
 			if err := a.snapshots.TakeSnapshotWithDesc(path, "before "+toolName); err != nil {

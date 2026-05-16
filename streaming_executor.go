@@ -23,9 +23,10 @@ import (
 //   - Non-Bash errors are returned normally without affecting siblings
 //   - Synthetic error messages for cancelled tools include description
 type StreamingToolExecutor struct {
-	registry *tools.Registry
-	gate     *PermissionGate
-	hooks    HookConfig // shell command hooks loaded from settings
+	registry   *tools.Registry
+	gate       *PermissionGate
+	hooks      HookConfig // shell command hooks loaded from settings
+	snapshots  *SnapshotHistory // file version history for auto-snapshots
 
 	// Tool queue
 	tools     []*TrackedTool
@@ -84,14 +85,15 @@ type TrackedTool struct {
 }
 
 // NewStreamingToolExecutor creates a new executor.
-func NewStreamingToolExecutor(registry *tools.Registry, gate *PermissionGate, hooks HookConfig) *StreamingToolExecutor {
+func NewStreamingToolExecutor(registry *tools.Registry, gate *PermissionGate, hooks HookConfig, snapshots *SnapshotHistory) *StreamingToolExecutor {
 	siblingCtx, siblingCancel := context.WithCancel(context.Background())
 	return &StreamingToolExecutor{
-		registry:    registry,
-		gate:        gate,
-		hooks:       hooks,
-		semaphore:   make(chan struct{}, 10), // up to 10 concurrent tools
-		siblingCtx:  siblingCtx,
+		registry:      registry,
+		gate:          gate,
+		hooks:         hooks,
+		snapshots:     snapshots,
+		semaphore:     make(chan struct{}, 10), // up to 10 concurrent tools
+		siblingCtx:    siblingCtx,
 		siblingCancel: siblingCancel,
 	}
 }
@@ -429,6 +431,18 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 		}
 	}
 
+	// Auto-snapshot before write/edit tools (matches agent_loop.go)
+	fmt.Fprintf(os.Stderr, "  [SNAP-EXEC] tool=%q snapshots=%v\n", tc.Name, e.snapshots != nil)
+	if e.snapshots != nil && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "multi_edit") {
+		if path := extractFilePathStreaming(input); path != "" {
+			if err := e.snapshots.TakeSnapshotWithDesc(path, "before "+tc.Name); err != nil {
+				fmt.Fprintf(os.Stderr, "  [SNAP] before-snapshot error: %v\n", err)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "  [SNAP] no path extracted for tool=%q\n", tc.Name)
+		}
+	}
+
 	// Recover from panics inside tool execution, matching agent_loop.go's
 	// panic safety net.
 	var result tools.ToolResult
@@ -445,6 +459,36 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	}()
 
 	wasError := result.IsError
+
+	// Post-snapshot for write/edit tools (matches agent_loop.go)
+	if e.snapshots != nil && !result.IsError && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "multi_edit") {
+		if path := extractFilePathStreaming(input); path != "" {
+			desc := tc.Name
+			if tc.Name == "edit_file" {
+				if oldStr, ok := input["old_string"].(string); ok {
+					if newStr, ok2 := input["new_string"].(string); ok2 {
+						desc = fmt.Sprintf("edit: '%s' -> '%s'", limitStrStreaming(oldStr, 50), limitStrStreaming(newStr, 50))
+					}
+				}
+			}
+			if err := e.snapshots.TakeSnapshotWithDesc(path, desc); err != nil {
+				fmt.Fprintf(os.Stderr, "  [SNAP] after-snapshot error: %v\n", err)
+			}
+		}
+	}
+
+	// Append unified diff to tool result for write/edit tools
+	if e.snapshots != nil && !result.IsError && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "multi_edit") {
+		if path := extractFilePathStreaming(input); path != "" {
+			if diffStr := diffLastTwoSnapshots(e.snapshots, path); diffStr != "" {
+				result.Output += "\n\n--- diff ---\n" + diffStr
+			} else {
+				fmt.Fprintf(os.Stderr, "  [SNAP] diff empty for %s (path=%q)\n", tc.Name, path)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "  [SNAP] no path extracted for %s\n", tc.Name)
+		}
+	}
 
 	// CRITICAL: After execution, check if a sibling tool errored while this
 	// tool was running. Matching upstream's getAbortReason() check inside
@@ -746,4 +790,21 @@ func getSessionID() string {
 		return sid
 	}
 	return "unknown"
+}
+
+// extractFilePathStreaming extracts a file path from tool input parameters,
+// matching the logic in agent_loop.go's extractFilePath.
+func extractFilePathStreaming(input map[string]any) string {
+	if path, ok := input["file_path"].(string); ok && path != "" {
+		return expandPath(path)
+	}
+	return ""
+}
+
+// limitStrStreaming returns at most n characters of s, with "..." appended if truncated.
+func limitStrStreaming(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-3] + "..."
 }

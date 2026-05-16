@@ -35,7 +35,7 @@ func (m *mockExecTool) Execute(params map[string]any) tools.ToolResult {
 
 func TestNewStreamingToolExecutor(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	if exec == nil {
 		t.Fatal("expected non-nil executor")
@@ -65,7 +65,7 @@ func TestNewStreamingToolExecutor(t *testing.T) {
 
 func TestSetMaxConcurrency(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	exec.SetMaxConcurrency(5)
 	if cap(exec.semaphore) != 5 {
@@ -89,7 +89,7 @@ func TestSetMaxConcurrency(t *testing.T) {
 
 func TestIsConcurrencySafe(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	safeTools := []struct {
 		name string
@@ -143,7 +143,7 @@ func TestIsConcurrencySafe(t *testing.T) {
 
 func TestCanExecuteToolNoToolsExecuting(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 	// No tools executing -> any tool can start
 	exec.mu.Lock()
 	if !exec.canExecuteToolLocked(true) {
@@ -157,7 +157,7 @@ func TestCanExecuteToolNoToolsExecuting(t *testing.T) {
 
 func TestCanExecuteToolSafeToolWithSafeExecuting(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	// Simulate a safe tool executing
 	exec.mu.Lock()
@@ -179,7 +179,7 @@ func TestCanExecuteToolSafeToolWithSafeExecuting(t *testing.T) {
 
 func TestCanExecuteToolSafeToolWithUnsafeExecuting(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	// Simulate an unsafe tool executing
 	exec.mu.Lock()
@@ -205,7 +205,7 @@ func TestCanExecuteToolSafeToolWithUnsafeExecuting(t *testing.T) {
 
 func TestClose(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	if exec.discarded {
 		t.Error("expected discarded to be false initially")
@@ -227,7 +227,7 @@ func TestClose(t *testing.T) {
 
 func TestDispatchUnknownTool(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_unknown", Name: "nonexistent_tool", Arguments: `{"key": "value"}`},
@@ -260,7 +260,7 @@ func TestDispatchKnownSafeTool(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_read", Name: "read_file", Arguments: `{"path": "/tmp/test.txt"}`},
@@ -293,7 +293,7 @@ func TestDispatchKnownUnsafeTool(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_write", Name: "write_file", Arguments: `{"path": "/tmp/test.txt", "content": "hello"}`},
@@ -323,7 +323,7 @@ func TestDispatchWhenStopped(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 	exec.Close() // stop before dispatch
 
 	toolCalls := []ToolCallInfo{
@@ -354,7 +354,7 @@ func TestExecuteMalformedJSON(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_bad", Name: "test_tool", Arguments: `{not valid json`},
@@ -390,7 +390,7 @@ func TestExecuteEmptyArguments(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_empty", Name: "test_tool", Arguments: ""},
@@ -420,7 +420,7 @@ func TestExecuteEmptyJSONObject(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_empty_obj", Name: "test_tool", Arguments: `{}`},
@@ -447,7 +447,7 @@ func TestExecutePanicRecovery(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_panic", Name: "panic_tool", Arguments: `{}`},
@@ -477,7 +477,7 @@ func TestExecuteEmptyToolUseIDGuard(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "", Name: "test_tool", Arguments: `{}`},
@@ -520,7 +520,7 @@ func TestBashErrorCancelsSiblings(t *testing.T) {
 	}
 	reg.Register(readTool)
 
-	executor := NewStreamingToolExecutor(reg, nil, nil)
+	executor := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	// Dispatch exec first (it's unsafe, so it blocks)
 	toolCalls := []ToolCallInfo{
@@ -562,7 +562,7 @@ func TestNonBashErrorDoesNotCancelSiblings(t *testing.T) {
 	}
 	reg.Register(globTool)
 
-	executor := NewStreamingToolExecutor(reg, nil, nil)
+	executor := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_read", Name: "read_file", Arguments: `{"path": "/nonexistent"}`},
@@ -604,7 +604,7 @@ func TestWriteErrorDoesNotCancelSiblings(t *testing.T) {
 	}
 	reg.Register(writeTool)
 
-	executor := NewStreamingToolExecutor(reg, nil, nil)
+	executor := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_write", Name: "write_file", Arguments: `{"path": "/root/test.txt"}`},
@@ -629,7 +629,7 @@ func TestWriteErrorDoesNotCancelSiblings(t *testing.T) {
 
 func TestGetToolDescription(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	tests := []struct {
 		name     string
@@ -679,7 +679,7 @@ func TestGetToolDescription(t *testing.T) {
 
 func TestCreateSyntheticErrorMessage(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	tc := ToolCallInfo{Name: "exec", Arguments: `{"command": "rm -rf /"}`}
 	msg := exec.createSyntheticErrorMessage(tc)
@@ -709,7 +709,7 @@ func TestStartAndStop(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	doneCh := make(chan int, 3)
 	toolCalls := []ToolCallInfo{
@@ -740,7 +740,7 @@ func TestStartAndStop(t *testing.T) {
 
 func TestStartIgnoresOutOfBounds(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	doneCh := make(chan int, 1)
 	toolCalls := []ToolCallInfo{
@@ -760,7 +760,7 @@ func TestStartIgnoresOutOfBounds(t *testing.T) {
 
 func TestStartNegativeIndex(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	doneCh := make(chan int, 1)
 	toolCalls := []ToolCallInfo{}
@@ -778,7 +778,7 @@ func TestStartNegativeIndex(t *testing.T) {
 
 func TestCloseStopsStart(t *testing.T) {
 	reg := tools.NewRegistry()
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	doneCh := make(chan int, 1)
 	toolCalls := []ToolCallInfo{}
@@ -815,7 +815,7 @@ func TestWaitReturnsOrderedResults(t *testing.T) {
 	reg.Register(slowTool)
 	reg.Register(fastTool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	// Execute fast first (index 1), then slow (index 0)
 	// Fast should complete first, but results should be ordered
@@ -857,7 +857,7 @@ func TestToolResultPreservesIndexOnConcurrentExecution(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	// Execute 5 tools with indices in random order
 	indices := []int{3, 0, 4, 1, 2}
@@ -944,7 +944,7 @@ func TestJSONRoundTripToolArguments(t *testing.T) {
 			}
 			reg.Register(tool)
 
-			exec := NewStreamingToolExecutor(reg, nil, nil)
+			exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 			toolCalls := []ToolCallInfo{
 				{ID: "toolu_test", Name: "test_tool", Arguments: tc.arguments},
@@ -1042,7 +1042,7 @@ func TestProcessQueueOrdersSafeTools(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	// Add multiple safe tools
 	toolCalls := []ToolCallInfo{
@@ -1090,7 +1090,7 @@ func TestCancelRemainingOnBashError(t *testing.T) {
 	reg.Register(execTool)
 	reg.Register(readTool)
 
-	executor := NewStreamingToolExecutor(reg, nil, nil)
+	executor := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_exec", Name: "exec", Arguments: `{"command": "bad_cmd"}`},
@@ -1150,7 +1150,7 @@ func TestSequentialUnsafeToolsDoNotHang(t *testing.T) {
 	}
 	reg.Register(writeTool)
 
-	executor := NewStreamingToolExecutor(reg, nil, nil)
+	executor := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	// Dispatch 3 unsafe tools sequentially via Start
 	doneCh := make(chan int, 3)
@@ -1206,7 +1206,7 @@ func TestMixedSafeUnsafeToolsDoNotHang(t *testing.T) {
 	reg.Register(readTool)
 	reg.Register(writeTool)
 
-	executor := NewStreamingToolExecutor(reg, nil, nil)
+	executor := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	doneCh := make(chan int, 3)
 	toolCalls := []ToolCallInfo{
@@ -1250,7 +1250,7 @@ func TestWaitErrorReturnsQuickly(t *testing.T) {
 	}
 	reg.Register(tool)
 
-	exec := NewStreamingToolExecutor(reg, nil, nil)
+	exec := NewStreamingToolExecutor(reg, nil, nil, nil)
 
 	toolCalls := []ToolCallInfo{
 		{ID: "toolu_1", Name: "exec", Arguments: `{}`},
