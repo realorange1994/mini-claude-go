@@ -75,8 +75,13 @@ func (h *SnapshotHistory) TakeSnapshotWithDesc(filePath, description string) err
 	}
 
 	content, err := os.ReadFile(absPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("cannot read %s: %w", absPath, err)
+	fileExists := true
+	if err != nil {
+		if os.IsNotExist(err) {
+			fileExists = false
+		} else {
+			return fmt.Errorf("cannot read %s: %w", absPath, err)
+		}
 	}
 	// If the file does not exist yet we still record a snapshot with
 	// empty content so that RewindTo can delete it later.
@@ -87,13 +92,19 @@ func (h *SnapshotHistory) TakeSnapshotWithDesc(filePath, description string) err
 	h.mu.RLock()
 	existing := h.snapshots[absPath]
 	h.mu.RUnlock()
+
 	if len(existing) > 0 {
 		last := existing[len(existing)-1]
 		if last.Checksum == checksum && !last.Deleted {
 			// Content unchanged, skip duplicate snapshot
+			fmt.Fprintf(os.Stderr, "  [SNAP] dedup skip: path=%s desc=%q existing=%d checksum=%s\n",
+				absPath, description, len(existing), checksum)
 			return nil
 		}
 	}
+
+	fmt.Fprintf(os.Stderr, "  [SNAP] creating: path=%s desc=%q exists=%v contentLen=%d checksum=%s\n",
+		absPath, description, fileExists, len(content), checksum)
 
 	snap := FileSnapshot{
 		FilePath:    absPath,
@@ -110,7 +121,12 @@ func (h *SnapshotHistory) TakeSnapshotWithDesc(filePath, description string) err
 	// Trim if over capacity
 	h.trimSnapshots(absPath)
 
-	return h.persist(snap)
+	if err := h.persist(snap); err != nil {
+		fmt.Fprintf(os.Stderr, "  [SNAP] persist error: path=%s err=%v\n", absPath, err)
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "  [SNAP] persisted: path=%s snapDir=%s\n", absPath, h.snapDir)
+	return nil
 }
 
 // trimSnapshots removes old snapshots when over capacity limits.
@@ -361,6 +377,7 @@ func (h *SnapshotHistory) Checkout(filePath string, version int) (string, error)
 func (h *SnapshotHistory) ListSnapshots(filePath string) []FileSnapshot {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "  [SNAP] ListSnapshots abs error: path=%q err=%v\n", filePath, err)
 		return nil
 	}
 
@@ -372,11 +389,14 @@ func (h *SnapshotHistory) ListSnapshots(filePath string) []FileSnapshot {
 		// Return a copy so the caller cannot mutate the slice header.
 		out := make([]FileSnapshot, len(snaps))
 		copy(out, snaps)
+		fmt.Fprintf(os.Stderr, "  [SNAP] ListSnapshots found %d in memory: path=%q\n", len(snaps), absPath)
 		return out
 	}
 
 	// Not in memory; try loading from disk.
-	return h.loadFromDisk(absPath)
+	diskSnaps := h.loadFromDisk(absPath)
+	fmt.Fprintf(os.Stderr, "  [SNAP] ListSnapshots disk loaded %d: path=%q snapDir=%s\n", len(diskSnaps), absPath, h.snapDir)
+	return diskSnaps
 }
 
 // SnapshotCount returns the number of snapshots for a file.
