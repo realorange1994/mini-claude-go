@@ -3013,7 +3013,9 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	// Auto-snapshot before write/edit tools
 	if a.snapshots != nil && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path := extractFilePath(input); path != "" {
-			_ = a.snapshots.TakeSnapshotWithDesc(path, "before "+toolName)
+			if err := a.snapshots.TakeSnapshotWithDesc(path, "before "+toolName); err != nil {
+				a.out("  [SNAP] before-snapshot error: %v\n", err)
+			}
 		}
 	}
 
@@ -3139,7 +3141,9 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 					}
 				}
 			}
-			_ = a.snapshots.TakeSnapshotWithDesc(path, desc)
+			if err := a.snapshots.TakeSnapshotWithDesc(path, desc); err != nil {
+				a.out("  [SNAP] after-snapshot error: %v\n", err)
+			}
 		}
 	}
 
@@ -3162,7 +3166,11 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		if path := extractFilePath(input); path != "" {
 			if diffStr := diffLastTwoSnapshots(a.snapshots, path); diffStr != "" {
 				result.Output += "\n\n--- diff ---\n" + diffStr
+			} else {
+				a.out("  [SNAP] diff empty for %s (path=%q)\n", toolName, path)
 			}
+		} else {
+			a.out("  [SNAP] no path extracted for %s\n", toolName)
 		}
 	}
 

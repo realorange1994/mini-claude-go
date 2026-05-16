@@ -2429,3 +2429,124 @@ func TestGetStringSliceStringSlice(t *testing.T) {
 		t.Errorf("expected [a.go, b.go], got %v", got)
 	}
 }
+
+// ─── diffLastTwoSnapshots + snapshot end-to-end ────────────────────────────
+
+func TestDiffLastTwoSnapshotsBasic(t *testing.T) {
+	// Create a temp file
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(fp, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create SnapshotHistory
+	h := NewSnapshotHistory(dir)
+
+	// Take "before" snapshot
+	if err := h.TakeSnapshotWithDesc(fp, "before edit"); err != nil {
+		t.Fatalf("before snapshot failed: %v", err)
+	}
+
+	// Modify file
+	if err := os.WriteFile(fp, []byte("hello world\nnew line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Take "after" snapshot
+	if err := h.TakeSnapshotWithDesc(fp, "after edit"); err != nil {
+		t.Fatalf("after snapshot failed: %v", err)
+	}
+
+	// Check snapshots exist
+	snaps := h.ListSnapshots(fp)
+	if len(snaps) != 2 {
+		t.Fatalf("expected 2 snapshots, got %d", len(snaps))
+	}
+
+	// Test diffLastTwoSnapshots
+	diff := diffLastTwoSnapshots(h, fp)
+	if diff == "" {
+		t.Fatal("expected diff, got empty string")
+	}
+	if !strings.Contains(diff, "+new line") {
+		t.Errorf("diff should contain added line, got: %q", diff)
+	}
+	t.Logf("diff:\n%s", diff)
+}
+
+func TestDiffLastTwoSnapshotsPathNormalization(t *testing.T) {
+	// Test that paths with different formats resolve to the same snapshot key
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(fp, []byte("line1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewSnapshotHistory(dir)
+
+	// Simulate what extractFilePath + expandPath does
+	expandedPath := expandPath(fp)
+	
+	// Take "before" snapshot with expanded path
+	if err := h.TakeSnapshotWithDesc(expandedPath, "before"); err != nil {
+		t.Fatalf("before snapshot failed: %v", err)
+	}
+
+	// Modify file
+	if err := os.WriteFile(fp, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Take "after" snapshot with expanded path
+	if err := h.TakeSnapshotWithDesc(expandedPath, "after"); err != nil {
+		t.Fatalf("after snapshot failed: %v", err)
+	}
+
+	// diffLastTwoSnapshots uses filepath.Abs internally
+	diff := diffLastTwoSnapshots(h, expandedPath)
+	if diff == "" {
+		t.Fatal("expected diff, got empty string")
+	}
+	if !strings.Contains(diff, "+line2") {
+		t.Errorf("diff should contain added line, got: %q", diff)
+	}
+}
+
+func TestDiffLastTwoSnapshotsNoChanges(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(fp, []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewSnapshotHistory(dir)
+	_ = h.TakeSnapshotWithDesc(fp, "before")
+	_ = h.TakeSnapshotWithDesc(fp, "after") // Same content, dedup should skip
+
+	snaps := h.ListSnapshots(fp)
+	if len(snaps) != 1 {
+		t.Fatalf("expected 1 snapshot (dedup), got %d", len(snaps))
+	}
+
+	diff := diffLastTwoSnapshots(h, fp)
+	if diff != "" {
+		t.Errorf("expected empty diff for identical content, got: %q", diff)
+	}
+}
+
+func TestDiffLastTwoSnapshotsLessThanTwo(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(fp, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewSnapshotHistory(dir)
+	_ = h.TakeSnapshotWithDesc(fp, "only one")
+
+	diff := diffLastTwoSnapshots(h, fp)
+	if diff != "" {
+		t.Errorf("expected empty diff for single snapshot, got: %q", diff)
+	}
+}
