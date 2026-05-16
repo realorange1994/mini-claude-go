@@ -37,6 +37,9 @@ func (t *FileHistoryTool) InputSchema() map[string]any {
 func (t *FileHistoryTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
 
 func (t *FileHistoryTool) Execute(params map[string]any) tools.ToolResult {
+	if t.History == nil {
+		return tools.ToolResult{Output: "Error: file history not available (no working directory)", IsError: true}
+	}
 	pathVal, hasPath := params["path"].(string)
 	if hasPath && pathVal != "" {
 		return t.showFileHistory(pathVal)
@@ -1158,7 +1161,7 @@ func getCwd() string {
 
 func expandPath(p string) string {
 	if filepath.IsAbs(p) {
-		return p
+		return filepath.Clean(p)
 	}
 	// Handle Unix-style absolute paths like /e/ on Windows: convert /x/ to X:\
 	if len(p) >= 3 && p[0] == '/' && (p[1] >= 'a' && p[1] <= 'z' || p[1] >= 'A' && p[1] <= 'Z') && p[2] == '/' {

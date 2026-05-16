@@ -3011,7 +3011,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	}
 
 	// Auto-snapshot before write/edit tools
-	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
+	if a.snapshots != nil && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path := extractFilePath(input); path != "" {
 			_ = a.snapshots.TakeSnapshotWithDesc(path, "before "+toolName)
 		}
@@ -3127,7 +3127,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	// with potentially different path normalization.
 
 	// Post-snapshot for write tools: capture the new state with a meaningful description
-	if !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
+	if a.snapshots != nil && !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path := extractFilePath(input); path != "" {
 			desc := toolName
 			if toolName == "edit_file" {
@@ -3144,7 +3144,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	}
 
 	// rm/rmrf cleanup: clear snapshot history for deleted files
-	if !result.IsError && toolName == "fileops" {
+	if a.snapshots != nil && !result.IsError && toolName == "fileops" {
 		if op, ok := input["operation"].(string); ok && (op == "rm" || op == "rmrf") {
 			if path := extractFilePath(input); path != "" {
 				if op == "rm" {
@@ -3158,7 +3158,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	// Append unified diff to tool result for write/edit tools.
 	// Snapshots were taken before and after the tool execution above.
-	if !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
+	if a.snapshots != nil && !result.IsError && (toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit") {
 		if path := extractFilePath(input); path != "" {
 			if diffStr := diffLastTwoSnapshots(a.snapshots, path); diffStr != "" {
 				result.Output += "\n\n--- diff ---\n" + diffStr
@@ -3280,9 +3280,11 @@ func limitStr(s string, max int) string {
 
 // extractFilePath extracts the file path from tool input.
 // Checks only "file_path" — matching official Claude Code schema.
+// Uses expandPath to normalize paths (e.g., /e/ → E:\ on Windows)
+// so they match what file_history tools use.
 func extractFilePath(input map[string]any) string {
 	if path, ok := input["file_path"].(string); ok && path != "" {
-		return path
+		return expandPath(path)
 	}
 	return ""
 }
