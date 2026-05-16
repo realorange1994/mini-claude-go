@@ -11,6 +11,12 @@ import (
 // data structures, logic, and computation.
 type LispEvalTool struct{}
 
+// evalResult holds the result of a Lisp evaluation.
+type evalResult struct {
+	output string
+	err    error
+}
+
 func (*LispEvalTool) Name() string { return "lisp_eval" }
 
 func (*LispEvalTool) Description() string {
@@ -33,8 +39,12 @@ func (*LispEvalTool) InputSchema() map[string]any {
 			},
 			"operation": map[string]any{
 				"type":        "string",
-				"enum":        []string{"eval", "reset", "help", "examples"},
-				"description": "Action to perform: 'eval' to evaluate a Lisp expression (default), 'reset' to clear interpreter state, 'help' to show usage manual, 'examples' to show code examples.",
+				"enum":        []string{"eval", "reset", "help", "examples", "eval_file", "lint"},
+				"description": "Action to perform: 'eval' to evaluate a Lisp expression (default), 'reset' to clear interpreter state, 'help' to show usage manual, 'examples' to show code examples, 'eval_file' to load and execute a Lisp file, 'lint' to check syntax without executing.",
+			},
+			"file": map[string]any{
+				"type":        "string",
+				"description": "File path for operation=eval_file or lint. Required for eval_file. Optional for lint (use either expression or file).",
 			},
 			"limits": map[string]any{
 				"type":        "string",
@@ -73,6 +83,75 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 	case "examples":
 		return ToolResult{Output: lispExamples(expr)}
 
+	case "eval_file":
+		file, _ := params["file"].(string)
+		if file == "" {
+			return ToolResult{Output: "Error: file is required for operation=eval_file", IsError: true}
+		}
+		var limits microlisp.ResourceLimits
+		switch limitsProfile {
+		case "strict":
+			limits = microlisp.StrictLimits()
+		case "unlimited":
+			limits = microlisp.UnlimitedLimits()
+		default:
+			limits = microlisp.DefaultLimits()
+		}
+		ch := make(chan evalResult, 1)
+		go func() {
+			output, err := microlisp.SafeLoadFileWithLimits(file, limits)
+			ch <- evalResult{output, err}
+		}()
+		select {
+		case <-ctx.Done():
+			return ToolResult{Output: "Error: lisp_eval timed out loading file", IsError: true}
+		case r := <-ch:
+			if r.err != nil {
+				return ToolResult{Output: fmt.Sprintf("Error: %v", r.err), IsError: true}
+			}
+			result := r.output
+			if result == "" {
+				result = "NIL"
+			}
+			return ToolResult{Output: result}
+		}
+
+	case "lint":
+		file, _ := params["file"].(string)
+		if file != "" {
+			var limits microlisp.ResourceLimits
+			switch limitsProfile {
+			case "strict":
+				limits = microlisp.StrictLimits()
+			case "unlimited":
+				limits = microlisp.UnlimitedLimits()
+			default:
+				limits = microlisp.DefaultLimits()
+			}
+			err := microlisp.SafeLintFileWithLimits(file, limits)
+			if err != nil {
+				return ToolResult{Output: fmt.Sprintf("Lint error: %v", err), IsError: true}
+			}
+			return ToolResult{Output: "No syntax errors found."}
+		}
+		if expr == "" {
+			return ToolResult{Output: "Error: expression or file is required for operation=lint", IsError: true}
+		}
+		var limits microlisp.ResourceLimits
+		switch limitsProfile {
+		case "strict":
+			limits = microlisp.StrictLimits()
+		case "unlimited":
+			limits = microlisp.UnlimitedLimits()
+		default:
+			limits = microlisp.DefaultLimits()
+		}
+		err := microlisp.SafeLintWithLimits(expr, limits)
+		if err != nil {
+			return ToolResult{Output: fmt.Sprintf("Lint error: %v", err), IsError: true}
+		}
+		return ToolResult{Output: "No syntax errors found."}
+
 	default: // eval (default when operation is empty or unknown)
 		if expr == "" {
 			return ToolResult{Output: "Error: expression is required. Examples: (+ 1 2) => 3, (car '(1 2 3)) => 1", IsError: true}
@@ -92,10 +171,6 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		// Run eval in a goroutine so we can respect context cancellation.
 		// The microlisp interpreter holds evalMu during execution, so
 		// we can't cancel mid-evaluation, but we can abort waiting for it.
-		type evalResult struct {
-			output string
-			err    error
-		}
 		ch := make(chan evalResult, 1)
 		go func() {
 			result, err := microlisp.SafeEvalWithLimits(expr, limits)

@@ -2,6 +2,7 @@ package microlisp
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -122,4 +123,32 @@ func ResetGlobalEnv() {
 	}
 	// Re-initialize the global environment with builtins and stdlib
 	InitGlobalEnv()
+}
+
+// LintString parses Lisp source without evaluating. Returns any syntax errors.
+func LintString(s string) error {
+	l := lex(s)
+	p := &Parser{l: l, ptoks: make([]Tok, 0, 64), readtable: currentReadtable, env: globalEnv}
+	p.advance()
+	for p.tok.typ != TEOF {
+		p.readtable = currentReadtable
+		p.env = globalEnv
+		v, err := p.readExpr()
+		if err != nil {
+			return err
+		}
+		if v == nil {
+			return fmt.Errorf("syntax error: unmatched close parenthesis")
+		}
+	}
+	return nil
+}
+
+// LintFile reads a Lisp source file and parses it without evaluating.
+func LintFile(fname string) error {
+	data, err := os.ReadFile(fname)
+	if err != nil {
+		return err
+	}
+	return LintString(string(data))
 }

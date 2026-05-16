@@ -200,6 +200,32 @@ func SafeLoadFileWithLimits(fname string, limits ResourceLimits) (output string,
 	return
 }
 
+// -------- Lint helpers --------
+
+// SafeLintWithLimits parses Lisp source without evaluating, with resource limits.
+// Returns any syntax errors found. Thread-safe (uses evalMu).
+func SafeLintWithLimits(s string, limits ResourceLimits) error {
+	evalMu.Lock()
+	defer evalMu.Unlock()
+
+	startLimits(limits)
+	defer stopLimits()
+
+	return LintString(s)
+}
+
+// SafeLintFileWithLimits parses a Lisp file without evaluating, with resource limits.
+// Returns any syntax errors found. Thread-safe (uses evalMu).
+func SafeLintFileWithLimits(fname string, limits ResourceLimits) error {
+	evalMu.Lock()
+	defer evalMu.Unlock()
+
+	startLimits(limits)
+	defer stopLimits()
+
+	return LintFile(fname)
+}
+
 // -------- Cancellation helper --------
 
 // NewCancelChannel creates a channel that can be used to cancel

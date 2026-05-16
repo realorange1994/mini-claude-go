@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -33,11 +34,31 @@ func (*ProcessTool) InputSchema() map[string]any {
 			},
 			"signal": map[string]any{
 				"type":        "string",
-				"description": "Signal to send (e.g., SIGTERM, SIGKILL, 9). Unix only (default: SIGTERM).",
+				"description": "Signal to send (e.g., SIGTERM, SIGKILL, SIGINT, SIGHUP, or numeric 9/15). Unix only. Ignored if force=true.",
+			},
+			"force": map[string]any{
+				"type":        "boolean",
+				"description": "Force kill. Unix: sends SIGKILL (-9). Windows: uses -Force flag. Overrides signal parameter.",
 			},
 			"user": map[string]any{
 				"type":        "string",
 				"description": "Filter by user (for list, pgrep).",
+			},
+			"filter_name": map[string]any{
+				"type":        "string",
+				"description": "Filter processes by name/command keyword (for list).",
+			},
+			"filter_status": map[string]any{
+				"type":        "string",
+				"description": "Filter by process status: running, idle, stopped (for list).",
+			},
+			"max_cpu": map[string]any{
+				"type":        "number",
+				"description": "Maximum CPU usage percent to include (for list). Processes above this are excluded.",
+			},
+			"max_memory": map[string]any{
+				"type":        "number",
+				"description": "Maximum memory usage in MB to include (for list). Processes above this are excluded.",
 			},
 			"lines": map[string]any{
 				"type":        "integer",
@@ -77,26 +98,319 @@ func (*ProcessTool) Execute(params map[string]any) ToolResult {
 }
 
 func processList(params map[string]any, isWindows bool) ToolResult {
-	var cmd *exec.Cmd
+	filterName, _ := params["filter_name"].(string)
+	filterStatus, _ := params["filter_status"].(string)
+	filterUser, _ := params["user"].(string)
+	var maxCPU, maxMemory float64
+	if v, ok := params["max_cpu"].(float64); ok {
+		maxCPU = v
+	}
+	if v, ok := params["max_memory"].(float64); ok {
+		maxMemory = v
+	}
+
+	hasFilters := filterName != "" || filterStatus != "" || filterUser != "" || maxCPU > 0 || maxMemory > 0
+
 	if isWindows {
-		user, hasUser := params["user"].(string)
-		if hasUser && user != "" {
-			safeUser := sanitizePSInput(user)
-			cmd = exec.Command("powershell", "-NoProfile", "-Command",
-				fmt.Sprintf("Get-Process -IncludeUserName | Where-Object {$_.UserName -like '*%s*'} | Format-Table -AutoSize", safeUser))
-		} else {
-			cmd = exec.Command("powershell", "-NoProfile", "-Command",
-				"Get-Process | Format-Table -AutoSize")
+		// Use ConvertTo-Json for structured output so we can filter in Go
+		cmd := exec.Command("powershell", "-NoProfile", "-Command",
+			`Get-Process -IncludeUserName | Select-Object Id, ProcessName, CPU, @{N='MemMB';E={[math]::Round($_.WorkingSet64/1MB,1)}}, UserName | ConvertTo-Json`)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, strings.TrimSpace(string(out))), IsError: true}
 		}
-	} else {
-		user, hasUser := params["user"].(string)
-		if hasUser && user != "" {
-			cmd = exec.Command("ps", "-u", user)
-		} else {
-			cmd = exec.Command("ps", "aux")
+		result := filterWindowsProcesses(string(out), filterName, filterStatus, filterUser, maxCPU, maxMemory, hasFilters)
+		return ToolResult{Output: result}
+	}
+
+	// Unix: parse ps aux output
+	cmd := exec.Command("ps", "aux")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, strings.TrimSpace(string(out))), IsError: true}
+	}
+
+	if !hasFilters {
+		return ToolResult{Output: strings.TrimSpace(string(out))}
+	}
+
+	return ToolResult{Output: filterUnixProcesses(string(out), filterName, filterStatus, filterUser, maxCPU, maxMemory)}
+}
+
+// procInfo holds parsed process fields for filtering.
+type procInfo struct {
+	user    string
+	pid     string
+	cpu     float64
+	memPct  float64
+	vsz     string
+	rss     string
+	tty     string
+	stat    string
+	start   string
+	time    string
+	command string
+}
+
+func filterUnixProcesses(raw, filterName, filterStatus, filterUser string, maxCPU, maxMemory float64) string {
+	lines := strings.Split(raw, "\n")
+	if len(lines) < 2 {
+		return strings.TrimSpace(raw)
+	}
+
+	var result []string
+	result = append(result, lines[0]) // header
+
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 11 {
+			continue
+		}
+
+		p := procInfo{
+			user:    fields[0],
+			pid:     fields[1],
+			tty:     fields[5],
+			stat:    fields[6],
+			start:   fields[7],
+			time:    fields[8],
+			command: strings.Join(fields[10:], " "),
+		}
+		p.cpu, _ = strconv.ParseFloat(fields[2], 64)
+		p.memPct, _ = strconv.ParseFloat(fields[3], 64)
+		p.vsz = fields[4]
+		p.rss = fields[5]
+
+		if filterUser != "" && !strings.Contains(strings.ToLower(p.user), strings.ToLower(filterUser)) {
+			continue
+		}
+		if filterName != "" && !strings.Contains(strings.ToLower(p.command), strings.ToLower(filterName)) {
+			continue
+		}
+		if filterStatus != "" && !statusMatches(p.stat, filterStatus) {
+			continue
+		}
+		if maxCPU > 0 && p.cpu > maxCPU {
+			continue
+		}
+		if maxMemory > 0 {
+			rssKB, _ := strconv.ParseFloat(p.rss, 64)
+			rssMB := rssKB / 1024.0
+			if rssMB > maxMemory {
+				continue
+			}
+		}
+
+		result = append(result, line)
+	}
+
+	return strings.TrimSpace(strings.Join(result, "\n"))
+}
+
+// statusMatches maps Unix stat codes to human-readable status.
+func statusMatches(stat, filter string) bool {
+	f := strings.ToLower(filter)
+	s := strings.ToUpper(stat)
+	switch f {
+	case "running":
+		return strings.Contains(s, "R")
+	case "idle":
+		return strings.Contains(s, "S")
+	case "stopped":
+		return strings.Contains(s, "T")
+	}
+	return false
+}
+
+func filterWindowsProcesses(jsonStr, filterName, filterStatus, filterUser string, maxCPU, maxMemory float64, hasFilters bool) string {
+	if !hasFilters {
+		// Just pretty-print the JSON as a table
+		return formatWinProcJSON(jsonStr)
+	}
+
+	// Parse JSON array of process objects
+	jsonStr = strings.TrimSpace(jsonStr)
+	if jsonStr == "" || jsonStr == "null" {
+		return "No processes found."
+	}
+
+	// Simple JSON array parsing (single object case too)
+	var procs []map[string]any
+	if strings.HasPrefix(jsonStr, "[") {
+		// Array case - manual parse
+		procs = parseSimpleWinProcs(jsonStr)
+	} else if strings.HasPrefix(jsonStr, "{") {
+		// Single object
+		p := parseSingleWinProc(jsonStr)
+		if p != nil {
+			procs = append(procs, p)
 		}
 	}
-	return runCmd(cmd)
+
+	var filtered []map[string]any
+	for _, p := range procs {
+		name, _ := p["ProcessName"].(string)
+		user, _ := p["UserName"].(string)
+		cpu, _ := p["CPU"].(float64)
+		memMB, _ := p["MemMB"].(float64)
+
+		if filterName != "" && !strings.Contains(strings.ToLower(name), strings.ToLower(filterName)) {
+			continue
+		}
+		if filterUser != "" && !strings.Contains(strings.ToLower(user), strings.ToLower(filterUser)) {
+			continue
+		}
+		if filterStatus != "" {
+			// Windows doesn't have Unix-style stat codes; skip filter
+		}
+		if maxCPU > 0 && cpu > maxCPU {
+			continue
+		}
+		if maxMemory > 0 && memMB > maxMemory {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+
+	if len(filtered) == 0 {
+		return "No processes match the filter criteria."
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s %s\n", "Id", "ProcessName", "CPU", "MemMB", "UserName"))
+	for _, p := range filtered {
+		id := fmt.Sprintf("%v", p["Id"])
+		name, _ := p["ProcessName"].(string)
+		cpu := fmt.Sprintf("%.1f", p["CPU"])
+		mem := fmt.Sprintf("%.1f", p["MemMB"])
+		user, _ := p["UserName"].(string)
+		sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s %s\n", id, name, cpu, mem, user))
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func formatWinProcJSON(jsonStr string) string {
+	procs := parseSimpleWinProcs(jsonStr)
+	if len(procs) == 0 {
+		return strings.TrimSpace(jsonStr)
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s %s\n", "Id", "ProcessName", "CPU", "MemMB", "UserName"))
+	for _, p := range procs {
+		id := fmt.Sprintf("%v", p["Id"])
+		name, _ := p["ProcessName"].(string)
+		cpu := fmt.Sprintf("%.1f", p["CPU"])
+		mem := fmt.Sprintf("%.1f", p["MemMB"])
+		user, _ := p["UserName"].(string)
+		sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s %s\n", id, name, cpu, mem, user))
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// parseSingleWinProc parses a single JSON object into a map.
+func parseSingleWinProc(s string) map[string]any {
+	return parseSimpleWinProcs("[" + s + "]")[0]
+}
+
+// parseSimpleWinProcs does minimal JSON parsing for Windows process output.
+func parseSimpleWinProcs(jsonStr string) []map[string]any {
+	var result []map[string]any
+	// Tokenize objects between { and }
+	depth := 0
+	start := -1
+	for i := 0; i < len(jsonStr); i++ {
+		switch jsonStr[i] {
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			depth--
+			if depth == 0 && start >= 0 {
+				obj := parseFlatJSONObject(jsonStr[start+1 : i])
+				if obj != nil {
+					result = append(result, obj)
+				}
+				start = -1
+			}
+		}
+	}
+	return result
+}
+
+// parseFlatJSONObject parses a flat JSON object (no nested objects/arrays).
+func parseFlatJSONObject(s string) map[string]any {
+	m := make(map[string]any)
+	i := 0
+	for i < len(s) {
+		// Find key
+		kq := strings.Index(s[i:], "\"")
+		if kq < 0 {
+			break
+		}
+		i += kq + 1
+		end := strings.Index(s[i:], "\"")
+		if end < 0 {
+			break
+		}
+		key := s[i : i+end]
+		i += end + 1
+		// Skip :
+		colon := strings.Index(s[i:], ":")
+		if colon < 0 {
+			break
+		}
+		i += colon + 1
+		// Skip whitespace
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		// Parse value
+		if s[i] == '"' {
+			i++
+			end = strings.Index(s[i:], "\"")
+			if end < 0 {
+				break
+			}
+			val := s[i : i+end]
+			i += end + 1
+			m[key] = val
+		} else if s[i] == 'n' && i+3 < len(s) && s[i:i+4] == "null" {
+			m[key] = nil
+			i += 4
+		} else {
+			// Number or boolean
+			end := i
+			for end < len(s) && s[end] != ',' && s[end] != '}' && s[end] != ' ' && s[end] != '\r' && s[end] != '\n' {
+				end++
+			}
+			val := strings.TrimSpace(s[i:end])
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				m[key] = f
+			} else if val == "true" {
+				m[key] = true
+			} else if val == "false" {
+				m[key] = false
+			} else {
+				m[key] = val
+			}
+			i = end
+		}
+		// Skip comma
+		comma := strings.Index(s[i:], ",")
+		if comma < 0 {
+			break
+		}
+		i += comma + 1
+	}
+	return m
 }
 
 func processKill(params map[string]any, isWindows bool) ToolResult {
@@ -115,20 +429,20 @@ func processKill(params map[string]any, isWindows bool) ToolResult {
 		return ToolResult{Output: "Error: pid must be a non-zero integer", IsError: true}
 	}
 
+	force, _ := params["force"].(bool)
+
 	if isWindows {
-		cmd := exec.Command("powershell", "-NoProfile", "-Command",
-			fmt.Sprintf("Stop-Process -Id %d -Force", pid))
+		if force {
+			cmd := exec.Command("powershell", "-NoProfile", "-Command",
+				fmt.Sprintf("Stop-Process -Id %d -Force", pid))
+			return runCmd(cmd)
+		}
+		// Without force, use taskkill without /F (allows graceful shutdown)
+		cmd := exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid))
 		return runCmd(cmd)
 	}
 
-	signal := "SIGTERM"
-	if s, ok := params["signal"].(string); ok && s != "" {
-		signal = s
-	}
-	sig := signal
-	if _, err := fmt.Sscanf(signal, "%d", new(int)); err != nil {
-		sig = "-" + strings.TrimPrefix(strings.TrimPrefix(signal, "SIG"), "")
-	}
+	sig := resolveSignal(params, force)
 	cmd := exec.Command("kill", sig, fmt.Sprintf("%d", pid))
 	return runCmd(cmd)
 }
@@ -139,10 +453,18 @@ func processKillByName(params map[string]any, isWindows bool) ToolResult {
 		return ToolResult{Output: "Error: pattern is required for pkill", IsError: true}
 	}
 
+	force, _ := params["force"].(bool)
+
 	if isWindows {
 		safePattern := sanitizePSInput(pattern)
-		cmd := exec.Command("powershell", "-NoProfile", "-Command",
-			fmt.Sprintf("Get-Process -Name '*%s*' -ErrorAction SilentlyContinue | Stop-Process -Force", safePattern))
+		var cmd *exec.Cmd
+		if force {
+			cmd = exec.Command("powershell", "-NoProfile", "-Command",
+				fmt.Sprintf("Get-Process -Name '*%s*' -ErrorAction SilentlyContinue | Stop-Process -Force", safePattern))
+		} else {
+			cmd = exec.Command("powershell", "-NoProfile", "-Command",
+				fmt.Sprintf("Get-Process -Name '*%s*' -ErrorAction SilentlyContinue | Stop-Process", safePattern))
+		}
 		out, err := cmd.CombinedOutput()
 		output := strings.TrimSpace(string(out))
 		if output == "" {
@@ -154,16 +476,27 @@ func processKillByName(params map[string]any, isWindows bool) ToolResult {
 		return ToolResult{Output: output}
 	}
 
-	signal := "SIGTERM"
-	if s, ok := params["signal"].(string); ok && s != "" {
-		signal = s
-	}
-	sig := signal
-	if _, err := fmt.Sscanf(signal, "%d", new(int)); err != nil {
-		sig = "-" + strings.TrimPrefix(strings.TrimPrefix(signal, "SIG"), "")
-	}
+	sig := resolveSignal(params, force)
 	cmd := exec.Command("pkill", sig, pattern)
 	return runCmd(cmd)
+}
+
+// resolveSignal determines the correct signal based on force and signal parameters.
+// Priority: force=true → SIGKILL; otherwise use signal param or default SIGTERM.
+func resolveSignal(params map[string]any, force bool) string {
+	if force {
+		return "-9"
+	}
+	if s, ok := params["signal"].(string); ok && s != "" {
+		// Numeric signal like "9" or "15"
+		if _, err := strconv.Atoi(s); err == nil {
+			return "-" + s
+		}
+		// Named signal: strip "SIG" prefix for kill command
+		sigName := strings.TrimPrefix(s, "SIG")
+		return "-" + sigName
+	}
+	return "-SIGTERM"
 }
 
 func processGrep(params map[string]any, isWindows bool) ToolResult {
