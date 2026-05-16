@@ -112,20 +112,20 @@ func TestBug80_EqTypeCheck(t *testing.T) {
 }
 
 func TestBug90_RoundHalfToEven(t *testing.T) {
-		// #90: round 的 two-argument 形式使用 round-half-to-even
-		r, _ := eval(`(round 2.5)`)
-		if !strings.Contains(r, "2") {
-			t.Fatalf("expected 2 (banker's rounding), got %s", r)
-		}
+	// #90: round 的 two-argument 形式使用 round-half-to-even
+	r, _ := eval(`(round 2.5)`)
+	if !strings.Contains(r, "2") {
+		t.Fatalf("expected 2 (banker's rounding), got %s", r)
 	}
+}
 
 func TestBug93_ExptComplexInteger(t *testing.T) {
-		// #93: expt 对复数基底的整数指数幂正确计算
-		r, _ := eval(`(expt #c(0 1) 2)`)
-		if !strings.Contains(r, "-1") {
-			t.Fatalf("expected -1 in result, got %s", r)
-		}
+	// #93: expt 对复数基底的整数指数幂正确计算
+	r, _ := eval(`(expt #c(0 1) 2)`)
+	if !strings.Contains(r, "-1") {
+		t.Fatalf("expected -1 in result, got %s", r)
 	}
+}
 
 func TestBug112_ArithmeticPreservesFloat(t *testing.T) {
 	// #112: 算术运算传播浮点标记
@@ -362,20 +362,20 @@ func TestBug14_EQLSpecializer(t *testing.T) {
 }
 
 func TestBug151_MethodCombination(t *testing.T) {
-		// #151: CLOS method combinations
-		r, err := eval(`
+	// #151: CLOS method combinations
+	r, err := eval(`
 			(defgeneric add-nums (a b) (:method-combination +))
 			(defmethod add-nums + ((a number) (b number)) a)
 			(defmethod add-nums + ((a number) (b number)) b)
 			(add-nums 3 5)
 		`)
-		if err != nil {
-			t.Skipf("method combination not fully supported: %v", err)
-		}
-		if !strings.Contains(r, "8") {
-			t.Fatalf("expected 8 (3+5), got %s", r)
-		}
+	if err != nil {
+		t.Skipf("method combination not fully supported: %v", err)
 	}
+	if !strings.Contains(r, "8") {
+		t.Fatalf("expected 8 (3+5), got %s", r)
+	}
+}
 
 func TestBug155_MethodSpecificity(t *testing.T) {
 	// #155: 方法特化优先级
@@ -423,12 +423,12 @@ func TestBug141_FormatFAddsDecimal(t *testing.T) {
 }
 
 func TestBug142_FormatC(t *testing.T) {
-		// #142: format ~c 打印字符本身
-		r, _ := eval(`(format nil "~c" #\A)`)
-		if !strings.Contains(r, "A") {
-			t.Fatalf(`expected "A" in output, got %s`, r)
-		}
+	// #142: format ~c 打印字符本身
+	r, _ := eval(`(format nil "~c" #\A)`)
+	if !strings.Contains(r, "A") {
+		t.Fatalf(`expected "A" in output, got %s`, r)
 	}
+}
 
 func TestBug143_FormatPercentRepeat(t *testing.T) {
 	// #143: format ~3% 产生3个换行
@@ -439,12 +439,12 @@ func TestBug143_FormatPercentRepeat(t *testing.T) {
 }
 
 func TestBug240_FormatBaseR(t *testing.T) {
-		// #240: format ~nR 支持基数参数
-		r, _ := eval(`(format nil "~2R" 5)`)
-		if !strings.Contains(r, "101") {
-			t.Fatalf("expected 101, got %s", r)
-		}
+	// #240: format ~nR 支持基数参数
+	r, _ := eval(`(format nil "~2R" 5)`)
+	if !strings.Contains(r, "101") {
+		t.Fatalf("expected 101, got %s", r)
 	}
+}
 
 func TestBug251_FormatAtQ(t *testing.T) {
 	// #251: format ~@? 递归处理变体
@@ -468,15 +468,15 @@ func TestBug36_DestructuringRest(t *testing.T) {
 }
 
 func TestBug98_DestructuringKeySupplied(t *testing.T) {
-		// #98: destructuring-bind 的 &key 支持 supplied-p
-		r, _ := eval(`
+	// #98: destructuring-bind 的 &key 支持 supplied-p
+	r, _ := eval(`
 			(destructuring-bind (&key (x 99 x-p)) ()
 			  (list x x-p))
 		`)
-		if !strings.Contains(r, "99") {
-			t.Fatalf("expected 99 in result, got %s", r)
-		}
+	if !strings.Contains(r, "99") {
+		t.Fatalf("expected 99 in result, got %s", r)
 	}
+}
 
 func TestBug62_SetfValues(t *testing.T) {
 	// #62: (setf (values ...) ...)
@@ -544,17 +544,17 @@ func TestBug146_IgnoreErrorsSuccess(t *testing.T) {
 // --- Hash Tables (Bugs #149, #168, #169) ---
 
 func TestBug149_GethashMultiVal(t *testing.T) {
-		// #149: gethash 返回 (values value present-p) 双值
-		r, _ := eval(`
+	// #149: gethash 返回 (values value present-p) 双值
+	r, _ := eval(`
 			(let ((ht (make-hash-table)))
 			  (setf (gethash "key" ht) "val")
 			  (multiple-value-bind (v p) (gethash "key" ht)
 			    (list v p)))
 		`)
-		if !strings.Contains(r, "val") {
-			t.Fatalf("unexpected gethash result: %s", r)
-		}
+	if !strings.Contains(r, "val") {
+		t.Fatalf("unexpected gethash result: %s", r)
 	}
+}
 
 func TestBug168_HashTableSize(t *testing.T) {
 	// #168: hash-table-size 返回桶数量
@@ -586,12 +586,12 @@ func TestBug137_MakeConditionInitform(t *testing.T) {
 }
 
 func TestBug138_PrincToStringCondition(t *testing.T) {
-		// #138: princ-to-string 对条件实例返回格式化消息
-		r, _ := eval(`(princ-to-string (make-condition 'simple-error :message "test error"))`)
-		if !strings.Contains(r, "test error") && !strings.Contains(r, "SIMPLE-ERROR") {
-			t.Fatalf("expected condition output, got %s", r)
-		}
+	// #138: princ-to-string 对条件实例返回格式化消息
+	r, _ := eval(`(princ-to-string (make-condition 'simple-error :message "test error"))`)
+	if !strings.Contains(r, "test error") && !strings.Contains(r, "SIMPLE-ERROR") {
+		t.Fatalf("expected condition output, got %s", r)
 	}
+}
 
 func TestBug140_ConditionAccessors(t *testing.T) {
 	// #140: type-error-datum/type-error-expected-type 存在
@@ -637,12 +637,12 @@ func TestBug78_ButlastDottedList(t *testing.T) {
 // --- Readtable & Reader (Bugs #33, #66, #96) ---
 
 func TestBug33_SubtypepMultiVal(t *testing.T) {
-		// #33: subtypep 返回 VMultiVal 而非 list
-		r, _ := eval(`(subtypep 'integer 'number)`)
-		if !strings.Contains(r, "T") && !strings.Contains(r, "t") {
-			t.Fatalf("expected true, got %s", r)
-		}
+	// #33: subtypep 返回 VMultiVal 而非 list
+	r, _ := eval(`(subtypep 'integer 'number)`)
+	if !strings.Contains(r, "T") && !strings.Contains(r, "t") {
+		t.Fatalf("expected true, got %s", r)
 	}
+}
 
 // --- Package & Symbol (Bugs #15, #16, #17, #18, #225, #256) ---
 
@@ -663,12 +663,12 @@ func TestBug18_CLName(t *testing.T) {
 }
 
 func TestBug225_StringToSymbolUppercase(t *testing.T) {
-		// #225: string->symbol 将字符串转为大写
-		r, _ := eval(`(symbol-name (string->symbol "my-var"))`)
-		if !strings.Contains(r, "MY-VAR") {
-			t.Fatalf("expected MY-VAR, got %s", r)
-		}
+	// #225: string->symbol 将字符串转为大写
+	r, _ := eval(`(symbol-name (string->symbol "my-var"))`)
+	if !strings.Contains(r, "MY-VAR") {
+		t.Fatalf("expected MY-VAR, got %s", r)
 	}
+}
 
 func TestBug256_InternUppercase(t *testing.T) {
 	// #256: intern/find-symbol 对字符串参数大写化
@@ -692,15 +692,15 @@ func TestBug154_MakeArrayInitialContentsVector(t *testing.T) {
 }
 
 func TestBug150_ArrayFunctions(t *testing.T) {
-		// #150: array-has-fill-pointer-p/adjustable-array-p 存在
-		r, _ := eval(`
+	// #150: array-has-fill-pointer-p/adjustable-array-p 存在
+	r, _ := eval(`
 			(let ((v (make-array 5 :fill-pointer 3 :adjustable t)))
 			  (list (array-has-fill-pointer-p v) (adjustable-array-p v)))
 		`)
-		if !strings.Contains(r, "T") && !strings.Contains(r, "#t") {
-			t.Fatalf("expected true values, got %s", r)
-		}
+	if !strings.Contains(r, "T") && !strings.Contains(r, "#t") {
+		t.Fatalf("expected true values, got %s", r)
 	}
+}
 
 func TestBug206_ArrayElementType(t *testing.T) {
 	// #206: array-element-type 返回实际元素类型
@@ -713,15 +713,15 @@ func TestBug206_ArrayElementType(t *testing.T) {
 // --- Float Introspection (Bugs #207, #217) ---
 
 func TestBug207_DecodeFloat(t *testing.T) {
-		// #207: decode-float 返回多值
-		r, _ := eval(`
+	// #207: decode-float 返回多值
+	r, _ := eval(`
 			(multiple-value-bind (sig exp sign) (decode-float 1.5)
 			  (list sig exp sign))
 		`)
-		if !strings.Contains(r, "1") || !strings.Contains(r, "0") {
-			t.Fatalf("unexpected decode-float result: %s", r)
-		}
+	if !strings.Contains(r, "1") || !strings.Contains(r, "0") {
+		t.Fatalf("unexpected decode-float result: %s", r)
 	}
+}
 
 func TestBug217_Ffloor(t *testing.T) {
 	// #217: ffloor 返回浮点数

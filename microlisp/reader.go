@@ -782,11 +782,11 @@ func (l *Lexer) next() Tok {
 				}
 				l.pos++
 			}
-				if depth > 0 {
-					// unclosed vector - no closing paren found
-					l.tok = Tok{typ: TErr, lit: "unclosed vector literal #(", pos: p}
-					return l.tok
-				}
+			if depth > 0 {
+				// unclosed vector - no closing paren found
+				l.tok = Tok{typ: TErr, lit: "unclosed vector literal #(", pos: p}
+				return l.tok
+			}
 			inner := string(l.src[start : l.pos-1])
 			l.tok = Tok{typ: TVector, lit: inner, pos: p}
 			return l.tok

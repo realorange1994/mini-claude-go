@@ -991,7 +991,7 @@ func typepCheckRec(val *Value, typeSpec *Value, env *Env, seen map[*Value]bool) 
 					body = body.cdr
 				}
 				return false
-case "ARRAY":
+			case "ARRAY":
 				// (array element-type) - check if array (strings are also arrays in CL)
 				if val.typ != VArray && val.typ != VStr {
 					return false
@@ -1449,9 +1449,9 @@ func goErrorToCondition(err error) *Value {
 				fname := strings.TrimSpace(fnameParts[0])
 				fname = strings.Trim(fname, "\"")
 				cond.instSlots = map[string]*Value{
-					"file-pathname":  vstr(fname),
-					"message":        vstr(msg),
-					"format-control": vstr(msg),
+					"file-pathname":    vstr(fname),
+					"message":          vstr(msg),
+					"format-control":   vstr(msg),
 					"format-arguments": vnil(),
 				}
 				return cond
@@ -1474,6 +1474,7 @@ func goErrorToCondition(err error) *Value {
 	}
 	return cond
 }
+
 // -------- with-condition-restarts support builtins --------
 
 // builtinAssociateRestarts associates restart objects with a condition.
