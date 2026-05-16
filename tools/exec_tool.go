@@ -1398,6 +1398,19 @@ func stripSafeWrappers(cmd string) string {
 		return cmd
 	}
 
+	// isShellOperator reports whether s looks like a shell control operator
+	// (pipe, conditional, subshell, redirect). If the first field after
+	// stripping is a shell operator, the original command was NOT wrapped —
+	// the operator was part of a compound command where the stripped token
+	// is the actual command.
+	isShellOperator := func(s string) bool {
+		switch s {
+		case "|", "||", "&&", ";", ">", ">>", "<", "<<", ")":
+			return true
+		}
+		return false
+	}
+
 	// Try to match wrapper prefixes
 	remaining := fields
 	for {
@@ -1418,6 +1431,11 @@ func stripSafeWrappers(cmd string) string {
 				// env: skip until we find a field that doesn't contain =
 				for skip < len(remaining) && strings.Contains(remaining[skip], "=") {
 					skip++
+				}
+				// If env has no VAR=val assignments to skip, it's the actual
+				// command (e.g. "env | grep" — env prints all env vars). Don't strip it.
+				if skip == 1 {
+					break
 				}
 			} else {
 				// Skip any -flag style options and their values
@@ -1442,6 +1460,12 @@ func stripSafeWrappers(cmd string) string {
 			}
 
 			if skip < len(remaining) {
+				after := remaining[skip]
+				// If the next token is a shell operator, the wrapper was the
+				// actual command (e.g. "timeout 10 | cat" — timeout IS the cmd).
+				if isShellOperator(after) {
+					break
+				}
 				remaining = remaining[skip:]
 				matched = true
 				break
@@ -1468,12 +1492,63 @@ func CheckDestructiveWarning(cmd string) string {
 	return warning
 }
 
+// hasWriteRedirect returns true if the command writes to a file via > or >>.
+// Redirects to /dev/null (e.g. 2>/dev/null, >/dev/null) are NOT considered
+// write redirects because they suppress output rather than create files.
+func hasWriteRedirect(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '>' {
+			// Check if this is >>
+			isDouble := i+1 < len(s) && s[i+1] == '>'
+			skip := 1
+			if isDouble {
+				skip = 2
+			}
+
+			// Find the target after > or >>
+			targetStart := i + skip
+			if targetStart >= len(s) {
+				return true // redirect with no target is still suspicious
+			}
+
+			// Skip whitespace
+			for targetStart < len(s) && (s[targetStart] == ' ' || s[targetStart] == '\t') {
+				targetStart++
+			}
+			if targetStart >= len(s) {
+				return true
+			}
+
+			// Extract target word
+			targetEnd := targetStart
+			for targetEnd < len(s) && s[targetEnd] != ' ' && s[targetEnd] != '\t' && s[targetEnd] != '|' && s[targetEnd] != ';' && s[targetEnd] != '<' {
+				targetEnd++
+			}
+			target := s[targetStart:targetEnd]
+
+			// Redirects to /dev/null are read-only (suppress output)
+			if target == "/dev/null" {
+				continue
+			}
+			// >&fd and N>&fd redirects are read-only (no file written)
+			// e.g. 2>&1, 1>&2, >&2
+			if len(target) >= 2 && target[0] == '&' && target[1] >= '0' && target[1] <= '9' {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // IsReadOnlyCommand reports whether a command is read-only (no side effects).
 func IsReadOnlyCommand(cmd string) bool {
 	stripped := stripSafeWrappers(cmd)
 
-	// Check for redirects — any write operator means NOT read-only
-	if strings.Contains(stripped, ">") || strings.Contains(stripped, ">>") {
+	// Check for write redirects — redirects to /dev/null are read-only
+	// (they suppress output, don't write to files).
+	if hasWriteRedirect(stripped) {
 		return false
 	}
 

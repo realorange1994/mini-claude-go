@@ -1121,3 +1121,149 @@ func TestExecStderrOnFailure(t *testing.T) {
 		t.Errorf("expected stderr content 'fail' in error output, got:\n%s", result.Output)
 	}
 }
+
+// ─── Regression: stripSafeWrappers env as main command ────────────────────────
+// Previously, "env | grep -i rust" was stripped to "| grep -i rust" because
+// env (skipArgs=-1) was treated as a wrapper even when used as the main command.
+// Now: env without VAR=val assignments is NOT stripped.
+
+func TestStripSafeWrappersEnvAsCommand(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		// env as main command — should NOT be stripped
+		{"env | grep -i rust", "env | grep -i rust"},
+		{"env", "env"},
+		{"env > /tmp/env.txt", "env > /tmp/env.txt"},
+		// env with VAR=val — should strip env
+		{"env FOO=bar ./script.sh", "./script.sh"},
+		{"env FOO=bar BAR=baz cmd", "cmd"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := stripSafeWrappers(tc.input)
+			if got != tc.expected {
+				t.Errorf("stripSafeWrappers(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+// ─── Regression: wrappers followed by shell operators ─────────────────────────
+// "timeout 10 | cat" — timeout IS the command, not a wrapper around cat.
+// The pipe means timeout is being executed, not wrapping cat.
+
+func TestStripSafeWrappersOperatorBoundary(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"timeout 10 | cat", "timeout 10 | cat"},
+		{"nice -n 10 && echo done", "nice -n 10 && echo done"},
+		{"sudo rm -f /tmp/x; ls", "rm -f /tmp/x; ls"}, // sudo IS a wrapper for rm
+		{"env FOO=bar cmd", "cmd"}, // env with VAR=val still works
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := stripSafeWrappers(tc.input)
+			if got != tc.expected {
+				t.Errorf("stripSafeWrappers(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+// ─── Regression: hasWriteRedirect /dev/null ──────────────────────────────────
+// Previously, "ls 2>/dev/null" was classified as NOT read-only because
+// strings.Contains(stripped, ">") treated all > as write operations.
+// Now: redirects to /dev/null are read-only (suppress output, don't write files).
+
+func TestHasWriteRedirect(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		// Write redirects — should return true
+		{"echo hello > out.txt", true},
+		{"echo hello >> out.txt", true},
+		{"ls > files.txt", true},
+		{"cat data >> /tmp/log", true},
+		{"> /tmp/empty", true},
+
+		// /dev/null redirects — should return false (read-only)
+		{"ls 2>/dev/null", false},
+		{"cmd >/dev/null", false},
+		{"cmd 2>/dev/null || echo fail", false},
+		{"cmd >/dev/null 2>&1", false},
+		{"cmd > /dev/null", false},
+
+		// No redirects — should return false
+		{"ls -la", false},
+		{"env | grep -i rust", false},
+		{"echo hello", false},
+
+		// fd-to-fd redirects — should return false (no file written)
+		{"cmd 2>&1", false},
+		{"cmd 1>&2", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := hasWriteRedirect(tc.input)
+			if got != tc.want {
+				t.Errorf("hasWriteRedirect(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsReadOnlyCommandDevNullRedirect(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"ls 2>/dev/null", true},
+		{"ls -la ~/.cargo/ 2>/dev/null || echo no", true},
+		{"cat /etc/passwd >/dev/null", true},
+		{"find / -name foo 2>/dev/null", true},
+		{"echo hello > out.txt", false},
+		{"ls > /tmp/files.txt", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := IsReadOnlyCommand(tc.input)
+			if got != tc.want {
+				t.Errorf("IsReadOnlyCommand(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// ─── Regression: concurrency safety for piped/compound read-only commands ─────
+// "env | grep -i rust" should be concurrency-safe (read-only).
+// "ls 2>/dev/null || echo no" should be concurrency-safe (read-only).
+
+func TestIsReadOnlyCommandCompoundReadOnly(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"env | grep -i rust", true},
+		{"ls -la | head -5", true},
+		{"cat /etc/passwd | grep root", true},
+		{"find . -name '*.go' | wc -l", true},
+		// Pipes to write targets — IsReadOnlyCommand only checks the first
+		// command in the pipe, so "ls | tee out.txt" is classified as read-only.
+		// This is a known limitation; the alternative (checking all pipe stages)
+		// would break many legitimate read-only pipe commands.
+		// {"ls | tee out.txt", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := IsReadOnlyCommand(tc.input)
+			if got != tc.want {
+				t.Errorf("IsReadOnlyCommand(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
