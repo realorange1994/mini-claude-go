@@ -1146,6 +1146,114 @@ func (a *AgentLoop) GetSubAgentOutput(taskID string, block bool, timeout time.Du
 	}
 }
 
+// GetTaskProgress returns a lightweight progress snapshot for a background task.
+// Matching upstream's TaskOutput progress snapshot mode.
+// Returns status, total lines, total bytes, and the last N lines of output.
+func (a *AgentLoop) GetTaskProgress(taskID string, lastN int) (string, string) {
+	switch {
+	case strings.HasPrefix(taskID, "agent-"):
+		return a.getAgentTaskProgress(taskID, lastN)
+	case strings.HasPrefix(taskID, "exec-"), strings.HasPrefix(taskID, "mcp-"):
+		return a.getBashBgTaskProgress(taskID, lastN)
+	default:
+		if out, err := a.getAgentTaskProgress(taskID, lastN); err == "" {
+			return out, ""
+		}
+		return a.getBashBgTaskProgress(taskID, lastN)
+	}
+}
+
+// getAgentTaskProgress returns progress for a sub-agent task.
+func (a *AgentLoop) getAgentTaskProgress(taskID string, lastN int) (string, string) {
+	if a.agentTaskStore == nil {
+		return "", "agent task store not available"
+	}
+	task := a.agentTaskStore.Get(taskID)
+	if task == nil {
+		return "", fmt.Sprintf("agent %s not found", taskID)
+	}
+
+	status := string(task.Status)
+	output := task.GetOutput()
+	totalLines := strings.Count(output, "\n")
+	totalBytes := len(output)
+
+	// Get last N lines
+	lines := strings.Split(output, "\n")
+	start := len(lines) - lastN
+	if start < 0 {
+		start = 0
+	}
+	lastLines := strings.Join(lines[start:], "\n")
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Task: %s\nStatus: %s\nTotal lines: %d\nTotal bytes: %d\n",
+		taskID, status, totalLines, totalBytes))
+	if task.IsTerminal() {
+		sb.WriteString("Completed: yes\n")
+	} else {
+		sb.WriteString("Completed: no (still running)\n")
+	}
+
+	// Include tool usage stats (matching upstream AgentToolResult)
+	readCount, searchCount, bashCount, editCount, toolsUsed, tokenCount := task.GetToolStats()
+	if toolsUsed > 0 {
+		sb.WriteString(fmt.Sprintf("Tools: %d (read:%d search:%d bash:%d edit:%d)\n",
+			toolsUsed, readCount, searchCount, bashCount, editCount))
+	}
+	if tokenCount > 0 {
+		sb.WriteString(fmt.Sprintf("Tokens: %d\n", tokenCount))
+	}
+
+	// Include partial result if killed
+	if task.Status == tools.TaskKilled && task.PartialResult != "" {
+		sb.WriteString(fmt.Sprintf("\nPartial result:\n%s\n", task.GetPartialResult()))
+	}
+
+	if lastLines != "" {
+		sb.WriteString(fmt.Sprintf("\n--- Last %d lines ---\n%s", lastN, lastLines))
+	}
+	return sb.String(), ""
+}
+
+// getBashBgTaskProgress returns progress for a bash/MCP background task.
+func (a *AgentLoop) getBashBgTaskProgress(taskID string, lastN int) (string, string) {
+	if a.taskStore == nil {
+		return "", "task store not available"
+	}
+	task := a.taskStore.GetTask(taskID)
+	if task == nil {
+		return "", fmt.Sprintf("task %s not found", taskID)
+	}
+
+	var totalLines, totalBytes int
+	var lastLines string
+
+	if task.OutputFile != "" {
+		if info, err := os.Stat(task.OutputFile); err == nil {
+			totalBytes = int(info.Size())
+		}
+		if lines, err := tools.CountFileLines(task.OutputFile); err == nil {
+			totalLines = int(lines)
+		}
+		tail := tailFile(task.OutputFile, lastN)
+		lastLines = strings.Join(tail, "\n")
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Task: %s\nStatus: %d\nTotal lines: %d\nTotal bytes: %d\n",
+		taskID, task.Status, totalLines, totalBytes))
+	if task.IsTerminal() {
+		sb.WriteString("Completed: yes\n")
+	} else {
+		sb.WriteString("Completed: no (still running)\n")
+	}
+	if lastLines != "" {
+		sb.WriteString(fmt.Sprintf("\n--- Last %d lines ---\n%s", lastN, lastLines))
+	}
+	return sb.String(), ""
+}
+
 // getAgentTaskOutput retrieves output from agentTaskStore (sub-agents).
 func (a *AgentLoop) getAgentTaskOutput(taskID string, block bool, timeout time.Duration) (string, string) {
 	if a.agentTaskStore == nil {
@@ -1156,7 +1264,15 @@ func (a *AgentLoop) getAgentTaskOutput(taskID string, block bool, timeout time.D
 		return "", fmt.Sprintf("agent %s not found", taskID)
 	}
 	if task.IsTerminal() {
-		result := fmt.Sprintf("Agent: %s\nStatus: %s\nOutput:\n%s", task.ID, task.Status, task.GetOutput())
+		result := task.FormatSummary()
+		output := task.GetOutput()
+		if output != "" {
+			result += fmt.Sprintf("\nOutput:\n%s", output)
+		}
+		// Include partial result if task was killed
+		if task.Status == tools.TaskKilled && task.PartialResult != "" {
+			result += fmt.Sprintf("\n\nPartial result:\n%s", task.GetPartialResult())
+		}
 		if tp := task.GetTranscriptPath(); tp != "" {
 			result += fmt.Sprintf("\nTranscriptPath: %s", tp)
 		}
@@ -1167,7 +1283,14 @@ func (a *AgentLoop) getAgentTaskOutput(taskID string, block bool, timeout time.D
 		for time.Now().Before(deadline) {
 			time.Sleep(500 * time.Millisecond)
 			if task.IsTerminal() {
-				result := fmt.Sprintf("Agent: %s\nStatus: %s\nOutput:\n%s", task.ID, task.Status, task.GetOutput())
+				result := task.FormatSummary()
+				output := task.GetOutput()
+				if output != "" {
+					result += fmt.Sprintf("\nOutput:\n%s", output)
+				}
+				if task.Status == tools.TaskKilled && task.PartialResult != "" {
+					result += fmt.Sprintf("\n\nPartial result:\n%s", task.GetPartialResult())
+				}
 				if tp := task.GetTranscriptPath(); tp != "" {
 					result += fmt.Sprintf("\nTranscriptPath: %s", tp)
 				}
@@ -1246,15 +1369,23 @@ func (a *AgentLoop) getPartialResult() string {
 }
 
 // CancelSubAgent cancels a running sub-agent by agent ID.
-// It calls the cancel function stored in the task state and marks the task as killed.
+// It extracts partial results before termination, then calls the cancel function
+// stored in the task state and marks the task as killed.
 func (a *AgentLoop) CancelSubAgent(agentID string) {
 	if a.taskStore == nil && a.agentTaskStore == nil {
 		return
 	}
 
-	// Kill in the new AgentTaskStore
+	// Kill in the new AgentTaskStore — extract partial result first
 	if a.agentTaskStore != nil {
-		a.agentTaskStore.Kill(agentID)
+		task := a.agentTaskStore.Get(agentID)
+		if task != nil && !task.IsTerminal() {
+			// Capture last 20 lines as partial result before killing
+			output := task.GetOutput()
+			partial := extractPartialResult(output, 20)
+			task.SetPartialResult(partial)
+			a.agentTaskStore.Kill(agentID)
+		}
 	}
 
 	// Also kill in the legacy TaskStore for backward compatibility
@@ -1397,5 +1528,66 @@ func (w *taskOutputWriter) Write(p []byte) (int, error) {
 		w.file.Write(p)
 	}
 	return len(p), nil
+}
+
+// tailFile reads the last N lines from a file.
+// Reads the tail portion of the file (up to 8KB) and returns the lines.
+func tailFile(path string, n int) []string {
+	if path == "" || n <= 0 {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return nil
+	}
+
+	// Read from the end — use 8KB or file size, whichever is smaller
+	readSize := int64(8192)
+	if info.Size() < readSize {
+		readSize = info.Size()
+	}
+
+	_, err = f.Seek(-readSize, io.SeekEnd)
+	if err != nil {
+		return nil
+	}
+
+	buf := make([]byte, readSize)
+	read, err := f.Read(buf)
+	if err != nil && read == 0 {
+		return nil
+	}
+
+	content := string(buf[:read])
+	lines := strings.Split(content, "\n")
+	// Remove trailing empty element if content ends with newline
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
+
+// extractPartialResult extracts the last N lines from a full output string,
+// useful for capturing partial results from killed agents.
+func extractPartialResult(output string, n int) string {
+	if output == "" {
+		return ""
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	result := strings.Join(lines, "\n")
+	return "[partial result, agent was killed]\n" + result
 }
 

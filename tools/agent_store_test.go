@@ -429,3 +429,127 @@ func TestAgentTaskStoreAddPendingMessageNonexistent(t *testing.T) {
 		t.Errorf("expected 0 messages for nonexistent task, got %d", len(msgs))
 	}
 }
+
+// ─── Partial Result Tests ────────────────────────────────────────────────────
+
+func TestAgentTaskSetAndGetPartialResult(t *testing.T) {
+	task := &AgentTask{ID: "test1"}
+	if task.GetPartialResult() != "" {
+		t.Error("expected empty partial result initially")
+	}
+	task.SetPartialResult("partial output")
+	if task.GetPartialResult() != "partial output" {
+		t.Errorf("expected 'partial output', got %q", task.GetPartialResult())
+	}
+}
+
+func TestAgentTaskUpdateToolStats(t *testing.T) {
+	task := &AgentTask{ID: "test2"}
+	task.UpdateToolStats("read_file")
+	task.UpdateToolStats("read_file")
+	task.UpdateToolStats("grep")
+	task.UpdateToolStats("exec")
+	task.UpdateToolStats("edit_file")
+
+	if task.ReadCount != 2 {
+		t.Errorf("expected ReadCount=2, got %d", task.ReadCount)
+	}
+	if task.SearchCount != 1 {
+		t.Errorf("expected SearchCount=1, got %d", task.SearchCount)
+	}
+	if task.BashCount != 1 {
+		t.Errorf("expected BashCount=1, got %d", task.BashCount)
+	}
+	if task.EditFileCount != 1 {
+		t.Errorf("expected EditFileCount=1, got %d", task.EditFileCount)
+	}
+	if task.ToolsUsed != 5 {
+		t.Errorf("expected ToolsUsed=5, got %d", task.ToolsUsed)
+	}
+}
+
+func TestAgentTaskSetAndGetTokenCount(t *testing.T) {
+	task := &AgentTask{ID: "test3"}
+	task.SetTokenCount(1500)
+	if task.GetTokenCount() != 1500 {
+		t.Errorf("expected TokenCount=1500, got %d", task.GetTokenCount())
+	}
+}
+
+func TestAgentTaskGetToolStats(t *testing.T) {
+	task := &AgentTask{ID: "test4"}
+	task.UpdateToolStats("read_file")
+	task.UpdateToolStats("exec")
+
+	readCount, searchCount, bashCount, editCount, toolsUsed, tokenCount := task.GetToolStats()
+	if readCount != 1 {
+		t.Errorf("expected readCount=1, got %d", readCount)
+	}
+	if searchCount != 0 {
+		t.Errorf("expected searchCount=0, got %d", searchCount)
+	}
+	if bashCount != 1 {
+		t.Errorf("expected bashCount=1, got %d", bashCount)
+	}
+	if editCount != 0 {
+		t.Errorf("expected editCount=0, got %d", editCount)
+	}
+	if toolsUsed != 2 {
+		t.Errorf("expected toolsUsed=2, got %d", toolsUsed)
+	}
+	if tokenCount != 0 {
+		t.Errorf("expected tokenCount=0, got %d", tokenCount)
+	}
+}
+
+func TestAgentTaskFormatSummary(t *testing.T) {
+	task := &AgentTask{
+		ID:         "test5",
+		Status:     TaskCompleted,
+		DurationMs: 1500,
+	}
+	task.UpdateToolStats("read_file")
+	task.UpdateToolStats("exec")
+	task.UpdateToolStats("edit_file")
+	task.SetTokenCount(2000)
+
+	summary := task.FormatSummary()
+
+	if !strings.Contains(summary, "test5") {
+		t.Error("summary should contain task ID")
+	}
+	if !strings.Contains(summary, "completed") {
+		t.Error("summary should contain status")
+	}
+	if !strings.Contains(summary, "1500ms") {
+		t.Error("summary should contain duration")
+	}
+	if !strings.Contains(summary, "read:1") {
+		t.Error("summary should contain read count")
+	}
+	if !strings.Contains(summary, "bash:1") {
+		t.Error("summary should contain bash count")
+	}
+	if !strings.Contains(summary, "edit:1") {
+		t.Error("summary should contain edit count")
+	}
+	if !strings.Contains(summary, "2000") {
+		t.Error("summary should contain token count")
+	}
+}
+
+func TestAgentTaskFormatSummaryMinimal(t *testing.T) {
+	task := &AgentTask{
+		ID:         "test6",
+		Status:     TaskKilled,
+		DurationMs: 0,
+	}
+	summary := task.FormatSummary()
+	if !strings.Contains(summary, "killed") {
+		t.Error("summary should contain status")
+	}
+	// No tool stats, so should not contain the breakdown
+	if strings.Contains(summary, "read:") {
+		t.Error("summary should not contain tool breakdown when no tools used")
+	}
+}

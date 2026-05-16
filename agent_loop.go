@@ -151,7 +151,8 @@ func (a *AgentLoop) registerPlanModeTools() {
 // registerTaskOutputTool registers the TaskOutputTool with this loop's callback.
 func (a *AgentLoop) registerTaskOutputTool() {
 	taskOutputTool := &tools.TaskOutputTool{
-		GetOutputFunc: a.GetSubAgentOutput,
+		GetOutputFunc:   a.GetSubAgentOutput,
+		GetProgressFunc: a.GetTaskProgress,
 	}
 	a.registry.Register(taskOutputTool)
 }

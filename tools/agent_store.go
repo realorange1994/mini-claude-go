@@ -52,6 +52,18 @@ type AgentTask struct {
 	ToolsUsed       int
 	DurationMs      int64
 	PendingMessages []string // queued by send_message, drained at turn boundaries
+
+	// Partial result extracted when killed (last assistant text before termination)
+	PartialResult   string
+
+	// Tool usage statistics (matching upstream AgentToolResult format)
+	ReadCount       int
+	SearchCount     int
+	BashCount       int
+	EditFileCount   int
+	LinesAdded      int
+	LinesRemoved    int
+	TokenCount      int // total tokens used by agent
 }
 
 // WriteOutput appends text to the task's output buffer, enforcing a size cap.
@@ -161,6 +173,83 @@ func (t *AgentTask) SetToolsInfo(toolsUsed int, durationMs int64) {
 	defer t.mu.Unlock()
 	t.ToolsUsed = toolsUsed
 	t.DurationMs = durationMs
+}
+
+// SetPartialResult stores a partial result (extracted from last assistant text when killed).
+func (t *AgentTask) SetPartialResult(result string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.PartialResult = result
+}
+
+// GetPartialResult returns the stored partial result.
+func (t *AgentTask) GetPartialResult() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.PartialResult
+}
+
+// UpdateToolStats increments tool-specific usage counters.
+// Matches upstream's createProgressTracker + updateProgressFromMessage pattern.
+func (t *AgentTask) UpdateToolStats(toolName string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch toolName {
+	case "read_file", "file_read":
+		t.ReadCount++
+	case "grep", "glob":
+		t.SearchCount++
+	case "exec", "bash":
+		t.BashCount++
+	case "edit_file", "file_edit", "multi_edit":
+		t.EditFileCount++
+	}
+	t.ToolsUsed++
+}
+
+// SetTokenCount updates the total token usage.
+func (t *AgentTask) SetTokenCount(count int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.TokenCount = count
+}
+
+// GetTokenCount returns the total token usage.
+func (t *AgentTask) GetTokenCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.TokenCount
+}
+
+// GetToolStats returns a snapshot of all tool usage statistics.
+func (t *AgentTask) GetToolStats() (readCount, searchCount, bashCount, editFileCount, toolsUsed, tokenCount int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.ReadCount, t.SearchCount, t.BashCount, t.EditFileCount, t.ToolsUsed, t.TokenCount
+}
+
+// FormatSummary returns a human-readable summary of the task result,
+// matching upstream's AgentToolResult format.
+func (t *AgentTask) FormatSummary() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Agent: %s\n", t.ID))
+	sb.WriteString(fmt.Sprintf("Status: %s\n", t.Status))
+	if t.DurationMs > 0 {
+		sb.WriteString(fmt.Sprintf("Duration: %dms\n", t.DurationMs))
+	}
+	sb.WriteString(fmt.Sprintf("Tools used: %d", t.ToolsUsed))
+	if t.ReadCount > 0 || t.SearchCount > 0 || t.BashCount > 0 || t.EditFileCount > 0 {
+		sb.WriteString(fmt.Sprintf(" (read:%d search:%d bash:%d edit:%d)",
+			t.ReadCount, t.SearchCount, t.BashCount, t.EditFileCount))
+	}
+	sb.WriteString("\n")
+	if t.TokenCount > 0 {
+		sb.WriteString(fmt.Sprintf("Tokens: %d\n", t.TokenCount))
+	}
+	return sb.String()
 }
 
 // AgentTaskStore manages background agent tasks with thread-safe access.
