@@ -97,30 +97,7 @@ func (e *FileEditTool) ExecuteContext(ctx context.Context, params map[string]any
 	}
 
 	if oldStr == "" {
-		// Official: allows creating a new file when old_string is empty
-		exists := true
-		if _, err := os.Stat(fp); os.IsNotExist(err) {
-			exists = false
-		}
-		if exists {
-			// Allow writing to an existing empty file (matching upstream behavior)
-			existingData, readErr := os.ReadFile(fp)
-			if readErr != nil || strings.TrimSpace(string(existingData)) != "" {
-				return ToolResult{Output: fmt.Sprintf("Error: cannot create new file with empty old_string — file %q already exists with content. Use a non-empty old_string to edit existing files, or delete the file first.", fp), IsError: true}
-			}
-		}
-		dir := filepath.Dir(fp)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
-		}
-		if err := WriteFileAtomically(fp, []byte(newStr)); err != nil {
-			return ToolResult{Output: fmt.Sprintf("Error writing file: %v", err), IsError: true}
-		}
-		// Update registry so subsequent writes are allowed without re-reading
-		if e.registry != nil {
-			e.registry.MarkFileReadWithContent(fp, newStr)
-		}
-		return ToolResult{Output: fmt.Sprintf("Successfully created %s", fp)}
+		return ToolResult{Output: "Error: old_string must not be empty. Use write_file to create a new file, or provide a non-empty old_string to edit an existing file.", IsError: true}
 	}
 
 	const maxEditSize = 1 << 30 // 1 GiB

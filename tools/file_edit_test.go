@@ -404,11 +404,10 @@ func TestNewFileEditTool(t *testing.T) {
 	}
 }
 
-// ─── edit_file empty old_string error message ────────────────────────────────
+// ─── edit_file empty old_string always rejected ──────────────────────────────
 
 func TestFileEditEmptyOldStringExistingFile(t *testing.T) {
-	// When old_string="" and file exists with content, the error message
-	// should clearly explain the situation, not just say "file already exists"
+	// When old_string="" and file exists with content, should be rejected
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "existing.txt")
 	if err := os.WriteFile(fp, []byte("some content\n"), 0o644); err != nil {
@@ -416,7 +415,6 @@ func TestFileEditEmptyOldStringExistingFile(t *testing.T) {
 	}
 
 	registry := NewRegistry()
-	// Mark file as read so the stale check passes
 	registry.MarkFileRead(fp)
 
 	tool := NewFileEditTool(registry)
@@ -426,22 +424,16 @@ func TestFileEditEmptyOldStringExistingFile(t *testing.T) {
 		"new_string": "new content",
 	})
 	if !result.IsError {
-		t.Error("empty old_string on existing file with content should return error")
+		t.Error("empty old_string on existing file should return error")
 	}
-	// The error message should mention the file path and explain the issue clearly
-	if !strings.Contains(result.Output, "cannot create new file") {
-		t.Errorf("error should mention 'cannot create new file', got: %q", result.Output)
-	}
-	if !strings.Contains(result.Output, "already exists") {
-		t.Errorf("error should mention 'already exists', got: %q", result.Output)
-	}
-	if !strings.Contains(result.Output, "non-empty old_string") {
-		t.Errorf("error should suggest using non-empty old_string, got: %q", result.Output)
+	if !strings.Contains(result.Output, "old_string must not be empty") {
+		t.Errorf("error should mention 'old_string must not be empty', got: %q", result.Output)
 	}
 }
 
 func TestFileEditEmptyOldStringNewFile(t *testing.T) {
-	// When old_string="" and file doesn't exist, it should create the file
+	// When old_string="" and file doesn't exist, should also be rejected
+	// (use write_file to create new files instead)
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "newfile.txt")
 
@@ -452,25 +444,16 @@ func TestFileEditEmptyOldStringNewFile(t *testing.T) {
 		"old_string": "",
 		"new_string": "hello world",
 	})
-	if result.IsError {
-		t.Errorf("empty old_string on nonexistent file should create file, got: %q", result.Output)
+	if !result.IsError {
+		t.Error("empty old_string should return error even for nonexistent file")
 	}
-	if !strings.Contains(result.Output, "Successfully created") {
-		t.Errorf("should say 'Successfully created', got: %q", result.Output)
-	}
-
-	// Verify file was created with correct content
-	data, err := os.ReadFile(fp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "hello world" {
-		t.Errorf("file content = %q, want 'hello world'", string(data))
+	if !strings.Contains(result.Output, "old_string must not be empty") {
+		t.Errorf("error should mention 'old_string must not be empty', got: %q", result.Output)
 	}
 }
 
 func TestFileEditEmptyOldStringEmptyFile(t *testing.T) {
-	// When old_string="" and file exists but is empty, it should write to it
+	// When old_string="" and file exists but is empty, should also be rejected
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "empty.txt")
 	if err := os.WriteFile(fp, []byte(""), 0o644); err != nil {
@@ -486,7 +469,10 @@ func TestFileEditEmptyOldStringEmptyFile(t *testing.T) {
 		"old_string": "",
 		"new_string": "content",
 	})
-	if result.IsError {
-		t.Errorf("empty old_string on empty existing file should succeed, got: %q", result.Output)
+	if !result.IsError {
+		t.Error("empty old_string on empty file should return error")
+	}
+	if !strings.Contains(result.Output, "old_string must not be empty") {
+		t.Errorf("error should mention 'old_string must not be empty', got: %q", result.Output)
 	}
 }
