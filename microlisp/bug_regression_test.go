@@ -396,8 +396,8 @@ func TestBug248_EnsureGenericFunction(t *testing.T) {
 		(ensure-generic-function 'test-generic)
 		(fboundp 'test-generic)
 	`)
-	if r != "#t" {
-		t.Fatalf("expected #t, got %s", r)
+	if r != "T" {
+		t.Fatalf("expected T, got %s", r)
 	}
 }
 
@@ -657,8 +657,8 @@ func TestBug16_CLUserPackage(t *testing.T) {
 func TestBug18_CLName(t *testing.T) {
 	// #18: cl:NAME package-qualified symbol is resolvable
 	r, _ := eval(`(fboundp 'cl:car)`)
-	if r != "#t" {
-		t.Fatalf("expected #t, got %s", r)
+	if r != "T" {
+		t.Fatalf("expected T, got %s", r)
 	}
 }
 
@@ -772,8 +772,8 @@ func TestBug171_StreamPredicates(t *testing.T) {
 func TestBug175_StandardInput(t *testing.T) {
 	// #175: *standard-input*/*error-output* etc. are bound
 	r, _ := eval(`(boundp '*standard-input*)`)
-	if r != "#t" {
-		t.Fatalf("expected #t, got %s", r)
+	if r != "T" {
+		t.Fatalf("expected T, got %s", r)
 	}
 }
 

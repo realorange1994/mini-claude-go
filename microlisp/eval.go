@@ -32,6 +32,13 @@ func captureStdout(fn func() error) (output string, err error) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
+	// Also redirect the Lisp stdoutStream, which holds a *os.File reference
+	// independent of the os.Stdout variable.
+	oldStdoutStream := stdoutStream
+	if oldStdoutStream != nil {
+		stdoutStream = newFileStream(w, false, true, "")
+	}
+
 	var buf bytes.Buffer
 	done := make(chan struct{})
 	go func() {
@@ -40,8 +47,15 @@ func captureStdout(fn func() error) (output string, err error) {
 	}()
 
 	defer func() {
+		// Flush any buffered data in the Lisp stream before closing the pipe
+		if stdoutStream != nil && stdoutStream.stream != nil && stdoutStream.stream.writer != nil {
+			stdoutStream.stream.writer.Flush()
+		}
 		w.Close()
 		os.Stdout = oldStdout
+		if oldStdoutStream != nil {
+			stdoutStream = oldStdoutStream
+		}
 		<-done
 		output = buf.String()
 		r.Close()

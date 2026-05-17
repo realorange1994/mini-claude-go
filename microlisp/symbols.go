@@ -216,7 +216,10 @@ func builtinBoundp(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("boundp: not a symbol")
 	}
 	_, err := globalEnv.Get(sym.str)
-	return vbool(err == nil), nil
+	if err == nil {
+		return vsym("T"), nil
+	}
+	return vnil(), nil
 }
 
 func builtinFboundp(args []*Value) (*Value, error) {
@@ -229,9 +232,12 @@ func builtinFboundp(args []*Value) (*Value, error) {
 	}
 	val, err := globalEnv.Get(sym.str)
 	if err != nil {
-		return vbool(false), nil
+		return vnil(), nil
 	}
-	return vbool(val.typ == VPrim || val.typ == VFunc || val.typ == VGeneric || val.typ == VMacro), nil
+	if val.typ == VPrim || val.typ == VFunc || val.typ == VGeneric || val.typ == VMacro {
+		return vsym("T"), nil
+	}
+	return vnil(), nil
 }
 
 var specialOperators = map[string]bool{
