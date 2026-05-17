@@ -14,12 +14,12 @@ import (
 
 // SourceEntry holds location info for a function.
 type SourceEntry struct {
-	Kind     string // "builtin", "stdlib", "special", "macro"
-	File     string // Go source file or "stdlib.lisp"
-	Start    int    // 1-based line number
-	End      int    // 1-based line number (0 for stdlib/special)
-	Doc      string // brief description
-	GoFunc   string // Go function name (for builtins)
+	Kind   string // "builtin", "stdlib", "special", "helper"
+	File   string // Go source file or "stdlib.go"
+	Start  int    // 1-based line number
+	End    int    // 1-based line number
+	Doc    string // brief description
+	GoFunc string // Go function name (for builtins/helpers)
 }
 
 var sourceIndex map[string]*SourceEntry
@@ -88,14 +88,18 @@ func loadBuiltinRegistry() map[string]string {
 	return result
 }
 
-// RegisterStdlibFunctions parses the stdlib string and extracts function names.
+// registerStdlibFunctions parses the stdlib string and extracts function names.
 func registerStdlibFunctions() {
-	// Extract (define (name ...) and (define-macro (name ...) from stdlib
-	defineRe := regexp.MustCompile(`\((?:define|define-macro)\s+\(?(\S+)`)
+	// Match all define-like forms: (define (name ...), (define-macro (name ...),
+	// (defsetf name ...), (defstruct name ...), (defgeneric name ...),
+	// (define-condition name ...), (defconstant name ...), (defparameter name ...)
+	defineRe := regexp.MustCompile(`\((?:define|define-macro|defsetf|defstruct|defgeneric|define-condition|defconstant|defparameter)\s+\(?(\S+)`)
 	for _, line := range strings.Split(stdlibContent, "\n") {
 		line = strings.TrimSpace(line)
 		if matches := defineRe.FindStringSubmatch(line); len(matches) > 1 {
-			name := strings.ToLower(matches[1])
+			// Strip trailing ) if present (e.g., "(define (internal-time-units-per-second)")
+			name := strings.TrimRight(matches[1], ")")
+			name = strings.ToLower(name)
 			sourceIndex[name] = &SourceEntry{
 				Kind: "stdlib",
 				File: "stdlib.go",
@@ -105,7 +109,7 @@ func registerStdlibFunctions() {
 	}
 }
 
-// ScanBuiltinFunctions scans microlisp/*.go files for builtin function definitions.
+// scanBuiltinFunctions scans microlisp/*.go files for builtin function definitions.
 func scanBuiltinFunctions(builtinMap map[string]string) {
 	dir := findMicrolispDir()
 	if dir == "" {
@@ -125,24 +129,28 @@ func scanBuiltinFunctions(builtinMap map[string]string) {
 			continue
 		}
 
+		// Read all lines first to avoid scanner state issues with findFuncEnd
+		var lines []string
 		f, err := os.Open(fpath)
 		if err != nil {
 			continue
 		}
-
 		scanner := bufio.NewScanner(f)
-		lineNum := 0
 		for scanner.Scan() {
-			lineNum++
-			line := strings.TrimSpace(scanner.Text())
-			if matches := funcRe.FindStringSubmatch(line); len(matches) > 1 {
+			lines = append(lines, scanner.Text())
+		}
+		f.Close()
+
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if matches := funcRe.FindStringSubmatch(trimmed); len(matches) > 1 {
 				goFunc := matches[1]
 				lispName, known := builtinMap[goFunc]
 				if !known {
 					continue // not a registered builtin
 				}
-				start := lineNum
-				end := findFuncEnd(scanner, lineNum)
+				start := i + 1 // 1-based
+				end := findFuncEndFromLines(lines, i)
 
 				sourceIndex[strings.ToLower(lispName)] = &SourceEntry{
 					Kind:   "builtin",
@@ -154,29 +162,25 @@ func scanBuiltinFunctions(builtinMap map[string]string) {
 				}
 			}
 		}
-		f.Close()
 	}
 }
 
-// findFuncEnd reads lines from scanner until the function's closing brace.
-// Assumes we're starting from the function declaration line.
-func findFuncEnd(scanner *bufio.Scanner, startLine int) int {
-	depth := 1 // we're inside the function body already
-	lineNum := startLine
-	for scanner.Scan() {
-		lineNum++
-		for _, ch := range scanner.Text() {
+// findFuncEndFromLines finds the closing brace of a function starting at declLine.
+func findFuncEndFromLines(lines []string, declLine int) int {
+	depth := 0
+	for i := declLine; i < len(lines); i++ {
+		for _, ch := range lines[i] {
 			if ch == '{' {
 				depth++
 			} else if ch == '}' {
 				depth--
 				if depth == 0 {
-					return lineNum
+					return i + 1 // 1-based
 				}
 			}
 		}
 	}
-	return lineNum
+	return len(lines)
 }
 
 // scanSpecialForms scans eval_core.go for case "FORMNAME": blocks and records
@@ -201,20 +205,34 @@ func scanSpecialForms() {
 	}
 
 	// Match case "FORMNAME": or case "A", "B":
-	caseRe := regexp.MustCompile(`^\s+case\s+"([A-Z][A-Z0-9-]*)"(?:\s*,\s*"[A-Z][A-Z0-9-]*")*\s*:`)
+	// Capture all quoted names in the case label
+	caseRe := regexp.MustCompile(`^\s+case\s+((?:"[A-Z][A-Z0-9\-!]*"\s*,?\s*)+):`)
 
 	for i, line := range lines {
-		if matches := caseRe.FindStringSubmatch(line); len(matches) > 1 {
-			formName := strings.ToLower(matches[1])
-			entry, ok := sourceIndex[formName]
-			if !ok {
-				continue // not a known special form
+		if caseRe.MatchString(line) {
+			// Extract all quoted names from the case label
+			nameRe := regexp.MustCompile(`"([A-Z][A-Z0-9\-!]*)"`)
+			allNames := nameRe.FindAllStringSubmatch(line, -1)
+			if len(allNames) == 0 {
+				continue
 			}
 			// Find the end of this case block
 			startLine := i + 1 // 1-based
 			endLine := findCaseBlockEnd(lines, i)
-			entry.Start = startLine
-			entry.End = endLine
+
+			for _, nameMatch := range allNames {
+				formName := strings.ToLower(nameMatch[1])
+				entry, ok := sourceIndex[formName]
+				if !ok {
+					continue // not a known special form
+				}
+				// Update to special form location in eval_core.go
+				// This may overwrite a builtin entry if the function is in both lists
+				entry.Kind = "special"
+				entry.File = "eval_core.go"
+				entry.Start = startLine
+				entry.End = endLine
+			}
 		}
 	}
 }
@@ -292,17 +310,21 @@ func scanHelperFunctions() {
 			continue
 		}
 
+		// Read all lines first to avoid scanner state issues
+		var lines []string
 		f, err := os.Open(fpath)
 		if err != nil {
 			continue
 		}
-
 		scanner := bufio.NewScanner(f)
-		lineNum := 0
 		for scanner.Scan() {
-			lineNum++
-			line := strings.TrimSpace(scanner.Text())
-			if matches := funcRe.FindStringSubmatch(line); len(matches) > 1 {
+			lines = append(lines, scanner.Text())
+		}
+		f.Close()
+
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if matches := funcRe.FindStringSubmatch(trimmed); len(matches) > 1 {
 				goFunc := matches[1]
 				// Skip builtins (already indexed)
 				if strings.HasPrefix(goFunc, "builtin") {
@@ -313,18 +335,18 @@ func scanHelperFunctions() {
 				if _, exists := sourceIndex[lower]; exists {
 					continue
 				}
-				end := findFuncEnd(scanner, lineNum)
+				start := i + 1 // 1-based
+				end := findFuncEndFromLines(lines, i)
 				sourceIndex[lower] = &SourceEntry{
 					Kind:   "helper",
 					File:   base,
-					Start:  lineNum,
+					Start:  start,
 					End:    end,
 					Doc:    fmt.Sprintf("Helper function: %s", goFunc),
 					GoFunc: goFunc,
 				}
 			}
 		}
-		f.Close()
 	}
 }
 
@@ -412,9 +434,9 @@ func readSourceSnippet(filename string, start, end int) string {
 
 // readStdlibSnippet extracts a stdlib function definition from the embedded stdlib string.
 func readStdlibSnippet(name string) string {
-	// Find the function in stdlib
-	// Match (define (name ...) or (define name ...)
-	pattern := fmt.Sprintf(`(?i)\(define\s+\(?%s\b`, regexp.QuoteMeta(name))
+	// Match all define-like forms that contain the function name
+	// Use [ \t()\n] instead of \b to handle names with special chars like *
+	pattern := fmt.Sprintf(`(?i)\((?:define|define-macro|defsetf|defstruct|defgeneric|define-condition|defconstant|defparameter)\s+\(?\s*%s(?:[ \t()\n]|$)`, regexp.QuoteMeta(name))
 	re := regexp.MustCompile(pattern)
 
 	lines := strings.Split(stdlibContent, "\n")
