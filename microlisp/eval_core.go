@@ -693,7 +693,7 @@ evalLoop:
 				vals := make([]*Value, 0, 8)
 				for !isNil(bindings) {
 					if bindings.typ != VPair {
-						return nil, fmt.Errorf("let: malformed bindings")
+						return nil, fmt.Errorf("letrec: malformed bindings")
 					}
 					b := bindings.car
 					if b.typ != VPair {
@@ -704,26 +704,50 @@ evalLoop:
 					}
 					names = append(names, b.car.str)
 					if !isNil(b.cdr) && b.cdr.typ == VPair {
-						vals = append(vals, b.cdr.car)
+						// Support implicit lambda: (name lambda-list body...)
+						if !isNil(b.cdr.cdr) && b.cdr.cdr.typ == VPair {
+							// (name lambda-list body...) — construct a VFunc
+							fparams := b.cdr.car
+							fbody := b.cdr.cdr
+							params, rest, optDefaults, keySpecs, e := parseParams(fparams)
+							if e != nil {
+								return nil, fmt.Errorf("letrec: %v", e)
+							}
+							fn := gcv()
+							fn.typ = VFunc
+							fn.params = params
+							fn.rest = rest
+							fn.optDefaults = optDefaults
+							fn.keySpecs = keySpecs
+							fn.body = fbody
+							// fn.env will be set after newEnv is created
+							vals = append(vals, fn)
+						} else {
+							// Simple (name value) binding
+							vals = append(vals, b.cdr.car)
+						}
 					} else {
 						vals = append(vals, vnil())
 					}
 					bindings = bindings.cdr
 				}
 				newEnv := &Env{parent: env, bindings: make(map[string]*Value)}
-				for _, name := range names {
-					newEnv.bindings[name] = vbool(false)
-				}
-				evals := make([]*Value, len(vals))
-				for i, val := range vals {
-					evald, e := Eval(val, newEnv)
-					if e != nil {
-						return nil, e
-					}
-					evals[i] = evald
-				}
+				// Pre-bind function stubs for recursion support
 				for i, name := range names {
-					newEnv.bindings[name] = evals[i]
+					if vals[i] != nil && vals[i].typ == VFunc {
+						vals[i].env = newEnv
+					}
+					newEnv.bindings[name] = vals[i]
+				}
+				// Evaluate initforms (non-function values need evaluation)
+				for i, val := range vals {
+					if val != nil && val.typ != VFunc {
+						evald, e := Eval(val, newEnv)
+						if e != nil {
+							return nil, e
+						}
+						newEnv.bindings[names[i]] = evald
+					}
 				}
 				var result *Value = vnil()
 				for !isNil(body) {
@@ -1035,10 +1059,12 @@ evalLoop:
 				}
 				// Execute statements
 				body = v.cdr
+				var result *Value = vnil()
 				for !isNil(body) {
 					stmt := body.car
 					if stmt.typ != VSym && stmt.typ != VNum {
-						_, err = Eval(stmt, env)
+						var ev *Value
+						ev, err = Eval(stmt, env)
 						if err != nil {
 							if _, ok := err.(*blockReturn); ok {
 								return nil, err
@@ -1058,10 +1084,14 @@ evalLoop:
 							}
 							return nil, err
 						}
+						result = ev
+					} else {
+						body = body.cdr
+						continue
 					}
 					body = body.cdr
 				}
-				return vnil(), nil
+				return result, nil
 			case "GO":
 				if v.cdr == nil || v.cdr.typ != VPair {
 					return nil, fmt.Errorf("go: malformed form")

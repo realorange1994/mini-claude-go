@@ -118,3 +118,53 @@ func TestBug5_DefmacroSideEffects(t *testing.T) {
 		t.Fatalf("expected stdout to contain 'expanding' from macro side effect, got: %q", out2)
 	}
 }
+
+// --- New bugs ---
+
+func TestBug_LetrecImplicitLambda(t *testing.T) {
+	ResetGlobalEnv()
+	r, err := SafeEvalString(`(letrec ((sq (x) (* x x))) (sq 5))`)
+	if err != nil {
+		t.Fatalf("letrec implicit lambda failed: %v", err)
+	}
+	if r != "25" {
+		t.Fatalf("expected 25, got %s", r)
+	}
+}
+
+func TestBug_TagbodyReturnValue(t *testing.T) {
+	ResetGlobalEnv()
+	// In CL, integers are valid go tags, so `42` is a tag, not a value.
+	// Use an actual expression to test return value tracking.
+	r, err := SafeEvalString(`(tagbody :a (go :b) :b (+ 20 22))`)
+	if err != nil {
+		t.Fatalf("tagbody failed: %v", err)
+	}
+	if r != "42" {
+		t.Fatalf("expected 42, got %s", r)
+	}
+}
+
+func TestBug_TagbodyReturnFrom(t *testing.T) {
+	ResetGlobalEnv()
+	// tagbody inside block: return-from should work
+	r, err := SafeEvalString(`(block nil (tagbody :a (return-from nil 3)))`)
+	if err != nil {
+		t.Fatalf("tagbody return-from failed: %v", err)
+	}
+	if r != "3" {
+		t.Fatalf("expected 3, got %s", r)
+	}
+}
+
+func TestBug_LabelsErrorMessage(t *testing.T) {
+	ResetGlobalEnv()
+	_, err := SafeEvalString(`(labels (x) x)`)
+	if err == nil {
+		t.Fatal("expected error for malformed labels")
+	}
+	// Should mention "labels" not "flet"
+	if strings.Contains(strings.ToLower(err.Error()), "flet") {
+		t.Fatalf("error message says 'flet' instead of 'labels': %v", err)
+	}
+}
