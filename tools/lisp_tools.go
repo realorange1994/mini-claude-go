@@ -58,11 +58,11 @@ func (*LispToolsTool) InputSchema() map[string]any {
 			},
 			"path": map[string]any{
 				"type":        "string",
-				"description": "Directory or file path for list, search, glob, mkdir, rm operations.",
+				"description": "Search root directory (required for list, search, glob, mkdir, rm; defaults to '.' for search and glob if omitted).",
 			},
 			"pattern": map[string]any{
 				"type":        "string",
-				"description": "Search pattern / glob pattern (for search and glob operations). Uses substring matching, not regex.",
+				"description": "Required for search (substring) and glob (shell wildcard pattern, e.g. '*.go').",
 			},
 			"recursive": map[string]any{
 				"type":        "boolean",
