@@ -52,6 +52,11 @@ func princToString(v *Value) string {
 				}
 				return formatMessage(fc.str, args)
 			}
+			// Fallback: check for MESSAGE slot directly
+			msg := instanceSlotWithInheritance(v, "message")
+			if msg != nil && msg.typ == VStr {
+				return msg.str
+			}
 		}
 		return writeToString(v)
 	default:

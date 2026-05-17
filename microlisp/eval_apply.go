@@ -30,12 +30,18 @@ func Apply(fn *Value, args *Value, env *Env) (result *Value, err error) {
 			for i, a := range argSlice {
 				argStrs[i] = ToString(primaryValue(a))
 			}
-			fmt.Printf("%s%d: (%s %s)\n", indent, traceDepth, fn.name, strings.Join(argStrs, " "))
+			depth := traceDepth + 1 // CL trace is 1-indexed
+			if len(argStrs) > 0 {
+				fmt.Printf("%s%d: (%s %s)\n", indent, depth, fn.name, strings.Join(argStrs, " "))
+			} else {
+				fmt.Printf("%s%d: (%s)\n", indent, depth, fn.name)
+			}
 			traceDepth++
 			defer func() {
-				traceDepth--
 				indent2 := strings.Repeat("  ", traceDepth)
-				fmt.Printf("%s%d: <= %s\n", indent2, traceDepth, ToString(result))
+				depth2 := traceDepth + 1
+				fmt.Printf("%s%d: %s returned %s\n", indent2, depth2, fn.name, ToString(result))
+				traceDepth--
 			}()
 		}
 		argSlice := toSlice(args)

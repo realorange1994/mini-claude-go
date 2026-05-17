@@ -1712,7 +1712,39 @@ evalLoop:
 									hcErr = fmt.Errorf("unhandled condition")
 								}
 							} else {
-								// Not a handledError — re-panic (genuine panic)
+								// Not a handledError — check for control flow errors
+								var br *blockReturn
+								if b, ok := r.(*blockReturn); ok {
+									br = b
+								} else if e, ok := r.(error); ok {
+									br, _ = e.(*blockReturn)
+								}
+								if br != nil {
+									// blockReturn from handler-case body
+									hcErr = br
+									return
+								}
+								var tc *tailCall
+								if t, ok := r.(*tailCall); ok {
+									tc = t
+								} else if e, ok := r.(error); ok {
+									tc, _ = e.(*tailCall)
+								}
+								if tc != nil {
+									hcErr = tc
+									return
+								}
+								var tv *throwValue
+								if t, ok := r.(*throwValue); ok {
+									tv = t
+								} else if e, ok := r.(error); ok {
+									tv, _ = e.(*throwValue)
+								}
+								if tv != nil {
+									hcErr = tv
+									return
+								}
+								// Genuine panic — re-panic
 								panic(r)
 							}
 						}
@@ -1720,6 +1752,16 @@ evalLoop:
 					}()
 					hcResult, hcErr = Eval(valForm, env)
 				}()
+				// If eval returned a Go error, check for control flow errors first
+				if hcErr != nil {
+					if br, ok := hcErr.(*blockReturn); ok && br.name == "NIL" {
+						// handler-case has implicit block nil — resolve it
+						hcResult = br.value
+						hcErr = nil
+					} else if isControlFlowError(hcErr) {
+						return nil, hcErr
+					}
+				}
 				// If eval returned a Go error, convert it to a Lisp condition
 				// and walk clauses to find a matching handler.
 				if hcErr != nil && !hcHandled {
@@ -1782,9 +1824,11 @@ evalLoop:
 					noErrorBody := noErrorClause.cdr.cdr // skip :no-error and var list
 					if len(noErrorVars) > 0 {
 						noErrorEnv := NewEnv(env)
+						// :no-error vars receive the result values as a list (CL spec)
+						valuesList := listFromSlice([]*Value{hcResult})
 						for i, vname := range noErrorVars {
 							if i == 0 {
-								noErrorEnv.Set(vname, hcResult)
+								noErrorEnv.Set(vname, valuesList)
 							}
 						}
 						hcResult = vnil()
@@ -1845,10 +1889,44 @@ evalLoop:
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							// Re-panic handledError so handler-case can catch it
-							// Let other panics (restartInvoke, tailCall) propagate naturally
-							if _, ok := r.(*handledError); ok {
-								panic(r)
+							// Catch blockReturn for "NIL" and use its value as result
+							// Note: control flow errors may be wrapped in error interface
+							var br *blockReturn
+							if b, ok := r.(*blockReturn); ok {
+								br = b
+							} else if e, ok := r.(error); ok {
+								br, _ = e.(*blockReturn)
+							}
+							if br != nil && br.name == "NIL" {
+								hbResult = br.value
+								hbErr = nil
+								return
+							}
+							// handledError means handler ran but didn't return-from;
+							// the condition is still being signaled, so propagate as error
+							var he *handledError
+							if h, ok := r.(*handledError); ok {
+								he = h
+							} else if e, ok := r.(error); ok {
+								he, _ = e.(*handledError)
+							}
+							if he != nil {
+								// handler ran but didn't return-from; propagate as error
+								hbErr = fmt.Errorf("%s", princToString(he.condition))
+								return
+							}
+							// Propagate blockReturn for other names, tailCall, and throwValue
+							// as error returns (not panics) so outer block/catch can handle them
+							switch v := r.(type) {
+							case *blockReturn:
+								hbErr = v
+								return
+							case *tailCall:
+								hbErr = v
+								return
+							case *throwValue:
+								hbErr = v
+								return
 							}
 							// For all other panics, convert to error return
 							hbErr = fmt.Errorf("handler-bind caught panic: %v", r)
@@ -2213,102 +2291,109 @@ evalLoop:
 				}
 				return vnil(), nil
 			case "SETF":
-				// (setf var newval) or (setf (accessor args...) newval)
+				// (setf place1 newval1 place2 newval2 ...)
+				// Collect all place-value pairs and evaluate them in order
 				if v.cdr == nil || v.cdr.typ != VPair || v.cdr.cdr == nil || v.cdr.cdr.typ != VPair {
 					return nil, fmt.Errorf("setf: malformed form")
 				}
-				target := v.cdr.car
-				newValExpr := v.cdr.cdr.car
-				if target.typ == VSym {
-					// Simple variable: (setf x val) -> like (set! x val)
-					name := target.str
-					ev, e := Eval(newValExpr, env)
-					if e != nil {
-						return nil, e
+				var pairs []*Value
+				cur := v.cdr
+				for !isNil(cur) && cur.typ == VPair {
+					place := cur.car
+					if cur.cdr == nil || cur.cdr.typ != VPair {
+						return nil, fmt.Errorf("setf: odd number of arguments")
 					}
-					for scope := env; scope != nil; scope = scope.parent {
-						if _, ok := scope.bindings[name]; ok {
-							scope.bindings[name] = ev
-							return ev, nil
-						}
-					}
-					// Not found in any scope: create in globalEnv (CL setf semantics)
-					globalEnv.Set(name, ev)
-					return ev, nil
+					val := cur.cdr.car
+					pairs = append(pairs, place, val)
+					cur = cur.cdr.cdr
 				}
-				// (setf (accessor args...) newval) or (setf (values ...) newval)
-				if target.typ != VPair {
-					return nil, fmt.Errorf("setf: target must be a list or symbol")
+				if len(pairs) < 2 {
+					return nil, fmt.Errorf("setf: malformed form")
 				}
-				if target.car == nil {
-					return nil, fmt.Errorf("setf: empty accessor")
-				}
-				// Handle (setf (values place1 place2 ...) newval)
-				if target.car.typ == VSym && target.car.str == "VALUES" {
-					// Evaluate the newval expression to get all values
-					vals, err := Eval(newValExpr, env)
-					if err != nil {
-						return nil, err
-					}
-					// Convert to list of values
-					valList := multiValList(vals)
-					// Collect all places from (values place1 place2 ...)
-					places := target.cdr
-					var result *Value
-					placeIdx := 0
-					for ; !isNil(places); places = places.cdr {
-						val := vnil()
-						// Walk valList to find the Nth element
-						cur := valList
-						for i := 0; cur != nil && cur.typ == VPair && i < placeIdx; i++ {
-							cur = cur.cdr
+				var result *Value
+				for i := 0; i < len(pairs); i += 2 {
+					target := pairs[i]
+					newValExpr := pairs[i+1]
+					if target.typ == VSym {
+						name := target.str
+						ev, e := Eval(newValExpr, env)
+						if e != nil {
+							return nil, e
 						}
-						if cur != nil && cur.typ == VPair && cur.car != nil {
-							val = cur.car
+						found := false
+						for scope := env; scope != nil; scope = scope.parent {
+							if _, ok := scope.bindings[name]; ok {
+								scope.bindings[name] = ev
+								result = ev
+								found = true
+								break
+							}
 						}
-						// Build (setf place val) AST and evaluate recursively
-						setfCall := &Value{typ: VPair,
-							car: &Value{typ: VSym, str: "SETF"},
-							cdr: &Value{typ: VPair, car: places.car,
-								cdr: &Value{typ: VPair, car: val, cdr: vnil()}}}
-						r, err := Eval(setfCall, env)
+						if !found {
+							globalEnv.Set(name, ev)
+							result = ev
+						}
+					} else if target.typ == VPair && target.car != nil && target.car.typ == VSym && target.car.str == "VALUES" {
+						vals, err := Eval(newValExpr, env)
 						if err != nil {
 							return nil, err
 						}
-						if placeIdx == 0 {
-							result = r
+						valList := multiValList(vals)
+						places := target.cdr
+						placeIdx := 0
+						for ; !isNil(places); places = places.cdr {
+							val := vnil()
+							cur2 := valList
+							for j := 0; cur2 != nil && cur2.typ == VPair && j < placeIdx; j++ {
+								cur2 = cur2.cdr
+							}
+							if cur2 != nil && cur2.typ == VPair && cur2.car != nil {
+								val = cur2.car
+							}
+							setfCall := &Value{typ: VPair,
+								car: &Value{typ: VSym, str: "SETF"},
+								cdr: &Value{typ: VPair, car: places.car,
+									cdr: &Value{typ: VPair, car: val, cdr: vnil()}}}
+							r, err := Eval(setfCall, env)
+							if err != nil {
+								return nil, err
+							}
+							if placeIdx == 0 {
+								result = r
+							}
+							placeIdx++
 						}
-						placeIdx++
-					}
-					if result == nil {
-						result = vnil()
-					}
-					return result, nil
-				}
-				accessorName := target.car.str
-				args := target.cdr
-				// Look up <accessor>-setf function
-				setter, err := env.Get(accessorName + "-setf")
-				if err != nil {
-					return nil, fmt.Errorf("setf: no setter for %s", accessorName)
-				}
-				// Build: (setter newval args...)
-				newValNode := &Value{typ: VPair, car: newValExpr, cdr: vnil()}
-				var callArgs *Value
-				if isNil(args) {
-					callArgs = newValNode
-				} else {
-					// First arg: newVal
-					callArgs = &Value{typ: VPair, car: newValExpr, cdr: vnil()}
-					tail := callArgs
-					// Then original args
-					for ; !isNil(args); args = args.cdr {
-						tail.cdr = &Value{typ: VPair, car: args.car, cdr: vnil()}
-						tail = tail.cdr
+					} else if target.typ == VPair {
+						if target.car == nil {
+							return nil, fmt.Errorf("setf: empty accessor")
+						}
+						accessorName := target.car.str
+						args := target.cdr
+						setter, err := env.Get(accessorName + "-setf")
+						if err != nil {
+							return nil, fmt.Errorf("setf: no setter for %s", accessorName)
+						}
+						callArgs := &Value{typ: VPair, car: newValExpr, cdr: vnil()}
+						if !isNil(args) {
+							tail := callArgs
+							for ; !isNil(args); args = args.cdr {
+								tail.cdr = &Value{typ: VPair, car: args.car, cdr: vnil()}
+								tail = tail.cdr
+							}
+						}
+						r, err := Eval(&Value{typ: VPair, car: setter, cdr: callArgs}, env)
+						if err != nil {
+							return nil, err
+						}
+						result = r
+					} else {
+						return nil, fmt.Errorf("setf: target must be a list or symbol")
 					}
 				}
-				v = &Value{typ: VPair, car: setter, cdr: callArgs}
-				continue
+				if result == nil {
+					result = vnil()
+				}
+				return result, nil
 			case "COND":
 				clauses := v.cdr
 				seen := make(map[*Value]bool)

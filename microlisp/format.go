@@ -243,6 +243,21 @@ func (fs *fmtState) parseFmtDirective() (params []interface{}, colon, at bool, c
 				params = append(params, -1)
 			}
 			gotValue = false
+		} else if c == '-' {
+			fs.next()
+			n := 0
+			hasDigits := false
+			for !fs.done() && fs.peek() >= '0' && fs.peek() <= '9' {
+				n = n*10 + int(fs.next()-'0')
+				hasDigits = true
+			}
+			if hasDigits {
+				params = append(params, -n)
+				gotValue = true
+			} else {
+				cmd = '-'
+				return
+			}
 		} else {
 			break
 		}
@@ -350,6 +365,12 @@ func formatDispatch(fs *fmtState) {
 		if isNil(arg) && colon {
 			s = "()"
 		}
+		// Negative mincol: left-justify with absolute value
+		leftJustify := false
+		if mincol < 0 {
+			leftJustify = true
+			mincol = -mincol
+		}
 		padlen := 0
 		if int(mincol) > len(s) {
 			padlen = int(mincol) - len(s)
@@ -362,16 +383,16 @@ func formatDispatch(fs *fmtState) {
 				}
 			}
 		}
-		if at {
+		if at || leftJustify {
+			fs.buf.WriteString(s)
 			for i := 0; i < padlen; i++ {
 				fs.buf.WriteByte(byte(padchar))
 			}
-			fs.buf.WriteString(s)
 		} else {
-			fs.buf.WriteString(s)
 			for i := 0; i < padlen; i++ {
 				fs.buf.WriteByte(byte(padchar))
 			}
+			fs.buf.WriteString(s)
 		}
 	case 'S':
 		arg := fs.popArg()

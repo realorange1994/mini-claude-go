@@ -6,6 +6,16 @@ import (
 	"strings"
 )
 
+// isControlFlowError checks if an error represents a control flow transfer
+// (block return, tail call, throw) that should be propagated, not caught.
+func isControlFlowError(err error) bool {
+	switch err.(type) {
+	case *blockReturn, *tailCall, *throwValue:
+		return true
+	}
+	return false
+}
+
 // applyAndResolveTailCall applies fn to args and resolves any tailCall errors.
 // This is needed because apply returns tailCall for VFunc, which defers (like warn's)
 // would run before the tailCall body is actually evaluated.
@@ -179,12 +189,18 @@ func signalDivisionByZero() error {
 				if fn.typ == VPrim {
 					result, err := fn.fn([]*Value{cond})
 					if err != nil {
+						if isControlFlowError(err) {
+							panic(err)
+						}
 						panic(fmt.Errorf("handler-function panicked: %v", err))
 					}
 					panic(&handledError{condition: cond, result: result})
 				} else if fn.typ == VFunc {
-					result, err := Apply(fn, cons(cond, vnil()), h.env)
+					result, err := applyAndResolveTailCall(fn, cons(cond, vnil()), h.env)
 					if err != nil {
+						if isControlFlowError(err) {
+							panic(err)
+						}
 						panic(fmt.Errorf("handler-function panicked: %v", err))
 					}
 					panic(&handledError{condition: cond, result: result})
@@ -297,6 +313,9 @@ func builtinError(args []*Value) (*Value, error) {
 						if _, ok := err.(*tailCall); ok {
 							panic(err)
 						}
+						if isControlFlowError(err) {
+							panic(err)
+						}
 						if he, ok := err.(*handledError); ok {
 							panic(he)
 						}
@@ -307,6 +326,9 @@ func builtinError(args []*Value) (*Value, error) {
 					_, err := applyAndResolveTailCall(fn, cons(cond, vnil()), h.env)
 					if err != nil {
 						if _, ok := err.(*tailCall); ok {
+							panic(err)
+						}
+						if isControlFlowError(err) {
 							panic(err)
 						}
 						if he, ok := err.(*handledError); ok {
@@ -634,6 +656,11 @@ func builtinMakeCondition(args []*Value) (*Value, error) {
 			resolved := resolveInitargToSlot(cls, slotName)
 			if resolved != "" {
 				slotName = resolved
+			} else {
+				// If no initarg mapping found, check if the initarg name matches a slot name directly
+				if classHasSlotName(cls, strings.ToUpper(slotName)) {
+					slotName = strings.ToUpper(slotName)
+				}
 			}
 			cond.instSlots[strings.ToUpper(slotName)] = val
 		} else if key.typ == VSym {
@@ -746,6 +773,40 @@ func findSlotNameForInitarg(slotDefs *Value, initarg string) string {
 		slotDefs = slotDefs.cdr
 	}
 	return ""
+}
+
+// classHasSlotName checks if any class in the hierarchy has a slot with the given name
+func classHasSlotName(cls *Value, slotName string) bool {
+	classes := []*Value{cls}
+	if cls.cpl != nil {
+		classes = append(classes, cls.cpl...)
+	}
+	for _, c := range classes {
+		if c.typ == VClass && c.body != nil {
+			if slotHasName(c.body, slotName) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// slotHasName checks if a slot definition has the given name
+func slotHasName(slotDefs *Value, name string) bool {
+	for !isNil(slotDefs) {
+		slot := slotDefs.car
+		var slotName string
+		if slot.typ == VSym {
+			slotName = slot.str
+		} else if slot.typ == VPair && slot.car != nil && slot.car.typ == VSym {
+			slotName = slot.car.str
+		}
+		if strings.EqualFold(slotName, name) {
+			return true
+		}
+		slotDefs = slotDefs.cdr
+	}
+	return false
 }
 
 // -------- typep --------

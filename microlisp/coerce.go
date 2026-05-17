@@ -40,21 +40,16 @@ func builtinCoerce(args []*Value) (*Value, error) {
 			return vstr(ToString(obj)), nil
 		}
 		if obj.typ == VPair || isNil(obj) {
-			// list of characters/numbers/symbols/strings -> string
+			// list of characters -> string (CL spec: all elements must be characters)
 			var sb strings.Builder
 			cur := obj
 			for !isNil(cur) {
 				if cur.typ == VPair {
 					elt := cur.car
-					if elt.typ == VChar {
-						sb.WriteRune(elt.ch)
-					} else if elt.typ == VNum {
-						sb.WriteRune(rune(toNum(elt)))
-					} else if elt.typ == VSym {
-						sb.WriteString(elt.str)
-					} else if elt.typ == VStr {
-						sb.WriteString(elt.str)
+					if elt.typ != VChar {
+						return nil, fmt.Errorf("coerce: cannot convert list to string - element %s is not a character", ToString(elt))
 					}
+					sb.WriteRune(elt.ch)
 					cur = cur.cdr
 				} else {
 					break

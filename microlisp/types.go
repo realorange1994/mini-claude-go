@@ -189,7 +189,7 @@ type throwValue struct {
 	value *Value
 }
 
-func (tv *throwValue) Error() string { return "<throw>" }
+func (tv *throwValue) Error() string { return fmt.Sprintf("<throw to tag: %s>", tv.tag) }
 
 // tailCall is used to implement proper tail-call optimization (TCO).
 // Instead of making a recursive Go call in tail position (which would
