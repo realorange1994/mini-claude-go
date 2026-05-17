@@ -26,7 +26,8 @@ func (*LispEvalTool) Description() string {
 		"Use for: math calculations, string processing, list manipulation, algorithm prototyping. " +
 		"State persists between calls (defvar, defun survive). " +
 		"Thread-safe: concurrent calls are serialized. " +
-		"Limitations: no filesystem I/O, no network, no FFI — pure computation only."
+		"Limitations: no filesystem I/O, no network, no FFI — pure computation only. " +
+		"Use operation='source' to view source of any builtin/stdlib function, 'source-list' to browse all available functions."
 }
 
 func (*LispEvalTool) InputSchema() map[string]any {
@@ -35,12 +36,12 @@ func (*LispEvalTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"expression": map[string]any{
 				"type":        "string",
-				"description": "Lisp expression to evaluate, e.g. (+ 1 2), (car '(1 2 3)), (format nil \"Hello ~A\" \"World\"). For operation=help: use topic name like \"arithmetic\", \"lists\", \"lambda\". For operation=examples: use category name like \"arithmetic\", \"recursion\", \"format\".",
+				"description": "Lisp expression to evaluate, e.g. (+ 1 2), (car '(1 2 3)), (format nil \"Hello ~A\" \"World\"). For operation=help: use topic name like \"arithmetic\", \"lists\", \"lambda\". For operation=examples: use category name like \"arithmetic\", \"recursion\", \"format\". For operation=source: function name like \"car\", \"string-append\", \"defclass\". For operation=source-list: optional filter substring.",
 			},
 			"operation": map[string]any{
 				"type":        "string",
-				"enum":        []string{"eval", "reset", "help", "examples", "eval_file", "lint"},
-				"description": "Action to perform: 'eval' to evaluate a Lisp expression (default), 'reset' to clear interpreter state, 'help' to show usage manual, 'examples' to show code examples, 'eval_file' to load and execute a Lisp file, 'lint' to check syntax without executing.",
+				"enum":        []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list"},
+				"description": "Action to perform: 'eval' to evaluate a Lisp expression (default), 'reset' to clear interpreter state, 'help' to show usage manual, 'examples' to show code examples, 'eval_file' to load and execute a Lisp file, 'lint' to check syntax without executing, 'source' to view source of a builtin/stdlib function, 'source-list' to list all indexed functions.",
 			},
 			"file": map[string]any{
 				"type":        "string",
@@ -151,6 +152,15 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 			return ToolResult{Output: fmt.Sprintf("Lint error: %v", err), IsError: true}
 		}
 		return ToolResult{Output: "No syntax errors found."}
+
+	case "source":
+		if expr == "" {
+			return ToolResult{Output: "Error: expression is required for operation=source. Use a function name like \"car\", \"string-append\", \"defclass\", or \"mapcar\".", IsError: true}
+		}
+		return ToolResult{Output: microlisp.GetSource(expr)}
+
+	case "source-list":
+		return ToolResult{Output: microlisp.SourceList(expr)}
 
 	default: // eval (default when operation is empty or unknown)
 		if expr == "" {
