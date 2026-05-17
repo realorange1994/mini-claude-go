@@ -506,6 +506,16 @@ func (a *AgentLoop) SpawnSubAgent(
 			outputFileHandle.Close()
 		}
 
+		// If the task was killed (e.g., by agent_kill), send a "killed"
+		// notification with partial result instead of "completed".
+		if bgTask != nil && bgTask.Status == tools.TaskKilled {
+			if a.taskStore != nil {
+				a.taskStore.UpdateStatus(taskID, TaskStatusKilled)
+			}
+			a.EnqueueAgentNotification(taskID, "killed", childResult, childLoop.TranscriptPath(), outputFilePath, turnsUsed, int(childLoop.totalInputTokens.Load()+childLoop.totalOutputTokens.Load()), dur)
+			return
+		}
+
 		if a.taskStore != nil {
 			a.taskStore.CompleteTask(taskID, childResult, turnsUsed, dur)
 		}
@@ -985,10 +995,35 @@ maxTurns := cfg.MaxTurns
 	child.gate = NewPermissionGate(&child.config)
 	child.currentMaxTokens.Store(int64(child.config.MaxOutputTokens))
 
-	// Wire BashTool's BackgroundTaskCallback so sub-agents can spawn background
+	// Wire ExecTool's BackgroundTaskCallback so sub-agents can spawn background
 	// bash commands. When this child agent exits, childLoop.Close() kills all
 	// tasks tracked in its taskStore — matching Claude Code's killShellTasksForAgent.
-	child.registerBashBgTool()
+	//
+	// CRITICAL: We must create a NEW ExecTool instance for the child, because
+	// buildSubAgentRegistry copies tool pointers from the parent registry —
+	// modifying the shared ExecTool's BackgroundTaskCallback would overwrite
+	// the parent's callback, causing the parent's exec background tasks to be
+	// registered in the child's taskStore (and thus invisible to the parent's
+	// task_output/task_stop queries).
+	if tool, ok := registry.Get("exec"); ok {
+		if _, ok := tool.(*tools.ExecTool); ok {
+			childExec := &tools.ExecTool{
+				BackgroundTaskCallback: child.spawnBackgroundBashCommand,
+				TimeoutCallback:        child.registerExistingProcessAsBgTask,
+			}
+			registry.Register(childExec) // replaces shared instance in child's registry
+		}
+	}
+	// Wire MCP timeout callback for the child (same pointer-sharing issue).
+	if tool, ok := registry.Get("mcp_call_tool"); ok {
+		if mcpTool, ok := tool.(*tools.MCPToolCaller); ok {
+			childMCP := &tools.MCPToolCaller{
+				Manager:         mcpTool.Manager,
+				TimeoutCallback: child.registerMCPTimeoutAsBgTask,
+			}
+			registry.Register(childMCP)
+		}
+	}
 
 	// Set system prompt on the child's context
 	child.context.SetSystemPrompt(childSysPrompt)

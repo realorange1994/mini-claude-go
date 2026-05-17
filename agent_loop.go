@@ -305,7 +305,19 @@ func (a *AgentLoop) InjectNotifications(notifications []string) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("[System: The following sub-agent tasks completed while you were waiting]\n\n")
+	// Use different prefix depending on whether any task was killed vs completed
+	hasKilled := false
+	for _, n := range notifications {
+		if strings.Contains(n, "<status>killed</status>") {
+			hasKilled = true
+			break
+		}
+	}
+	if hasKilled {
+		sb.WriteString("[System: The following sub-agent tasks finished while you were waiting (some were killed)]\n\n")
+	} else {
+		sb.WriteString("[System: The following sub-agent tasks completed while you were waiting]\n\n")
+	}
 	for _, n := range notifications {
 		sb.WriteString(n)
 		sb.WriteString("\n\n")
