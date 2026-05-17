@@ -252,11 +252,6 @@ var initLib = `
       (list 'setf place (list 'cdr v))
       (list 'car v))))
 
-(define-macro (pushnew item place)
-  (list 'if (list 'member item place)
-    place
-    (list 'setf place (list 'cons item place))))
-
 (define-macro (incf place . delta)
   (if (null? delta)
     (list 'setf place (list '+ place 1))

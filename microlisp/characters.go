@@ -10,14 +10,19 @@ func builtinChar(args []*Value) (*Value, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("char: need string and index")
 	}
-	if args[0].typ != VStr {
-		return nil, fmt.Errorf("char: expected a string")
-	}
 	if args[1].typ != VNum {
-		return nil, fmt.Errorf("char: expected an integer")
+		return nil, fmt.Errorf("char: expected an integer index")
 	}
 	idx := int(args[1].num)
-	s := args[0].str
+	var s string
+	switch args[0].typ {
+	case VStr:
+		s = args[0].str
+	case VChar:
+		s = string(args[0].ch)
+	default:
+		return nil, fmt.Errorf("char: expected a string or character")
+	}
 	runes := []rune(s)
 	if idx < 0 || idx >= len(runes) {
 		return nil, fmt.Errorf("char: index %d out of range", idx)

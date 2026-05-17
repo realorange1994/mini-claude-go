@@ -527,9 +527,28 @@ func builtinMember(args []*Value) (*Value, error) {
 	if lst.typ != VPair && lst.typ != VNil {
 		return nil, fmt.Errorf("member: expected a proper list")
 	}
-	keyFn, testFn, testNotFn, _, _, _, _, _, err := seqParseKeys(args, 2)
+	keyFn, testFn, testNotFn, fromEnd, _, _, _, _, err := seqParseKeys(args, 2)
 	if err != nil {
 		return nil, err
+	}
+	// Collect all matching tails; :from-end returns the last match
+	if fromEnd {
+		var lastMatch *Value
+		seen := make(map[*Value]bool)
+		for cur := lst; !isNil(cur) && cur.typ == VPair; {
+			if seen[cur] {
+				break
+			}
+			seen[cur] = true
+			if testItemMatchFull(item, cur.car, testFn, testNotFn, keyFn) {
+				lastMatch = cur
+			}
+			cur = cur.cdr
+		}
+		if lastMatch != nil {
+			return lastMatch, nil
+		}
+		return vnil(), nil
 	}
 	seen := make(map[*Value]bool)
 	for !isNil(lst) && lst.typ == VPair {
@@ -557,46 +576,34 @@ func builtinPosition(args []*Value) (*Value, error) {
 			return nil, err
 		}
 	}
-	start, end := 0, -1
-	for i := 2; i < len(args); i++ {
-		if args[i].typ == VSym {
-			switch args[i].str {
-			case ":START":
-				if i+1 < len(args) {
-					i++
-					n, e := safeToNum(args[i], "position")
-					if e != nil {
-						return nil, e
-					}
-					start = int(n)
-				}
-			case ":END":
-				if i+1 < len(args) {
-					i++
-					n, e := safeToNum(args[i], "position")
-					if e != nil {
-						return nil, e
-					}
-					end = int(n)
-				}
-			}
-		}
+	keyFn, testFn, testNotFn, fromEnd, _, start, end, _, err := seqParseKeys(args, 2)
+	if err != nil {
+		return nil, err
 	}
 	if seq.typ == VStr {
 		s := seq.str
 		runes := []rune(s)
-		var targetCh rune
-		if item.typ == VChar {
-			targetCh = item.ch
-		} else {
-			return vnil(), nil
-		}
 		if end < 0 || end > len(runes) {
 			end = len(runes)
 		}
-		for i := start; i < end; i++ {
-			if runes[i] == targetCh {
-				return vnum(float64(i)), nil
+		if start < 0 || start > end {
+			start = 0
+		}
+		if item.typ != VChar {
+			return vnil(), nil
+		}
+		targetCh := item.ch
+		if fromEnd {
+			for i := end - 1; i >= start; i-- {
+				if runes[i] == targetCh {
+					return vnum(float64(i)), nil
+				}
+			}
+		} else {
+			for i := start; i < end; i++ {
+				if runes[i] == targetCh {
+					return vnum(float64(i)), nil
+				}
 			}
 		}
 		return vnil(), nil
@@ -605,9 +612,20 @@ func builtinPosition(args []*Value) (*Value, error) {
 	if end < 0 || end > len(elems) {
 		end = len(elems)
 	}
-	for i := start; i < end; i++ {
-		if eqVal(elems[i], item) {
-			return vnum(float64(i)), nil
+	if start < 0 || start > end {
+		start = 0
+	}
+	if fromEnd {
+		for i := end - 1; i >= start; i-- {
+			if testItemMatchFull(item, elems[i], testFn, testNotFn, keyFn) {
+				return vnum(float64(i)), nil
+			}
+		}
+	} else {
+		for i := start; i < end; i++ {
+			if testItemMatchFull(item, elems[i], testFn, testNotFn, keyFn) {
+				return vnum(float64(i)), nil
+			}
 		}
 	}
 	return vnil(), nil
@@ -1028,32 +1046,40 @@ func builtinPushnew(args []*Value) (*Value, error) {
 			i++
 		}
 	}
+	// Check if item already in current list
+	currentVal := vnil()
 	if place.typ == VSym {
-		currentVal, err := globalEnv.Get(place.str)
+		val, err := globalEnv.Get(place.str)
 		if err != nil {
 			currentVal = vnil()
+		} else {
+			currentVal = val
 		}
-		// Check if item already in list
-		for lst := currentVal; lst != nil && lst.typ == VPair; lst = lst.cdr {
-			if !isNil(testFn) {
-				res, err := callFnOnSeq(testFn, []*Value{item, lst.car}, globalEnv)
-				if err != nil {
-					return nil, err
-				}
-				if isTruthy(res) {
-					return currentVal, nil
-				}
-			} else {
-				if eqVal(item, lst.car) {
-					return currentVal, nil
-				}
+	} else if place.typ == VPair || place.typ == VNil {
+		currentVal = place
+	} else {
+		return nil, fmt.Errorf("pushnew: second argument must be a symbol or list")
+	}
+	for lst := currentVal; lst != nil && lst.typ == VPair; lst = lst.cdr {
+		if !isNil(testFn) {
+			res, err := callFnOnSeq(testFn, []*Value{item, lst.car}, globalEnv)
+			if err != nil {
+				return nil, err
+			}
+			if isTruthy(res) {
+				return currentVal, nil
+			}
+		} else {
+			if eqVal(item, lst.car) {
+				return currentVal, nil
 			}
 		}
-		newVal := cons(item, currentVal)
-		globalEnv.Set(place.str, newVal)
-		return newVal, nil
 	}
-	return nil, fmt.Errorf("pushnew: second argument must be a symbol")
+	newVal := cons(item, currentVal)
+	if place.typ == VSym {
+		globalEnv.Set(place.str, newVal)
+	}
+	return newVal, nil
 }
 
 func builtinPush(args []*Value) (*Value, error) {
