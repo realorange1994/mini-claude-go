@@ -175,7 +175,7 @@ func builtinStrLen(args []*Value) (*Value, error) {
 	if args[0].typ != VStr {
 		return nil, fmt.Errorf("string-length: expected string")
 	}
-	return vnum(float64(len(args[0].str))), nil
+	return vnum(float64(utf8.RuneCountInString(args[0].str))), nil
 }
 
 func builtinStrFind(args []*Value) (*Value, error) {
@@ -197,7 +197,7 @@ func builtinStrFind(args []*Value) (*Value, error) {
 	if idx < 0 {
 		return vnil(), nil
 	}
-	return vnum(float64(idx)), nil
+	return vnum(float64(utf8.RuneCountInString(args[1].str[:idx]))), nil
 }
 
 func builtinSubstring(args []*Value) (*Value, error) {
