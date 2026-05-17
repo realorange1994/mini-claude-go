@@ -797,11 +797,9 @@ func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc
 				},
 			},
 		},
-		ToolChoice: anthropic.ToolChoiceUnionParam{
-			OfTool: &anthropic.ToolChoiceToolParam{
-				Name: "classify_action",
-			},
-		},
+		// ToolChoice omitted — thinking mode doesn't support required/object.
+		// With a single tool defined and clear system prompt, the model will
+		// naturally choose it in auto mode.
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(
 				anthropic.NewTextBlock(userMsg),
@@ -863,11 +861,9 @@ func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc
 				},
 			},
 		},
-		ToolChoice: anthropic.ToolChoiceUnionParam{
-			OfTool: &anthropic.ToolChoiceToolParam{
-				Name: "classify_action",
-			},
-		},
+		// ToolChoice omitted — thinking mode doesn't support required/object.
+		// With a single tool defined and clear system prompt, the model will
+		// naturally choose it in auto mode.
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(
 				anthropic.NewTextBlock(stage2Prompt),
