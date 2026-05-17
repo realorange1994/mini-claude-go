@@ -1,24 +1,12 @@
 package microlisp
 
 import (
-	"bufio"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+
+	"miniclaudecode-go/tools/rgrep"
 )
 
-// Output size limits to prevent context explosion
-const (
-	maxOutputBytes  = 8 * 1024  // 8KB total output cap
-	maxLineLen      = 300       // max chars per line in content mode
-)
-
-// builtinGoSearch performs efficient file+content search natively in Go,
-// avoiding the O(N^2) string allocation overhead of the Lisp line-scanner.
-// Only scans top-level files in the given directory (non-recursive),
-// matching the old Lisp directory/glob behavior.
-//
+// builtinGoSearch delegates to the rgrep search engine.
 // Args: pattern path output-mode case-insensitive head-limit glob
 func builtinGoSearch(args []*Value) (*Value, error) {
 	if len(args) < 1 {
@@ -31,9 +19,16 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 		root = primaryValue(args[1]).str
 	}
 
-	outputMode := "content"
+	outputMode := rgrep.OutputContent
 	if len(args) > 2 {
-		outputMode = primaryValue(args[2]).str
+		switch primaryValue(args[2]).str {
+		case "count":
+			outputMode = rgrep.OutputCount
+		case "files_with_matches":
+			outputMode = rgrep.OutputFilesWithMatch
+		default:
+			outputMode = rgrep.OutputContent
+		}
 	}
 
 	caseInsensitive := false
@@ -57,144 +52,63 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 		}
 	}
 
-	// If root is a regular file, search just that file
-	if info, err := os.Stat(root); err == nil && !info.IsDir() {
-		return searchSingleFile(root, pattern, outputMode, caseInsensitive, headLimit)
+	cfg := rgrep.SearchConfig{
+		Pattern:         pattern,
+		Path:            root,
+		OutputMode:      outputMode,
+		CaseInsensitive: caseInsensitive,
+		FixedStrings:    true, // literal substring search, not regex
+		HeadLimit:       headLimit,
+		Glob:            glob,
 	}
 
-	if _, err := os.Stat(root); os.IsNotExist(err) {
-		return vstr(fmt.Sprintf("Error: no such directory: %s", root)), nil
+	result := rgrep.Search(cfg)
+
+	if result.Err != nil {
+		return vstr(fmt.Sprintf("Error: %v", result.Err)), nil
 	}
 
-	searchPattern := pattern
-	if caseInsensitive {
-		searchPattern = strings.ToLower(pattern)
-	}
-
-	// Read directory entries (non-recursive, matching old Lisp behavior)
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return vstr(fmt.Sprintf("Error: %v", err)), nil
-	}
-
-	var matches []string
-	matchCount := 0
-	outputSize := 0
-	truncated := false
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-
-		// Apply glob filter
-		if glob != "" {
-			matched, _ := filepath.Match(glob, name)
-			if !matched {
-				continue
-			}
-		}
-
-		fpath := filepath.Join(root, name)
-
-		fileMatches, fileCount := scanFile(fpath, searchPattern, outputMode, caseInsensitive, headLimit-len(matches), maxOutputBytes-outputSize)
-		outputSize += len(fileMatches)
-		matches = append(matches, fileMatches...)
-		matchCount += fileCount
-
-		if len(matches) >= headLimit || outputSize >= maxOutputBytes {
-			truncated = len(matches) >= headLimit || outputSize >= maxOutputBytes
-			break
-		}
-	}
-
-	var result string
 	switch outputMode {
-	case "count":
-		result = fmt.Sprintf("%d", matchCount)
-	default:
-		result = strings.Join(matches, "\n")
-		if truncated {
-			result += "\n... (output truncated, try a more specific pattern, use glob filter, or use count mode for complete results)"
+	case rgrep.OutputCount:
+		// In count mode, TotalMatches is the total across all files
+		total := 0
+		for _, r := range result.Results {
+			total += r.LineNum // LineNum holds the count per file
 		}
+		return vstr(fmt.Sprintf("%d", total)), nil
+
+	case rgrep.OutputFilesWithMatch:
+		lines := make([]string, len(result.Results))
+		for i, r := range result.Results {
+			lines[i] = r.Path
+		}
+		out := joinWithNL(lines)
+		if result.Truncated {
+			out += "\n... (output truncated, try a more specific pattern, use glob filter, or use count mode for complete results)"
+		}
+		return vstr(out), nil
+
+	default:
+		// Content mode: format as "path\tlineNum\tline"
+		lines := make([]string, len(result.Results))
+		for i, r := range result.Results {
+			lines[i] = fmt.Sprintf("%s\t%d\t%s", r.Path, r.LineNum, r.Line)
+		}
+		out := joinWithNL(lines)
+		if result.Truncated {
+			out += "\n... (output truncated, try a more specific pattern, use glob filter, or use count mode for complete results)"
+		}
+		return vstr(out), nil
 	}
-	return vstr(result), nil
 }
 
-// searchSingleFile searches one file and returns the result directly.
-func searchSingleFile(fpath, pattern, outputMode string, caseInsensitive bool, headLimit int) (*Value, error) {
-	searchPattern := pattern
-	if caseInsensitive {
-		searchPattern = strings.ToLower(pattern)
-	}
-
-	matches, count := scanFile(fpath, searchPattern, outputMode, caseInsensitive, headLimit, maxOutputBytes)
-
-	var result string
-	switch outputMode {
-	case "count":
-		result = fmt.Sprintf("%d", count)
-	default:
-		result = strings.Join(matches, "\n")
-		if len(matches) >= headLimit || len(result) >= maxOutputBytes {
-			result += "\n... (output truncated, try a more specific pattern, use glob filter, or use count mode for complete results)"
+func joinWithNL(ss []string) string {
+	result := ""
+	for i, s := range ss {
+		if i > 0 {
+			result += "\n"
 		}
+		result += s
 	}
-	return vstr(result), nil
-}
-
-// scanFile reads a file line-by-line using bufio.Scanner and searches for the pattern.
-// Returns matching lines (for content/files_with_matches modes) and total match count.
-// Truncates individual lines longer than maxLineLen to prevent single-line blowups.
-func scanFile(fpath, searchPattern, outputMode string, caseInsensitive bool, remaining, maxOutput int) ([]string, int) {
-	f, err := os.Open(fpath)
-	if err != nil {
-		return nil, 0
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	var matches []string
-	lineNum := 0
-	matchCount := 0
-	fileAdded := false
-
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Text()
-		searchLine := line
-		if caseInsensitive {
-			searchLine = strings.ToLower(line)
-		}
-
-		if strings.Contains(searchLine, searchPattern) {
-			matchCount++
-
-			switch outputMode {
-			case "content":
-				if remaining > 0 && maxOutput > 0 {
-					displayLine := line
-					if len(displayLine) > maxLineLen {
-						displayLine = displayLine[:maxLineLen] + "..."
-					}
-					entry := fmt.Sprintf("%s\t%d\t%s", fpath, lineNum, displayLine)
-					matches = append(matches, entry)
-					remaining--
-					maxOutput -= len(entry)
-				}
-			case "files_with_matches":
-				if !fileAdded {
-					matches = append(matches, fpath)
-					fileAdded = true
-				}
-			}
-		}
-	}
-
-	return matches, matchCount
+	return result
 }

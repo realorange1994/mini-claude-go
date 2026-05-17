@@ -691,8 +691,8 @@ const lispToolsLib = `
     (condition (c) (format nil "Error: ~A" c))))
 
 ;; Text search (substring matching, no regex)
-;; Delegates to go-search for efficient native file walking and line scanning.
-;; Lisp line-by-line scanning with substring allocations is O(N^2) in memory churn.
+;; Delegates to go-search -> rgrep engine for efficient file walking, binary detection,
+;; and line scanning. Respects .gitignore, skips VCS/binary files.
 (define (lisp-search pattern path output-mode case-insensitive head-limit glob-filter)
   (handler-case
     (let ((safe (safe-path? path)))
