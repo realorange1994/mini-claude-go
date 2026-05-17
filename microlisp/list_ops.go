@@ -226,6 +226,10 @@ func builtinListLength(args []*Value) (*Value, error) {
 		count++
 		v = v.cdr
 	}
+	// CL spec: list-length returns nil for non-proper (dotted) lists
+	if !isNil(v) && v.typ != VNil {
+		return vnil(), nil
+	}
 	return vnum(float64(count)), nil
 }
 

@@ -33,7 +33,12 @@ func seqParseKeys(args []*Value, startIdx int) (keyFn, testFn, testNotFn *Value,
 					testNotFn = args[i]
 				}
 			case ":FROM-END":
-				fromEnd = true
+				if i+1 < len(args) {
+					i++
+					fromEnd = isTruthy(args[i])
+				} else {
+					fromEnd = true
+				}
 			case ":COUNT":
 				if i+1 < len(args) {
 					i++

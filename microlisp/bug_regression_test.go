@@ -1046,3 +1046,35 @@ func TestBug_LispEvalContextCancellation(t *testing.T) {
 		t.Fatalf("expected 3, got %s", r)
 	}
 }
+
+func TestBug_AppendNonListArg(t *testing.T) {
+	// (append '(1 2) 3 4) crashed with "car: not a pair" — intermediate
+	// non-list arg caused cryptic error instead of proper type-error.
+	// CL spec: only the last argument can be a non-list object.
+	// Fix: stdlib append now checks (pair? (car lists)) before recursing.
+	_, err := eval(`(append '(1 2) 3 4)`)
+	if err == nil {
+		t.Fatal("expected error for (append '(1 2) 3 4), got nil")
+	}
+	if !strings.Contains(err.Error(), "not a list") {
+		t.Fatalf("error should mention 'not a list', got: %v", err)
+	}
+	// Valid cases must still work
+	r1, _ := eval(`(append '(1 2) 3)`)
+	if r1 != "(1 2  . 3)" {
+		t.Fatalf("append '(1 2) 3: expected (1 2  . 3), got %s", r1)
+	}
+	r2, _ := eval(`(append '(1 2) '(3 4))`)
+	if !strings.Contains(r2, "1") || !strings.Contains(r2, "2") || !strings.Contains(r2, "3") || !strings.Contains(r2, "4") {
+		t.Fatalf("append '(1 2) '(3 4): expected (1 2 3 4), got %s", r2)
+	}
+}
+
+func TestBug_FormatColonD(t *testing.T) {
+	// ~:D inserts commas as group separators for decimal integers.
+	// (format nil "~:D" 1234567) should return "1,234,567"
+	r, _ := eval(`(format nil "~:D" 1234567)`)
+	if r != `"1,234,567"` {
+		t.Fatalf("expected \"1,234,567\", got %s", r)
+	}
+}

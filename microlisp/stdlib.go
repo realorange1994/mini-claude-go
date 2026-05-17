@@ -119,6 +119,7 @@ var initLib = `
     ((null? lists) '())
     ((null? (cdr lists)) (car lists))
     ((null? (car lists)) (apply append (cdr lists)))
+    ((not (pair? (car lists))) (error "append: argument is not a list"))
     (else (cons (car (car lists)) (apply append (cons (cdr (car lists)) (cdr lists)))))))
 (define (range n)
   (if (<= n 0) '() (append (range (- n 1)) (list (- n 1)))))

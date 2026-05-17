@@ -445,10 +445,14 @@ func builtinRevappend(args []*Value) (*Value, error) {
 
 func builtinLdiff(args []*Value) (*Value, error) {
 	if len(args) < 2 {
-		return nil, fmt.Errorf("ldiff: need two lists")
+		return nil, fmt.Errorf("ldiff: need two arguments")
 	}
 	list := args[0]
 	obj := args[1]
+	// If first arg is not a list, return nil per CL spec
+	if list.typ != VPair && !isNil(list) {
+		return vnil(), nil
+	}
 	var result []*Value
 	seen := make(map[*Value]bool)
 	for !isNil(list) && list.typ == VPair {
