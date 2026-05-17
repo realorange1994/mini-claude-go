@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+// Output size limits to prevent context explosion
+const (
+	maxOutputBytes  = 64 * 1024 // 64KB total output cap
+	maxLineLen      = 512       // max chars per line in content mode
+)
+
 // builtinGoSearch performs efficient file+content search natively in Go,
 // avoiding the O(N^2) string allocation overhead of the Lisp line-scanner.
 // Only scans top-level files in the given directory (non-recursive),
@@ -73,6 +79,8 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 
 	var matches []string
 	matchCount := 0
+	outputSize := 0
+	truncated := false
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -91,11 +99,13 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 
 		fpath := filepath.Join(root, name)
 
-		fileMatches, fileCount := scanFile(fpath, searchPattern, outputMode, caseInsensitive, headLimit-len(matches))
+		fileMatches, fileCount := scanFile(fpath, searchPattern, outputMode, caseInsensitive, headLimit-len(matches), maxOutputBytes-outputSize)
+		outputSize += len(fileMatches)
 		matches = append(matches, fileMatches...)
 		matchCount += fileCount
 
-		if len(matches) >= headLimit {
+		if len(matches) >= headLimit || outputSize >= maxOutputBytes {
+			truncated = len(matches) >= headLimit || outputSize >= maxOutputBytes
 			break
 		}
 	}
@@ -106,6 +116,9 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 		result = fmt.Sprintf("%d", matchCount)
 	default:
 		result = strings.Join(matches, "\n")
+		if truncated {
+			result += "\n... (output truncated, use count mode or narrow search for complete results)"
+		}
 	}
 	return vstr(result), nil
 }
@@ -117,7 +130,7 @@ func searchSingleFile(fpath, pattern, outputMode string, caseInsensitive bool, h
 		searchPattern = strings.ToLower(pattern)
 	}
 
-	matches, count := scanFile(fpath, searchPattern, outputMode, caseInsensitive, headLimit)
+	matches, count := scanFile(fpath, searchPattern, outputMode, caseInsensitive, headLimit, maxOutputBytes)
 
 	var result string
 	switch outputMode {
@@ -125,13 +138,17 @@ func searchSingleFile(fpath, pattern, outputMode string, caseInsensitive bool, h
 		result = fmt.Sprintf("%d", count)
 	default:
 		result = strings.Join(matches, "\n")
+		if len(matches) >= headLimit || len(result) >= maxOutputBytes {
+			result += "\n... (output truncated, use count mode or narrow search for complete results)"
+		}
 	}
 	return vstr(result), nil
 }
 
 // scanFile reads a file line-by-line using bufio.Scanner and searches for the pattern.
 // Returns matching lines (for content/files_with_matches modes) and total match count.
-func scanFile(fpath, searchPattern, outputMode string, caseInsensitive bool, remaining int) ([]string, int) {
+// Truncates individual lines longer than maxLineLen to prevent single-line blowups.
+func scanFile(fpath, searchPattern, outputMode string, caseInsensitive bool, remaining, maxOutput int) ([]string, int) {
 	f, err := os.Open(fpath)
 	if err != nil {
 		return nil, 0
@@ -160,9 +177,15 @@ func scanFile(fpath, searchPattern, outputMode string, caseInsensitive bool, rem
 
 			switch outputMode {
 			case "content":
-				if remaining > 0 {
-					matches = append(matches, fmt.Sprintf("%s\t%d\t%s", fpath, lineNum, line))
+				if remaining > 0 && maxOutput > 0 {
+					displayLine := line
+					if len(displayLine) > maxLineLen {
+						displayLine = displayLine[:maxLineLen] + "..."
+					}
+					entry := fmt.Sprintf("%s\t%d\t%s", fpath, lineNum, displayLine)
+					matches = append(matches, entry)
 					remaining--
+					maxOutput -= len(entry)
 				}
 			case "files_with_matches":
 				if !fileAdded {
