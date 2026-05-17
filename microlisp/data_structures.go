@@ -1101,6 +1101,28 @@ func builtinRowMajorAref(args []*Value) (*Value, error) {
 	return arr.array.elements[i], nil
 }
 
+func builtinRowMajorArefSetf(args []*Value) (*Value, error) {
+	if len(args) < 3 {
+		return nil, fmt.Errorf("row-major-aref-setf: need newval, array, and index")
+	}
+	newVal := args[0]
+	arr := args[1]
+	idx := args[2]
+	if arr.typ != VArray || arr.array == nil {
+		return nil, fmt.Errorf("row-major-aref-setf: second argument must be an array")
+	}
+	n, err := safeToNum(idx, "row-major-aref-setf")
+	if err != nil {
+		return nil, err
+	}
+	i := int(n)
+	if i < 0 || i >= len(arr.array.elements) {
+		return nil, fmt.Errorf("row-major-aref-setf: index %d out of bounds", i)
+	}
+	arr.array.elements[i] = primaryValue(newVal)
+	return newVal, nil
+}
+
 var processStartTime = time.Now()
 
 // -------- Bit array operations --------

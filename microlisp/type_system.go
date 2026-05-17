@@ -394,7 +394,8 @@ func builtinNumberP(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("numberp: need 1 argument")
 	}
-	return vbool(args[0].typ == VNum), nil
+	v := primaryValue(args[0])
+	return vbool(v.typ == VNum || v.typ == VBigInt || v.typ == VRat || v.typ == VComplex), nil
 }
 
 func builtinCharP(args []*Value) (*Value, error) {

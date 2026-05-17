@@ -1023,6 +1023,28 @@ func builtinFloat(args []*Value) (*Value, error) {
 	return vfloat(n), nil
 }
 
+func builtinFloatSign(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("float-sign: need a float")
+	}
+	f1 := toNum(args[0])
+	sign := 1.0
+	if f1 < 0 {
+		sign = -1.0
+	} else if f1 == 0 {
+		// CL spec: (float-sign 0.0) => 1.0, (float-sign -0.0) => -1.0
+		// Check for negative zero
+		if math.Signbit(f1) {
+			sign = -1.0
+		}
+	}
+	if len(args) >= 2 {
+		f2 := toNum(args[1])
+		return vfloat(sign * math.Abs(f2)), nil
+	}
+	return vfloat(sign), nil
+}
+
 func builtinRational(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("rational: need a number")

@@ -786,6 +786,10 @@ func builtinGet(args []*Value) (*Value, error) {
 	if sym.typ != VSym {
 		return nil, fmt.Errorf("get: expected a symbol")
 	}
+	defaultVal := vnil()
+	if len(args) >= 3 {
+		defaultVal = args[2]
+	}
 	// Walk plist: (indicator1 value1 indicator2 value2 ...)
 	plist := sym.plist
 	seen := make(map[*Value]bool)
@@ -799,7 +803,7 @@ func builtinGet(args []*Value) (*Value, error) {
 		}
 		plist = plist.cdr.cdr
 	}
-	return vnil(), nil
+	return defaultVal, nil
 }
 
 func builtinPutprop(args []*Value) (*Value, error) {

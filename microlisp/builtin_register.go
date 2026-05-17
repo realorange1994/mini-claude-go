@@ -444,6 +444,7 @@ var builtins = []builtinDef{
 	{"vector-push-extend", builtinVectorPushExtend},
 	// Row-major aref
 	{"row-major-aref", builtinRowMajorAref},
+	{"row-major-aref-setf", builtinRowMajorArefSetf},
 	{"bit", builtinBitAref},
 	{"sbit", builtinSbitAref},
 	// Random state
@@ -721,6 +722,7 @@ var builtins = []builtinDef{
 	{"realp", builtinRealp},
 	{"complexp", builtinComplexp},
 	{"float", builtinFloat},
+	{"float-sign", builtinFloatSign},
 	{"rational", builtinRational},
 	{"numberp", builtinNumberP},
 	{"numerator", builtinNumerator},
