@@ -299,7 +299,7 @@ func (t *LispToolsTool) doSearch(ctx context.Context, params map[string]any) Too
 	if v, ok := paramInt(params["head_limit"]); ok {
 		headLimit = v
 	}
-	globFilter := "nil"
+	globFilter := lispStr("")
 	if v, ok := params["glob"].(string); ok && v != "" {
 		globFilter = lispStr(v)
 	}
@@ -691,60 +691,16 @@ const lispToolsLib = `
     (condition (c) (format nil "Error: ~A" c))))
 
 ;; Text search (substring matching, no regex)
+;; Delegates to go-search for efficient native file walking and line scanning.
+;; Lisp line-by-line scanning with substring allocations is O(N^2) in memory churn.
 (define (lisp-search pattern path output-mode case-insensitive head-limit glob-filter)
   (handler-case
-    (let ((search-pattern (if case-insensitive (string-downcase pattern) pattern)))
-      (let ((safe (safe-path? path)))
-        (let ((files (if (and glob-filter (not (equal glob-filter "nil")))
-                         (directory (string-append safe "/" glob-filter))
-                         (directory (string-append safe "/*")))))
-          (lisp-search-files files search-pattern output-mode case-insensitive head-limit '() 0))))
+    (let ((safe (safe-path? path)))
+      (let ((glob (if (and (stringp glob-filter) (> (string-length glob-filter) 0))
+                      glob-filter
+                      "")))
+        (go-search pattern safe output-mode case-insensitive head-limit glob)))
     (condition (c) (format nil "Error: ~A" c))))
-
-(define (lisp-search-files files search-pattern output-mode case-insensitive head-limit results count)
-  (if (or (null files) (>= (length results) head-limit))
-      (cond
-        ((equal output-mode "count") (format nil "~A" count))
-        ((equal output-mode "files_with_matches")
-         (string-join (mapcar (lambda (r) (first (split-string r "|"))) results) "\n"))
-        (t (string-join results "\n")))
-      (let ((fname (namestring (car files))))
-        (let ((content (ignore-errors (read-file-fully fname))))
-          (if (not content)
-              (lisp-search-files (cdr files) search-pattern output-mode case-insensitive head-limit results count)
-              (let ((search-content (if case-insensitive (string-downcase content) content)))
-                (let ((result (lisp-search-lines fname content search-content search-pattern output-mode 1 '() 0)))
-                  (lisp-search-files (cdr files) search-pattern output-mode case-insensitive head-limit
-                                     (if (> (third result) 0) (append results (first result)) results)
-                                     (+ count (third result))))))))))
-
-;; Returns ((matches) (file-count) line-count)
-(define (lisp-search-lines fname orig-content search-content search-pattern output-mode lnum matches file-count)
-  (if (equal search-content "")
-      (list matches '() file-count)
-      (let ((pos (string-find "\n" search-content)))
-        (if (not pos)
-            ;; Last line
-            (if (string-find search-pattern search-content)
-                (list (if (equal output-mode "content")
-                          (cons (format nil "~A|~A|~A" fname lnum orig-content) matches)
-                          (if (null matches) (list (format nil "~A" fname)) matches))
-                      '() (+ file-count 1))
-                (list matches '() file-count))
-            ;; Has more lines
-            (let ((line (substring search-content 0 pos)))
-              (let ((orig-pos (string-find "\n" orig-content)))
-                (let ((orig-line (if (not orig-pos) orig-content (substring orig-content 0 orig-pos))))
-                  (let ((rest (substring search-content (+ pos 1))))
-                    (let ((orig-rest (if (not orig-pos) "" (substring orig-content (+ orig-pos 1)))))
-                      (if (string-find search-pattern line)
-                          (lisp-search-lines fname orig-rest rest search-pattern output-mode (+ lnum 1)
-                                             (if (equal output-mode "content")
-                                                 (cons (format nil "~A|~A|~A" fname lnum orig-line) matches)
-                                                 (if (null matches) (list (format nil "~A" fname)) matches))
-                                             (+ file-count 1))
-                          (lisp-search-lines fname orig-rest rest search-pattern output-mode (+ lnum 1)
-                                             matches file-count)))))))))))
 
 ;; Glob file matching
 (define (lisp-glob pattern path head-limit)
