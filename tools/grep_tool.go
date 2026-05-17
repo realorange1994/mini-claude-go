@@ -239,8 +239,20 @@ func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) To
 		}
 	}
 
+	// Parse excludes
+	var excludes []string
+	if exclArr, ok := params["excludes"]; ok {
+		if arr, ok := exclArr.([]any); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					excludes = append(excludes, s)
+				}
+			}
+		}
+	}
+
 	if _, err := exec.LookPath("rg"); err == nil {
-		return rgSearch(ctx, pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, showLineNumbers, multiline, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesizeStr)
+		return rgSearch(ctx, pattern, searchPath, include, typeFilter, caseInsensitive, fixedStrings, outputMode, showLineNumbers, multiline, ctxBefore, ctxAfter, headLimit, offset, maxDepth, maxFilesizeStr, excludes)
 	}
 
 	// Pure Go fallback using rgrep engine
@@ -312,13 +324,18 @@ func splitGlobPatterns(glob string) []string {
 }
 
 
-func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, showLineNumbers, multiline bool, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string) ToolResult {
+func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, showLineNumbers, multiline bool, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string, excludes []string) ToolResult {
 	args := []string{"--hidden", "--max-columns", "500"}
 
 	// Exclude VCS directories (matching official Claude Code behavior)
 	vcsDirs := []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
 	for _, dir := range vcsDirs {
 		args = append(args, "--glob", "!"+dir)
+	}
+
+	// Add user exclude patterns
+	for _, excl := range excludes {
+		args = append(args, "--glob", "!"+excl)
 	}
 
 	// --no-heading is not used (we use -n for line numbers)

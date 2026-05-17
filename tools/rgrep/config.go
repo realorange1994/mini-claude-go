@@ -29,6 +29,7 @@ type SearchConfig struct {
 	MaxDepth       int        // max directory depth (0 = unlimited)
 	MaxFilesize    int64      // max file size in bytes (0 = unlimited)
 	Ctx            context.Context
+	Excludes       []string   // exclude patterns (glob, supports **)
 }
 
 // Result is a single match from the search.

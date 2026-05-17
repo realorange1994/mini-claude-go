@@ -84,6 +84,7 @@ func Search(cfg SearchConfig) SearchResult {
 			MaxDepth:         cfg.MaxDepth,
 			Globs:            globs,
 			TypeFilter:       cfg.TypeFilter,
+			Excludes:         cfg.Excludes,
 			RespectGitIgnore: true,
 			Ctx:              cfg.Ctx,
 			MaxFilesize:      cfg.MaxFilesize,

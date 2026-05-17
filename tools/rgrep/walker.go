@@ -15,6 +15,7 @@ var defaultIgnoredDirs = map[string]bool{
 	".bzr":          true,
 	".jj":           true,
 	".sl":           true,
+	".claude":       true,
 	"node_modules":  true,
 	"__pycache__":   true,
 	".venv":         true,
@@ -99,9 +100,9 @@ func WalkDir(opts WalkOptions) ([]WalkEntry, error) {
 				return filepath.SkipDir
 			}
 
-			// Skip excluded directories
+			// Skip excluded directories (supports ** glob patterns)
 			for _, excl := range opts.Excludes {
-				if matched, _ := filepath.Match(excl, d.Name()); matched {
+				if matchExcludePattern(excl, rel, true) {
 					return filepath.SkipDir
 				}
 			}
@@ -192,6 +193,32 @@ func WalkDir(opts WalkOptions) ([]WalkEntry, error) {
 	}
 
 	return entries, nil
+}
+
+// matchExcludePattern matches a path against an exclude pattern.
+// Supports gitignore-style patterns including ** for recursive matching.
+// relPath is the path relative to the search root (using forward slashes).
+// isDir indicates whether the path is a directory.
+func matchExcludePattern(pattern, relPath string, isDir bool) bool {
+	relPath = filepath.ToSlash(relPath)
+	pattern = filepath.ToSlash(pattern)
+
+	// Strip leading ./ from both
+	relPath = strings.TrimPrefix(relPath, "./")
+	pattern = strings.TrimPrefix(pattern, "./")
+
+	// Direct name match (e.g., ".claude" matches any dir named .claude)
+	if !strings.Contains(pattern, "/") && !strings.Contains(pattern, "**") {
+		// Pattern like ".claude" — match against the basename
+		base := filepath.Base(relPath)
+		if m, _ := filepath.Match(pattern, base); m {
+			return true
+		}
+		return false
+	}
+
+	// Pattern with ** or / — use gitignore-style matching
+	return matchGlob(pattern, relPath)
 }
 
 // isBinaryExt returns true for file extensions that are typically binary.
