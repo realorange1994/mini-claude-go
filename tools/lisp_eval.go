@@ -106,6 +106,8 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		default:
 			limits = microlisp.DefaultLimits()
 		}
+		cancelChan := microlisp.NewCancelChannel()
+		limits.CancelChan = cancelChan
 		ch := make(chan evalResult, 1)
 		go func() {
 			output, err := microlisp.SafeLoadFileWithLimits(file, limits)
@@ -113,6 +115,7 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		}()
 		select {
 		case <-ctx.Done():
+			close(cancelChan)
 			return ToolResult{Output: "Error: lisp_eval timed out loading file", IsError: true}
 		case r := <-ch:
 			if r.err != nil {
@@ -202,9 +205,19 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 			limits = microlisp.DefaultLimits()
 		}
 
+		// Wire context cancellation into the Lisp evaluator's CancelChan.
+		// When ctx.Done() fires, closing cancelChan triggers stepCheck()
+		// to abort the evaluation (checked every 1024 steps), releasing
+		// evalMu. Without this, the goroutine holding evalMu would
+		// continue running indefinitely after context cancellation,
+		// causing permanent deadlock on any subsequent lisp_eval call.
+		cancelChan := microlisp.NewCancelChannel()
+		limits.CancelChan = cancelChan
+
 		// Run eval in a goroutine so we can respect context cancellation.
-		// The microlisp interpreter holds evalMu during execution, so
-		// we can't cancel mid-evaluation, but we can abort waiting for it.
+		// The microlisp interpreter holds evalMu during execution.
+		// CancelChan allows stepCheck() to abort mid-evaluation when
+		// the context is cancelled, ensuring evalMu is released promptly.
 		ch := make(chan evalResult, 1)
 		go func() {
 			result, err := microlisp.SafeEvalWithLimits(expr, limits)
@@ -212,6 +225,7 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		}()
 		select {
 		case <-ctx.Done():
+			close(cancelChan)
 			return ToolResult{Output: fmt.Sprintf("Error: lisp_eval timed out evaluating expression"), IsError: true}
 		case r := <-ch:
 			if r.err != nil {
