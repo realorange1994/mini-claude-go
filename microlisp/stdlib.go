@@ -416,15 +416,8 @@ var initLib = `
   (if (null? x) y
     (revappend (cdr x) (cons (car x) y))))
 
-(define (ldiff list sublist)
-  (if (eq? list sublist) '()
-    (if (null? list) '()
-      (cons (car list) (ldiff (cdr list) sublist)))))
-
-(define (tailp sublist list)
-  (cond ((eq? sublist list) #t)
-        ((null? list) #f)
-        (else (tailp sublist (cdr list)))))
+;; ldiff and tailp are handled by Go builtins (using structural comparison
+;; since the reader always allocates fresh cons cells for quoted lists)
 
 ;; -------- type-of-matches helper --------
 (define (type-of-matches obj type-spec)

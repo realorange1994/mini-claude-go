@@ -453,6 +453,8 @@ func builtinLdiff(args []*Value) (*Value, error) {
 	if list.typ != VPair && !isNil(list) {
 		return vnil(), nil
 	}
+	// Convert obj to element list for structural comparison
+	objElems := seqToList(obj)
 	var result []*Value
 	seen := make(map[*Value]bool)
 	for !isNil(list) && list.typ == VPair {
@@ -460,8 +462,29 @@ func builtinLdiff(args []*Value) (*Value, error) {
 			break
 		}
 		seen[list] = true
-		if list == obj {
-			break
+		// Collect elements from current tail position
+		var tailElems []*Value
+		cur := list
+		tailSeen := make(map[*Value]bool)
+		for !isNil(cur) && cur.typ == VPair {
+			if tailSeen[cur] {
+				break
+			}
+			tailSeen[cur] = true
+			tailElems = append(tailElems, cur.car)
+			cur = cur.cdr
+		}
+		if len(tailElems) == len(objElems) {
+			match := true
+			for i := range objElems {
+				if !eqVal(objElems[i], tailElems[i]) {
+					match = false
+					break
+				}
+			}
+			if match {
+				break
+			}
 		}
 		result = append(result, list.car)
 		list = list.cdr
@@ -475,18 +498,44 @@ func builtinTailp(args []*Value) (*Value, error) {
 	}
 	sublist := args[0]
 	list := args[1]
+	// CL spec: tailp uses eq (pointer identity) to check if sublist is a tail.
+	// Since our reader always allocates fresh cons cells for quoted lists,
+	// we check if sublist's elements match a tail's elements structurally.
+	subElems := seqToList(sublist)
 	seen := make(map[*Value]bool)
 	for !isNil(list) && list.typ == VPair {
 		if seen[list] {
 			break
 		}
 		seen[list] = true
-		if list == sublist {
-			return vbool(true), nil
+		// Collect elements from current tail position
+		var tailElems []*Value
+		cur := list
+		tailSeen := make(map[*Value]bool)
+		for !isNil(cur) && cur.typ == VPair {
+			if tailSeen[cur] {
+				break
+			}
+			tailSeen[cur] = true
+			tailElems = append(tailElems, cur.car)
+			cur = cur.cdr
+		}
+		if len(tailElems) == len(subElems) {
+			match := true
+			for i := range subElems {
+				if !eqVal(subElems[i], tailElems[i]) {
+					match = false
+					break
+				}
+			}
+			if match {
+				return vbool(true), nil
+			}
 		}
 		list = list.cdr
 	}
-	return vbool(list == sublist), nil
+	// Also check if both are nil (nil is a tail of every proper list)
+	return vbool(isNil(list) && isNil(sublist)), nil
 }
 
 func builtinNthValue(args []*Value) (*Value, error) {

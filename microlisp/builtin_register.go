@@ -144,6 +144,7 @@ var builtins = []builtinDef{
 	{"procedure?", builtinProcP},
 	{"characterp", builtinCharP},
 	{"char", builtinChar},
+	{"schar", builtinChar},
 	{"char-setf", builtinCharSetf},
 	{"char=", builtinCharEq},
 	{"char<", builtinCharLt},

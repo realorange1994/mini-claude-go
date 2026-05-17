@@ -36,6 +36,9 @@ func builtinCoerce(args []*Value) (*Value, error) {
 		if obj.typ == VSym {
 			return vstr(obj.str), nil
 		}
+		if isNumeric(obj) {
+			return vstr(ToString(obj)), nil
+		}
 		if obj.typ == VPair || isNil(obj) {
 			// list of characters/numbers/symbols/strings -> string
 			var sb strings.Builder
@@ -315,5 +318,5 @@ func builtinCharacter(args []*Value) (*Value, error) {
 	if designator.typ == VSym && len(designator.str) == 1 {
 		return vchar(rune(designator.str[0])), nil
 	}
-	return nil, fmt.Errorf("character: %v is not a character designator", designator)
+	return nil, fmt.Errorf("character: %s is not a character designator", ToString(designator))
 }

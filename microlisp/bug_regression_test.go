@@ -1078,3 +1078,127 @@ func TestBug_FormatColonD(t *testing.T) {
 		t.Fatalf("expected \"1,234,567\", got %s", r)
 	}
 }
+
+// --- Bug Batch: tailp, ldiff, reduce :initial-value, character error msg, schar, coerce int->string ---
+
+func TestBug_TailpStructural(t *testing.T) {
+	// tailp did not recognize structural tail matches because the stdlib
+	// definition used eq? (pointer identity) which fails when the reader
+	// allocates fresh cons cells for quoted lists. Fix: removed stdlib
+	// definition; Go builtin uses structural element comparison.
+	r1, err := eval(`(tailp '(c d) '(a b c d))`)
+	if err != nil {
+		t.Fatalf("tailp unexpected error: %v", err)
+	}
+	if r1 != "#t" {
+		t.Fatalf("tailp '(c d) '(a b c d): expected #t, got %s", r1)
+	}
+	// Identical lists: the tail of the full list IS the sublist structurally
+	r2, err := eval(`(tailp '(a b c d) '(a b c d))`)
+	if err != nil {
+		t.Fatalf("tailp identical: unexpected error: %v", err)
+	}
+	if r2 != "#t" {
+		t.Fatalf("tailp identical: expected #t, got %s", r2)
+	}
+	// Empty list is a tail of every list
+	r3, _ := eval(`(tailp '() '(a b c d))`)
+	if r3 != "#t" {
+		t.Fatalf("tailp nil: expected #t, got %s", r3)
+	}
+	// Non-tail should return #f
+	r4, _ := eval(`(tailp '(x y) '(a b c d))`)
+	if r4 != "#f" {
+		t.Fatalf("tailp non-tail: expected #f, got %s", r4)
+	}
+}
+
+func TestBug_LdiffStructural(t *testing.T) {
+	// ldiff did not detect structural tail match for same reason as tailp.
+	// Fix: removed stdlib definition; Go builtin uses structural comparison.
+	r1, _ := eval(`(ldiff '(a b c d) '(c d))`)
+	// Since '(c d) is structurally the tail at position 2, ldiff returns (A B)
+	if !strings.Contains(r1, "A") || !strings.Contains(r1, "B") {
+		t.Fatalf("ldiff: expected (A B), got %s", r1)
+	}
+	// When obj matches entire list, ldiff returns nil
+	r2, _ := eval(`(ldiff '(a b c d) '(a b c d))`)
+	if r2 != "NIL" && r2 != "()" {
+		t.Fatalf("ldiff identical: expected NIL, got %s", r2)
+	}
+}
+
+func TestBug_ReduceEmptyWithInitialValue(t *testing.T) {
+	// reduce on empty sequence with :initial-value returned error instead of
+	// the initial value. The boolFromKey helper checked lowercase :initial-value
+	// but Lisp reader produces uppercase :INITIAL-VALUE.
+	// Fix: boolFromKey now uses strings.EqualFold for case-insensitive match.
+	r1, err := eval(`(reduce #'+ '() :initial-value 10)`)
+	if err != nil {
+		t.Fatalf("reduce empty with initial-value: unexpected error: %v", err)
+	}
+	if r1 != "10" {
+		t.Fatalf("reduce empty :initial-value 10: expected 10, got %s", r1)
+	}
+	// Empty sequence without :initial-value should signal error
+	_, err2 := eval(`(reduce #'+ '())`)
+	if err2 == nil {
+		t.Fatal("reduce empty without initial-value: expected error, got nil")
+	}
+	// Non-empty with initial-value
+	r3, _ := eval(`(reduce #'+ '(1 2 3) :initial-value 10)`)
+	if r3 != "16" {
+		t.Fatalf("reduce with initial-value: expected 16, got %s", r3)
+	}
+}
+
+func TestBug_CharacterErrorMessage(t *testing.T) {
+	// character function error message exposed Go internal struct
+	// (showing "&{4 0 0 0 ...}") instead of readable value.
+	// Fix: use ToString(designator) instead of %v formatting.
+	_, err := eval(`(character "ABC")`)
+	if err == nil {
+		t.Fatal("character with multi-char string: expected error, got nil")
+	}
+	// Error message should be readable, not a Go struct dump
+	if strings.Contains(err.Error(), "&{") {
+		t.Fatalf("character error exposes Go struct: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ABC") {
+		t.Fatalf("character error should mention input, got: %v", err)
+	}
+}
+
+func TestBug_ScharFunction(t *testing.T) {
+	// schar function was not implemented — returned "undefined: SCHAR".
+	// Fix: registered schar as alias to char in builtin_register.go.
+	r1, _ := eval(`(schar "hello" 1)`)
+	if r1 != "#\\e" {
+		t.Fatalf("schar \"hello\" 1: expected #\\e, got %s", r1)
+	}
+	// Compare with char
+	r2, _ := eval(`(char "hello" 1)`)
+	if r2 != "#\\e" {
+		t.Fatalf("char \"hello\" 1: expected #\\e, got %s", r2)
+	}
+	if r1 != r2 {
+		t.Fatalf("schar and char should return same result: %s vs %s", r1, r2)
+	}
+}
+
+func TestBug_CoerceIntegerToString(t *testing.T) {
+	// coerce integer to string returned "" (empty string).
+	// Fix: added isNumeric(obj) case in builtinCoerce for string type.
+	r1, _ := eval(`(coerce 123 'string)`)
+	if r1 != `"123"` {
+		t.Fatalf("coerce 123 'string: expected \"123\", got %s", r1)
+	}
+	r2, _ := eval(`(coerce 5 'string)`)
+	if r2 != `"5"` {
+		t.Fatalf("coerce 5 'string: expected \"5\", got %s", r2)
+	}
+	r3, _ := eval(`(coerce 0 'string)`)
+	if r3 != `"0"` {
+		t.Fatalf("coerce 0 'string: expected \"0\", got %s", r3)
+	}
+}

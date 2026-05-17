@@ -335,10 +335,14 @@ func builtinSeqReduce(args []*Value) (*Value, error) {
 	if start < 0 {
 		start = 0
 	}
+	hasInitialValue := boolFromKey(":initial-value", args, 2)
 	if start >= end || len(elements) == 0 {
+		// CL spec: reduce on empty sequence without :initial-value is an error
+		if !hasInitialValue {
+			return nil, fmt.Errorf("reduce: cannot reduce empty sequence without :initial-value")
+		}
 		return initialVal, nil
 	}
-	hasInitialValue := boolFromKey(":initial-value", args, 2)
 
 	if !fromEnd {
 		// Left-to-right reduce (default)
@@ -394,7 +398,7 @@ func builtinSeqReduce(args []*Value) (*Value, error) {
 
 func boolFromKey(key string, args []*Value, startIdx int) bool {
 	for i := startIdx; i < len(args); i++ {
-		if args[i].typ == VSym && args[i].str == key {
+		if args[i].typ == VSym && strings.EqualFold(args[i].str, key) {
 			return true
 		}
 	}
