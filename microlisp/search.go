@@ -10,8 +10,8 @@ import (
 
 // Output size limits to prevent context explosion
 const (
-	maxOutputBytes  = 64 * 1024 // 64KB total output cap
-	maxLineLen      = 512       // max chars per line in content mode
+	maxOutputBytes  = 8 * 1024  // 8KB total output cap
+	maxLineLen      = 300       // max chars per line in content mode
 )
 
 // builtinGoSearch performs efficient file+content search natively in Go,
@@ -117,7 +117,7 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 	default:
 		result = strings.Join(matches, "\n")
 		if truncated {
-			result += "\n... (output truncated, use count mode or narrow search for complete results)"
+			result += "\n... (output truncated, try a more specific pattern, use glob filter, or use count mode for complete results)"
 		}
 	}
 	return vstr(result), nil
@@ -139,7 +139,7 @@ func searchSingleFile(fpath, pattern, outputMode string, caseInsensitive bool, h
 	default:
 		result = strings.Join(matches, "\n")
 		if len(matches) >= headLimit || len(result) >= maxOutputBytes {
-			result += "\n... (output truncated, use count mode or narrow search for complete results)"
+			result += "\n... (output truncated, try a more specific pattern, use glob filter, or use count mode for complete results)"
 		}
 	}
 	return vstr(result), nil
