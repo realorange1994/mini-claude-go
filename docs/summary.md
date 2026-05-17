@@ -27,7 +27,7 @@ This document summarizes the gap analysis between Go **miniClaudeCode** and the 
 | 3 | **TUI** (Ink/React terminal interface) | 缺失 | Headless CLI only, no interactive UI |
 | 4 | **Beta header system** (15+ constants) | 缺失 | Cannot access beta API features |
 | 5 | **Model management** (aliases, context windows, providers) | 缺失 | Single hardcoded provider/model |
-| 6 | **Tool pairing validation** (`ensureToolResultPairing`) | 缺失 | Orphaned tool_use/tool_result causes API 400 |
+| 6 | **Tool pairing validation** (`ensureToolResultPairing`) | 已修复 | Tool result delivery fixed; shared tool pointer overwrite fixed |
 | 7 | **Role alternation enforcement** | 缺失 | Multiple consecutive same-role messages rejected |
 | 8 | **GrowthBook feature flags** | 缺失 | No remote feature gating |
 | 9 | **Cost tracking** | 缺失 | No USD cost calculation or display |
@@ -48,6 +48,10 @@ This document summarizes the gap analysis between Go **miniClaudeCode** and the 
 | **Windows path handling** | `PosixToWindowsPath()` matches upstream's approach: MSYS2 mounts (/tmp/, /home/), Cygdrive, UNC |
 | **Pipe input mode** | `io.ReadAll()` for non-terminal stdin fixes multi-line prompt splitting |
 | **Git Bash detection** | `findGitBashForWindows()` with memoize pattern, auto-selected as default Windows shell |
+| **Source index** | Full source code lookup for all ~1000 functions (builtins, helpers, special forms, stdlib) with pagination. Upstream has no equivalent |
+| **rgrep engine** | Native ripgrep wrapper with .gitignore support, replaces custom go-search |
+| **Sub-agent isolation** | Independent ExecTool/MCPToolCaller instances per child agent, preventing shared-pointer overwrite bugs |
+| **Killed agent notifications** | Partial result extraction + "killed" status notification, matching upstream's AgentToolResult format |
 
 ## Go Simplifications (简化)
 
@@ -68,6 +72,19 @@ This document summarizes the gap analysis between Go **miniClaudeCode** and the 
 | 1 | **Path inconsistency** — file tools and exec resolved different physical files for `/tmp/` on Windows | `PosixToWindowsPath()` maps MSYS2 mounts (/tmp/, /home/, /cygdrive/) to Windows native paths. `expandPath()` uses the converter on Windows for all file tools |
 | 2 | **Shell detection** — hardcoded static text in system prompt | `GetShellInfo()` dynamically detects Git Bash/PowerShell on Windows. `GetPathFormatInfo()` returns path format guidance injected into system prompt |
 | 3 | **Pipe input split** — multi-line piped input split by `ReadString('\n')` causing empty first prompt | `io.ReadAll(stdinReader)` for non-terminal stdin reads entire input as single prompt |
+
+## Recently Resolved (R24-R25)
+
+| # | Gap | Resolution |
+|---|-----|------------|
+| 4 | **Exec background tasks invisible** — parent agent's `task_output`/`task_stop` return "task not found" for its own `exec run_in_background=true` tasks | Root cause: `buildSubAgentRegistry` copies tool pointers, `child.registerBashBgTool()` overwrites shared `ExecTool.BackgroundTaskCallback`. Fix: create new `ExecTool`/`MCPToolCaller` instances for child agents instead of modifying shared instances |
+| 5 | **Killed sub-agent empty notification** — killed agents send "completed" notification with 0 tokens and empty result, confusing parent LLM | Detect `TaskKilled` status in child goroutine completion path, send "killed" notification with partial result. `InjectNotifications` uses different prefix when killed tasks exist |
+| 6 | **Source index missing helpers** — ~255 helper functions and special form code invisible to source/source-list queries | `scanHelperFunctions()` indexes all non-builtin Go funcs as `Kind: "helper"`. `scanSpecialForms()` extracts actual Go source code for each special form from `eval_core.go` |
+| 7 | **Source query token explosion** — `SourceList("")` returns all ~1000+ functions at once, consuming entire context | Add `offset`/`limit` pagination to `GetSource()` and `SourceList()`, default limit 50 entries |
+| 8 | **Search output unlimited** — grep/glob/go-search can fill entire context window | Add `truncateOutput` utility with configurable max chars, circuit breaker for output size |
+| 9 | **Unicode string bugs** — `string-length`/`string-find` use byte offsets instead of rune offsets for multi-byte chars | Use `utf8.RuneCountInString()` for length, `[]rune` indexing for positions |
+| 10 | **Code organization** — 90+ functions scattered across files without single-responsibility principle | 6-phase reorganization: equality.go, type_system.go, concurrency.go, data_structures.go, list_ops.go cleanup; sequences.go stub deleted |
+| 11 | **Custom go-search replaced** — maintenance burden and feature gaps | Replace with rgrep engine (native ripgrep wrapper with .gitignore support) |
 
 ## Refactoring Priorities
 
