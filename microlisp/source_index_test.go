@@ -68,14 +68,17 @@ func TestGetSourceCaseInsensitive(t *testing.T) {
 
 func TestSourceListReturnsResults(t *testing.T) {
 	out := SourceList("", 0, 50)
-	if !strings.Contains(out, "functions") {
-		t.Fatalf("expected function count in source-list output, got: %s", out)
+	if !strings.Contains(out, "source index") {
+		t.Fatalf("expected source index header in output, got: %s", out)
 	}
 	if !strings.Contains(out, "Builtins:") {
 		t.Fatalf("expected builtin count, got: %s", out)
 	}
 	if !strings.Contains(out, "Stdlib:") {
 		t.Fatalf("expected stdlib count, got: %s", out)
+	}
+	if !strings.Contains(out, "Helpers:") {
+		t.Fatalf("expected helper count, got: %s", out)
 	}
 }
 
@@ -104,7 +107,7 @@ func TestSourceListPagination(t *testing.T) {
 func TestSourceListLimitZero(t *testing.T) {
 	out := SourceList("", 0, 0)
 	// limit=0 should use default of 50
-	if !strings.Contains(out, "functions") {
+	if !strings.Contains(out, "source index") {
 		t.Fatalf("expected results with limit=0, got: %s", out)
 	}
 }
@@ -176,5 +179,68 @@ func TestExtractStdlibString(t *testing.T) {
 	}
 	if !strings.Contains(stdlibContent, "define") {
 		t.Fatal("stdlibContent should contain 'define' forms")
+	}
+}
+
+func TestSpecialFormHasSourceCode(t *testing.T) {
+	// Special forms should now have Start/End line numbers and show actual code
+	out := GetSource("if")
+	if !strings.Contains(out, "Lines:") {
+		t.Fatalf("expected line range for special form 'if', got: %s", out)
+	}
+	if !strings.Contains(out, "eval_core.go") {
+		t.Fatalf("expected eval_core.go for 'if', got: %s", out)
+	}
+	// Should show actual Go code (contains case label or implementation)
+	if !strings.Contains(out, "IF") && !strings.Contains(out, "func") && !strings.Contains(out, "case") {
+		t.Fatalf("expected source code for 'if', got: %s", out)
+	}
+}
+
+func TestHelperFunctionIndexed(t *testing.T) {
+	// Helper functions (non-builtin Go functions) should be indexed
+	// "eqval" is a well-known helper used in equality.go
+	entry := sourceIndex["eqval"]
+	if entry == nil {
+		t.Fatal("expected 'eqval' to be indexed as helper")
+	}
+	if entry.Kind != "helper" {
+		t.Fatalf("expected 'eqval' kind to be 'helper', got: %s", entry.Kind)
+	}
+	if entry.Start == 0 {
+		t.Fatal("expected 'eqval' to have Start line number")
+	}
+}
+
+func TestGetSourceHelper(t *testing.T) {
+	out := GetSource("eqval")
+	if strings.Contains(out, "No source found") {
+		t.Fatalf("expected source for helper 'eqval', got: %s", out)
+	}
+	if !strings.Contains(out, "helper") {
+		t.Fatalf("expected 'eqval' to be helper, got: %s", out)
+	}
+	if !strings.Contains(out, "Go function:") {
+		t.Fatalf("expected Go function name for helper 'eqval', got: %s", out)
+	}
+}
+
+func TestSourceListIncludesHelpers(t *testing.T) {
+	out := SourceList("", 0, 50)
+	if !strings.Contains(out, "Helpers:") {
+		t.Fatalf("expected Helpers count in output, got: %s", out)
+	}
+}
+
+func TestHelperCountSignificant(t *testing.T) {
+	// There should be a significant number of helper functions
+	helperCount := 0
+	for _, entry := range sourceIndex {
+		if entry.Kind == "helper" {
+			helperCount++
+		}
+	}
+	if helperCount < 100 {
+		t.Fatalf("expected at least 100 helper functions, got: %d", helperCount)
 	}
 }

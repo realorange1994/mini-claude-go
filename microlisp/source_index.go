@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -48,6 +49,12 @@ func init() {
 	// then find source for each go-func in the Go source files.
 	builtinMap := loadBuiltinRegistry()
 	scanBuiltinFunctions(builtinMap)
+
+	// Scan special form case blocks in eval_core.go for line ranges
+	scanSpecialForms()
+
+	// Scan all non-builtin Go functions as helpers
+	scanHelperFunctions()
 }
 
 // loadBuiltinRegistry parses builtin_register.go to extract {lisp-name, go-func} pairs.
@@ -172,6 +179,155 @@ func findFuncEnd(scanner *bufio.Scanner, startLine int) int {
 	return lineNum
 }
 
+// scanSpecialForms scans eval_core.go for case "FORMNAME": blocks and records
+// line ranges for each special form in the index.
+func scanSpecialForms() {
+	dir := findMicrolispDir()
+	if dir == "" {
+		return
+	}
+
+	f, err := os.Open(filepath.Join(dir, "eval_core.go"))
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Read all lines first
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	// Match case "FORMNAME": or case "A", "B":
+	caseRe := regexp.MustCompile(`^\s+case\s+"([A-Z][A-Z0-9-]*)"(?:\s*,\s*"[A-Z][A-Z0-9-]*")*\s*:`)
+
+	for i, line := range lines {
+		if matches := caseRe.FindStringSubmatch(line); len(matches) > 1 {
+			formName := strings.ToLower(matches[1])
+			entry, ok := sourceIndex[formName]
+			if !ok {
+				continue // not a known special form
+			}
+			// Find the end of this case block
+			startLine := i + 1 // 1-based
+			endLine := findCaseBlockEnd(lines, i)
+			entry.Start = startLine
+			entry.End = endLine
+		}
+	}
+}
+
+// findCaseBlockEnd finds the line where a switch case block ends.
+// In Go, case blocks extend until the next case/default or the closing brace.
+func findCaseBlockEnd(lines []string, caseLine int) int {
+	// Track brace depth relative to the switch
+	switchDepth := 0
+	// Find the opening brace of the switch (should be on or after the switch line)
+	for i := caseLine; i >= 0; i-- {
+		for _, ch := range lines[i] {
+			if ch == '{' {
+				switchDepth++
+			} else if ch == '}' {
+				switchDepth--
+			}
+		}
+	}
+	// switchDepth now represents how many braces were opened before the caseLine
+	// The switch itself opened one brace, so inside the switch depth >= 1
+
+	for i := caseLine + 1; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Skip empty lines and comments
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+
+		// Count braces on this line before checking
+		for _, ch := range line {
+			if ch == '{' {
+				switchDepth++
+			} else if ch == '}' {
+				switchDepth--
+				if switchDepth == 0 {
+					// Closing brace of the switch statement
+					return i + 1 // 1-based
+				}
+			}
+		}
+
+		// Check if this line starts a new case or default at the switch level
+		// In Go, case labels inside a switch are at one indent level inside the switch
+		if strings.HasPrefix(trimmed, "case ") || strings.HasPrefix(trimmed, "default:") {
+			// This is a new case block — the previous one ended on the line before this
+			return i // 1-based (i is 0-based, so line i is 1-based i+1, but we want the line before)
+		}
+	}
+	return len(lines)
+}
+
+// scanHelperFunctions scans all microlisp/*.go files for non-builtin Go functions
+// and registers them as "helper" entries in the source index.
+func scanHelperFunctions() {
+	dir := findMicrolispDir()
+	if dir == "" {
+		return
+	}
+
+	goFiles, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		return
+	}
+
+	// Match any function: func <name>(...
+	// Skip test files and main.go
+	funcRe := regexp.MustCompile(`^func\s+([A-Za-z][A-Za-z0-9_]*)\s*\(`)
+
+	for _, fpath := range goFiles {
+		base := filepath.Base(fpath)
+		if strings.HasSuffix(base, "_test.go") || base == "main.go" {
+			continue
+		}
+
+		f, err := os.Open(fpath)
+		if err != nil {
+			continue
+		}
+
+		scanner := bufio.NewScanner(f)
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			line := strings.TrimSpace(scanner.Text())
+			if matches := funcRe.FindStringSubmatch(line); len(matches) > 1 {
+				goFunc := matches[1]
+				// Skip builtins (already indexed)
+				if strings.HasPrefix(goFunc, "builtin") {
+					continue
+				}
+				// Skip already-indexed names (stdlib, special forms)
+				lower := strings.ToLower(goFunc)
+				if _, exists := sourceIndex[lower]; exists {
+					continue
+				}
+				end := findFuncEnd(scanner, lineNum)
+				sourceIndex[lower] = &SourceEntry{
+					Kind:   "helper",
+					File:   base,
+					Start:  lineNum,
+					End:    end,
+					Doc:    fmt.Sprintf("Helper function: %s", goFunc),
+					GoFunc: goFunc,
+				}
+			}
+		}
+		f.Close()
+	}
+}
+
 // GetSource returns the source code for a named function or special form.
 // Returns empty string if not found.
 func GetSource(name string) string {
@@ -201,7 +357,7 @@ func GetSource(name string) string {
 	fmt.Fprintf(&b, "File: %s\n", entry.File)
 
 	switch entry.Kind {
-	case "builtin":
+	case "builtin", "helper":
 		if entry.GoFunc != "" {
 			fmt.Fprintf(&b, "Go function: %s\n", entry.GoFunc)
 		}
@@ -215,7 +371,12 @@ func GetSource(name string) string {
 
 	case "special":
 		fmt.Fprintf(&b, "\n%s", entry.Doc)
-		fmt.Fprintf(&b, "\nSpecial forms are handled directly by the evaluator (eval_core.go).")
+		if entry.Start > 0 {
+			fmt.Fprintf(&b, "\nLines: %d-%d\n", entry.Start, entry.End)
+			fmt.Fprintf(&b, "\n%s", readSourceSnippet(entry.File, entry.Start, entry.End))
+		} else {
+			fmt.Fprintf(&b, "\nSpecial forms are handled directly by the evaluator (eval_core.go).")
+		}
 	}
 
 	return b.String()
@@ -300,7 +461,7 @@ func SourceList(query string, offset, limit int) string {
 
 	// Collect and sort matching entries
 	var matched []string
-	builtins, stdlibCount, special := 0, 0, 0
+	builtins, stdlibCount, special, helpers := 0, 0, 0, 0
 	for name, entry := range sourceIndex {
 		if query == "" || strings.Contains(name, strings.ToLower(query)) {
 			matched = append(matched, name)
@@ -311,6 +472,8 @@ func SourceList(query string, offset, limit int) string {
 				stdlibCount++
 			case "special":
 				special++
+			case "helper":
+				helpers++
 			}
 		}
 	}
@@ -335,8 +498,8 @@ func SourceList(query string, offset, limit int) string {
 	page := matched[offset:end]
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "microlisp function index (%d total functions, %d match %q):\n", len(sourceIndex), totalMatched, query)
-	fmt.Fprintf(&b, "  Builtins: %d | Stdlib: %d | Special forms: %d\n", builtins, stdlibCount, special)
+	fmt.Fprintf(&b, "microlisp source index (%d total entries, %d match %q):\n", len(sourceIndex), totalMatched, query)
+	fmt.Fprintf(&b, "  Builtins: %d | Stdlib: %d | Special forms: %d | Helpers: %d\n", builtins, stdlibCount, special, helpers)
 	fmt.Fprintf(&b, "  Showing entries %d-%d of %d (use offset/limit to page)\n\n", offset+1, end, totalMatched)
 	fmt.Fprintf(&b, "Usage: (source \"name\") to view source of a specific function.\n\n")
 
@@ -354,7 +517,7 @@ func SourceList(query string, offset, limit int) string {
 
 // findMicrolispDir locates the microlisp source directory.
 func findMicrolispDir() string {
-	// Try: relative to cwd, then relative to executable
+	// 1. Try relative to cwd
 	candidates := []string{
 		"microlisp",
 		filepath.Join("..", "microlisp"),
@@ -368,6 +531,29 @@ func findMicrolispDir() string {
 			}
 		}
 	}
+
+	// 2. Try relative to executable
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		for _, rel := range []string{"..", filepath.Join("..", "..")} {
+			c := filepath.Join(exeDir, rel, "microlisp")
+			if info, err := os.Stat(c); err == nil && info.IsDir() {
+				if _, err := os.Stat(filepath.Join(c, "eval.go")); err == nil {
+					abs, _ := filepath.Abs(c)
+					return abs
+				}
+			}
+		}
+	}
+
+	// 3. Use runtime.Caller to find this source file's directory
+	if _, file, _, ok := runtime.Caller(0); ok {
+		dir := filepath.Dir(file)
+		if _, err := os.Stat(filepath.Join(dir, "eval.go")); err == nil {
+			return dir
+		}
+	}
+
 	return ""
 }
 
