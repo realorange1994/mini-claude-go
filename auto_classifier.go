@@ -36,9 +36,44 @@ type AutoModeClassifier struct {
 
 	// toolChoiceUnsupported tracks whether the upstream API rejected
 	// tool_choice=required/object (e.g. thinking mode on Coze proxy).
-	// Once detected for a model, we skip tool_choice on all future calls
+	// Once detected for a model, we skip tool_choice on future calls
 	// to avoid repeated 400 errors.
 	toolChoiceUnsupported bool
+
+	// toolChoiceDisabledCount counts calls made while tool_choice was
+	// disabled. Every toolChoiceRetryInterval calls we re-probe with
+	// tool_choice to support auto-upgrade if the upstream API changes.
+	toolChoiceDisabledCount int
+}
+
+// toolChoiceRetryInterval is how many classifier calls (with tool_choice
+// disabled) between each re-probe attempt.
+const toolChoiceRetryInterval = 8
+
+// shouldUseToolChoice returns whether the next API call should include
+// tool_choice=required. When disabled, it periodically re-probes every
+// toolChoiceRetryInterval calls to support auto-upgrade.
+func (c *AutoModeClassifier) shouldUseToolChoice() bool {
+	if !c.toolChoiceUnsupported {
+		return true
+	}
+	// Disabled — re-probe on every Nth call
+	if c.toolChoiceDisabledCount >= toolChoiceRetryInterval {
+		c.toolChoiceDisabledCount = 0
+		return true
+	}
+	c.toolChoiceDisabledCount++
+	return false
+}
+
+// onToolChoiceSuccess clears the unsupported flag if it was set, allowing
+// auto-upgrade when the upstream API starts supporting tool_choice again.
+func (c *AutoModeClassifier) onToolChoiceSuccess() {
+	if c.toolChoiceUnsupported {
+		c.toolChoiceUnsupported = false
+		c.toolChoiceDisabledCount = 0
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] tool_choice auto-upgrade: API now accepts it\n")
+	}
 }
 
 type cacheEntry struct {
@@ -775,39 +810,41 @@ func (c *AutoModeClassifier) callClassifier(
 
 // callStage1 makes the fast classification API call.
 func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc string) (ClassifierResult, error) {
-	resp, err := c.doStage1(ctx, userMsg)
+	useToolChoice := c.shouldUseToolChoice()
+	resp, err := c.doStage1(ctx, userMsg, useToolChoice)
 	if err != nil {
-		if c.isToolChoiceError(err) && !c.toolChoiceUnsupported {
+		if useToolChoice && c.isToolChoiceError(err) {
 			c.mu.Lock()
 			c.toolChoiceUnsupported = true
+			c.toolChoiceDisabledCount = 0
 			c.mu.Unlock()
-			fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1: tool_choice rejected by API, retrying without it\n")
-			resp, err = c.doStage1(ctx, userMsg)
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1: tool_choice rejected, retrying without it\n")
+			resp, err = c.doStage1(ctx, userMsg, false)
 		}
 	}
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 API error: %v\n", err)
-		// API error in stage 1: escalate to stage 2 rather than blocking
 		return ClassifierResult{Unavailable: true}, fmt.Errorf("API error: %v", err)
+	}
+
+	if useToolChoice {
+		c.onToolChoiceSuccess()
 	}
 
 	result, ok := parseClassifierResponse(resp.Content, actionDesc)
 	if !ok {
-		// Parse failure in stage 1: escalate to stage 2
 		return ClassifierResult{Unavailable: true}, fmt.Errorf("parse failure in stage 1")
 	}
 
 	if result.Allow {
-		// Fast path: allowed by stage 1 (caller logs the result)
 		return result, nil
 	}
 
-	// Stage 1 blocked — escalate to stage 2 for full reasoning
 	return result, nil
 }
 
-func (c *AutoModeClassifier) doStage1(ctx context.Context, userMsg string) (*anthropic.Message, error) {
+func (c *AutoModeClassifier) doStage1(ctx context.Context, userMsg string, useToolChoice bool) (*anthropic.Message, error) {
 	params := anthropic.MessageNewParams{
 		Model:     GetModelForAPI(c.model),
 		MaxTokens: stage1MaxTokens,
@@ -842,7 +879,7 @@ func (c *AutoModeClassifier) doStage1(ctx context.Context, userMsg string) (*ant
 			),
 		},
 	}
-	if !c.toolChoiceUnsupported {
+	if useToolChoice {
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{
 			OfTool: &anthropic.ToolChoiceToolParam{
 				Name: "classify_action",
@@ -856,20 +893,21 @@ func (c *AutoModeClassifier) doStage1(ctx context.Context, userMsg string) (*ant
 func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc string) ClassifierResult {
 	stage2Prompt := userMsg + "\n\n## Analysis required:\nProvide a detailed security analysis of this action. Consider: is the action clearly requested by the user? Could it have unintended consequences? Does it modify the system state or download external code? Explain your reasoning step by step, then provide your verdict."
 
-	resp, err := c.doStage2(ctx, stage2Prompt)
+	useToolChoice := c.shouldUseToolChoice()
+	resp, err := c.doStage2(ctx, stage2Prompt, useToolChoice)
 	if err != nil {
-		if c.isToolChoiceError(err) && !c.toolChoiceUnsupported {
+		if useToolChoice && c.isToolChoiceError(err) {
 			c.mu.Lock()
 			c.toolChoiceUnsupported = true
+			c.toolChoiceDisabledCount = 0
 			c.mu.Unlock()
-			fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2: tool_choice rejected by API, retrying without it\n")
-			resp, err = c.doStage2(ctx, stage2Prompt)
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2: tool_choice rejected, retrying without it\n")
+			resp, err = c.doStage2(ctx, stage2Prompt, false)
 		}
 	}
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 API error: %v, failing closed\n", err)
-		// Stage 2 API failed: fail-closed (block by default)
 		return ClassifierResult{
 			Allow:       false,
 			Reason:      "classifier unavailable (stage 2 error); action blocked by default",
@@ -877,9 +915,12 @@ func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc
 		}
 	}
 
+	if useToolChoice {
+		c.onToolChoiceSuccess()
+	}
+
 	result, ok := parseClassifierResponse(resp.Content, actionDesc)
 	if !ok {
-		// Parse failure in stage 2: fail-closed (block by default)
 		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 parse failure, blocking: %s\n", actionDesc)
 		return ClassifierResult{
 			Allow:       false,
@@ -896,7 +937,7 @@ func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc
 	return result
 }
 
-func (c *AutoModeClassifier) doStage2(ctx context.Context, stage2Prompt string) (*anthropic.Message, error) {
+func (c *AutoModeClassifier) doStage2(ctx context.Context, stage2Prompt string, useToolChoice bool) (*anthropic.Message, error) {
 	params := anthropic.MessageNewParams{
 		Model:       GetModelForAPI(c.model),
 		MaxTokens:   stage2MaxTokens,
@@ -932,7 +973,7 @@ func (c *AutoModeClassifier) doStage2(ctx context.Context, stage2Prompt string) 
 			),
 		},
 	}
-	if !c.toolChoiceUnsupported {
+	if useToolChoice {
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{
 			OfTool: &anthropic.ToolChoiceToolParam{
 				Name: "classify_action",
