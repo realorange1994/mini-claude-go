@@ -125,7 +125,7 @@ func (e *StreamingToolExecutor) isConcurrencySafe(toolName string, arguments str
 	}
 	switch toolName {
 	case "read_file", "glob", "grep", "web_search", "web_fetch",
-		"read_skill", "tool_search", "agent_list", "agent_get":
+		"read_skill", "tool_search", "agent_list", "agent_get", "lisp_eval":
 		return true
 	default:
 		return false
@@ -599,7 +599,7 @@ func (e *StreamingToolExecutor) recordResult(r toolExecResult) {
 // results have been collected so far.
 func (e *StreamingToolExecutor) Wait(ctx context.Context, totalCalls int) []toolExecResult {
 	deadline := time.Now().Add(5 * time.Minute)
-	graceDeadline := time.Now().Add(1 * time.Second)
+	graceDeadline := time.Now().Add(10 * time.Second)
 	for {
 		e.mu.Lock()
 		if e.discarded {
@@ -640,8 +640,9 @@ func (e *StreamingToolExecutor) Wait(ctx context.Context, totalCalls int) []tool
 		// If nothing was dispatched after a grace period, the Start
 		// goroutine has likely exited (channel closed before Wait) or
 		// never started. Break to avoid a 5-minute hang.
-		// We give a 1-second grace period because the Start goroutine
-		// may not have processed items yet.
+		// We give a 10-second grace period because the Start goroutine
+		// may be slow to process items under load, and premature exit
+		// causes a double-execution deadlock with the fallback path.
 		if dispatched == 0 && time.Now().After(graceDeadline) {
 			break
 		}
