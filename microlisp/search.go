@@ -10,6 +10,8 @@ import (
 
 // builtinGoSearch performs efficient file+content search natively in Go,
 // avoiding the O(N^2) string allocation overhead of the Lisp line-scanner.
+// Only scans top-level files in the given directory (non-recursive),
+// matching the old Lisp directory/glob behavior.
 //
 // Args: pattern path output-mode case-insensitive head-limit glob
 func builtinGoSearch(args []*Value) (*Value, error) {
@@ -49,6 +51,11 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 		}
 	}
 
+	// If root is a regular file, search just that file
+	if info, err := os.Stat(root); err == nil && !info.IsDir() {
+		return searchSingleFile(root, pattern, outputMode, caseInsensitive, headLimit)
+	}
+
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return vstr(fmt.Sprintf("Error: no such directory: %s", root)), nil
 	}
@@ -58,66 +65,39 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 		searchPattern = strings.ToLower(pattern)
 	}
 
+	// Read directory entries (non-recursive, matching old Lisp behavior)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return vstr(fmt.Sprintf("Error: %v", err)), nil
+	}
+
 	var matches []string
 	matchCount := 0
 
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
-		if info.IsDir() {
-			return nil
-		}
+
+		name := entry.Name()
 
 		// Apply glob filter
 		if glob != "" {
-			matched, _ := filepath.Match(glob, filepath.Base(path))
+			matched, _ := filepath.Match(glob, name)
 			if !matched {
-				return nil
+				continue
 			}
 		}
 
-		// Open and scan file
-		f, err := os.Open(path)
-		if err != nil {
-			return nil // skip unreadable files
+		fpath := filepath.Join(root, name)
+
+		fileMatches, fileCount := scanFile(fpath, searchPattern, outputMode, caseInsensitive, headLimit-len(matches))
+		matches = append(matches, fileMatches...)
+		matchCount += fileCount
+
+		if len(matches) >= headLimit {
+			break
 		}
-		defer f.Close()
-
-		scanner := bufio.NewScanner(f)
-		// Increase buffer size for long lines
-		buf := make([]byte, 0, 64*1024)
-		scanner.Buffer(buf, 1024*1024)
-
-		lineNum := 0
-		fileHasMatch := false
-
-		for scanner.Scan() {
-			lineNum++
-			line := scanner.Text()
-			searchLine := line
-			if caseInsensitive {
-				searchLine = strings.ToLower(line)
-			}
-
-			if strings.Contains(searchLine, searchPattern) {
-				fileHasMatch = true
-				matchCount++
-
-				if outputMode == "content" && len(matches) < headLimit {
-					matches = append(matches, fmt.Sprintf("%s\t%d\t%s", path, lineNum, line))
-				}
-			}
-		}
-
-		if fileHasMatch && outputMode == "files_with_matches" && len(matches) < headLimit {
-			matches = append(matches, path)
-		}
-		return nil
-	})
-
-	if err != nil {
-		return vstr(fmt.Sprintf("Error: %v", err)), nil
 	}
 
 	var result string
@@ -128,4 +108,70 @@ func builtinGoSearch(args []*Value) (*Value, error) {
 		result = strings.Join(matches, "\n")
 	}
 	return vstr(result), nil
+}
+
+// searchSingleFile searches one file and returns the result directly.
+func searchSingleFile(fpath, pattern, outputMode string, caseInsensitive bool, headLimit int) (*Value, error) {
+	searchPattern := pattern
+	if caseInsensitive {
+		searchPattern = strings.ToLower(pattern)
+	}
+
+	matches, count := scanFile(fpath, searchPattern, outputMode, caseInsensitive, headLimit)
+
+	var result string
+	switch outputMode {
+	case "count":
+		result = fmt.Sprintf("%d", count)
+	default:
+		result = strings.Join(matches, "\n")
+	}
+	return vstr(result), nil
+}
+
+// scanFile reads a file line-by-line using bufio.Scanner and searches for the pattern.
+// Returns matching lines (for content/files_with_matches modes) and total match count.
+func scanFile(fpath, searchPattern, outputMode string, caseInsensitive bool, remaining int) ([]string, int) {
+	f, err := os.Open(fpath)
+	if err != nil {
+		return nil, 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	var matches []string
+	lineNum := 0
+	matchCount := 0
+	fileAdded := false
+
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		searchLine := line
+		if caseInsensitive {
+			searchLine = strings.ToLower(line)
+		}
+
+		if strings.Contains(searchLine, searchPattern) {
+			matchCount++
+
+			switch outputMode {
+			case "content":
+				if remaining > 0 {
+					matches = append(matches, fmt.Sprintf("%s\t%d\t%s", fpath, lineNum, line))
+					remaining--
+				}
+			case "files_with_matches":
+				if !fileAdded {
+					matches = append(matches, fpath)
+					fileAdded = true
+				}
+			}
+		}
+	}
+
+	return matches, matchCount
 }
