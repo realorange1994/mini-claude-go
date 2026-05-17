@@ -105,6 +105,11 @@ func (*GrepTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Maximum file size to search (e.g. '1M', '500K', '100B'). Files larger than this are skipped.",
 			},
+			"excludes": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "List of file/directory patterns to exclude. Supports glob patterns like `**/.claude/**` or directory names like `node_modules`.",
+			},
 			"head_limit": map[string]any{
 				"type":        "integer",
 				"description": "Maximum number of results to return (default: 250). Set to 0 for unlimited.",
