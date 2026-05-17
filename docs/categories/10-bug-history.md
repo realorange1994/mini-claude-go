@@ -176,6 +176,30 @@
 
 ---
 
+## Microlisp Language Compliance Bugs
+
+### Bug 22: Missing 4-deep car/cdr composition functions (caaaar through cddddr)
+- **位置**: microlisp/stdlib.go
+- **原因**: stdlib only defined 2-deep (caar, cadr, cdar, cddr) and 3-deep (caaar..cdddr) car/cdr combinations. All 16 four-deep combinations were missing: caaaar, caaadr, caadar, caaddr, cadaar, cadadr, caddar, cadddr, cdaaar, cdaadr, cdadar, cdaddr, cddaar, cddadr, cdddar, cddddr
+- **修复**: Add 16 `(define ...)` forms for all 4-deep car/cdr combinations after line 87
+- **提交**: TBD
+
+### Bug 23: defvar/defparameter return incorrect values
+- **位置**: microlisp/eval_core.go `case "DEFVAR"`, `case "DEFPARAMETER"`
+- **原因**: Both defvar and defparameter returned `vsym(name)` (the symbol name) instead of the evaluated value. CL spec requires defparameter to return the value of the initform, and defvar should return the value when an initform is provided
+- **修复**:
+  1. defvar: return the evaluated value when initform is provided and symbol is not already bound
+  2. defparameter: return the evaluated value instead of vsym(name)
+- **提交**: TBD
+
+### Bug 24: parse-integer error messages inconsistent
+- **位置**: microlisp/strings.go `builtinParseInteger()`
+- **原因**: Two error paths returned different messages: `"parse-integer: no integer at position %d"` (empty/sign-only string) vs `"parse-integer: not an integer"` (parse failure). Both should show what failed
+- **修复**: Unify both error paths to `"parse-integer: junk in string \"xxx\""` which includes the original substring that failed to parse, providing clearer debugging context
+- **提交**: TBD
+
+---
+
 ## Code Organization
 
 ### Refactoring: 90+ misplaced functions reorganized into single-responsibility files

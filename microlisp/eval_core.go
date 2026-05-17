@@ -519,9 +519,11 @@ evalLoop:
 							return nil, e
 						}
 						globalEnv.Set(name, ev)
+						// CL spec: defvar returns the value when initform is provided
+						return ev, nil
 					}
 				}
-				// defvar without initial value: leave unbound (no binding created)
+				// defvar without initial value or already bound: return symbol
 				return vsym(name), nil
 			case "DEFPARAMETER":
 				if v.cdr == nil || v.cdr.typ != VPair {
@@ -539,7 +541,8 @@ evalLoop:
 					return nil, e
 				}
 				globalEnv.Set(name, ev)
-				return vsym(name), nil
+				// CL spec: defparameter returns the value of the initform
+				return ev, nil
 			case "DEFCONSTANT":
 				// (defconstant name initial-value-form &optional documentation)
 				if v.cdr == nil || v.cdr.typ != VPair {

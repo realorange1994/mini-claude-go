@@ -86,6 +86,14 @@ This document summarizes the gap analysis between Go **miniClaudeCode** and the 
 | 10 | **Code organization** — 90+ functions scattered across files without single-responsibility principle | 6-phase reorganization: equality.go, type_system.go, concurrency.go, data_structures.go, list_ops.go cleanup; sequences.go stub deleted |
 | 11 | **Custom go-search replaced** — maintenance burden and feature gaps | Replace with rgrep engine (native ripgrep wrapper with .gitignore support) |
 
+## Recently Resolved (R26) — Microlisp Language Compliance
+
+| # | Gap | Resolution |
+|---|-----|------------|
+| 12 | **4-deep car/cdr missing** — all 16 four-deep compositions (caaaar..cddddr) undefined | Add 16 `(define ...)` forms to stdlib.go: caaaar, caaadr, caadar, caaddr, cadaar, cadadr, caddar, cadddr, cdaaar, cdaadr, cdadar, cdaddr, cddaar, cddadr, cdddar, cddddr |
+| 13 | **defvar/defparameter return symbol** — returned `vsym(name)` instead of evaluated value | defvar returns evaluated value when initform provided and unbound; defparameter returns evaluated value |
+| 14 | **parse-integer inconsistent errors** — two paths returned different messages ("no integer at position" vs "not an integer") | Unify to `"parse-integer: junk in string \"xxx\""` showing the failed substring |
+
 ## Refactoring Priorities
 
 ### Phase 1: Critical Capability (P0)

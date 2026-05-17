@@ -1066,7 +1066,7 @@ func builtinParseInteger(args []*Value) (*Value, error) {
 		if junkAllowed {
 			return vnil(), nil
 		}
-		return nil, fmt.Errorf("parse-integer: no integer at position %d", start)
+		return nil, fmt.Errorf("parse-integer: no integer at position %d in \"%s\"", start, str[start:end])
 	}
 	// Position: count from start, skip whitespace then count sign+digits
 	pos := start
@@ -1094,7 +1094,7 @@ func builtinParseInteger(args []*Value) (*Value, error) {
 			}
 			return vnil(), nil
 		}
-		return nil, fmt.Errorf("parse-integer: not an integer")
+		return nil, fmt.Errorf("parse-integer: junk in string \"%s\"", str[start:end])
 	}
 	return multiVal(vnum(float64(n)), vnum(float64(pos))), nil
 }
