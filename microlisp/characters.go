@@ -484,3 +484,59 @@ func builtinCharNotEq(args []*Value) (*Value, error) {
 	}
 	return vbool(true), nil
 }
+func builtinCharDowncase(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("char-downcase: need a character")
+	}
+	c := primaryValue(args[0])
+	if c.typ != VChar {
+		return nil, fmt.Errorf("char-downcase: not a character")
+	}
+	return vchar(unicode.ToLower(c.ch)), nil
+}
+
+func builtinCharUpcase(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("char-upcase: need a character")
+	}
+	c := primaryValue(args[0])
+	if c.typ != VChar {
+		return nil, fmt.Errorf("char-upcase: not a character")
+	}
+	return vchar(unicode.ToUpper(c.ch)), nil
+}
+
+func builtinAlphanumericP(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return vbool(false), nil
+	}
+	c := primaryValue(args[0])
+	if c.typ == VChar {
+		return vbool(unicode.IsLetter(c.ch) || unicode.IsDigit(c.ch)), nil
+	}
+	return vbool(false), nil
+}
+
+func builtinDigitCharP(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return vnil(), nil
+	}
+	radix := 10
+	if len(args) > 1 {
+		radix = int(toNum(args[1]))
+	}
+	c := primaryValue(args[0])
+	if c.typ != VChar {
+		return vnil(), nil
+	}
+	d := unicode.ToLower(c.ch)
+	baseDigit := '0'
+	radixChar := rune('a' + radix - 10)
+	if d >= baseDigit && d < baseDigit+rune(radix) {
+		return vnum(float64(int(d - baseDigit))), nil
+	}
+	if d >= 'a' && d < radixChar {
+		return vnum(float64(int(d - 'a' + 10))), nil
+	}
+	return vnil(), nil
+}

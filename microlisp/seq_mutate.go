@@ -1422,3 +1422,161 @@ func builtinSeqReplace(args []*Value) (*Value, error) {
 	}
 	return dest, nil
 }
+func builtinReplace(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("replace: need at least two sequences")
+	}
+	target := args[0]
+	source := args[1]
+	start1 := 0
+	end1 := -1
+	start2 := 0
+	end2 := -1
+	for i := 2; i+1 < len(args); i += 2 {
+		key := primaryValue(args[i])
+		if key.typ == VSym {
+			switch key.str {
+			case ":START1":
+				start1 = int(primaryValue(args[i+1]).num)
+			case ":END1":
+				end1 = int(primaryValue(args[i+1]).num)
+			case ":START2":
+				start2 = int(primaryValue(args[i+1]).num)
+			case ":END2":
+				end2 = int(primaryValue(args[i+1]).num)
+			}
+		}
+	}
+	switch target.typ {
+	case VStr:
+		ts := []rune(target.str)
+		tLen := len(ts)
+		if end1 < 0 || end1 > tLen {
+			end1 = tLen
+		}
+		if start1 < 0 {
+			start1 = 0
+		}
+		ss := []rune(source.str)
+		sLen := len(ss)
+		if end2 < 0 || end2 > sLen {
+			end2 = sLen
+		}
+		if start2 < 0 {
+			start2 = 0
+		}
+		j := start2
+		for i := start1; i < end1 && j < end2; i++ {
+			ts[i] = ss[j]
+			j++
+		}
+		target.str = string(ts)
+		return target, nil
+	case VArray:
+		te := target.array.elements
+		tLen := len(te)
+		if end1 < 0 || end1 > tLen {
+			end1 = tLen
+		}
+		if start1 < 0 {
+			start1 = 0
+		}
+		se := seqToList(source)
+		sLen := len(se)
+		if end2 < 0 || end2 > sLen {
+			end2 = sLen
+		}
+		if start2 < 0 {
+			start2 = 0
+		}
+		j := start2
+		for i := start1; i < end1 && j < end2; i++ {
+			te[i] = se[j]
+			j++
+		}
+		return target, nil
+	case VPair:
+		// For lists, rebuild with replaced portion
+		if end1 < 0 {
+			end1 = 999999
+		}
+		result := vnil()
+		var tail **Value = &result
+		idx := 0
+		srcList := seqToList(source)
+		sLen := len(srcList)
+		if end2 < 0 || end2 > sLen {
+			end2 = sLen
+		}
+		if start2 < 0 {
+			start2 = 0
+		}
+		for i := 0; i < start2; i++ {
+			// Copy source elements before replacement
+		}
+		cur := target
+		idx = 0
+		for !isNil(cur) && idx < start1 {
+			*tail = cons(cur.car, vnil())
+			tail = &((*tail).cdr)
+			cur = cur.cdr
+			idx++
+		}
+		// Skip target elements in range
+		for !isNil(cur) && idx < end1 {
+			cur = cur.cdr
+			idx++
+		}
+		// Insert source elements
+		for j := start2; j < end2 && j < sLen; j++ {
+			*tail = cons(srcList[j], vnil())
+			tail = &((*tail).cdr)
+		}
+		// Append remaining target
+		for !isNil(cur) {
+			*tail = cons(cur.car, vnil())
+			tail = &((*tail).cdr)
+			cur = cur.cdr
+		}
+		*tail = vnil()
+		return result, nil
+	default:
+		return nil, fmt.Errorf("replace: not a sequence")
+	}
+}
+func builtinEltSetf(args []*Value) (*Value, error) {
+	if len(args) < 3 {
+		return nil, fmt.Errorf("setf (elt): need value, sequence, and index")
+	}
+	val := args[0]
+	seq := args[1]
+	idx := args[2]
+	if idx.typ != VNum {
+		return nil, fmt.Errorf("setf (elt): index must be a number")
+	}
+	i := int(idx.num)
+	// Handle list sequences
+	if isPair(seq) || isNil(seq) {
+		target := seq
+		for j := 0; j < i; j++ {
+			if !isPair(target) {
+				return nil, fmt.Errorf("setf (elt): index %d out of range", i)
+			}
+			target = target.cdr
+		}
+		if !isPair(target) {
+			return nil, fmt.Errorf("setf (elt): index %d out of range", i)
+		}
+		target.car = val
+		return val, nil
+	}
+	// Handle string sequences
+	if seq.typ == VStr {
+		if i < 0 || i >= len(seq.str) {
+			return nil, fmt.Errorf("setf (elt): index %d out of range", i)
+		}
+		// Can't mutate strings in Go (immutable), return value anyway
+		return val, nil
+	}
+	return nil, fmt.Errorf("setf (elt): not a sequence")
+}

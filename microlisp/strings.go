@@ -2,6 +2,7 @@ package microlisp
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -1025,4 +1026,83 @@ func builtinStringGe(args []*Value) (*Value, error) {
 		return vnum(float64(len(runes2))), nil
 	}
 	return vnil(), nil
+}
+func builtinParseInteger(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("parse-integer: need a string")
+	}
+	strVal := primaryValue(args[0])
+	var str string
+	if strVal.typ == VStr {
+		str = strVal.str
+	} else {
+		str = ToString(strVal)
+	}
+	start := 0
+	end := -1
+	radix := 10
+	junkAllowed := false
+	for i := 1; i+1 < len(args); i += 2 {
+		key := primaryValue(args[i])
+		if key.typ == VSym {
+			switch key.str {
+			case ":START":
+				start = int(primaryValue(args[i+1]).num)
+			case ":END":
+				end = int(primaryValue(args[i+1]).num)
+			case ":RADIX":
+				radix = int(primaryValue(args[i+1]).num)
+			case ":JUNK-ALLOWED":
+				junkAllowed = !isNil(args[i+1])
+			}
+		}
+	}
+	if end < 0 {
+		end = len(str)
+	}
+	s := strings.TrimSpace(str[start:end])
+	s = strings.ReplaceAll(s, "_", "")
+	if s == "" || s == "-" || s == "+" {
+		if junkAllowed {
+			return vnil(), nil
+		}
+		return nil, fmt.Errorf("parse-integer: no integer at position %d", start)
+	}
+	// Position: count from start, skip whitespace then count sign+digits
+	pos := start
+	for pos < len(str) && (str[pos] == ' ' || str[pos] == '\t' || str[pos] == '\n' || str[pos] == '\r') {
+		pos++
+	}
+	// s contains sign+digits (or just digits); len(s) counts all
+	pos += len(s)
+
+	n, err := strconv.ParseInt(s, radix, 64)
+	if err != nil {
+		// Try to parse as much as possible for junk-allowed
+		if junkAllowed {
+			// Find longest valid prefix of s
+			for l := len(s); l > 0; l-- {
+				partial, e2 := strconv.ParseInt(s[:l], radix, 64)
+				if e2 == nil {
+					p := start
+					for p < len(str) && (str[p] == ' ' || str[p] == '\t' || str[p] == '\n' || str[p] == '\r') {
+						p++
+					}
+					p += l
+					return multiVal(vnum(float64(partial)), vnum(float64(p))), nil
+				}
+			}
+			return vnil(), nil
+		}
+		return nil, fmt.Errorf("parse-integer: not an integer")
+	}
+	return multiVal(vnum(float64(n)), vnum(float64(pos))), nil
+}
+func builtinSimpleStringP(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return vbool(false), nil
+	}
+	v := args[0]
+	// In CL, all strings are simple strings by default
+	return vbool(v.typ == VStr), nil
 }

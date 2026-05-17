@@ -1124,3 +1124,21 @@ func reflectToLisp(v reflect.Value) *Value {
 		return vstr(fmt.Sprint(v.Interface()))
 	}
 }
+func builtinCopyStructure(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("copy-structure: need an instance")
+	}
+	inst := args[0]
+	if inst.typ != VInstance {
+		return nil, fmt.Errorf("copy-structure: expected a structure instance, got %s", typeStr(inst))
+	}
+	newSlots := make(map[string]*Value, len(inst.instSlots))
+	for k, v := range inst.instSlots {
+		newSlots[k] = v // shallow copy of slots
+	}
+	result := gcv()
+	result.typ = VInstance
+	result.instClass = inst.instClass
+	result.instSlots = newSlots
+	return result, nil
+}

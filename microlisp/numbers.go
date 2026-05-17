@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 )
 
 // -------- abs --------
@@ -1421,4 +1422,21 @@ func builtinBoole(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("boole: invalid opcode %d", op)
 	}
 	return vnum(float64(result)), nil
+}
+func builtinUpgradedComplexPartType(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("upgraded-complex-part-type: need a type specifier")
+	}
+	typeArg := args[0]
+	typeName := strings.ToUpper(ToString(typeArg))
+	switch typeName {
+	case "SINGLE-FLOAT", "DOUBLE-FLOAT", "SHORT-FLOAT", "LONG-FLOAT", "FLOAT":
+		return vsym("SINGLE-FLOAT"), nil
+	case "RATIONAL", "RATIO", "INTEGER", "FIXNUM", "BIGNUM":
+		return vsym("RATIONAL"), nil
+	case "REAL", "NUMBER":
+		return vsym("REAL"), nil
+	default:
+		return vsym(typeName), nil
+	}
 }

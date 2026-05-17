@@ -2883,3 +2883,15 @@ evalLoop:
 		}
 	}
 }
+func builtinSet(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("set: need symbol and value")
+	}
+	sym := args[0]
+	if sym.typ != VSym {
+		return nil, fmt.Errorf("set: first argument must be a symbol")
+	}
+	val := args[1]
+	globalEnv.Set(sym.str, val)
+	return val, nil
+}

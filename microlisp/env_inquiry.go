@@ -3,6 +3,8 @@ package microlisp
 import (
 	"fmt"
 	"math"
+	"os"
+	"runtime"
 	"strings"
 )
 
@@ -153,4 +155,43 @@ func builtinIsqrt(args []*Value) (*Value, error) {
 	}
 	r := int(math.Sqrt(n))
 	return vnum(float64(r)), nil
+}
+func builtinLongSiteName(args []*Value) (*Value, error) {
+	return vstr(""), nil
+}
+
+func builtinShortSiteName(args []*Value) (*Value, error) {
+	return vstr(""), nil
+}
+
+func builtinSoftwareVersion(args []*Value) (*Value, error) {
+	return vstr(""), nil
+}
+
+func builtinSoftwareType(args []*Value) (*Value, error) {
+	return vstr(runtime.GOOS), nil
+}
+
+func builtinMachineInstance(args []*Value) (*Value, error) {
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "unknown"
+	}
+	return vstr(hostname), nil
+}
+
+func builtinMachineVersion(args []*Value) (*Value, error) {
+	return vstr(""), nil
+}
+
+func builtinMachineType(args []*Value) (*Value, error) {
+	return vstr(runtime.GOARCH), nil
+}
+
+func builtinLispImplementationVersion(args []*Value) (*Value, error) {
+	return vstr("0.1.0"), nil
+}
+
+func builtinLispImplementationType(args []*Value) (*Value, error) {
+	return vstr("MicroLisp"), nil
 }

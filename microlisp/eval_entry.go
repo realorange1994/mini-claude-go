@@ -30,3 +30,20 @@ func EvalString(s string, env *Env) (*Value, error) {
 	}
 	return result, nil
 }
+func builtinEvalString(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("eval-string: need a string")
+	}
+	s := primaryValue(args[0])
+	if s.typ != VStr {
+		return nil, fmt.Errorf("eval-string: need a string, got %s", ToString(s))
+	}
+	return EvalString(s.str, globalEnv)
+}
+
+func builtinEval(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("eval: need expression")
+	}
+	return Eval(args[0], globalEnv)
+}

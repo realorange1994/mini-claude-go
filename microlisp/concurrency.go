@@ -2,68 +2,14 @@ package microlisp
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
-	"unicode"
+	"time"
 )
 
 var traceTable = make(map[string]bool)
 
 var traceDepth = 0
-
-func builtinTrace(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("trace: need function name")
-	}
-	var result []*Value
-	for _, arg := range args {
-		v := primaryValue(arg)
-		name := ""
-		switch v.typ {
-		case VFunc, VPrim:
-			name = v.name
-		case VSym:
-			name = v.str
-		}
-		if name != "" {
-			traceTable[name] = true
-			result = append(result, vsym(name))
-		}
-	}
-	return listFromSlice(result), nil
-}
-
-func builtinUntrace(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		names := make([]string, 0, len(traceTable))
-		for name := range traceTable {
-			names = append(names, name)
-		}
-		traceTable = make(map[string]bool)
-		result := make([]*Value, len(names))
-		for i, n := range names {
-			result[i] = vsym(n)
-		}
-		return listFromSlice(result), nil
-	}
-	var result []*Value
-	for _, arg := range args {
-		v := primaryValue(arg)
-		name := ""
-		switch v.typ {
-		case VFunc, VPrim:
-			name = v.name
-		case VSym:
-			name = v.str
-		}
-		if name != "" {
-			delete(traceTable, name)
-		}
-		result = append(result, vsym(name))
-	}
-	return listFromSlice(result), nil
-}
 
 func builtinMakeCondVar(args []*Value) (*Value, error) {
 	cid := atomic.AddInt64(&nextCondID, 1)
@@ -194,141 +140,111 @@ func builtinAtomicSet(args []*Value) (*Value, error) {
 	return vnum(float64(val)), nil
 }
 
-func builtinEval(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("eval: need expression")
+func builtinSleep(args []*Value) (*Value, error) {
+	if len(args) < 1 || args[0].typ != VNum {
+		return nil, fmt.Errorf("sleep: need a number of seconds")
 	}
-	return Eval(args[0], globalEnv)
+	secs := args[0].num
+	duration := time.Duration(secs * float64(time.Second))
+	time.Sleep(duration)
+	return vnil(), nil
 }
 
-func builtinEvalString(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("eval-string: need a string")
+func builtinUnlock(args []*Value) (*Value, error) {
+	if len(args) < 1 || args[0].typ != VLock {
+		return nil, fmt.Errorf("unlock: need a lock object")
 	}
-	s := primaryValue(args[0])
-	if s.typ != VStr {
-		return nil, fmt.Errorf("eval-string: need a string, got %s", ToString(s))
+	lid := int64(args[0].num)
+	lockMapMu.Lock()
+	mu, ok := lockMutexMap[lid]
+	lockMapMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("unlock: invalid lock")
 	}
-	return EvalString(s.str, globalEnv)
+	mu.Unlock()
+	return vnil(), nil
 }
 
-func builtinHandlerEval(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("handler-eval: need expression")
+func builtinLock(args []*Value) (*Value, error) {
+	if len(args) < 1 || args[0].typ != VLock {
+		return nil, fmt.Errorf("lock: need a lock object")
 	}
-	result, err := Eval(args[0], globalEnv)
-	if err != nil {
-		// Signal as a condition so handler-case can catch it
-		return builtinError([]*Value{vstr(err.Error())})
+	lid := int64(args[0].num)
+	lockMapMu.Lock()
+	mu, ok := lockMutexMap[lid]
+	lockMapMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("lock: invalid lock")
 	}
-	return result, nil
+	mu.Lock()
+	return vnil(), nil
 }
 
-func builtinFuncall(args []*Value) (*Value, error) {
+func builtinMakeLock(args []*Value) (*Value, error) {
+	lid := atomic.AddInt64(&nextLockID, 1)
+	lockMapMu.Lock()
+	lockMutexMap[lid] = &sync.Mutex{}
+	lockMapMu.Unlock()
+	return &Value{typ: VLock, num: float64(lid)}, nil
+}
+
+func builtinJoinThread(args []*Value) (*Value, error) {
+	if len(args) < 1 || args[0].typ != VThread {
+		return nil, fmt.Errorf("join-thread: need a thread")
+	}
+	tid := int64(args[0].num)
+	threadChannelsMu.Lock()
+	ch, ok := threadChannels[tid]
+	threadChannelsMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("join-thread: no such thread %d", tid)
+	}
+	tr := <-ch
+	if tr.err != nil {
+		return nil, tr.err
+	}
+	threadChannelsMu.Lock()
+	delete(threadChannels, tid)
+	threadChannelsMu.Unlock()
+	return tr.value, nil
+}
+
+func copyGlobalEnv() *Env {
+	env := NewEnv(nil)
+	for k, v := range globalEnv.bindings {
+		env.bindings[k] = v
+	}
+	return env
+}
+
+func builtinMakeThread(args []*Value) (*Value, error) {
 	if len(args) < 1 {
-		return nil, fmt.Errorf("funcall: need function")
+		return nil, fmt.Errorf("make-thread: need a function")
 	}
 	fn := args[0]
-	callArgs := args[1:]
-	return callFnOnSeq(fn, callArgs, globalEnv)
+	fnArgs := args[1:]
+
+	tid := atomic.AddInt64(&nextThreadID, 1)
+	resultCh := make(chan threadResult, 1)
+
+	threadChannelsMu.Lock()
+	threadChannels[tid] = resultCh
+	threadChannelsMu.Unlock()
+
+	go func() {
+		threadEnv := copyGlobalEnv()
+		argList := listFromSlice(fnArgs)
+		result, err := Apply(fn, argList, threadEnv)
+		resultCh <- threadResult{value: result, err: err}
+	}()
+
+	return &Value{typ: VThread, num: float64(tid)}, nil
 }
 
-func builtinEql(args []*Value) (*Value, error) {
-	if len(args) < 2 {
-		return vbool(false), nil
-	}
-	return vbool(eqVal(args[0], args[1])), nil
-}
-
-func builtinEqIdentity(args []*Value) (*Value, error) {
-	if len(args) < 2 {
-		return vbool(false), nil
-	}
-	a, b := args[0], args[1]
-	if a == b {
-		return vbool(true), nil
-	}
-	// In CL, nil (symbol) and () (empty list/VNil) are eq
-	if isNil(a) || isNil(b) {
-		if (a.typ == VSym && strings.EqualFold(a.str, "nil") && b.typ == VNil) ||
-			(b.typ == VSym && strings.EqualFold(b.str, "nil") && a.typ == VNil) {
-			return vbool(true), nil
-		}
-	}
-	return vbool(false), nil
-}
-
-func builtinEqual(args []*Value) (*Value, error) {
-	if len(args) < 2 {
-		return vbool(false), nil
-	}
-	return vbool(eqVal(args[0], args[1])), nil
-}
-
-func builtinEqualp(args []*Value) (*Value, error) {
-	if len(args) < 2 {
-		return vbool(false), nil
-	}
-	return vbool(equalpVal(args[0], args[1])), nil
-}
-
-func equalpVal(a, b *Value) bool {
-	if a == b {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	// Numbers: same mathematical value
-	if isNumeric(a) && isNumeric(b) {
-		return equalpNumeric(a, b)
-	}
-	// Characters: case-insensitive
-	if a.typ == VChar && b.typ == VChar {
-		ac, bc := unicode.ToLower(a.ch), unicode.ToLower(b.ch)
-		return ac == bc
-	}
-	// Strings: case-insensitive
-	if a.typ == VStr && b.typ == VStr {
-		return strings.EqualFold(a.str, b.str)
-	}
-	// Lists: recursively compare
-	if a.typ == VPair && b.typ == VPair {
-		return equalpVal(a.car, b.car) && equalpVal(a.cdr, b.cdr)
-	}
-	// Symbols: case-insensitive
-	if a.typ == VSym && b.typ == VSym {
-		return strings.EqualFold(a.str, b.str)
-	}
-	// Arrays: element-wise comparison
-	if a.typ == VArray && b.typ == VArray {
-		return equalpArray(a, b)
-	}
-	// Otherwise use eql
-	return eqVal(a, b)
-}
-
-func equalpNumeric(a, b *Value) bool {
-	switch a.typ {
-	case VNum:
-		switch b.typ {
-		case VNum:
-			return a.num == b.num
-		case VRat:
-			return float64(a.num) == float64(b.irat)/float64(b.iden)
-		}
-	case VRat:
-		switch b.typ {
-		case VNum:
-			return float64(a.irat)/float64(a.iden) == b.num
-		case VRat:
-			return a.irat == b.irat && a.iden == b.iden
-		}
-	case VComplex:
-		if b.typ == VComplex {
-			return a.num == b.num && a.imag == b.imag
-		}
-	}
-
-	return false
-}
+var nextLockID int64
+var atomicCounter int64
+var lockMutexMap = make(map[int64]*sync.Mutex)
+var lockMapMu sync.Mutex
+var condMu sync.Mutex
+var condVars = make(map[int64]*sync.Cond)
+var nextCondID int64

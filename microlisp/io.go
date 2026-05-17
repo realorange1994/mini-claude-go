@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
-	"time"
+	"strings"
 )
 
 // -------- File loading --------
@@ -38,146 +36,75 @@ func LoadFile(fname string, env *Env) (*Value, error) {
 	}
 	return result, evalErr
 }
-
-func builtinMakeThread(args []*Value) (*Value, error) {
+func builtinCompileFilePathname(args []*Value) (*Value, error) {
 	if len(args) < 1 {
-		return nil, fmt.Errorf("make-thread: need a function")
+		return nil, fmt.Errorf("compile-file-pathname: need a pathname")
 	}
-	fn := args[0]
-	fnArgs := args[1:]
-
-	tid := atomic.AddInt64(&nextThreadID, 1)
-	resultCh := make(chan threadResult, 1)
-
-	threadChannelsMu.Lock()
-	threadChannels[tid] = resultCh
-	threadChannelsMu.Unlock()
-
-	go func() {
-		threadEnv := copyGlobalEnv()
-		argList := listFromSlice(fnArgs)
-		result, err := Apply(fn, argList, threadEnv)
-		resultCh <- threadResult{value: result, err: err}
-	}()
-
-	return &Value{typ: VThread, num: float64(tid)}, nil
-}
-
-func copyGlobalEnv() *Env {
-	env := NewEnv(nil)
-	for k, v := range globalEnv.bindings {
-		env.bindings[k] = v
+	path := args[0]
+	var fileStr string
+	if path.typ == VStr {
+		fileStr = path.str
+	} else if path.typ == VPathname {
+		fileStr = pathnameToString(path.pathname)
+	} else {
+		return nil, fmt.Errorf("compile-file-pathname: need a pathname or string")
 	}
-	return env
-}
-
-func builtinJoinThread(args []*Value) (*Value, error) {
-	if len(args) < 1 || args[0].typ != VThread {
-		return nil, fmt.Errorf("join-thread: need a thread")
+	outputPath := fileStr
+	if strings.HasSuffix(outputPath, ".lisp") {
+		outputPath = outputPath[:len(outputPath)-5] + ".fas"
+	} else if strings.HasSuffix(outputPath, ".lsp") {
+		outputPath = outputPath[:len(outputPath)-4] + ".fas"
+	} else if !strings.HasSuffix(outputPath, ".fas") {
+		outputPath += ".fas"
 	}
-	tid := int64(args[0].num)
-	threadChannelsMu.Lock()
-	ch, ok := threadChannels[tid]
-	threadChannelsMu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("join-thread: no such thread %d", tid)
-	}
-	tr := <-ch
-	if tr.err != nil {
-		return nil, tr.err
-	}
-	threadChannelsMu.Lock()
-	delete(threadChannels, tid)
-	threadChannelsMu.Unlock()
-	return tr.value, nil
-}
-
-var nextLockID int64
-var atomicCounter int64
-var lockMutexMap = make(map[int64]*sync.Mutex)
-var lockMapMu sync.Mutex
-var condMu sync.Mutex
-var condVars = make(map[int64]*sync.Cond)
-var nextCondID int64
-
-func builtinMakeLock(args []*Value) (*Value, error) {
-	lid := atomic.AddInt64(&nextLockID, 1)
-	lockMapMu.Lock()
-	lockMutexMap[lid] = &sync.Mutex{}
-	lockMapMu.Unlock()
-	return &Value{typ: VLock, num: float64(lid)}, nil
-}
-
-func builtinLock(args []*Value) (*Value, error) {
-	if len(args) < 1 || args[0].typ != VLock {
-		return nil, fmt.Errorf("lock: need a lock object")
-	}
-	lid := int64(args[0].num)
-	lockMapMu.Lock()
-	mu, ok := lockMutexMap[lid]
-	lockMapMu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("lock: invalid lock")
-	}
-	mu.Lock()
-	return vnil(), nil
-}
-
-func builtinUnlock(args []*Value) (*Value, error) {
-	if len(args) < 1 || args[0].typ != VLock {
-		return nil, fmt.Errorf("unlock: need a lock object")
-	}
-	lid := int64(args[0].num)
-	lockMapMu.Lock()
-	mu, ok := lockMutexMap[lid]
-	lockMapMu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("unlock: invalid lock")
-	}
-	mu.Unlock()
-	return vnil(), nil
-}
-
-func builtinSleep(args []*Value) (*Value, error) {
-	if len(args) < 1 || args[0].typ != VNum {
-		return nil, fmt.Errorf("sleep: need a number of seconds")
-	}
-	secs := args[0].num
-	duration := time.Duration(secs * float64(time.Second))
-	time.Sleep(duration)
-	return vnil(), nil
-}
-
-func builtinValues(args []*Value) (*Value, error) {
-	// values returns a VMultiVal wrapping all arguments.
-	// Primary value (car) is the first argument, or nil if none.
+	p := parsePathnameString(outputPath)
 	v := gcv()
-	v.typ = VMultiVal
-	v.cdr = vnil()
-	if len(args) > 0 {
-		v.car = args[0]
-		v.cdr = list(args[1:]...)
-	}
+	v.typ = VPathname
+	v.pathname = p
 	return v, nil
 }
 
-func builtinValuesList(args []*Value) (*Value, error) {
-	// values-list: converts a list to multiple values.
-	// (values-list '(a b c)) => values a b c
-	if len(args) != 1 {
-		return nil, fmt.Errorf("values-list: need exactly 1 argument")
+func builtinCompileFile(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("compile-file: need a pathname")
 	}
-	lst := args[0]
-	if isNil(lst) {
-		v := gcv()
-		v.typ = VMultiVal
-		v.car = vnil()
-		v.cdr = vnil()
-		return v, nil
+	path := args[0]
+	var fileStr string
+	if path.typ == VStr {
+		fileStr = path.str
+	} else if path.typ == VPathname {
+		fileStr = pathnameToString(path.pathname)
+	} else {
+		return nil, fmt.Errorf("compile-file: need a pathname or string")
 	}
+	// Read and parse the file (MicroLisp has no native code compiler, so we just parse)
+	data, err := os.ReadFile(fileStr)
+	if err != nil {
+		return nil, fmt.Errorf("compile-file: could not read %s: %v", fileStr, err)
+	}
+	forms, perr := parseAll(string(data))
+	if perr != nil {
+		return nil, fmt.Errorf("compile-file: parse error in %s: %v", fileStr, perr)
+	}
+	for !isNil(forms) {
+		_, err := Eval(forms.car, globalEnv)
+		if err != nil {
+			return nil, fmt.Errorf("compile-file: error in %s: %v", fileStr, err)
+		}
+		forms = forms.cdr
+	}
+	// Return output pathname (append .fas to input name)
+	outputPath := fileStr
+	if !strings.HasSuffix(outputPath, ".lisp") && !strings.HasSuffix(outputPath, ".lsp") {
+		outputPath += ".fas"
+	} else if strings.HasSuffix(outputPath, ".lisp") {
+		outputPath = outputPath[:len(outputPath)-5] + ".fas"
+	} else {
+		outputPath = outputPath[:len(outputPath)-4] + ".fas"
+	}
+	p := parsePathnameString(outputPath)
 	v := gcv()
-	v.typ = VMultiVal
-	v.car = lst.car
-	v.cdr = lst.cdr
+	v.typ = VPathname
+	v.pathname = p
 	return v, nil
 }

@@ -1492,3 +1492,14 @@ func builtinDissociateRestarts(args []*Value) (*Value, error) {
 	// Stub: cleanup is handled by unwind-protect naturally.
 	return vnil(), nil
 }
+func builtinHandlerEval(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("handler-eval: need expression")
+	}
+	result, err := Eval(args[0], globalEnv)
+	if err != nil {
+		// Signal as a condition so handler-case can catch it
+		return builtinError([]*Value{vstr(err.Error())})
+	}
+	return result, nil
+}

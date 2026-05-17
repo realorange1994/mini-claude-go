@@ -1698,3 +1698,171 @@ func builtinInteractiveStreamP(args []*Value) (*Value, error) {
 	isInteractive := s.isFile && (s.file == os.Stdin || s.file == os.Stdout || s.file == os.Stderr)
 	return vbool(isInteractive), nil
 }
+func builtinWriteSequence(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("write-sequence: need a sequence")
+	}
+	seq := args[0]
+	stream := stdoutStream
+	if len(args) > 1 {
+		stream = args[1]
+		if stream.typ != VStream {
+			return nil, fmt.Errorf("write-sequence: not a stream")
+		}
+	}
+	start := 0
+	end := -1
+	for i := 2; i+1 < len(args); i += 2 {
+		key := primaryValue(args[i])
+		if key.typ == VSym {
+			switch key.str {
+			case ":START":
+				start = int(primaryValue(args[i+1]).num)
+			case ":END":
+				end = int(primaryValue(args[i+1]).num)
+			}
+		}
+	}
+	switch seq.typ {
+	case VStr:
+		s := seq.str
+		if end < 0 || end > len(s) {
+			end = len(s)
+		}
+		if start < 0 {
+			start = 0
+		}
+		if err := stream.stream.writeString(s[start:end]); err != nil {
+			return nil, err
+		}
+		stream.stream.flush()
+		return seq, nil
+	case VArray:
+		arr := seq.array
+		total := len(arr.elements)
+		if end < 0 || end > total {
+			end = total
+		}
+		if start < 0 {
+			start = 0
+		}
+		for i := start; i < end; i++ {
+			if err := stream.stream.writeString(ToString(primaryValue(arr.elements[i]))); err != nil {
+				return nil, err
+			}
+		}
+		stream.stream.flush()
+		return seq, nil
+	case VPair:
+		lst := seq
+		seen := make(map[*Value]bool)
+		idx := 0
+		for !isNil(lst) {
+			if seen[lst] {
+				break
+			}
+			seen[lst] = true
+			if idx >= start && (end < 0 || idx < end) {
+				if err := stream.stream.writeString(ToString(primaryValue(lst.car))); err != nil {
+					return nil, err
+				}
+			}
+			lst = lst.cdr
+			idx++
+		}
+		stream.stream.flush()
+		return seq, nil
+	default:
+		return nil, fmt.Errorf("write-sequence: not a sequence")
+	}
+}
+
+func builtinReadSequence(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("read-sequence: need sequence and stream")
+	}
+	seq := args[0]
+	stream := args[1]
+	if stream.typ != VStream {
+		return nil, fmt.Errorf("read-sequence: second argument must be a stream")
+	}
+	start := 0
+	end := -1
+	for i := 2; i+1 < len(args); i += 2 {
+		key := primaryValue(args[i])
+		if key.typ == VSym {
+			switch key.str {
+			case ":START":
+				start = int(primaryValue(args[i+1]).num)
+			case ":END":
+				end = int(primaryValue(args[i+1]).num)
+			}
+		}
+	}
+	switch seq.typ {
+	case VStr:
+		s := seq.str
+		runes := []rune(s)
+		total := len(runes)
+		if end < 0 || end > total {
+			end = total
+		}
+		if start < 0 {
+			start = 0
+		}
+		count := 0
+		for i := start; i < end; i++ {
+			r, err := stream.stream.readChar()
+			if err != nil {
+				break
+			}
+			runes[i] = r
+			count++
+		}
+		seq.str = string(runes)
+		return vnum(float64(start + count)), nil
+	case VArray:
+		arr := seq.array
+		total := len(arr.elements)
+		if end < 0 || end > total {
+			end = total
+		}
+		if start < 0 {
+			start = 0
+		}
+		count := 0
+		for i := start; i < end; i++ {
+			r, err := stream.stream.readChar()
+			if err != nil {
+				break
+			}
+			arr.elements[i] = vstr(string(r))
+			count++
+		}
+		return vnum(float64(start + count)), nil
+	case VPair:
+		lst := seq
+		seen := make(map[*Value]bool)
+		idx := 0
+		count := 0
+		for !isNil(lst) {
+			if seen[lst] {
+				break
+			}
+			seen[lst] = true
+			if idx >= start && (end < 0 || idx < end) {
+				r, err := stream.stream.readChar()
+				if err != nil {
+					break
+				}
+				lst.car = vstr(string(r))
+				count++
+			}
+			lst = lst.cdr
+			idx++
+		}
+		return vnum(float64(start + count)), nil
+	default:
+		return nil, fmt.Errorf("read-sequence: not a sequence")
+	}
+}

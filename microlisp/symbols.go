@@ -351,3 +351,49 @@ func builtinFmakunbound(args []*Value) (*Value, error) {
 	delete(globalEnv.bindings, sym.str)
 	return sym, nil
 }
+func globalEnvGetFunction(name string) *Value {
+	fn, _ := globalEnv.Get(name)
+	if fn != nil && (fn.typ == VFunc || fn.typ == VPrim || fn.typ == VMacro) {
+		return fn
+	}
+	return nil
+}
+
+func builtinFdefinition(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("fdefinition: need a function name")
+	}
+	name := args[0]
+	if name.typ == VSym {
+		fn := globalEnvGetFunction(name.str)
+		if fn != nil {
+			return fn, nil
+		}
+		return nil, fmt.Errorf("fdefinition: %s is not a function", name.str)
+	}
+	return nil, fmt.Errorf("fdefinition: expected a symbol")
+}
+
+func builtinDefinedP(args []*Value) (*Value, error) {
+	if len(args) < 1 || args[0].typ != VSym {
+		return vbool(false), nil
+	}
+	_, err := globalEnv.Get(args[0].str)
+	return vbool(err == nil), nil
+}
+
+func builtinSymbolValueSetf(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("setf (symbol-value): need value and symbol")
+	}
+	val := args[0]
+	sym := args[1]
+	if sym.typ != VSym {
+		return nil, fmt.Errorf("setf (symbol-value): second argument must be a symbol")
+	}
+	if _, err := globalEnv.Get(sym.str); err != nil {
+		return nil, fmt.Errorf("setf (symbol-value): symbol %s is unbound", sym.str)
+	}
+	globalEnv.Set(sym.str, val)
+	return val, nil
+}

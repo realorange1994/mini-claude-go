@@ -2,8 +2,6 @@ package microlisp
 
 import (
 	"fmt"
-	"strings"
-	"unsafe"
 )
 
 func builtinRest(args []*Value) (*Value, error) {
@@ -178,499 +176,6 @@ func builtinTenth(args []*Value) (*Value, error) {
 		return v.car, nil
 	}
 	return vnil(), nil
-}
-
-func builtinNullP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("null?: need 1 argument")
-	}
-	return vbool(isNil(args[0])), nil
-}
-
-func builtinPairP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("pair?: need 1 argument")
-	}
-	return vbool(isPair(args[0])), nil
-}
-
-func builtinListP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("listp: need 1 argument")
-	}
-	v := args[0]
-	return vbool(isNil(v) || v.typ == VPair), nil
-}
-
-func builtinNumP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("number?: need 1 argument")
-	}
-	return vbool(args[0].typ == VNum || args[0].typ == VRat || args[0].typ == VComplex), nil
-}
-
-func builtinStrP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("string?: need 1 argument")
-	}
-	return vbool(args[0].typ == VStr), nil
-}
-
-func builtinSymP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("symbol?: need 1 argument")
-	}
-	return vbool(args[0].typ == VSym), nil
-}
-
-func builtinStringP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("stringp: need 1 argument")
-	}
-	return vbool(args[0].typ == VStr), nil
-}
-
-func builtinBoolP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("boolean?: need 1 argument")
-	}
-	return vbool(args[0].typ == VBool), nil
-}
-
-func builtinProcP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("procedure?: need 1 argument")
-	}
-	return vbool(args[0].typ == VPrim || args[0].typ == VFunc), nil
-}
-
-func builtinCharP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("character?: need 1 argument")
-	}
-	return vbool(args[0].typ == VChar), nil
-}
-
-func builtinNumberP(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("numberp: need 1 argument")
-	}
-	return vbool(args[0].typ == VNum), nil
-}
-
-func eqVal(a, b *Value) bool {
-	if a == b {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	// In CL, nil (symbol) and () (empty list/VNil) are equal
-	if a.typ == VNil && b.typ == VNil {
-		return true
-	}
-	if a.typ == VNil && b.typ == VSym && strings.EqualFold(b.str, "nil") ||
-		b.typ == VNil && a.typ == VSym && strings.EqualFold(a.str, "nil") {
-		return true
-	}
-	if a.typ != b.typ {
-		return false
-	}
-	return eqValSeen(a, b, make(map[[2]uintptr]bool))
-}
-
-func eqValSeen(a, b *Value, seen map[[2]uintptr]bool) bool {
-	if a == b {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	if a.typ != b.typ {
-		return false
-	}
-	switch a.typ {
-	case VNum:
-		return a.num == b.num
-	case VRat:
-		return a.irat == b.irat && a.iden == b.iden
-	case VComplex:
-		return a.num == b.num && a.imag == b.imag
-	case VStr:
-		return a.str == b.str
-	case VSym:
-		return a.str == b.str
-	case VChar:
-		return a.ch == b.ch
-	case VPackage:
-		return a.pkg == b.pkg
-	case VReadtable:
-		return a.readtable == b.readtable
-	case VBool, VNil, VVHash:
-		return a == b
-	case VPair:
-		ka := [2]uintptr{uintptr(unsafe.Pointer(a)), uintptr(unsafe.Pointer(b))}
-		if seen[ka] {
-			return true
-		}
-		seen[ka] = true
-		return eqValSeen(a.car, b.car, seen) && eqValSeen(a.cdr, b.cdr, seen)
-	case VArray:
-		if a.array == nil || b.array == nil {
-			return a.array == b.array
-		}
-		if len(a.array.elements) != len(b.array.elements) {
-			return false
-		}
-		for i := range a.array.elements {
-			if !eqValSeen(a.array.elements[i], b.array.elements[i], seen) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-func bindPattern(pattern *Value, val *Value, env *Env) error {
-	return bindPatternRec(pattern, val, env, make(map[*Value]bool))
-}
-
-func bindPatternRec(pattern *Value, val *Value, env *Env, seen map[*Value]bool) error {
-	if pattern.typ == VSym {
-		// Simple variable: bind the whole value
-		env.Set(pattern.str, val)
-		return nil
-	}
-	if pattern.typ != VPair {
-		return fmt.Errorf("destructuring-bind: invalid pattern")
-	}
-	// List pattern: bind each element
-	// Handle lambda-list keywords: &rest, &optional, &key
-	vp := pattern
-	vv := val
-	localSeen := make(map[*Value]bool)
-	for !isNil(vp) {
-		if localSeen[vp] {
-			return fmt.Errorf("destructuring-bind: circular pattern")
-		}
-		localSeen[vp] = true
-		// Check for dotted pair (rest parameter) - must come before &rest handling
-		if !isNil(vp) && vp.typ == VSym {
-			// Dotted pair: (a b . rest)
-			env.Set(vp.str, vv)
-			return nil
-		}
-		if vp.typ != VPair {
-			break
-		}
-		head := vp.car
-		// Skip &rest, &optional, &key keywords and handle them specially
-		if head != nil && head.typ == VSym {
-			symName := strings.ToUpper(head.str)
-			if symName == "&REST" || symName == "&BODY" {
-				// &rest var: bind var to the remaining value list
-				restVar := vp.cdr
-				if restVar == nil || restVar.typ != VPair || restVar.car == nil || restVar.car.typ != VSym {
-					return fmt.Errorf("destructuring-bind: malformed &rest pattern")
-				}
-				env.Set(restVar.car.str, vv)
-				return nil
-			}
-			if symName == "&OPTIONAL" || symName == "&KEY" {
-				// Process &optional vars: bind from remaining values
-				if symName == "&OPTIONAL" {
-					vp = vp.cdr
-					for !isNil(vp) {
-						if vp.typ != VPair {
-							break
-						}
-						elem := vp.car
-						// Check if we've hit another lambda-list keyword
-						if elem != nil && elem.typ == VSym {
-							elemUpper := strings.ToUpper(elem.str)
-							if elemUpper == "&REST" || elemUpper == "&BODY" || elemUpper == "&KEY" || elemUpper == "&AUX" || elemUpper == "&ALLOW-OTHER-KEYS" || elemUpper == "&ENVIRONMENT" || elemUpper == "&WHOLE" {
-								break // let outer loop handle it
-							}
-						}
-						if elem == nil || elem.typ == VNil {
-							// nil element, skip
-						} else if elem.typ == VSym {
-							// Simple optional var: bind to value or nil
-							if !isNil(vv) {
-								env.Set(elem.str, vv.car)
-								if !isNil(vv) {
-									vv = vv.cdr
-								}
-							} else {
-								env.Set(elem.str, vnil())
-							}
-						} else if elem.typ == VPair {
-							// (var default-value supplied-p) or (var default-value) or (var)
-							varName := elem.car
-							if varName != nil && varName.typ == VSym {
-								var optSuppliedPSym *Value
-								if elem.cdr != nil && elem.cdr.typ == VPair && elem.cdr.cdr != nil && elem.cdr.cdr.typ == VPair && elem.cdr.cdr.car != nil && elem.cdr.cdr.car.typ == VSym {
-									optSuppliedPSym = elem.cdr.cdr.car
-								}
-								if !isNil(vv) {
-									env.Set(varName.str, vv.car)
-									if optSuppliedPSym != nil {
-										env.Set(optSuppliedPSym.str, vbool(true))
-									}
-									if !isNil(vv) {
-										vv = vv.cdr
-									}
-								} else {
-									var optDefault *Value
-									if elem.cdr != nil && elem.cdr.typ == VPair && elem.cdr.car != nil {
-										optDefault = elem.cdr.car
-									}
-									if optDefault != nil {
-										evalDef, _ := Eval(optDefault, env)
-										if evalDef == nil {
-											evalDef = vnil()
-										}
-										env.Set(varName.str, evalDef)
-									} else {
-										env.Set(varName.str, vnil())
-									}
-									if optSuppliedPSym != nil {
-										env.Set(optSuppliedPSym.str, vbool(false))
-									}
-								}
-							}
-						} else {
-							// Non-symbol/non-list element (e.g., number literal in default),
-							// not a valid pattern variable - skip
-						}
-						vp = vp.cdr
-					}
-					// Don't return - continue outer loop to handle &rest/&key/&aux
-					continue
-				}
-				// Process &key vars: keyword-based binding
-				// Build a keyword-to-index map from the value list
-				// Keywords are symbols starting with ':'; bind var matching after ':'
-				vp = vp.cdr
-				// Collect keyword-value pairs from the value list
-				keyValMap := make(map[string]*Value)
-				for !isNil(vv) && vv.typ == VPair {
-					key := vv.car
-					val := vnil()
-					if !isNil(vv.cdr) && vv.cdr.typ == VPair {
-						val = vv.cdr.car
-					}
-					if key != nil && key.typ == VSym && len(key.str) > 0 && key.str[0] == ':' {
-						keywordName := key.str[1:] // strip leading ':'
-						keyValMap[keywordName] = val
-					}
-					vv = vv.cdr
-					if !isNil(vv) && vv.typ == VPair {
-						vv = vv.cdr
-					} else {
-						break
-					}
-				}
-				// Bind each key pattern variable
-				for !isNil(vp) {
-					if vp.typ != VPair {
-						break
-					}
-					elem := vp.car
-					if elem == nil || elem.typ == VNil {
-						// nil element, skip
-					} else if elem.typ == VSym {
-						// Simple key var: bind matching keyword or nil
-						if val, ok := keyValMap[elem.str]; ok {
-							env.Set(elem.str, val)
-						} else {
-							env.Set(elem.str, vnil())
-						}
-					} else if elem.typ == VPair {
-						// (var default-value) or ((:keyword var) default-value) or (:keyword var) or (:keyword var default-value)
-						varName := elem.car
-						if varName != nil && varName.typ == VSym {
-							var keySuppliedPSym *Value
-							if elem.cdr != nil && elem.cdr.typ == VPair && elem.cdr.cdr != nil && elem.cdr.cdr.typ == VPair && elem.cdr.cdr.car != nil && elem.cdr.cdr.car.typ == VSym {
-								keySuppliedPSym = elem.cdr.cdr.car
-							}
-							if val, ok := keyValMap[varName.str]; ok {
-								env.Set(varName.str, val)
-								if keySuppliedPSym != nil {
-									env.Set(keySuppliedPSym.str, vbool(true))
-								}
-							} else if elem.cdr != nil && elem.cdr.typ == VPair && elem.cdr.car != nil {
-								evalDef, _ := Eval(elem.cdr.car, env)
-								if evalDef == nil {
-									evalDef = vnil()
-								}
-								env.Set(varName.str, evalDef)
-								if keySuppliedPSym != nil {
-									env.Set(keySuppliedPSym.str, vbool(false))
-								}
-							} else {
-								env.Set(varName.str, vnil())
-								if keySuppliedPSym != nil {
-									env.Set(keySuppliedPSym.str, vbool(false))
-								}
-							}
-						} else if varName != nil && varName.typ == VPair && varName.car != nil && varName.car.typ == VSym {
-							// (:keyword var) form
-							keywordName := varName.car.str
-							if keywordName[0] == ':' {
-								keywordName = keywordName[1:]
-							}
-							subVar := varName.cdr
-							if subVar != nil && subVar.typ == VSym {
-								// (:keyword var) simple form - bind var from keyword map or nil
-								if val, ok := keyValMap[keywordName]; ok {
-									env.Set(subVar.str, val)
-								} else {
-									env.Set(subVar.str, vnil())
-								}
-								// Handle (:keyword var default) and (:keyword var default supplied-p)
-								if elem.cdr != nil && elem.cdr.typ == VPair {
-									var kwDefault *Value
-									var kwSuppliedP *Value
-									if elem.cdr.car != nil {
-										kwDefault = elem.cdr.car
-									}
-									if elem.cdr.cdr != nil && elem.cdr.cdr.typ == VPair && elem.cdr.cdr.car != nil && elem.cdr.cdr.car.typ == VSym {
-										kwSuppliedP = elem.cdr.cdr.car
-									}
-									if _, ok := keyValMap[keywordName]; !ok {
-										if kwDefault != nil {
-											evalDef, _ := Eval(kwDefault, env)
-											if evalDef == nil {
-												evalDef = vnil()
-											}
-											env.Set(subVar.str, evalDef)
-										}
-										if kwSuppliedP != nil {
-											env.Set(kwSuppliedP.str, vbool(false))
-										}
-									} else if kwSuppliedP != nil {
-										env.Set(kwSuppliedP.str, vbool(true))
-									}
-								}
-							} else if subVar != nil && subVar.typ == VPair && subVar.car != nil && subVar.car.typ == VSym {
-								// subVar is a list like (VAR) - extract car
-								subVar = subVar.car
-								var kwSuppliedPSym *Value
-								if elem.cdr != nil && elem.cdr.typ == VPair && elem.cdr.cdr != nil && elem.cdr.cdr.typ == VPair && elem.cdr.cdr.car != nil && elem.cdr.cdr.car.typ == VSym {
-									kwSuppliedPSym = elem.cdr.cdr.car
-								}
-								if val, ok := keyValMap[keywordName]; ok {
-									env.Set(subVar.str, val)
-									if kwSuppliedPSym != nil {
-										env.Set(kwSuppliedPSym.str, vbool(true))
-									}
-								} else if elem.cdr != nil && elem.cdr.typ == VPair && elem.cdr.car != nil {
-									evalDef2, _ := Eval(elem.cdr.car, env)
-									if evalDef2 == nil {
-										evalDef2 = vnil()
-									}
-									env.Set(subVar.str, evalDef2)
-									if kwSuppliedPSym != nil {
-										env.Set(kwSuppliedPSym.str, vbool(false))
-									}
-								} else {
-									env.Set(subVar.str, vnil())
-									if kwSuppliedPSym != nil {
-										env.Set(kwSuppliedPSym.str, vbool(false))
-									}
-								}
-							}
-						}
-					}
-					vp = vp.cdr
-				}
-				return nil
-			}
-		}
-		if isNil(vv) {
-			// Not enough values — bind variable to nil
-			if head == nil || head.typ != VSym {
-				return fmt.Errorf("destructuring-bind: malformed var pattern")
-			}
-			env.Set(head.str, vnil())
-		} else if vv.typ != VPair {
-			return fmt.Errorf("destructuring-bind: expected a list, got %s", typeStr(vv))
-		} else {
-			if err := bindPatternRec(head, vv.car, env, seen); err != nil {
-				return err
-			}
-		}
-		vp = vp.cdr
-		if !isNil(vp) && vp.typ == VSym {
-			// Dotted pair: (a b . rest)
-			if isNil(vv) {
-				env.Set(vp.str, vnil())
-			} else {
-				env.Set(vp.str, vv.cdr)
-			}
-			return nil
-		}
-		if !isNil(vv) {
-			vv = vv.cdr
-		}
-	}
-	return nil
-}
-
-func builtinEqvP(args []*Value) (*Value, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("eqv?: need 2 arguments")
-	}
-	a, b := args[0], args[1]
-	if a.typ != b.typ {
-		return vbool(false), nil
-	}
-	switch a.typ {
-	case VNum:
-		return vbool(a.num == b.num), nil
-	case VRat:
-		return vbool(a.str == b.str), nil
-	case VComplex:
-		return vbool(a.str == b.str), nil
-	case VStr:
-		return vbool(a.str == b.str), nil
-	case VChar:
-		return vbool(a.ch == b.ch), nil
-	case VPackage:
-		return vbool(a.pkg == b.pkg), nil
-	case VReadtable:
-		return vbool(a.readtable == b.readtable), nil
-	default:
-		return vbool(a == b), nil
-	}
-}
-
-func builtinEqualP(args []*Value) (*Value, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("equal?: need 2 arguments")
-	}
-	return vbool(eqVal(args[0], args[1])), nil
-}
-
-func builtinCopyStructure(args []*Value) (*Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("copy-structure: need an instance")
-	}
-	inst := args[0]
-	if inst.typ != VInstance {
-		return nil, fmt.Errorf("copy-structure: expected a structure instance, got %s", typeStr(inst))
-	}
-	newSlots := make(map[string]*Value, len(inst.instSlots))
-	for k, v := range inst.instSlots {
-		newSlots[k] = v // shallow copy of slots
-	}
-	result := gcv()
-	result.typ = VInstance
-	result.instClass = inst.instClass
-	result.instSlots = newSlots
-	return result, nil
 }
 
 func builtinCopyList(args []*Value) (*Value, error) {
@@ -1417,4 +922,190 @@ func builtinCopyAlist(args []*Value) (*Value, error) {
 		}
 	}
 	return result, nil
+}
+func builtinList(args []*Value) (*Value, error) {
+	return listFromSlice(args), nil
+}
+
+func builtinSetCdrAsSetter(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("setf (cdr): need 2 arguments")
+	}
+	val := args[0]
+	cons := args[1]
+	if !isPair(cons) {
+		return nil, fmt.Errorf("setf (cdr): not a pair")
+	}
+	cons.cdr = val
+	return val, nil
+}
+
+func builtinSetCarAsSetter(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("setf (car): need 2 arguments")
+	}
+	val := args[0]
+	cons := args[1]
+	if !isPair(cons) {
+		return nil, fmt.Errorf("setf (car): not a pair")
+	}
+	cons.car = val
+	return val, nil
+}
+
+func builtinSetCdr(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("set-cdr!: need pair and value")
+	}
+	if !isPair(args[0]) {
+		return nil, fmt.Errorf("set-cdr!: not a pair")
+	}
+	args[0].cdr = args[1]
+	return args[1], nil
+}
+
+func builtinSetCar(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("set-car!: need pair and value")
+	}
+	if !isPair(args[0]) {
+		return nil, fmt.Errorf("set-car!: not a pair")
+	}
+	args[0].car = args[1]
+	return args[1], nil
+}
+
+func builtinCdr(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("cdr: need 1 argument")
+	}
+	v := args[0]
+	if v != nil && v.typ == VMultiVal {
+		v = primaryValue(v)
+	}
+	if isNil(v) {
+		return vnil(), nil
+	}
+	if !isPair(v) {
+		return nil, fmt.Errorf("cdr: not a pair")
+	}
+	return v.cdr, nil
+}
+
+func builtinCar(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("car: need 1 argument")
+	}
+	v := args[0]
+	if v != nil && v.typ == VMultiVal {
+		return primaryValue(v), nil
+	}
+	if isNil(v) {
+		return vnil(), nil
+	}
+	if !isPair(v) {
+		return nil, fmt.Errorf("car: not a pair")
+	}
+	return v.car, nil
+}
+
+func builtinCons(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("cons: need 2 arguments")
+	}
+	return cons(args[0], args[1]), nil
+}
+func builtinPushnew(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("pushnew: need item and place")
+	}
+	item := args[0]
+	place := args[1]
+	testFn := vnil()
+	for i := 2; i < len(args); i++ {
+		if args[i].typ == VSym && args[i].str == ":TEST" && i+1 < len(args) {
+			testFn = args[i+1]
+			i++
+		}
+	}
+	if place.typ == VSym {
+		currentVal, err := globalEnv.Get(place.str)
+		if err != nil {
+			currentVal = vnil()
+		}
+		// Check if item already in list
+		for lst := currentVal; lst != nil && lst.typ == VPair; lst = lst.cdr {
+			if !isNil(testFn) {
+				res, err := callFnOnSeq(testFn, []*Value{item, lst.car}, globalEnv)
+				if err != nil {
+					return nil, err
+				}
+				if isTruthy(res) {
+					return currentVal, nil
+				}
+			} else {
+				if eqVal(item, lst.car) {
+					return currentVal, nil
+				}
+			}
+		}
+		newVal := cons(item, currentVal)
+		globalEnv.Set(place.str, newVal)
+		return newVal, nil
+	}
+	return nil, fmt.Errorf("pushnew: second argument must be a symbol")
+}
+
+func builtinPush(args []*Value) (*Value, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("push: need item and place")
+	}
+	item := args[0]
+	place := args[1]
+	if place.typ == VSym {
+		currentVal, err := globalEnv.Get(place.str)
+		if err != nil {
+			currentVal = vnil()
+		}
+		newVal := cons(item, currentVal)
+		globalEnv.Set(place.str, newVal)
+		return newVal, nil
+	}
+	return nil, fmt.Errorf("push: second argument must be a symbol")
+}
+
+func builtinNull(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return vbool(true), nil
+	}
+	return vbool(isNil(args[0])), nil
+}
+
+func builtinNthSetf(args []*Value) (*Value, error) {
+	if len(args) < 3 {
+		return nil, fmt.Errorf("setf (nth): need value, n, and list")
+	}
+	val := args[0]
+	n := args[1]
+	lst := args[2]
+	if n.typ != VNum {
+		return nil, fmt.Errorf("setf (nth): index must be a number")
+	}
+	idx := int(n.num)
+	if idx < 0 {
+		return nil, fmt.Errorf("setf (nth): index must be non-negative")
+	}
+	// Walk down to the nth element
+	target := lst
+	for i := 0; i < idx; i++ {
+		if !isPair(target) {
+			return nil, fmt.Errorf("setf (nth): index %d out of range", idx)
+		}
+		target = target.cdr
+	}
+	if !isPair(target) {
+		return nil, fmt.Errorf("setf (nth): index %d out of range", idx)
+	}
+	target.car = val
+	return val, nil
 }
