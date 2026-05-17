@@ -181,7 +181,7 @@ func TestDetectUTF16BEWithoutBOM(t *testing.T) {
 // --- East Asian encoding detection tests ---
 
 func TestDetectCharset_GBK(t *testing.T) {
-	// GBK encoded "测试 GBK 编码"
+	// GBK encoded text
 	gbkData := []byte{0xb2, 0xe2, 0xca, 0xd4, 0x20, 0x47, 0x42, 0x4b, 0x20, 0xb1, 0xe0, 0xc2, 0xeb}
 	encName, certain := DetectCharset(gbkData, "")
 	if encName != "gbk" {
@@ -199,7 +199,7 @@ func TestDetectCharset_GBK(t *testing.T) {
 }
 
 func TestDetectCharset_Big5(t *testing.T) {
-	// Big5 encoded "測試 Test"
+	// Big5 encoded text
 	big5Data := []byte{0xA6, 0x78, 0xB0, 0xE6, 0x20, 0x54, 0x65, 0x73, 0x74}
 	encName, _ := DetectCharset(big5Data, "")
 	if encName != "big5" {

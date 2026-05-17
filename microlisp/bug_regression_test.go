@@ -20,7 +20,7 @@ func eval(s string) (string, error) {
 // --- Type System & Predicates (Bugs #60, #61, #64, #65, #68, #114, #115, #131) ---
 
 func TestBug60_TypepVector(t *testing.T) {
-	// #60: typep 不识别字符串为 vector/array
+	// #60: typep does not recognize strings as vector/array
 	r, err := eval(`(and (typep "hello" 'vector) (typep "hello" 'array))`)
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestBug60_TypepVector(t *testing.T) {
 }
 
 func TestBug61_LogandRejectsFloat(t *testing.T) {
-	// #61: logand/logior/logxor 对非整数参数应报type-error
+	// #61: logand/logior/logxor should report type-error for non-integer arguments
 	_, err := eval(`(logior 3.0)`)
 	if err == nil {
 		t.Fatal("expected error for logior with float, got nil")
@@ -42,7 +42,7 @@ func TestBug61_LogandRejectsFloat(t *testing.T) {
 }
 
 func TestBug64_TypeOfReturnsUppercase(t *testing.T) {
-	// #64: type-of 返回大写类型名称而非 "unknown"
+	// #64: type-of returns uppercase type name instead of "unknown"
 	r, _ := eval(`(type-of #c(1 2))`)
 	if r != "COMPLEX" {
 		t.Fatalf("expected COMPLEX, got %s", r)
@@ -50,7 +50,7 @@ func TestBug64_TypeOfReturnsUppercase(t *testing.T) {
 }
 
 func TestBug68_IsNilRecognizesVNilSym(t *testing.T) {
-	// #68: isNil() 识别 VSym "NIL"
+	// #68: isNil() recognizes VSym "NIL"
 	r, err := eval(`(length '())`)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestBug68_IsNilRecognizesVNilSym(t *testing.T) {
 }
 
 func TestBug114_TypepDistinguishesFloat(t *testing.T) {
-	// #114: typep/ subtypep 的 INTEGER/FLOAT 区分尊重浮点标记
+	// #114: typep/subtypep INTEGER/FLOAT distinction respects float flag
 	r, err := eval(`(and (typep 1.0 'single-float) (not (typep 1.0 'integer)))`)
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestBug114_TypepDistinguishesFloat(t *testing.T) {
 }
 
 func TestBug115_TypeOfDistinguishesFloat(t *testing.T) {
-	// #115: type-of 对 isFloat VNum 返回 "single-float"
+	// #115: type-of returns "single-float" for isFloat VNum
 	r, err := eval(`(type-of 1.0)`)
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestBug115_TypeOfDistinguishesFloat(t *testing.T) {
 }
 
 func TestBug131_TypeOfReturnsUppercase(t *testing.T) {
-	// #131: typeStr 返回大写类型名称
+	// #131: typeStr returns uppercase type name
 	r, _ := eval(`(type-of 42)`)
 	if r != "INTEGER" {
 		t.Fatalf("expected INTEGER, got %s", r)
@@ -93,7 +93,7 @@ func TestBug131_TypeOfReturnsUppercase(t *testing.T) {
 // --- Arithmetic & Numeric (Bugs #37, #80, #90, #93, #112, #118, #119) ---
 
 func TestBug37_BigIntComparison(t *testing.T) {
-	// #37: 大整数比较不丢失精度
+	// #37: big integer comparison does not lose precision
 	r, err := eval(`(= (* (expt 2 60) 2) (expt 2 61))`)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestBug37_BigIntComparison(t *testing.T) {
 }
 
 func TestBug80_EqTypeCheck(t *testing.T) {
-	// #80: =/ /= 等数值比较对复数应报错或正确比较
+	// #80: =/ /= and other numeric comparisons should handle complex numbers correctly
 	r, _ := eval(`(/= 3 3.0)`)
 	if r != "#f" {
 		t.Fatalf("expected #f (3 equals 3.0 numerically), got %s", r)
@@ -112,7 +112,7 @@ func TestBug80_EqTypeCheck(t *testing.T) {
 }
 
 func TestBug90_RoundHalfToEven(t *testing.T) {
-	// #90: round 的 two-argument 形式使用 round-half-to-even
+	// #90: two-argument form of round uses round-half-to-even
 	r, _ := eval(`(round 2.5)`)
 	if !strings.Contains(r, "2") {
 		t.Fatalf("expected 2 (banker's rounding), got %s", r)
@@ -120,7 +120,7 @@ func TestBug90_RoundHalfToEven(t *testing.T) {
 }
 
 func TestBug93_ExptComplexInteger(t *testing.T) {
-	// #93: expt 对复数基底的整数指数幂正确计算
+	// #93: expt correctly computes integer powers of complex bases
 	r, _ := eval(`(expt #c(0 1) 2)`)
 	if !strings.Contains(r, "-1") {
 		t.Fatalf("expected -1 in result, got %s", r)
@@ -128,7 +128,7 @@ func TestBug93_ExptComplexInteger(t *testing.T) {
 }
 
 func TestBug112_ArithmeticPreservesFloat(t *testing.T) {
-	// #112: 算术运算传播浮点标记
+	// #112: arithmetic operations propagate float flag
 	r, _ := eval(`(+ 1 2.0)`)
 	if !strings.Contains(r, ".") {
 		t.Fatalf("expected float result for (+ 1 2.0), got %s", r)
@@ -136,7 +136,7 @@ func TestBug112_ArithmeticPreservesFloat(t *testing.T) {
 }
 
 func TestBug118_ComplexFloatDisplay(t *testing.T) {
-	// #118: 复数浮点显示不丢失 .0 后缀
+	// #118: complex float display does not lose .0 suffix
 	r, _ := eval(`(format nil "~s" (coerce 1 '(complex float)))`)
 	if !strings.Contains(r, "1.0") && !strings.Contains(r, "1") {
 		t.Fatalf("unexpected complex display: %s", r)
@@ -144,7 +144,7 @@ func TestBug118_ComplexFloatDisplay(t *testing.T) {
 }
 
 func TestBug119_CoerceComplexRational(t *testing.T) {
-	// #119: coerce 到 (complex rational) 产生复数
+	// #119: coerce to (complex rational) produces complex number
 	r, _ := eval(`(type-of (coerce 1/2 '(complex rational)))`)
 	if r != "COMPLEX" {
 		t.Fatalf("expected COMPLEX, got %s", r)
@@ -154,7 +154,7 @@ func TestBug119_CoerceComplexRational(t *testing.T) {
 // --- Coerce (Bugs #81-84, #102-104, #107, #110, #111, #223) ---
 
 func TestBug110_CoerceToFloat(t *testing.T) {
-	// #110: coerce 到 float 返回浮点数
+	// #110: coerce to float returns a float
 	r, _ := eval(`(floatp (coerce 1 'float))`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -162,7 +162,7 @@ func TestBug110_CoerceToFloat(t *testing.T) {
 }
 
 func TestBug111_ReaderDistinguishesFloat(t *testing.T) {
-	// #111: reader 区分整数和浮点数字面量
+	// #111: reader distinguishes integer and float literals
 	r1, _ := eval(`(type-of 1)`)
 	r2, _ := eval(`(type-of 1.0)`)
 	if r1 == r2 {
@@ -171,7 +171,7 @@ func TestBug111_ReaderDistinguishesFloat(t *testing.T) {
 }
 
 func TestBug102_CoerceCharacterFromSymbol(t *testing.T) {
-	// #102: coerce 的 character 类型支持符号设计符
+	// #102: coerce character type supports symbol designators
 	r, _ := eval(`(char= (coerce 'a 'character) #\A)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -179,7 +179,7 @@ func TestBug102_CoerceCharacterFromSymbol(t *testing.T) {
 }
 
 func TestBug104_CoerceSimpleVector(t *testing.T) {
-	// #104: coerce 支持 simple-vector 结果类型
+	// #104: coerce supports simple-vector result type
 	r, _ := eval(`(typep (coerce '(1 2 3) 'simple-vector) 'vector)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -187,7 +187,7 @@ func TestBug104_CoerceSimpleVector(t *testing.T) {
 }
 
 func TestBug107_CoerceComplexToList(t *testing.T) {
-	// #107: coerce 的 list 类型支持复数
+	// #107: coerce list type supports complex numbers
 	r, _ := eval(`(coerce #c(3 4) 'list)`)
 	if !strings.Contains(r, "3") || !strings.Contains(r, "4") {
 		t.Fatalf("expected (3 4), got %s", r)
@@ -195,7 +195,7 @@ func TestBug107_CoerceComplexToList(t *testing.T) {
 }
 
 func TestBug223_CoerceTypeSpecifiers(t *testing.T) {
-	// #223: coerce 识别 real/number/symbol 类型说明符
+	// #223: coerce recognizes real/number/symbol type specifiers
 	r, err := eval(`(coerce 3.14 'real)`)
 	if err != nil {
 		t.Fatalf("coerce to 'real should work, got error: %v", err)
@@ -208,7 +208,7 @@ func TestBug223_CoerceTypeSpecifiers(t *testing.T) {
 // --- Sequence Operations (Bugs #23, #24, #26, #27, #29, #30, #69, #75, #76, #77, #78, #83-89, #116, #147, #148, #212-215, #229-234) ---
 
 func TestBug23_SubseqString(t *testing.T) {
-	// #23: subseq 对字符串返回子字符串
+	// #23: subseq returns substring for strings
 	r, _ := eval(`(subseq "Hello World" 0 5)`)
 	if r != `"Hello"` {
 		t.Fatalf(`expected "Hello", got %s`, r)
@@ -216,7 +216,7 @@ func TestBug23_SubseqString(t *testing.T) {
 }
 
 func TestBug27_AssocReturnsNil(t *testing.T) {
-	// #27: assoc 找不到时返回 nil 而非 #f
+	// #27: assoc returns nil instead of #f when not found
 	r, _ := eval(`(assoc 'z '((a . 1) (b . 2)))`)
 	if r != "NIL" && r != "()" {
 		t.Fatalf("expected NIL or (), got %s", r)
@@ -224,7 +224,7 @@ func TestBug27_AssocReturnsNil(t *testing.T) {
 }
 
 func TestBug30_Mapcon(t *testing.T) {
-	// #30: mapcon 返回正确结果
+	// #30: mapcon returns correct result
 	r, _ := eval(`(mapcon #'copy-list '((1 2) (3 4)))`)
 	if !strings.Contains(r, "1") || !strings.Contains(r, "2") || !strings.Contains(r, "3") || !strings.Contains(r, "4") {
 		t.Fatalf("unexpected mapcon result: %s", r)
@@ -232,7 +232,7 @@ func TestBug30_Mapcon(t *testing.T) {
 }
 
 func TestBug69_SubseqVector(t *testing.T) {
-	// #231: subseq 对 VArray 返回向量
+	// #231: subseq returns vector for VArray
 	r, _ := eval(`(typep (subseq #(1 2 3 4 5) 1 3) 'vector)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -240,7 +240,7 @@ func TestBug69_SubseqVector(t *testing.T) {
 }
 
 func TestBug229_ReplaceModifiesInPlace(t *testing.T) {
-	// #229: replace 就地修改目标
+	// #229: replace modifies target in place
 	r, _ := eval(`
 		(let ((v (make-array 3 :initial-contents '(1 2 3))))
 		  (replace v #(4 5 6))
@@ -252,7 +252,7 @@ func TestBug229_ReplaceModifiesInPlace(t *testing.T) {
 }
 
 func TestBug233_ConcatenateVector(t *testing.T) {
-	// #233: concatenate 'vector 返回向量
+	// #233: concatenate 'vector returns a vector
 	r, _ := eval(`(typep (concatenate 'vector '(1 2) '(3 4)) 'vector)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -260,7 +260,7 @@ func TestBug233_ConcatenateVector(t *testing.T) {
 }
 
 func TestBug214_GetPropertiesOrder(t *testing.T) {
-	// #214: get-properties 返回 (values indicator value tail)
+	// #214: get-properties returns (values indicator value tail)
 	r, _ := eval(`
 		(let ((p '(:a 1 :b 2)))
 		  (multiple-value-bind (ind val tail) (get-properties p '(:a))
@@ -272,7 +272,7 @@ func TestBug214_GetPropertiesOrder(t *testing.T) {
 }
 
 func TestBug215_FillModifiesVector(t *testing.T) {
-	// #215: fill 就地修改向量
+	// #215: fill modifies vector in place
 	r, _ := eval(`
 		(let ((v #(1 2 3 4 5)))
 		  (fill v 0)
@@ -286,7 +286,7 @@ func TestBug215_FillModifiesVector(t *testing.T) {
 // --- Strings & Characters (Bugs #100, #103, #117, #244-247) ---
 
 func TestBug100_Character(t *testing.T) {
-	// #100: character 函数返回字符
+	// #100: character function returns a character
 	r, _ := eval(`(character #\A)`)
 	if r != "#\\A" {
 		t.Fatalf("expected #\\A, got %s", r)
@@ -294,7 +294,7 @@ func TestBug100_Character(t *testing.T) {
 }
 
 func TestBug117_CharNameRubout(t *testing.T) {
-	// #117: char-name 对 (code-char 127) 返回 "Rubout"
+	// #117: char-name returns "Rubout" for (code-char 127)
 	r, _ := eval(`(char-name (code-char 127))`)
 	if !strings.Contains(strings.ToLower(r), "rubout") {
 		t.Fatalf("expected Rubout, got %s", r)
@@ -302,7 +302,7 @@ func TestBug117_CharNameRubout(t *testing.T) {
 }
 
 func TestBug244_CharNotEq(t *testing.T) {
-	// #244: char/= 检查所有字符对
+	// #244: char/= checks all character pairs
 	r, _ := eval(`(char/= #\a #\b #\c #\b)`)
 	if r != "#f" {
 		t.Fatalf("expected #f (b appears twice), got %s", r)
@@ -310,7 +310,7 @@ func TestBug244_CharNotEq(t *testing.T) {
 }
 
 func TestBug246_CharEqual(t *testing.T) {
-	// #246: char-equal 支持多参数
+	// #246: char-equal supports multi-argument
 	r, _ := eval(`(char-equal #\a #\A #\b)`)
 	if r != "#f" {
 		t.Fatalf("expected #f, got %s", r)
@@ -320,7 +320,7 @@ func TestBug246_CharEqual(t *testing.T) {
 // --- Macros & Backquote (Bugs #43, #44, #92, #123-126, #162) ---
 
 func TestBug43_44_DoubleBackquote(t *testing.T) {
-	// #43/#44: 双反引号嵌套求值正确
+	// #43/#44: double backquote nesting evaluates correctly
 	r, _ := eval("(let ((x 5)) ``(+ ,,x ,x))")
 	if !strings.Contains(r, "+") {
 		t.Fatalf("unexpected double backquote result: %s", r)
@@ -328,7 +328,7 @@ func TestBug43_44_DoubleBackquote(t *testing.T) {
 }
 
 func TestBug92_EvalQuasiquoteCaseInsensitive(t *testing.T) {
-	// #92: evalQuasiquote 对 UNQUOTE 大小写不敏感
+	// #92: evalQuasiquote is case-insensitive for UNQUOTE
 	r, _ := eval("(let ((x 42)) `(,x))")
 	if !strings.Contains(r, "42") {
 		t.Fatalf("expected 42 in result, got %s", r)
@@ -336,7 +336,7 @@ func TestBug92_EvalQuasiquoteCaseInsensitive(t *testing.T) {
 }
 
 func TestBug123_MacroexpandBackquote(t *testing.T) {
-	// #123: macroexpand 对 backquote 返回代码形式
+	// #123: macroexpand returns code form for backquote
 	r, _ := eval("(macroexpand '`(a ,b))")
 	// macroexpand returns a value; check non-empty (macro expansion may vary)
 	if r == "" {
@@ -347,7 +347,7 @@ func TestBug123_MacroexpandBackquote(t *testing.T) {
 // --- CLOS (Bugs #14, #22, #151, #155, #248, #249, #252, #253) ---
 
 func TestBug14_EQLSpecializer(t *testing.T) {
-	// #14: EQL specializer 分发
+	// #14: EQL specializer dispatch
 	r, _ := eval(`
 		(defclass animal () ())
 		(defclass dog (animal) ())
@@ -378,7 +378,7 @@ func TestBug151_MethodCombination(t *testing.T) {
 }
 
 func TestBug155_MethodSpecificity(t *testing.T) {
-	// #155: 方法特化优先级
+	// #155: method specialization priority
 	r, _ := eval(`
 		(defgeneric describe-val (x))
 		(defmethod describe-val ((x integer)) "integer")
@@ -391,7 +391,7 @@ func TestBug155_MethodSpecificity(t *testing.T) {
 }
 
 func TestBug248_EnsureGenericFunction(t *testing.T) {
-	// #248: ensure-generic-function 存在
+	// #248: ensure-generic-function exists
 	r, _ := eval(`
 		(ensure-generic-function 'test-generic)
 		(fboundp 'test-generic)
@@ -402,7 +402,7 @@ func TestBug248_EnsureGenericFunction(t *testing.T) {
 }
 
 func TestBug252_ClassOf(t *testing.T) {
-	// #252: class-of 返回类对象
+	// #252: class-of returns class object
 	r, _ := eval(`
 		(defclass my-class () ())
 		(type-of (class-of (make-instance 'my-class)))
@@ -415,7 +415,7 @@ func TestBug252_ClassOf(t *testing.T) {
 // --- Format (Bugs #74, #141, #142, #143, #158, #165, #204, #209, #210, #240, #251) ---
 
 func TestBug141_FormatFAddsDecimal(t *testing.T) {
-	// #141: format ~f 对整数添加 .0
+	// #141: format ~f adds .0 for integers
 	r, _ := eval(`(format nil "~f" 42)`)
 	if !strings.Contains(r, ".") {
 		t.Fatalf("expected decimal in format ~f 42, got %s", r)
@@ -423,7 +423,7 @@ func TestBug141_FormatFAddsDecimal(t *testing.T) {
 }
 
 func TestBug142_FormatC(t *testing.T) {
-	// #142: format ~c 打印字符本身
+	// #142: format ~c prints the character itself
 	r, _ := eval(`(format nil "~c" #\A)`)
 	if !strings.Contains(r, "A") {
 		t.Fatalf(`expected "A" in output, got %s`, r)
@@ -431,7 +431,7 @@ func TestBug142_FormatC(t *testing.T) {
 }
 
 func TestBug143_FormatPercentRepeat(t *testing.T) {
-	// #143: format ~3% 产生3个换行
+	// #143: format ~3% produces 3 newlines
 	r, _ := eval(`(length (format nil "~3%"))`)
 	if r != "3" {
 		t.Fatalf("expected 3, got %s", r)
@@ -439,7 +439,7 @@ func TestBug143_FormatPercentRepeat(t *testing.T) {
 }
 
 func TestBug240_FormatBaseR(t *testing.T) {
-	// #240: format ~nR 支持基数参数
+	// #240: format ~nR supports radix parameter
 	r, _ := eval(`(format nil "~2R" 5)`)
 	if !strings.Contains(r, "101") {
 		t.Fatalf("expected 101, got %s", r)
@@ -447,7 +447,7 @@ func TestBug240_FormatBaseR(t *testing.T) {
 }
 
 func TestBug251_FormatAtQ(t *testing.T) {
-	// #251: format ~@? 递归处理变体
+	// #251: format ~@? recursive processing variant
 	r, _ := eval(`(format nil "~@? ~A" "~A ~A" 1 2 3)`)
 	if !strings.Contains(r, "1") || !strings.Contains(r, "2") {
 		t.Fatalf("unexpected ~@? result: %s", r)
@@ -457,7 +457,7 @@ func TestBug251_FormatAtQ(t *testing.T) {
 // --- Destructuring & Setf (Bugs #36, #39, #62, #73, #98, #99, #163, #239) ---
 
 func TestBug36_DestructuringRest(t *testing.T) {
-	// #36: destructuring-bind 支持 &rest
+	// #36: destructuring-bind supports &rest
 	r, _ := eval(`
 		(destructuring-bind (a &rest rest) '(1 2 3 4)
 		  (list a rest))
@@ -468,7 +468,7 @@ func TestBug36_DestructuringRest(t *testing.T) {
 }
 
 func TestBug98_DestructuringKeySupplied(t *testing.T) {
-	// #98: destructuring-bind 的 &key 支持 supplied-p
+	// #98: destructuring-bind &key supports supplied-p
 	r, _ := eval(`
 			(destructuring-bind (&key (x 99 x-p)) ()
 			  (list x x-p))
@@ -491,7 +491,7 @@ func TestBug62_SetfValues(t *testing.T) {
 }
 
 func TestBug239_SetfSymbolValue(t *testing.T) {
-	// #239: setf (symbol-value sym) 生效
+	// #239: setf (symbol-value sym) takes effect
 	r, _ := eval(`
 		(defvar sym-val 10)
 		(setf (symbol-value 'sym-val) 42)
@@ -505,7 +505,7 @@ func TestBug239_SetfSymbolValue(t *testing.T) {
 // --- Ignore-errors & Multi-values (Bugs #35, #54, #55, #79, #146) ---
 
 func TestBug35_35_IgnoreErrorsMultiVal(t *testing.T) {
-	// #35: ignore-errors 返回 (values nil condition)
+	// #35: ignore-errors returns (values nil condition)
 	r, _ := eval(`
 		(ignore-errors (/ 1 0))
 	`)
@@ -515,7 +515,7 @@ func TestBug35_35_IgnoreErrorsMultiVal(t *testing.T) {
 }
 
 func TestBug55_NthValue(t *testing.T) {
-	// #55: nth-value 从 VMultiVal 正确提取
+	// #55: nth-value correctly extracts from VMultiVal
 	r, _ := eval(`(nth-value 1 (values 10 20 30))`)
 	if r != "20" {
 		t.Fatalf("expected 20, got %s", r)
@@ -523,7 +523,7 @@ func TestBug55_NthValue(t *testing.T) {
 }
 
 func TestBug79_FloorMultiVal(t *testing.T) {
-	// #79: floor 返回 VMultiVal 而非 list
+	// #79: floor returns VMultiVal instead of list
 	r, _ := eval(`(floor 7 3)`)
 	if !strings.Contains(r, "2") {
 		t.Fatalf("expected 2 in floor result, got %s", r)
@@ -531,7 +531,7 @@ func TestBug79_FloorMultiVal(t *testing.T) {
 }
 
 func TestBug146_IgnoreErrorsSuccess(t *testing.T) {
-	// #146: ignore-errors 成功时返回 (values result nil)
+	// #146: ignore-errors returns (values result nil) on success
 	r, _ := eval(`
 		(multiple-value-bind (val err) (ignore-errors (+ 1 2))
 		  (list val err))
@@ -544,7 +544,7 @@ func TestBug146_IgnoreErrorsSuccess(t *testing.T) {
 // --- Hash Tables (Bugs #149, #168, #169) ---
 
 func TestBug149_GethashMultiVal(t *testing.T) {
-	// #149: gethash 返回 (values value present-p) 双值
+	// #149: gethash returns (values value present-p) two values
 	r, _ := eval(`
 			(let ((ht (make-hash-table)))
 			  (setf (gethash "key" ht) "val")
@@ -557,7 +557,7 @@ func TestBug149_GethashMultiVal(t *testing.T) {
 }
 
 func TestBug168_HashTableSize(t *testing.T) {
-	// #168: hash-table-size 返回桶数量
+	// #168: hash-table-size returns number of buckets
 	r, _ := eval(`(type-of (hash-table-size (make-hash-table)))`)
 	if r != "NUMBER" && r != "number" && r != "INTEGER" && r != "integer" {
 		t.Fatalf("expected number, got %s", r)
@@ -565,7 +565,7 @@ func TestBug168_HashTableSize(t *testing.T) {
 }
 
 func TestBug169_HashTableRehashThreshold(t *testing.T) {
-	// #169: hash-table-rehash-threshold 存在
+	// #169: hash-table-rehash-threshold exists
 	r, _ := eval(`(hash-table-rehash-threshold (make-hash-table))`)
 	if r == "" {
 		t.Fatal("hash-table-rehash-threshold returned empty")
@@ -575,7 +575,7 @@ func TestBug169_HashTableRehashThreshold(t *testing.T) {
 // --- Conditions & Restarts (Bugs #137, #138, #139, #140, #167, #174) ---
 
 func TestBug137_MakeConditionInitform(t *testing.T) {
-	// #137: make-condition 评估 :initform
+	// #137: make-condition evaluates :initform
 	r, _ := eval(`
 		(define-condition test-cond (error) ((msg :initform "default" :accessor test-msg)))
 		(princ-to-string (make-condition 'test-cond))
@@ -586,7 +586,7 @@ func TestBug137_MakeConditionInitform(t *testing.T) {
 }
 
 func TestBug138_PrincToStringCondition(t *testing.T) {
-	// #138: princ-to-string 对条件实例返回格式化消息
+	// #138: princ-to-string returns formatted message for condition instance
 	r, _ := eval(`(princ-to-string (make-condition 'simple-error :message "test error"))`)
 	if !strings.Contains(r, "test error") && !strings.Contains(r, "SIMPLE-ERROR") {
 		t.Fatalf("expected condition output, got %s", r)
@@ -594,7 +594,7 @@ func TestBug138_PrincToStringCondition(t *testing.T) {
 }
 
 func TestBug140_ConditionAccessors(t *testing.T) {
-	// #140: type-error-datum/type-error-expected-type 存在
+	// #140: type-error-datum/type-error-expected-type exist
 	r, _ := eval(`
 		(handler-case (type-error-datum (make-condition 'type-error :datum 42 :expected-type 'string))
 		  (error (c) "error"))
@@ -607,7 +607,7 @@ func TestBug140_ConditionAccessors(t *testing.T) {
 // --- Loop (Bugs #28, #29, #78) ---
 
 func TestBug28_LoopForOn(t *testing.T) {
-	// #28: loop 的 for x on ... 不无限循环
+	// #28: loop for x on ... does not loop infinitely
 	r, _ := eval(`(loop for x on '(1 2 3) collect x)`)
 	if !strings.Contains(r, "1") || !strings.Contains(r, "2") || !strings.Contains(r, "3") {
 		t.Fatalf("unexpected loop on result: %s", r)
@@ -615,7 +615,7 @@ func TestBug28_LoopForOn(t *testing.T) {
 }
 
 func TestBug29_LoopWith(t *testing.T) {
-	// #29: loop 的 with x = value 子句正确解析
+	// #29: loop with x = value clause parses correctly
 	r, _ := eval(`(loop with x = 10 for i from 1 to 3 collect (+ x i))`)
 	if !strings.Contains(r, "11") || !strings.Contains(r, "12") || !strings.Contains(r, "13") {
 		t.Fatalf("unexpected loop with result: %s", r)
@@ -623,7 +623,7 @@ func TestBug29_LoopWith(t *testing.T) {
 }
 
 func TestBug78_ButlastDottedList(t *testing.T) {
-	// #78: butlast 对点状列表处理正确
+	// #78: butlast handles dotted lists correctly
 	r, _ := eval(`(butlast '(1 2 3 . 4) 1)`)
 	if !strings.Contains(r, "1") || !strings.Contains(r, "2") {
 		t.Fatalf("unexpected butlast result: %s", r)
@@ -637,7 +637,7 @@ func TestBug78_ButlastDottedList(t *testing.T) {
 // --- Readtable & Reader (Bugs #33, #66, #96) ---
 
 func TestBug33_SubtypepMultiVal(t *testing.T) {
-	// #33: subtypep 返回 VMultiVal 而非 list
+	// #33: subtypep returns VMultiVal instead of list
 	r, _ := eval(`(subtypep 'integer 'number)`)
 	if !strings.Contains(r, "T") && !strings.Contains(r, "t") {
 		t.Fatalf("expected true, got %s", r)
@@ -647,7 +647,7 @@ func TestBug33_SubtypepMultiVal(t *testing.T) {
 // --- Package & Symbol (Bugs #15, #16, #17, #18, #225, #256) ---
 
 func TestBug16_CLUserPackage(t *testing.T) {
-	// #16: CL-USER 包存在
+	// #16: CL-USER package exists
 	r, _ := eval(`(find-package "CL-USER")`)
 	if r == "NIL" || r == "()" {
 		t.Fatal("CL-USER package not found")
@@ -655,7 +655,7 @@ func TestBug16_CLUserPackage(t *testing.T) {
 }
 
 func TestBug18_CLName(t *testing.T) {
-	// #18: cl:NAME 包限定符号可解析
+	// #18: cl:NAME package-qualified symbol is resolvable
 	r, _ := eval(`(fboundp 'cl:car)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -663,7 +663,7 @@ func TestBug18_CLName(t *testing.T) {
 }
 
 func TestBug225_StringToSymbolUppercase(t *testing.T) {
-	// #225: string->symbol 将字符串转为大写
+	// #225: string->symbol converts string to uppercase
 	r, _ := eval(`(symbol-name (string->symbol "my-var"))`)
 	if !strings.Contains(r, "MY-VAR") {
 		t.Fatalf("expected MY-VAR, got %s", r)
@@ -671,7 +671,7 @@ func TestBug225_StringToSymbolUppercase(t *testing.T) {
 }
 
 func TestBug256_InternUppercase(t *testing.T) {
-	// #256: intern/find-symbol 对字符串参数大写化
+	// #256: intern/find-symbol uppercases string argument
 	r, _ := eval(`
 		(intern "my-symbol")
 		(find-symbol "MY-SYMBOL")
@@ -684,7 +684,7 @@ func TestBug256_InternUppercase(t *testing.T) {
 // --- Array (Bugs #94, #150, #154, #206, #231) ---
 
 func TestBug154_MakeArrayInitialContentsVector(t *testing.T) {
-	// #154: make-array 对向量 :initial-contents 正确处理
+	// #154: make-array handles :initial-contents for vectors correctly
 	r, _ := eval(`(aref (make-array 3 :initial-contents #(10 20 30)) 1)`)
 	if r != "20" {
 		t.Fatalf("expected 20, got %s", r)
@@ -692,7 +692,7 @@ func TestBug154_MakeArrayInitialContentsVector(t *testing.T) {
 }
 
 func TestBug150_ArrayFunctions(t *testing.T) {
-	// #150: array-has-fill-pointer-p/adjustable-array-p 存在
+	// #150: array-has-fill-pointer-p/adjustable-array-p exist
 	r, _ := eval(`
 			(let ((v (make-array 5 :fill-pointer 3 :adjustable t)))
 			  (list (array-has-fill-pointer-p v) (adjustable-array-p v)))
@@ -703,7 +703,7 @@ func TestBug150_ArrayFunctions(t *testing.T) {
 }
 
 func TestBug206_ArrayElementType(t *testing.T) {
-	// #206: array-element-type 返回实际元素类型
+	// #206: array-element-type returns actual element type
 	r, _ := eval(`(array-element-type "hello")`)
 	if !strings.Contains(r, "CHARACTER") {
 		t.Fatalf("expected CHARACTER, got %s", r)
@@ -713,7 +713,7 @@ func TestBug206_ArrayElementType(t *testing.T) {
 // --- Float Introspection (Bugs #207, #217) ---
 
 func TestBug207_DecodeFloat(t *testing.T) {
-	// #207: decode-float 返回多值
+	// #207: decode-float returns multiple values
 	r, _ := eval(`
 			(multiple-value-bind (sig exp sign) (decode-float 1.5)
 			  (list sig exp sign))
@@ -724,7 +724,7 @@ func TestBug207_DecodeFloat(t *testing.T) {
 }
 
 func TestBug217_Ffloor(t *testing.T) {
-	// #217: ffloor 返回浮点数
+	// #217: ffloor returns a float
 	r, _ := eval(`(ffloor 7.5)`)
 	if !strings.Contains(r, ".") {
 		t.Fatalf("expected float result for ffloor, got %s", r)
@@ -734,7 +734,7 @@ func TestBug217_Ffloor(t *testing.T) {
 // --- Bit Operations (Bugs #205, #234) ---
 
 func TestBug205_BitOps(t *testing.T) {
-	// #205: lognand/lognor/logandc1/logandc2/logorc1/logorc2 存在
+	// #205: lognand/lognor/logandc1/logandc2/logorc1/logorc2 exist
 	r, _ := eval(`(lognand #b1100 #b1010)`)
 	if r == "" {
 		t.Fatal("lognand returned empty")
@@ -742,7 +742,7 @@ func TestBug205_BitOps(t *testing.T) {
 }
 
 func TestBug234_BitAndc(t *testing.T) {
-	// #234: bit-andc1/bit-andc2 存在
+	// #234: bit-andc1/bit-andc2 exist
 	r, _ := eval(`(bit-andc1 #*1100 #*1010)`)
 	if r == "" {
 		t.Fatal("bit-andc1 returned empty")
@@ -752,7 +752,7 @@ func TestBug234_BitAndc(t *testing.T) {
 // --- Environment (Bugs #224) ---
 
 func TestBug224_VariableInformation(t *testing.T) {
-	// #224: variable-information 存在
+	// #224: variable-information exists
 	r, _ := eval(`(variable-information 'car)`)
 	if r == "" {
 		t.Fatal("variable-information returned empty")
@@ -762,7 +762,7 @@ func TestBug224_VariableInformation(t *testing.T) {
 // --- Stream & I/O (Bugs #171, #175, #192-193) ---
 
 func TestBug171_StreamPredicates(t *testing.T) {
-	// #171: open-stream-p/stream-element-type 存在
+	// #171: open-stream-p/stream-element-type exist
 	r, _ := eval(`(open-stream-p *standard-output*)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -770,7 +770,7 @@ func TestBug171_StreamPredicates(t *testing.T) {
 }
 
 func TestBug175_StandardInput(t *testing.T) {
-	// #175: *standard-input*/*error-output* 等绑定
+	// #175: *standard-input*/*error-output* etc. are bound
 	r, _ := eval(`(boundp '*standard-input*)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -780,7 +780,7 @@ func TestBug175_StandardInput(t *testing.T) {
 // --- Pathnames (Bugs #222) ---
 
 func TestBug222_TranslatePathname(t *testing.T) {
-	// #222: translate-pathname 存在
+	// #222: translate-pathname exists
 	r, _ := eval(`(translate-pathname "foo.txt" "*.txt" "*.lisp")`)
 	if r == "" {
 		t.Fatal("translate-pathname returned empty")
@@ -790,7 +790,7 @@ func TestBug222_TranslatePathname(t *testing.T) {
 // --- Misc (Bugs #41, #42, #50, #52, #56, #57, #58, #59, #63, #67, #105, #106, #108) ---
 
 func TestBug41_BlockNilName(t *testing.T) {
-	// #41: block/return-from 接受 nil 作为块名
+	// #41: block/return-from accepts nil as block name
 	r, _ := eval(`(block nil (return-from nil 42))`)
 	if !strings.Contains(r, "42") {
 		t.Fatalf("expected 42 in result, got %s", r)
@@ -798,7 +798,7 @@ func TestBug41_BlockNilName(t *testing.T) {
 }
 
 func TestBug42_EqNil(t *testing.T) {
-	// #42: eq/equal 将 nil 符号和 VNil 视为相等
+	// #42: eq/equal treats nil symbol and VNil as equal
 	r, _ := eval(`(eq nil 'nil)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -806,7 +806,7 @@ func TestBug42_EqNil(t *testing.T) {
 }
 
 func TestBug57_DeleteDuplicatesValueEq(t *testing.T) {
-	// #57: delete-duplicates 使用值相等
+	// #57: delete-duplicates uses value equality
 	r, _ := eval(`(delete-duplicates '(1 2 1 3 2))`)
 	if !strings.Contains(r, "1") || !strings.Contains(r, "2") || !strings.Contains(r, "3") {
 		t.Fatalf("unexpected delete-duplicates result: %s", r)
@@ -819,7 +819,7 @@ func TestBug57_DeleteDuplicatesValueEq(t *testing.T) {
 }
 
 func TestBug59_CoerceVector(t *testing.T) {
-	// #59: coerce 支持 'vector 和 'array 结果类型
+	// #59: coerce supports 'vector and 'array result types
 	r, _ := eval(`(typep (coerce '(1 2 3) 'vector) 'vector)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -827,7 +827,7 @@ func TestBug59_CoerceVector(t *testing.T) {
 }
 
 func TestBug63_CharNameC1Control(t *testing.T) {
-	// #63: char-name 对 C1 控制字符返回名称
+	// #63: char-name returns name for C1 control characters
 	r, _ := eval(`(char-name (code-char 128))`)
 	if r == "" {
 		t.Fatal("char-name for C1 control returned empty")
@@ -835,7 +835,7 @@ func TestBug63_CharNameC1Control(t *testing.T) {
 }
 
 func TestBug67_SetqUpdatesGlobal(t *testing.T) {
-	// #67: set!/setq 更新 globalEnv 中的全局变量
+	// #67: set!/setq updates global variable in globalEnv
 	r, _ := eval(`
 		(defvar global-test 10)
 		(setq global-test 20)
@@ -847,7 +847,7 @@ func TestBug67_SetqUpdatesGlobal(t *testing.T) {
 }
 
 func TestBug105_IncfEvalDelta(t *testing.T) {
-	// #105: incf 带 delta 表达式时先求值 delta
+	// #105: incf with delta expression evaluates delta first
 	r, _ := eval(`
 		(let ((x 1))
 		  (flet ((d () (setf x (* 2 x))))
@@ -860,7 +860,7 @@ func TestBug105_IncfEvalDelta(t *testing.T) {
 }
 
 func TestBug106_HandlerCaseCaseInsensitive(t *testing.T) {
-	// #106: handler-case 条件类型匹配大小写不敏感
+	// #106: handler-case condition type matching is case-insensitive
 	r, _ := eval(`
 		(handler-case (error "test")
 		  (error (c) "caught"))
@@ -871,7 +871,7 @@ func TestBug106_HandlerCaseCaseInsensitive(t *testing.T) {
 }
 
 func TestBug108_PiConstant(t *testing.T) {
-	// #108: pi 常量存在
+	// #108: pi constant exists
 	r, _ := eval(`(> pi 3)`)
 	if r != "#t" {
 		t.Fatalf("expected #t, got %s", r)
@@ -879,7 +879,7 @@ func TestBug108_PiConstant(t *testing.T) {
 }
 
 func TestBug124_SxhashQuality(t *testing.T) {
-	// #124: sxhash 对不同列表返回不同哈希值
+	// #124: sxhash returns different hashes for different lists
 	r, _ := eval(`(not (= (sxhash '(1 2 3)) (sxhash '(3 2 1))))`)
 	if r != "#t" {
 		t.Fatalf("expected #t (different hashes), got %s", r)
@@ -887,7 +887,7 @@ func TestBug124_SxhashQuality(t *testing.T) {
 }
 
 func TestBug127_RandomBigLimit(t *testing.T) {
-	// #127: random 对大值不报错
+	// #127: random does not error for large values
 	r, _ := eval(`(random 1000000)`)
 	if r == "" {
 		t.Fatal("random for large value returned empty")
@@ -895,7 +895,7 @@ func TestBug127_RandomBigLimit(t *testing.T) {
 }
 
 func TestBug130_SharpDot(t *testing.T) {
-	// #130: #. (sharp-dot) 读者宏
+	// #130: #. (sharp-dot) reader macro
 	r, err := eval(`(let ((x 42)) #.x)`)
 	if err != nil || r == "" {
 		t.Skipf("#. reader macro not fully supported: err=%v result=%q", err, r)
@@ -906,7 +906,7 @@ func TestBug130_SharpDot(t *testing.T) {
 }
 
 func TestBug212_ButlastNoDottedTail(t *testing.T) {
-	// #212: butlast 对点状列表 n > 0 不保留尾部
+	// #212: butlast on dotted list with n > 0 does not retain tail
 	r, _ := eval(`(butlast '(1 2 3 . 4) 1)`)
 	if strings.Contains(r, ".") {
 		t.Fatalf("butlast should return proper list, got %s", r)
@@ -914,7 +914,7 @@ func TestBug212_ButlastNoDottedTail(t *testing.T) {
 }
 
 func TestBug238_FormatToStream(t *testing.T) {
-	// #238: format 写入字符串输出流
+	// #238: format writes to string output stream
 	r, _ := eval(`
 		(let ((s (make-string-output-stream)))
 		  (format s "hello")
@@ -926,7 +926,7 @@ func TestBug238_FormatToStream(t *testing.T) {
 }
 
 func TestBug243_FormatBigIntBase(t *testing.T) {
-	// #243: formatBigIntBase 支持任意基数
+	// #243: formatBigIntBase supports arbitrary radix
 	r, _ := eval(`(format nil "~5R" 42)`)
 	if !strings.Contains(r, "132") {
 		t.Fatalf("expected 132 (42 in base 5), got %s", r)
@@ -934,7 +934,7 @@ func TestBug243_FormatBigIntBase(t *testing.T) {
 }
 
 func TestBug250_NsubstituteIfNotDestructive(t *testing.T) {
-	// #250: nsubstitute-if-not 就地修改
+	// #250: nsubstitute-if-not modifies in place
 	r, _ := eval(`
 		(let ((v #(1 2 3 4 5)))
 		  (nsubstitute-if-not 0 #'evenp v)
@@ -946,7 +946,7 @@ func TestBug250_NsubstituteIfNotDestructive(t *testing.T) {
 }
 
 func TestBug254_AssocEmptyList(t *testing.T) {
-	// #254: assoc 在空列表或未找到时返回 ()
+	// #254: assoc returns () for empty list or when not found
 	r, _ := eval(`(assoc 'z '())`)
 	if r != "NIL" && r != "()" && r != "#f" {
 		t.Fatalf("expected NIL, got %s", r)

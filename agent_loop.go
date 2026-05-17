@@ -4662,7 +4662,7 @@ func (a *AgentLoop) InjectRunningAgentStatus() {
 }
 
 // tryCompaction attempts LLM-driven compaction, falling back to truncation.
-// When session memory exists and has content, uses SM-compact (免 API 压缩)
+// When session memory exists and has content, uses SM-compact (API-free compaction)
 // to skip the LLM call and use session memory as the summary directly.
 func (a *AgentLoop) tryCompaction() {
 	// Phase 0: Micro-compact — clear old tool results (cheap, no LLM call)

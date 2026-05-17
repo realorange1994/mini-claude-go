@@ -343,7 +343,7 @@ func TestSearchCompilesRegexCorrectly(t *testing.T) {
 }
 
 // ─── Regression: count mode must output path:count, NOT path:lineNum:content ─
-// Bug 2: output_mode: count was returning 文件:行号:内容 format instead of
+// Bug 2: output_mode: count was returning path:lineNum:content format instead of
 // pure path:count format matching ripgrep --count.
 
 func TestCountModeOutputFormat(t *testing.T) {

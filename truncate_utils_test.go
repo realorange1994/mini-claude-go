@@ -27,7 +27,7 @@ func TestStringWidthEmpty(t *testing.T) {
 }
 
 func TestStringWidthMixed(t *testing.T) {
-	// "hi你好" = 2 + 4 = 6
+	// "hi" + 2 CJK chars = 2 + 4 = 6
 	if stringWidth("hi\u4f60\u597d") != 6 {
 		t.Errorf("expected width 6, got %d", stringWidth("hi\u4f60\u597d"))
 	}
@@ -86,7 +86,7 @@ func TestTruncateToWidthEmptyString(t *testing.T) {
 }
 
 func TestTruncateToWidthMixedCJK(t *testing.T) {
-	// "ab你好cd" has width 2+4+2=8, truncate to 5
+	// "ab" + 2 CJK chars + "cd" has width 2+4+2=8, truncate to 5
 	result := truncateToWidth("ab\u4f60\u597dcd", 5)
 	if !strings.HasSuffix(result, "\u2026") {
 		t.Errorf("expected ellipsis, got %q", result)
@@ -322,7 +322,7 @@ func TestTruncateStartToWidthIdempotent(t *testing.T) {
 // ─── Ported from upstream truncate.test.ts: CJK/emoji boundary tests ───────
 
 func TestTruncateToWidthCJKExactBoundaryUpstream(t *testing.T) {
-	// Upstream: truncateToWidth("你好世界", 4) => "你…" (CJK chars take 2 width each)
+	// Upstream: truncateToWidth with 4 CJK chars, width 4 => preserves 1 char + ellipsis
 	result := truncateToWidth("你好世界", 4)
 	if !strings.HasSuffix(result, "\u2026") {
 		t.Errorf("expected truncation at CJK boundary, got %q", result)
@@ -334,7 +334,7 @@ func TestTruncateToWidthCJKExactBoundaryUpstream(t *testing.T) {
 }
 
 func TestTruncateToWidthCJKPreservesChars(t *testing.T) {
-	// Upstream: truncateToWidth("你好世界", 6) => "你好…" (preserves full CJK chars)
+	// Upstream: truncateToWidth with 4 CJK chars, width 6 => preserves 2 chars + ellipsis
 	result := truncateToWidth("你好世界", 6)
 	if !strings.HasSuffix(result, "\u2026") {
 		t.Errorf("expected truncation, got %q", result)
@@ -345,7 +345,7 @@ func TestTruncateToWidthCJKPreservesChars(t *testing.T) {
 }
 
 func TestTruncateToWidthCJKPassThrough(t *testing.T) {
-	// Upstream: truncateToWidth("你好", 4) => "你好" (within limit, no truncation)
+	// Upstream: truncateToWidth with 2 CJK chars, width 4 => no truncation needed
 	result := truncateToWidth("你好", 4)
 	if result != "你好" {
 		t.Errorf("expected CJK pass-through, got %q", result)
@@ -353,7 +353,7 @@ func TestTruncateToWidthCJKPassThrough(t *testing.T) {
 }
 
 func TestTruncateToWidthMixedASCIICJK(t *testing.T) {
-	// Upstream: truncateToWidth("hello你好", 8) => "hello你…"
+	// Upstream: truncateToWidth "hello" + 2 CJK chars, width 8
 	result := truncateToWidth("hello你好", 8)
 	if !strings.HasSuffix(result, "\u2026") {
 		t.Errorf("expected mixed truncation, got %q", result)
@@ -364,7 +364,7 @@ func TestTruncateToWidthMixedASCIICJK(t *testing.T) {
 }
 
 func TestTruncateToWidthMixedASCIICJKExact(t *testing.T) {
-	// Upstream: truncateToWidth("hello你好", 9) => "hello你好" (exact fit)
+	// Upstream: truncateToWidth "hello" + 2 CJK chars, width 9 => exact fit
 	result := truncateToWidth("hello你好", 9)
 	if result != "hello你好" {
 		t.Errorf("expected exact fit pass-through, got %q", result)
@@ -372,7 +372,7 @@ func TestTruncateToWidthMixedASCIICJKExact(t *testing.T) {
 }
 
 func TestTruncateStartToWidthCJKBoundaryUpstream(t *testing.T) {
-	// Upstream: truncateStartToWidth("你好世界", 4) => "…界"
+	// Upstream: truncateStartToWidth with 4 CJK chars, width 4 => ellipsis + last char
 	result := truncateStartToWidth("你好世界", 4)
 	if !strings.HasPrefix(result, "\u2026") {
 		t.Errorf("expected leading ellipsis, got %q", result)
@@ -383,7 +383,7 @@ func TestTruncateStartToWidthCJKBoundaryUpstream(t *testing.T) {
 }
 
 func TestTruncateStartToWidthCJKPreservesChars(t *testing.T) {
-	// Upstream: truncateStartToWidth("你好世界", 6) => "…世界"
+	// Upstream: truncateStartToWidth with 4 CJK chars, width 6 => ellipsis + last 2 chars
 	result := truncateStartToWidth("你好世界", 6)
 	if !strings.HasPrefix(result, "\u2026") {
 		t.Errorf("expected leading ellipsis, got %q", result)
@@ -394,7 +394,7 @@ func TestTruncateStartToWidthCJKPreservesChars(t *testing.T) {
 }
 
 func TestTruncateToWidthNoEllipsisCJK(t *testing.T) {
-	// Upstream: truncateToWidthNoEllipsis("你好世界", 4) => "你好"
+	// Upstream: truncateToWidthNoEllipsis with 4 CJK chars, width 4 => first 2 chars
 	result := truncateToWidthNoEllipsis("你好世界", 4)
 	if strings.Contains(result, "\u2026") {
 		t.Errorf("should not contain ellipsis, got %q", result)

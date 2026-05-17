@@ -1157,7 +1157,7 @@ func modelContextWindow(model string) int {
 	if strings.Contains(lower, "[1m]") {
 		return 1_000_000
 	}
-	// Priority 2: Sonnet 4 / Opus 4 裸模型（无 suffix）也支持 1M
+	// Priority 2: Sonnet 4 / Opus 4 base models (no suffix) also support 1M
 	// These are known 1M-capable models as of 2025
 	if (strings.Contains(lower, "sonnet-4") || strings.Contains(lower, "opus-4-6") || strings.Contains(lower, "opus-4-7")) &&
 		!strings.Contains(lower, "[haiku]") && !strings.Contains(lower, "[3.5]") && !strings.Contains(lower, "[3.0]") {

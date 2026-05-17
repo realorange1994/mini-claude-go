@@ -52,7 +52,7 @@ func (*SystemTool) ExecuteContext(ctx context.Context, params map[string]any) To
 
 // runPowershellUTF8 runs a PowerShell command with UTF-8 output encoding.
 // This is necessary on Chinese/other locale Windows to avoid garbled characters
-// (e.g. "Microsoft Windows 11 家庭中文版" would appear as mojibake without this).
+// (e.g. "Microsoft Windows 11 Home Chinese Edition" would appear as mojibake without this).
 func runPowershellUTF8(command string) ToolResult {
 	psCmd := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; " + command
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)

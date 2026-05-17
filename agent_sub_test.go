@@ -239,7 +239,7 @@ var _ = tools.NewRegistry
 
 // TestBuildSubAgentRegistryDisallowedOverridesAllowed verifies that when a tool
 // appears in both allowed_tools and disallowed_tools, disallowed always wins.
-// This is the core test for the "disallowed_tools 对 exec 未完全阻止" issue.
+// This is the core test for the "disallowed_tools did not fully block exec" issue.
 func TestBuildSubAgentRegistryDisallowedOverridesAllowed(t *testing.T) {
 	// Create a parent registry with test tools
 	parentRegistry := tools.NewRegistry()
