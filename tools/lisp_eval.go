@@ -52,6 +52,14 @@ func (*LispEvalTool) InputSchema() map[string]any {
 				"enum":        []string{"default", "strict", "unlimited"},
 				"description": "Resource limit profile for safety: 'default' (1M steps, 30s, 256MB heap) for normal use; 'strict' (100K steps, 10s, 64MB heap) for untrusted code; 'unlimited' disables all limits (REPL mode only). Defaults to 'default'.",
 			},
+				"offset": map[string]any{
+					"type":        "integer",
+					"description": "Zero-based offset for source-list pagination (default: 0).",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Max entries to return for source-list (default: 50).",
+				},
 		},
 		"required": []string{},
 	}
@@ -160,7 +168,15 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		return ToolResult{Output: microlisp.GetSource(expr)}
 
 	case "source-list":
-		return ToolResult{Output: microlisp.SourceList(expr)}
+		offset := 0
+		limit := 0
+		if v, ok := params["offset"].(float64); ok {
+			offset = int(v)
+		}
+		if v, ok := params["limit"].(float64); ok {
+			limit = int(v)
+		}
+		return ToolResult{Output: microlisp.SourceList(expr, offset, limit)}
 
 	default: // eval (default when operation is empty or unknown)
 		if expr == "" {

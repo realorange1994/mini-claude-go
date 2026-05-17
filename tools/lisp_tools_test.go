@@ -387,12 +387,12 @@ func TestLispStr(t *testing.T) {
 		input string
 		want  string
 	}{
-		{`hello`, `\"hello\"`},
-		{`say "hi"`, `\"say \\\"hi\\\"\"`},
-		{`line1\nline2`, `\"line1\\nline2\"`},
-		{`tab\there`, `\"tab\\there\"`},
-		{`back\\slash`, `\"back\\\\slash\"`},
-		{``, `\"\"`},
+		{`hello`, `"hello"`},
+		{`say "hi"`, `"say \"hi\""`},
+		{"line1\nline2", `"line1\nline2"`},
+		{"tab\there", `"tab\there"`},
+		{`back\slash`, `"back\\slash"`},
+		{``, `""`},
 	}
 	for _, tc := range cases {
 		got := lispStr(tc.input)

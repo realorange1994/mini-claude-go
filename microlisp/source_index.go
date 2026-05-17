@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -24,6 +25,12 @@ var sourceIndex map[string]*SourceEntry
 
 func init() {
 	sourceIndex = make(map[string]*SourceEntry)
+
+	// Initialize stdlibContent first (needed by registerStdlibFunctions below)
+	data, err := stdlibFS.ReadFile("stdlib.go")
+	if err == nil {
+		stdlibContent = extractStdlibString(string(data))
+	}
 
 	// Register special forms
 	for _, name := range specialOpNames {
@@ -277,18 +284,23 @@ func readStdlibSnippet(name string) string {
 	return "(function definition not found in stdlib)\n"
 }
 
-// SourceList returns a summary of all indexed functions.
-func SourceList(query string) string {
-	var b strings.Builder
-	count := 0
+// SourceList returns a summary of all indexed functions with pagination.
+// query: substring filter (empty = all)
+// offset: skip first N entries (1-based, default 1)
+// limit: max entries to return (default 50)
+func SourceList(query string, offset, limit int) string {
+	const defaultLimit = 50
 
-	// Count by kind
-	builtins := 0
-	stdlib := 0
-	special := 0
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
 
-	// Collect matching entries
+	// Collect and sort matching entries
 	var matched []string
+	builtins, stdlibCount, special := 0, 0, 0
 	for name, entry := range sourceIndex {
 		if query == "" || strings.Contains(name, strings.ToLower(query)) {
 			matched = append(matched, name)
@@ -296,7 +308,7 @@ func SourceList(query string) string {
 			case "builtin":
 				builtins++
 			case "stdlib":
-				stdlib++
+				stdlibCount++
 			case "special":
 				special++
 			}
@@ -304,22 +316,37 @@ func SourceList(query string) string {
 	}
 
 	if len(matched) == 0 {
-		return fmt.Sprintf("No functions found matching: %q\nUse (source-list \"\") to see all functions.", query)
+		return fmt.Sprintf("No functions found matching: %q\nUse (source-list) with empty query to see all functions.", query)
 	}
 
-	fmt.Fprintf(&b, "microlisp function index (%d total, %d shown):\n", len(sourceIndex), len(matched))
-	fmt.Fprintf(&b, "  Builtins: %d | Stdlib: %d | Special forms: %d\n\n", builtins, stdlib, special)
+	// Sort for stable pagination
+	sort.Strings(matched)
+
+	totalMatched := len(matched)
+
+	// Apply offset and limit
+	if offset >= totalMatched {
+		return fmt.Sprintf("Offset %d exceeds total matches (%d). Use offset=0 to start from beginning.", offset, totalMatched)
+	}
+	end := offset + limit
+	if end > totalMatched {
+		end = totalMatched
+	}
+	page := matched[offset:end]
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "microlisp function index (%d total functions, %d match %q):\n", len(sourceIndex), totalMatched, query)
+	fmt.Fprintf(&b, "  Builtins: %d | Stdlib: %d | Special forms: %d\n", builtins, stdlibCount, special)
+	fmt.Fprintf(&b, "  Showing entries %d-%d of %d (use offset/limit to page)\n\n", offset+1, end, totalMatched)
 	fmt.Fprintf(&b, "Usage: (source \"name\") to view source of a specific function.\n\n")
 
-	// Sort and display
-	for _, name := range matched {
+	for _, name := range page {
 		entry := sourceIndex[name]
 		fmt.Fprintf(&b, "  %-30s %-10s %s\n", name, entry.Kind, entry.File)
-		count++
-		if count > 200 {
-			fmt.Fprintf(&b, "  ... (%d more entries, narrow with query)\n", len(matched)-200)
-			break
-		}
+	}
+
+	if end < totalMatched {
+		fmt.Fprintf(&b, "\n  ... %d more entries (use offset=%d to continue)\n", totalMatched-end, end)
 	}
 
 	return b.String()
@@ -351,13 +378,6 @@ var stdlibFS embed.FS
 
 // stdlibContent is the embedded stdlib source string.
 var stdlibContent string
-
-func init() {
-	data, err := stdlibFS.ReadFile("stdlib.go")
-	if err == nil {
-		stdlibContent = extractStdlibString(string(data))
-	}
-}
 
 // extractStdlibString extracts the initLib string constant from stdlib.go source.
 func extractStdlibString(src string) string {

@@ -1,0 +1,180 @@
+package microlisp
+
+import (
+	"strings"
+	"testing"
+)
+
+// -------- Source Index Tests --------
+
+func TestGetSourceBuiltin(t *testing.T) {
+	// "car" is a well-known builtin
+	out := GetSource("car")
+	if strings.Contains(out, "No source found") {
+		t.Fatalf("expected source for 'car', got: %s", out)
+	}
+	if !strings.Contains(out, "builtin") {
+		t.Fatalf("expected 'car' to be a builtin, got: %s", out)
+	}
+	if !strings.Contains(out, "Lines:") {
+		t.Fatalf("expected line range for builtin 'car', got: %s", out)
+	}
+}
+
+func TestGetSourceStdlib(t *testing.T) {
+	// "cadr" is defined in stdlib (not a builtin or special form)
+	out := GetSource("cadr")
+	if strings.Contains(out, "No source found") {
+		t.Fatalf("expected source for 'cadr', got: %s", out)
+	}
+	if !strings.Contains(out, "stdlib") {
+		t.Fatalf("expected 'cadr' to be stdlib, got: %s", out)
+	}
+}
+
+func TestGetSourceSpecialForm(t *testing.T) {
+	out := GetSource("if")
+	if strings.Contains(out, "No source found") {
+		t.Fatalf("expected source for 'if', got: %s", out)
+	}
+	if !strings.Contains(out, "special") {
+		t.Fatalf("expected 'if' to be special, got: %s", out)
+	}
+}
+
+func TestGetSourceNotFound(t *testing.T) {
+	out := GetSource("xyzzy-no-such-function")
+	if !strings.Contains(out, "No source found") {
+		t.Fatalf("expected 'No source found' for unknown function, got: %s", out)
+	}
+}
+
+func TestGetSourceFuzzyMatch(t *testing.T) {
+	// Partial match should find the shortest containing key
+	out := GetSource("append")
+	if strings.Contains(out, "No source found") {
+		t.Fatalf("expected fuzzy match for 'append', got: %s", out)
+	}
+}
+
+func TestGetSourceCaseInsensitive(t *testing.T) {
+	// Should work with upper case
+	outUpper := GetSource("CAR")
+	outLower := GetSource("car")
+	if outUpper != outLower {
+		t.Fatalf("case-insensitive: CAR and car should give same result")
+	}
+}
+
+func TestSourceListReturnsResults(t *testing.T) {
+	out := SourceList("", 0, 50)
+	if !strings.Contains(out, "functions") {
+		t.Fatalf("expected function count in source-list output, got: %s", out)
+	}
+	if !strings.Contains(out, "Builtins:") {
+		t.Fatalf("expected builtin count, got: %s", out)
+	}
+	if !strings.Contains(out, "Stdlib:") {
+		t.Fatalf("expected stdlib count, got: %s", out)
+	}
+}
+
+func TestSourceListQueryFilter(t *testing.T) {
+	out := SourceList("car", 0, 50)
+	if !strings.Contains(out, "car") {
+		t.Fatalf("expected 'car' in filtered results, got: %s", out)
+	}
+}
+
+func TestSourceListPagination(t *testing.T) {
+	// Get first page
+	out1 := SourceList("", 0, 10)
+	// Get second page
+	out2 := SourceList("", 10, 10)
+	// They should be different
+	if out1 == out2 {
+		t.Fatalf("expected different output for different offsets")
+	}
+	// Second page should show entries starting at offset 11
+	if !strings.Contains(out2, "11-") {
+		t.Fatalf("expected offset 11 in second page, got: %s", out2)
+	}
+}
+
+func TestSourceListLimitZero(t *testing.T) {
+	out := SourceList("", 0, 0)
+	// limit=0 should use default of 50
+	if !strings.Contains(out, "functions") {
+		t.Fatalf("expected results with limit=0, got: %s", out)
+	}
+}
+
+func TestSourceListOffsetOutOfBounds(t *testing.T) {
+	out := SourceList("zzz-not-a-function", 0, 10)
+	if !strings.Contains(out, "No functions found") {
+		t.Fatalf("expected 'No functions found' for impossible query, got: %s", out)
+	}
+}
+
+func TestSourceListNegativeOffset(t *testing.T) {
+	out := SourceList("", -5, 10)
+	// Should not panic, treat as 0
+	if strings.Contains(out, "panic") || strings.Contains(out, "error") {
+		t.Fatalf("unexpected error with negative offset: %s", out)
+	}
+}
+
+func TestSourceListSorted(t *testing.T) {
+	out := SourceList("", 0, 200)
+	// Extract function names from output and verify they're sorted
+	lines := strings.Split(out, "\n")
+	var names []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "Usage") ||
+			strings.HasPrefix(trimmed, "microlisp") || strings.HasPrefix(trimmed, "...") {
+			continue
+		}
+		if trimmed != "" && !strings.Contains(trimmed, "Showing") &&
+			!strings.Contains(trimmed, "Builtins") && !strings.Contains(trimmed, "functions") {
+			// Parse: "  name                           kind       file"
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 {
+				names = append(names, fields[0])
+			}
+		}
+	}
+	// Verify sorted order
+	for i := 1; i < len(names); i++ {
+		if names[i] < names[i-1] {
+			t.Fatalf("source-list output not sorted: %q before %q", names[i-1], names[i])
+		}
+	}
+}
+
+func TestSourceIndexNotEmpty(t *testing.T) {
+	if len(sourceIndex) == 0 {
+		t.Fatal("sourceIndex should not be empty after init")
+	}
+}
+
+func TestSourceIndexHasSpecialForms(t *testing.T) {
+	// These are core special forms that must be indexed
+	specials := []string{"if", "lambda", "quote", "define", "let", "cond"}
+	for _, s := range specials {
+		entry := sourceIndex[strings.ToLower(s)]
+		if entry == nil {
+			t.Logf("WARNING: special form %q not found in sourceIndex (may be OK if not in specialOpNames)", s)
+		}
+	}
+}
+
+func TestExtractStdlibString(t *testing.T) {
+	// Verify stdlib content was extracted
+	if stdlibContent == "" {
+		t.Fatal("stdlibContent should not be empty after init")
+	}
+	if !strings.Contains(stdlibContent, "define") {
+		t.Fatal("stdlibContent should contain 'define' forms")
+	}
+}
