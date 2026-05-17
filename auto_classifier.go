@@ -33,6 +33,12 @@ type AutoModeClassifier struct {
 	mu        sync.RWMutex
 	enabled   bool
 	claudeMd  string // project CLAUDE.md content for user intent context
+
+	// toolChoiceUnsupported tracks whether the upstream API rejected
+	// tool_choice=required/object (e.g. thinking mode on Coze proxy).
+	// Once detected for a model, we skip tool_choice on all future calls
+	// to avoid repeated 400 errors.
+	toolChoiceUnsupported bool
 }
 
 type cacheEntry struct {
@@ -769,7 +775,40 @@ func (c *AutoModeClassifier) callClassifier(
 
 // callStage1 makes the fast classification API call.
 func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc string) (ClassifierResult, error) {
-	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
+	resp, err := c.doStage1(ctx, userMsg)
+	if err != nil {
+		if c.isToolChoiceError(err) && !c.toolChoiceUnsupported {
+			c.mu.Lock()
+			c.toolChoiceUnsupported = true
+			c.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1: tool_choice rejected by API, retrying without it\n")
+			resp, err = c.doStage1(ctx, userMsg)
+		}
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 API error: %v\n", err)
+		// API error in stage 1: escalate to stage 2 rather than blocking
+		return ClassifierResult{Unavailable: true}, fmt.Errorf("API error: %v", err)
+	}
+
+	result, ok := parseClassifierResponse(resp.Content, actionDesc)
+	if !ok {
+		// Parse failure in stage 1: escalate to stage 2
+		return ClassifierResult{Unavailable: true}, fmt.Errorf("parse failure in stage 1")
+	}
+
+	if result.Allow {
+		// Fast path: allowed by stage 1 (caller logs the result)
+		return result, nil
+	}
+
+	// Stage 1 blocked — escalate to stage 2 for full reasoning
+	return result, nil
+}
+
+func (c *AutoModeClassifier) doStage1(ctx context.Context, userMsg string) (*anthropic.Message, error) {
+	params := anthropic.MessageNewParams{
 		Model:     GetModelForAPI(c.model),
 		MaxTokens: stage1MaxTokens,
 		System: []anthropic.TextBlockParam{
@@ -797,79 +836,36 @@ func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc
 				},
 			},
 		},
-		// ToolChoice omitted — thinking mode doesn't support required/object.
-		// With a single tool defined and clear system prompt, the model will
-		// naturally choose it in auto mode.
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(
 				anthropic.NewTextBlock(userMsg),
 			),
 		},
-	})
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 API error: %v\n", err)
-		// API error in stage 1: escalate to stage 2 rather than blocking
-		return ClassifierResult{Unavailable: true}, fmt.Errorf("API error: %v", err)
 	}
-
-	result, ok := parseClassifierResponse(resp.Content, actionDesc)
-	if !ok {
-		// Parse failure in stage 1: escalate to stage 2
-		return ClassifierResult{Unavailable: true}, fmt.Errorf("parse failure in stage 1")
+	if !c.toolChoiceUnsupported {
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{
+			OfTool: &anthropic.ToolChoiceToolParam{
+				Name: "classify_action",
+			},
+		}
 	}
-
-	if result.Allow {
-		// Fast path: allowed by stage 1 (caller logs the result)
-		return result, nil
-	}
-
-	// Stage 1 blocked — escalate to stage 2 for full reasoning
-	return result, nil
+	return c.client.Messages.New(ctx, params)
 }
 
 // callStage2 makes the thinking classification API call.
 func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc string) ClassifierResult {
 	stage2Prompt := userMsg + "\n\n## Analysis required:\nProvide a detailed security analysis of this action. Consider: is the action clearly requested by the user? Could it have unintended consequences? Does it modify the system state or download external code? Explain your reasoning step by step, then provide your verdict."
 
-	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:       GetModelForAPI(c.model),
-		MaxTokens:   stage2MaxTokens,
-		Temperature: param.NewOpt(0.0),
-		System: []anthropic.TextBlockParam{
-			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT, CacheControl: anthropic.CacheControlEphemeralParam{}},
-		},
-		Tools: []anthropic.ToolUnionParam{
-			{
-				OfTool: &anthropic.ToolParam{
-					Name:        "classify_action",
-					Description: param.NewOpt("Classify whether the tool action should be allowed or blocked, providing detailed reasoning"),
-					InputSchema: anthropic.ToolInputSchemaParam{
-						Properties: map[string]any{
-							"decision": map[string]any{
-								"type":        "string",
-								"enum":        []string{"allow", "block"},
-								"description": "Whether to allow or block this action",
-							},
-							"reason": map[string]any{
-								"type":        "string",
-								"description": "Detailed reason for the decision, including security concerns and user intent",
-							},
-						},
-						Required: []string{"decision", "reason"},
-					},
-				},
-			},
-		},
-		// ToolChoice omitted — thinking mode doesn't support required/object.
-		// With a single tool defined and clear system prompt, the model will
-		// naturally choose it in auto mode.
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(
-				anthropic.NewTextBlock(stage2Prompt),
-			),
-		},
-	})
+	resp, err := c.doStage2(ctx, stage2Prompt)
+	if err != nil {
+		if c.isToolChoiceError(err) && !c.toolChoiceUnsupported {
+			c.mu.Lock()
+			c.toolChoiceUnsupported = true
+			c.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2: tool_choice rejected by API, retrying without it\n")
+			resp, err = c.doStage2(ctx, stage2Prompt)
+		}
+	}
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 API error: %v, failing closed\n", err)
@@ -898,6 +894,62 @@ func (c *AutoModeClassifier) callStage2(ctx context.Context, userMsg, actionDesc
 	}
 	fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 2 %s: %s (%s)\n", status, actionDesc, result.Reason)
 	return result
+}
+
+func (c *AutoModeClassifier) doStage2(ctx context.Context, stage2Prompt string) (*anthropic.Message, error) {
+	params := anthropic.MessageNewParams{
+		Model:       GetModelForAPI(c.model),
+		MaxTokens:   stage2MaxTokens,
+		Temperature: param.NewOpt(0.0),
+		System: []anthropic.TextBlockParam{
+			{Text: AUTO_CLASSIFIER_SYSTEM_PROMPT, CacheControl: anthropic.CacheControlEphemeralParam{}},
+		},
+		Tools: []anthropic.ToolUnionParam{
+			{
+				OfTool: &anthropic.ToolParam{
+					Name:        "classify_action",
+					Description: param.NewOpt("Classify whether the tool action should be allowed or blocked, providing detailed reasoning"),
+					InputSchema: anthropic.ToolInputSchemaParam{
+						Properties: map[string]any{
+							"decision": map[string]any{
+								"type":        "string",
+								"enum":        []string{"allow", "block"},
+								"description": "Whether to allow or block this action",
+							},
+							"reason": map[string]any{
+								"type":        "string",
+								"description": "Detailed reason for the decision, including security concerns and user intent",
+							},
+						},
+						Required: []string{"decision", "reason"},
+					},
+				},
+			},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(
+				anthropic.NewTextBlock(stage2Prompt),
+			),
+		},
+	}
+	if !c.toolChoiceUnsupported {
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{
+			OfTool: &anthropic.ToolChoiceToolParam{
+				Name: "classify_action",
+			},
+		}
+	}
+	return c.client.Messages.New(ctx, params)
+}
+
+// isToolChoiceError checks if an API error is caused by tool_choice being
+// unsupported (e.g. thinking mode on Coze proxy rejects tool_choice=required).
+func (c *AutoModeClassifier) isToolChoiceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "tool_choice") || strings.Contains(msg, "InvalidParameter")
 }
 
 // parseClassifierResponse extracts ClassifierResult from the Anthropic response.
