@@ -9,7 +9,7 @@ import (
 
 func TestGetSourceBuiltin(t *testing.T) {
 	// "car" is a well-known builtin
-	out := GetSource("car")
+	out := GetSource("car", 0, 0)
 	if strings.Contains(out, "No source found") {
 		t.Fatalf("expected source for 'car', got: %s", out)
 	}
@@ -23,7 +23,7 @@ func TestGetSourceBuiltin(t *testing.T) {
 
 func TestGetSourceStdlib(t *testing.T) {
 	// "cadr" is defined in stdlib (not a builtin or special form)
-	out := GetSource("cadr")
+	out := GetSource("cadr", 0, 0)
 	if strings.Contains(out, "No source found") {
 		t.Fatalf("expected source for 'cadr', got: %s", out)
 	}
@@ -33,7 +33,7 @@ func TestGetSourceStdlib(t *testing.T) {
 }
 
 func TestGetSourceSpecialForm(t *testing.T) {
-	out := GetSource("if")
+	out := GetSource("if", 0, 0)
 	if strings.Contains(out, "No source found") {
 		t.Fatalf("expected source for 'if', got: %s", out)
 	}
@@ -43,7 +43,7 @@ func TestGetSourceSpecialForm(t *testing.T) {
 }
 
 func TestGetSourceNotFound(t *testing.T) {
-	out := GetSource("xyzzy-no-such-function")
+	out := GetSource("xyzzy-no-such-function", 0, 0)
 	if !strings.Contains(out, "No source found") {
 		t.Fatalf("expected 'No source found' for unknown function, got: %s", out)
 	}
@@ -51,7 +51,7 @@ func TestGetSourceNotFound(t *testing.T) {
 
 func TestGetSourceFuzzyMatch(t *testing.T) {
 	// Partial match should find the shortest containing key
-	out := GetSource("append")
+	out := GetSource("append", 0, 0)
 	if strings.Contains(out, "No source found") {
 		t.Fatalf("expected fuzzy match for 'append', got: %s", out)
 	}
@@ -59,8 +59,8 @@ func TestGetSourceFuzzyMatch(t *testing.T) {
 
 func TestGetSourceCaseInsensitive(t *testing.T) {
 	// Should work with upper case
-	outUpper := GetSource("CAR")
-	outLower := GetSource("car")
+	outUpper := GetSource("CAR", 0, 0)
+	outLower := GetSource("car", 0, 0)
 	if outUpper != outLower {
 		t.Fatalf("case-insensitive: CAR and car should give same result")
 	}
@@ -184,7 +184,7 @@ func TestExtractStdlibString(t *testing.T) {
 
 func TestSpecialFormHasSourceCode(t *testing.T) {
 	// Special forms should now have Start/End line numbers and show actual code
-	out := GetSource("if")
+	out := GetSource("if", 0, 0)
 	if !strings.Contains(out, "Lines:") {
 		t.Fatalf("expected line range for special form 'if', got: %s", out)
 	}
@@ -213,7 +213,7 @@ func TestHelperFunctionIndexed(t *testing.T) {
 }
 
 func TestGetSourceHelper(t *testing.T) {
-	out := GetSource("eqval")
+	out := GetSource("eqval", 0, 0)
 	if strings.Contains(out, "No source found") {
 		t.Fatalf("expected source for helper 'eqval', got: %s", out)
 	}

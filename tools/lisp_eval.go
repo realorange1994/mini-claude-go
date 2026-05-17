@@ -54,11 +54,11 @@ func (*LispEvalTool) InputSchema() map[string]any {
 			},
 				"offset": map[string]any{
 					"type":        "integer",
-					"description": "Zero-based offset for source-list pagination (default: 0).",
+					"description": "Zero-based line offset for source code display, or entry offset for source-list pagination (default: 0).",
 				},
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "Max entries to return for source-list (default: 50).",
+					"description": "Max lines to return for source code display, or max entries for source-list (default: 50).",
 				},
 		},
 		"required": []string{},
@@ -165,7 +165,15 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		if expr == "" {
 			return ToolResult{Output: "Error: expression is required for operation=source. Use a plain function name like \"car\" or \"string-append\" — NOT a Lisp expression like (source 'car).", IsError: true}
 		}
-		return ToolResult{Output: microlisp.GetSource(expr)}
+		srcOffset := 0
+		srcLimit := 0
+		if v, ok := params["offset"].(float64); ok {
+			srcOffset = int(v)
+		}
+		if v, ok := params["limit"].(float64); ok {
+			srcLimit = int(v)
+		}
+		return ToolResult{Output: microlisp.GetSource(expr, srcOffset, srcLimit)}
 
 	case "source-list":
 		offset := 0

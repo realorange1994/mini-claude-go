@@ -88,25 +88,50 @@ func loadBuiltinRegistry() map[string]string {
 	return result
 }
 
-// registerStdlibFunctions parses the stdlib string and extracts function names.
+// registerStdlibFunctions parses the stdlib string and extracts function names
+// with Start/End line numbers (relative to the embedded stdlibContent string).
 func registerStdlibFunctions() {
 	// Match all define-like forms: (define (name ...), (define-macro (name ...),
 	// (defsetf name ...), (defstruct name ...), (defgeneric name ...),
 	// (define-condition name ...), (defconstant name ...), (defparameter name ...)
 	defineRe := regexp.MustCompile(`\((?:define|define-macro|defsetf|defstruct|defgeneric|define-condition|defconstant|defparameter)\s+\(?(\S+)`)
-	for _, line := range strings.Split(stdlibContent, "\n") {
-		line = strings.TrimSpace(line)
-		if matches := defineRe.FindStringSubmatch(line); len(matches) > 1 {
+	lines := strings.Split(stdlibContent, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if matches := defineRe.FindStringSubmatch(trimmed); len(matches) > 1 {
 			// Strip trailing ) if present (e.g., "(define (internal-time-units-per-second)")
 			name := strings.TrimRight(matches[1], ")")
 			name = strings.ToLower(name)
+			start := i + 1 // 1-based line in stdlibContent
+			end := findSexpEndFromLines(lines, i)
 			sourceIndex[name] = &SourceEntry{
 				Kind: "stdlib",
 				File: "stdlib.go",
-				Doc:  fmt.Sprintf("Stdlib function: %s", matches[1]),
+				Start: start,
+				End:   end,
+				Doc:   fmt.Sprintf("Stdlib function: %s", matches[1]),
 			}
 		}
 	}
+}
+
+// findSexpEndFromLines finds the closing paren of an s-expression starting at startLine.
+// Returns 1-based line number.
+func findSexpEndFromLines(lines []string, startLine int) int {
+	depth := 0
+	for i := startLine; i < len(lines); i++ {
+		for _, ch := range lines[i] {
+			if ch == '(' {
+				depth++
+			} else if ch == ')' {
+				depth--
+				if depth == 0 {
+					return i + 1 // 1-based
+				}
+			}
+		}
+	}
+	return len(lines)
 }
 
 // scanBuiltinFunctions scans microlisp/*.go files for builtin function definitions.
@@ -351,8 +376,8 @@ func scanHelperFunctions() {
 }
 
 // GetSource returns the source code for a named function or special form.
-// Returns empty string if not found.
-func GetSource(name string) string {
+// offset/limit control how many lines of source to show (0 means unlimited).
+func GetSource(name string, offset, limit int) string {
 	name = strings.ToLower(name)
 
 	// Look for exact match first
@@ -384,18 +409,36 @@ func GetSource(name string) string {
 			fmt.Fprintf(&b, "Go function: %s\n", entry.GoFunc)
 		}
 		if entry.Start > 0 {
-			fmt.Fprintf(&b, "Lines: %d-%d\n", entry.Start, entry.End)
+			fmt.Fprintf(&b, "Lines: %d-%d", entry.Start, entry.End)
+			totalLines := entry.End - entry.Start + 1
+			if limit > 0 && totalLines > limit {
+				fmt.Fprintf(&b, " (showing %d lines, use offset/limit to see more)", limit)
+			}
+			fmt.Fprintf(&b, "\n")
 		}
-		fmt.Fprintf(&b, "\n%s", readSourceSnippet(entry.File, entry.Start, entry.End))
+		fmt.Fprintf(&b, "\n%s", readSourceSnippet(entry.File, entry.Start, entry.End, offset, limit))
 
 	case "stdlib":
-		fmt.Fprintf(&b, "\n%s", readStdlibSnippet(name))
+		if entry.Start > 0 {
+			fmt.Fprintf(&b, "Lines: %d-%d", entry.Start, entry.End)
+			totalLines := entry.End - entry.Start + 1
+			if limit > 0 && totalLines > limit {
+				fmt.Fprintf(&b, " (showing %d lines, use offset/limit to see more)", limit)
+			}
+			fmt.Fprintf(&b, "\n")
+		}
+		fmt.Fprintf(&b, "\n%s", readStdlibSnippet(name, offset, limit))
 
 	case "special":
 		fmt.Fprintf(&b, "\n%s", entry.Doc)
 		if entry.Start > 0 {
-			fmt.Fprintf(&b, "\nLines: %d-%d\n", entry.Start, entry.End)
-			fmt.Fprintf(&b, "\n%s", readSourceSnippet(entry.File, entry.Start, entry.End))
+			fmt.Fprintf(&b, "\nLines: %d-%d", entry.Start, entry.End)
+			totalLines := entry.End - entry.Start + 1
+			if limit > 0 && totalLines > limit {
+				fmt.Fprintf(&b, " (showing %d lines, use offset/limit to see more)", limit)
+			}
+			fmt.Fprintf(&b, "\n")
+			fmt.Fprintf(&b, "\n%s", readSourceSnippet(entry.File, entry.Start, entry.End, offset, limit))
 		} else {
 			fmt.Fprintf(&b, "\nSpecial forms are handled directly by the evaluator (eval_core.go).")
 		}
@@ -405,7 +448,9 @@ func GetSource(name string) string {
 }
 
 // readSourceSnippet reads lines from a microlisp source file.
-func readSourceSnippet(filename string, start, end int) string {
+// offset: skip first N lines of the snippet (0 = start from beginning).
+// limit: max lines to show (0 = unlimited, show all).
+func readSourceSnippet(filename string, start, end, offset, limit int) string {
 	dir := findMicrolispDir()
 	if dir == "" {
 		return "(source directory not available)\n"
@@ -420,20 +465,74 @@ func readSourceSnippet(filename string, start, end int) string {
 	scanner := bufio.NewScanner(f)
 	var b strings.Builder
 	lineNum := 0
+	shown := 0
 	for scanner.Scan() {
 		lineNum++
 		if lineNum >= start && lineNum <= end {
+			// Apply offset: skip first N lines of the snippet
+			snippetLine := lineNum - start
+			if snippetLine < offset {
+				continue
+			}
+			// Apply limit: stop after showing limit lines
+			if limit > 0 && shown >= limit {
+				break
+			}
 			fmt.Fprintf(&b, "%4d  %s\n", lineNum, scanner.Text())
+			shown++
 		}
 		if lineNum > end {
 			break
 		}
 	}
+	// If truncated, add continuation hint
+	totalLines := end - start + 1
+	if limit > 0 && shown >= limit && shown < totalLines-offset {
+		fmt.Fprintf(&b, "\n  ... %d more lines (use offset=%d, limit=%d to continue)\n",
+			totalLines-offset-shown, offset+shown, limit)
+	}
 	return b.String()
 }
 
 // readStdlibSnippet extracts a stdlib function definition from the embedded stdlib string.
-func readStdlibSnippet(name string) string {
+// offset: skip first N lines of the definition (0 = start from beginning).
+// limit: max lines to show (0 = unlimited, show all).
+func readStdlibSnippet(name string, offset, limit int) string {
+	entry, ok := sourceIndex[name]
+	if !ok || entry.Start == 0 {
+		// Fallback: use regex-based extraction (no line numbers known)
+		return readStdlibSnippetRegex(name, offset, limit)
+	}
+
+	lines := strings.Split(stdlibContent, "\n")
+	start := entry.Start - 1 // convert to 0-based
+	end := entry.End         // already 1-based, exclusive upper bound for slice
+
+	var b strings.Builder
+	shown := 0
+	for i := start; i < end && i < len(lines); i++ {
+		snippetLine := i - start
+		if snippetLine < offset {
+			continue
+		}
+		if limit > 0 && shown >= limit {
+			break
+		}
+		fmt.Fprintf(&b, "%4d  %s\n", i+1, lines[i])
+		shown++
+	}
+	// If truncated, add continuation hint
+	totalLines := end - start
+	if limit > 0 && shown >= limit && shown < totalLines-offset {
+		fmt.Fprintf(&b, "\n  ... %d more lines (use offset=%d, limit=%d to continue)\n",
+			totalLines-offset-shown, offset+shown, limit)
+	}
+	return b.String()
+}
+
+// readStdlibSnippetRegex is the fallback regex-based extraction for stdlib functions
+// that don't have line numbers recorded.
+func readStdlibSnippetRegex(name string, offset, limit int) string {
 	// Match all define-like forms that contain the function name
 	// Use [ \t()\n] instead of \b to handle names with special chars like *
 	pattern := fmt.Sprintf(`(?i)\((?:define|define-macro|defsetf|defstruct|defgeneric|define-condition|defconstant|defparameter)\s+\(?\s*%s(?:[ \t()\n]|$)`, regexp.QuoteMeta(name))
@@ -456,8 +555,23 @@ func readStdlibSnippet(name string) string {
 				if depth == 0 {
 					// Found the end
 					var b strings.Builder
+					shown := 0
 					for k := start; k <= j; k++ {
+						snippetLine := k - start
+						if snippetLine < offset {
+							continue
+						}
+						if limit > 0 && shown >= limit {
+							break
+						}
 						fmt.Fprintf(&b, "%4d  %s\n", k+1, lines[k])
+						shown++
+					}
+					// If truncated, add continuation hint
+					totalLines := j - start + 1
+					if limit > 0 && shown >= limit && shown < totalLines-offset {
+						fmt.Fprintf(&b, "\n  ... %d more lines (use offset=%d, limit=%d to continue)\n",
+							totalLines-offset-shown, offset+shown, limit)
 					}
 					return b.String()
 				}
