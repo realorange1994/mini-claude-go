@@ -1382,9 +1382,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 					streamingExecDone = true
 					var toolResults []anthropic.ToolResultBlockParam
 					for _, sr := range streamingResults {
+						output := a.truncateOutput(sr.output)
 						toolResults = append(toolResults, anthropic.ToolResultBlockParam{
 							ToolUseID: sr.toolUseID,
-							Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: sr.output}}},
+							Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: output}}},
 							IsError:   anthropic.Bool(sr.isError),
 						})
 					}
