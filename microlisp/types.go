@@ -148,6 +148,7 @@ type Value struct {
 	methodIdx    int           // method index in genMethods for VMethod type
 	goVal        interface{}   // for VGoVal type: holds the actual Go value
 	goValType    reflect.Type  // for VGoVal: stores the Go type for reflection
+	goValReflect reflect.Value // for VGoVal: stores settable reflect.Value (from reflect.New)
 }
 
 type genMethod struct {

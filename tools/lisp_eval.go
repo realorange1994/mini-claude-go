@@ -800,6 +800,28 @@ The reader VGoVal (type *rand.reader) is automatically recognized as implementin
    (funcall (go:import "crypto/rsa.GenerateKey") reader 2048)  => #<go-val *rsa.PrivateKey>
    ;; Works for io.Reader, io.Writer, and other interfaces
 
+--- Creating and Manipulating Go Structs ---
+  (go:new "crypto/x509.Certificate")  => #<go-val x509.Certificate>
+  (go:field cert "Version")           => 0
+  (go:set-field cert "Version" 3)     => nil
+  (go:set-field cert "IsCA" t)        => nil
+  (go:field cert "Subject")           => #<go-val pkix.Name> (nested struct)
+
+  Full example — create a self-signed certificate:
+  (let* ((cert (go:new "crypto/x509.Certificate"))
+         (priv (funcall (go:import "crypto/rsa.GenerateKey")
+                        (go:import "crypto/rand.Reader")
+                        2048)))
+    (go:set-field cert "SerialNumber" 1)
+    (go:set-field cert "IsCA" t)
+    (go:set-field cert "BasicConstraintsValid" t)
+    (go:import "crypto/x509.CreateCertificate")
+    ;; pass cert and priv to CreateCertificate...
+  )
+
+  Supported field types: integers, booleans, strings, slices, *big.Int, nested structs.
+  Pointer fields can be set to nil or to numeric/struct values.
+
 --- Registering Custom Go Values ---
   (go:register "mypackage.myvalue" 42)   => register a number
   (go:register "mypackage.mystring" "hello") => register a string
