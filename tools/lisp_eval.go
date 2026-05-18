@@ -27,6 +27,7 @@ func (*LispEvalTool) Name() string { return "lisp_eval" }
 func (*LispEvalTool) Description() string {
 	return "Evaluate Common Lisp expressions. State persists between calls. " +
 		"Quick start: expression=\"(+ 1 2)\". " +
+		"Use operation=\"define\" to see function signatures (params, return types). " +
 		"Use operation=\"help\" for topic docs, \"examples\" for code samples, " +
 		"\"skill\" for a complete usage guide. FFI: (ffi \"math.Sqrt\") calls Go stdlib."
 }
@@ -41,8 +42,8 @@ func (*LispEvalTool) InputSchema() map[string]any {
 			},
 			"operation": map[string]any{
 				"type": "string",
-				"enum": []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list", "xref", "xref-list", "skill"},
-				"description": `Action: eval (default, evaluate expression), reset (clear state), help (topic docs), examples (code samples), skill (usage guide — expression="ffi"/"ops"/"xref" or empty for full), source (view function source — expression=plain name), source-list (browse indexed functions), xref (call graph — expression=plain name), xref-list (browse all xrefs), eval_file (run .lisp file), lint (check syntax)`,
+				"enum": []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list", "xref", "xref-list", "skill", "define"},
+				"description": `Action: eval (default, evaluate expression), reset (clear state), help (topic docs), examples (code samples), skill (usage guide — expression="ffi"/"ops"/"xref" or empty for full), define (function signature — params, return types, usage), source (view function source — expression=plain name), source-list (browse indexed functions), xref (call graph — expression=plain name), xref-list (browse all xrefs), eval_file (run .lisp file), lint (check syntax)`,
 			},
 			"file": map[string]any{
 				"type":        "string",
@@ -178,6 +179,12 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 			return ToolResult{Output: fmt.Sprintf("Lint error: %v", err), IsError: true}
 		}
 		return ToolResult{Output: "No syntax errors found."}
+
+	case "define":
+		if expr == "" {
+			return ToolResult{Output: "Error: expression is required for operation=define. Use a plain function name like \"car\" or \"math.Sin\" — NOT a Lisp expression.", IsError: true}
+		}
+		return ToolResult{Output: microlisp.GetDefine(expr)}
 
 	case "source":
 		if expr == "" {
@@ -840,6 +847,7 @@ The reader VGoVal (type *rand.reader) is automatically recognized as implementin
 3. Call:      expression="(square 7)"
 
 --- Need Something Specific? ---
+- Function signature?  → operation=define, expression="car" (params, return types, usage)
 - Function reference? → operation=help, expression="arithmetic" (or any topic)
 - Code examples?      → operation=examples, expression="lists" (or any category)
 - Go interop/FFI?     → operation=skill, expression="ffi"
@@ -849,6 +857,10 @@ The reader VGoVal (type *rand.reader) is automatically recognized as implementin
 - Full guide?         → operation=skill, expression=""
 
 --- All Operations ---
+  define (NEW) — function signature: params, return types, usage
+    expression: "car"         →  (car lst), returns first element
+    expression: "math.Pow"    →  func math.Pow(float64, float64) → (float64)
+    expression: "format"      →  (format dest fmt args...), returns formatted string
   eval (default) — evaluate Lisp expression; state persists
     expression: "(+ 1 2)"  →  3
     limits: "default" | "strict" | "unlimited"
@@ -946,6 +958,8 @@ Call sites section (with context):
 3. Call:       expression="(square 7)" → 49
 
 --- Learn More ---
+- How to call a function?                   → operation=define, expression="car"
+- What params does a Go function take?      → operation=define, expression="math.Pow"
 - Arithmetic, lists, strings, lambda, etc.? → operation=help, expression="topic"
 - See code examples?                        → operation=examples, expression="category"
 - Call Go stdlib functions?                 → operation=skill, expression="ffi"

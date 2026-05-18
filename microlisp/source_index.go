@@ -523,6 +523,208 @@ func GetSource(name string, offset, limit int) string {
 	return b.String()
 }
 
+// GetDefine returns the function signature (parameter list, return types) for any function.
+// Works for: builtins, stdlib functions, special forms, Go FFI functions.
+func GetDefine(name string) string {
+	name = strings.ToLower(name)
+
+	// 1. Try exact match in source index
+	entry, ok := sourceIndex[name]
+	if !ok {
+		// Try prefix match
+		best := ""
+		for k := range sourceIndex {
+			if strings.Contains(k, name) && (best == "" || len(k) < len(best)) {
+				best = k
+			}
+		}
+		if best != "" {
+			entry = sourceIndex[best]
+			name = best
+		} else {
+			return fmt.Sprintf("No function definition found for: %q\n\nTry (source-list) to see all available functions.", name)
+		}
+	}
+
+	var b strings.Builder
+	switch entry.Kind {
+	case "builtin":
+		fmt.Fprintf(&b, "=== %s (builtin) ===\n\n", name)
+		// Try builtinDocMap for signature
+		if doc, ok := builtinDocMap[name]; ok {
+			// Extract signature part (before em-dash)
+			if idx := strings.Index(doc, "\u2014"); idx > 0 {
+				fmt.Fprintf(&b, "%s\n\n%s\n", strings.TrimSpace(doc[:idx]), strings.TrimSpace(doc[idx+1:]))
+			} else {
+				fmt.Fprintf(&b, "%s\n", doc)
+			}
+		} else {
+			// Try to extract from Go source: find the builtin func and show it accepts &[*Value] args
+			if entry.GoFunc != "" {
+				fmt.Fprintf(&b, "(%s &rest args) — Builtin function (Go: %s)\n\n", name, entry.GoFunc)
+				fmt.Fprintf(&b, "Accepts any number of arguments, type-checked at call time.\n")
+			} else {
+				fmt.Fprintf(&b, "(%s &rest args) — Builtin function\n\n", name)
+			}
+		}
+		fmt.Fprintf(&b, "Implementation: microlisp/%s (lines %d-%d)\n", entry.File, entry.Start, entry.End)
+
+	case "special":
+		fmt.Fprintf(&b, "=== %s (special form) ===\n\n", name)
+		if doc, ok := builtinDocMap[name]; ok {
+			fmt.Fprintf(&b, "%s\n", doc)
+		} else {
+			fmt.Fprintf(&b, "Special form: %s (handled directly by evaluator)\n", name)
+		}
+		fmt.Fprintf(&b, "Implementation: microlisp/eval_core.go")
+		if entry.Start > 0 {
+			fmt.Fprintf(&b, " (lines %d-%d)", entry.Start, entry.End)
+		}
+		fmt.Fprintf(&b, "\n\nNote: Special forms do not evaluate all arguments — control flow is built-in.\n")
+
+	case "stdlib":
+		fmt.Fprintf(&b, "=== %s (stdlib) ===\n\n", name)
+		// Extract define/defun form from stdlib source
+		defineForm := extractDefineForm(name)
+		if defineForm != "" {
+			fmt.Fprintf(&b, "%s\n", defineForm)
+		} else {
+			fmt.Fprintf(&b, "(%s ...) — Stdlib function\n", name)
+		}
+		fmt.Fprintf(&b, "Implementation: stdlib.go (lines %d-%d)\n", entry.Start, entry.End)
+
+	case "go-ffi":
+		fmt.Fprintf(&b, "=== %s (go-ffi) ===\n\n", name)
+		if entry.GoFunc != "" {
+			fmt.Fprintf(&b, "Go function: %s\n", entry.GoFunc)
+		}
+		if entry.GoSrc != "" {
+			fmt.Fprintf(&b, "Source: %s:%d\n\n", entry.GoSrc, entry.Start)
+		}
+		// Extract signature from GoPackageRegistry
+		sig := getFFISignature(name)
+		if sig != "" {
+			fmt.Fprintf(&b, "%s\n", sig)
+		} else {
+			fmt.Fprintf(&b, "%s\n", entry.Doc)
+		}
+		fmt.Fprintf(&b, "\nUsage in Lisp: ((ffi %q) arg1 arg2 ...)\n     or: ((go:import %q) arg1 arg2 ...)\n", entry.GoFunc, entry.GoFunc)
+
+	case "helper":
+		fmt.Fprintf(&b, "=== %s (helper) ===\n\n", name)
+		if entry.GoFunc != "" {
+			fmt.Fprintf(&b, "Go function: %s\n", entry.GoFunc)
+		}
+		fmt.Fprintf(&b, "Implementation: microlisp/%s (lines %d-%d)\n", entry.File, entry.Start, entry.End)
+	}
+
+	return b.String()
+}
+
+// extractDefineForm extracts the first line of a stdlib function definition
+// from the embedded stdlib content, showing the function name and parameters.
+func extractDefineForm(name string) string {
+	// Match define forms: (define (name params...), (defun name (params...),
+	// (define-macro (name params...), etc.
+	pattern := fmt.Sprintf(`(?i)\((?:define|define-macro|defun|define-condition|defgeneric)\s+\(?\s*%s(?:\s|[\(\)\s])`, regexp.QuoteMeta(name))
+	lines := strings.Split(stdlibContent, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if matched, _ := regexp.MatchString(pattern, trimmed); matched {
+			// Extract just the signature part — up to the first body expression
+			// Count parens to find where the arg list ends
+			depth := 0
+			inArgList := false
+			var sb strings.Builder
+			for i, ch := range trimmed {
+				if ch == '(' {
+					depth++
+					if depth == 2 {
+						inArgList = true
+					}
+				}
+				if inArgList && depth == 1 && ch == ')' {
+					// End of arg list, include this ) and stop
+					sb.WriteRune(ch)
+					// Check if there's more on this line after the arg list
+					rest := strings.TrimSpace(trimmed[i+1:])
+					if rest != "" && !strings.HasPrefix(rest, ")") {
+						sb.WriteString(" ...")
+					}
+					break
+				}
+				if depth == 0 && ch == ')' {
+					// Special case: (define name) with no args (constant)
+					sb.WriteRune(ch)
+					break
+				}
+				sb.WriteRune(ch)
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
+			// Fallback: return the full first part
+			if idx := strings.Index(trimmed, ")"); idx > 0 {
+				// Check if this is just a simple define with no args
+				inner := strings.TrimSpace(trimmed[7:idx]) // skip "(define "
+				parts := strings.Fields(inner)
+				if len(parts) == 1 {
+					return trimmed[:idx+1] // just (define name)
+				}
+			}
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// getFFISignature extracts the Go function signature from GoPackageRegistry
+// for a given FFI function name (e.g. "math.sin").
+func getFFISignature(name string) string {
+	// name is like "math.sin" (lowercase)
+	// Need to find the original case-sensitive pkg/sym name
+	parts := strings.SplitN(name, ".", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	lowerPkg := parts[0]
+	lowerSym := parts[1]
+
+	// Search GoPackageRegistry for matching (case-insensitive)
+	for pkgName, pkg := range GoPackageRegistry {
+		if strings.ToLower(pkgName) != lowerPkg {
+			continue
+		}
+		for symName, fnVal := range pkg {
+			if strings.ToLower(symName) != lowerSym {
+				continue
+			}
+			if fnVal.Kind() != reflect.Func {
+				return fmt.Sprintf("  %s.%s — not a function", pkgName, symName)
+			}
+			sig := fnVal.Type()
+			params := make([]string, sig.NumIn())
+			for i := 0; i < sig.NumIn(); i++ {
+				params[i] = sig.In(i).String()
+			}
+			returns := make([]string, sig.NumOut())
+			for i := 0; i < sig.NumOut(); i++ {
+				returns[i] = sig.Out(i).String()
+			}
+			var isVariadic string
+			if sig.IsVariadic() {
+				isVariadic = " (variadic)"
+			}
+			return fmt.Sprintf("  func %s.%s(%s)%s → (%s)",
+				pkgName, symName,
+				strings.Join(params, ", "),
+				isVariadic,
+				strings.Join(returns, ", "))
+		}
+	}
+	return ""
+}
+
 // readAbsSourceSnippet reads lines from an absolute-path Go source file (for go-ffi entries).
 // It reads from startLine, showing up to `limit` lines (default 40 if limit==0).
 func readAbsSourceSnippet(filename string, startLine, offset, limit int) string {
