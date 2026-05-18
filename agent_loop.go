@@ -4584,7 +4584,40 @@ func (a *AgentLoop) buildCompactSummaryMessage(preTokens int, messages []anthrop
 		}
 	}
 
+	// Inject pending tasks and current work context — the key anti-amnesia mechanism.
+	// Without this, the model loses its goals when the conversation is compacted,
+	// because the structured metadata above captures what WAS done but not what's
+	// left to do. This matches upstream's compact prompt sections #7 (Pending Tasks)
+	// and #8/#9 (Current Work / Optional Next Step).
+	if a.todoList != nil {
+		pending := a.todoList.GetPendingTasks()
+		if len(pending) > 0 {
+			sb.WriteString("\n## Pending Tasks\n")
+			for i, item := range pending {
+				status := string(item.Status)
+				active := ""
+				if item.ActiveForm != "" {
+					active = " (" + item.ActiveForm + ")"
+				}
+				sb.WriteString(fmt.Sprintf("%d. [%s] %s%s\n", i+1, status, item.Content, active))
+			}
+		}
+	}
+
 	sb.WriteString("\n## Current Work\n")
+	// Extract current work context from toolStateTracker and todoList.
+	if a.toolStateTracker != nil {
+		activeTask := a.toolStateTracker.GetActiveTask()
+		if activeTask != "" {
+			sb.WriteString(fmt.Sprintf("Active task: %s\n", activeTask))
+		}
+	}
+	if a.todoList != nil {
+		inProgress := a.todoList.GetInProgressTask()
+		if inProgress != "" {
+			sb.WriteString(fmt.Sprintf("Currently working on: %s\n", inProgress))
+		}
+	}
 	sb.WriteString("(compact truncated the conversation — recent messages are preserved verbatim below)\n")
 
 	// Transcript path for detail recovery.

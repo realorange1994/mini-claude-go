@@ -2543,6 +2543,24 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 		sb.WriteString("\n")
 	}
 
+	// Work completed summary — extract what was accomplished from edit operations.
+	// This helps the model understand what's done vs what's pending after compaction.
+	if len(editOperations) > 0 {
+		sb.WriteString("## Work Completed\n")
+		sb.WriteString("The following changes were made to the codebase:\n")
+		for _, op := range editOperations {
+			sb.WriteString("- " + op + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// Last user message — represents the most recent work direction.
+	// After compaction, this is the key signal for what the model should continue.
+	if len(userMessages) > 0 {
+		lastMsg := userMessages[len(userMessages)-1]
+		sb.WriteString(fmt.Sprintf("## Most Recent Direction\nThe user's most recent message was: %s\n\n", lastMsg))
+	}
+
 	return sb.String()
 }
 

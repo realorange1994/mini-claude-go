@@ -78,6 +78,32 @@ func (t *TodoList) BuildIdleReminder() string {
 	return "The TodoWrite tool hasn't been used recently. If you're on tasks that would benefit from tracking progress, consider using the TodoWrite tool to update your task list. If your current task list is stale, update it. If you don't have a task list, create one for multi-step work."
 }
 
+// GetPendingTasks returns all tasks that are not completed (pending + in_progress).
+// Used by compaction to preserve goal state across context compression.
+func (t *TodoList) GetPendingTasks() []TodoItem {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var pending []TodoItem
+	for _, item := range t.Items {
+		if item.Status != TodoCompleted {
+			pending = append(pending, item)
+		}
+	}
+	return pending
+}
+
+// GetInProgressTask returns the currently in-progress task, or empty string if none.
+func (t *TodoList) GetInProgressTask() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for _, item := range t.Items {
+		if item.Status == TodoInProgress {
+			return item.Content
+		}
+	}
+	return ""
+}
+
 // BuildReminder returns the task list formatted for injection into the system prompt.
 // Returns empty string if the list is empty.
 func (t *TodoList) BuildReminder() string {
