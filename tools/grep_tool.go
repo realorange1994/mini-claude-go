@@ -338,6 +338,12 @@ func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, ca
 		args = append(args, "--glob", "!"+dir)
 	}
 
+	// Exclude common large/cache directories to match rgrep's defaultIgnoredDirs
+	cacheDirs := []string{".claude", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".coverage", "htmlcov"}
+	for _, dir := range cacheDirs {
+		args = append(args, "--glob", "!"+dir)
+	}
+
 	// Add user exclude patterns
 	for _, excl := range excludes {
 		args = append(args, "--glob", "!"+excl)
