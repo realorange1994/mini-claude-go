@@ -2,6 +2,7 @@ package microlisp
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -1006,7 +1007,30 @@ func (l *Lexer) lexNum() Tok {
 	}
 	f, err := strconv.ParseFloat(numStr, 64)
 	if err != nil {
+		// Handle overflow: if the number is too large for float64,
+		// return positive or negative infinity as a float.
+		if numStr != "" && (numStr[0] == '-' || numStr[0] == '+') {
+			sign := numStr[0]
+			// Check if it's just an overflow (not a parse error)
+			absStr := numStr[1:]
+			if _, e2 := strconv.ParseFloat(absStr, 64); e2 != nil {
+				if sign == '-' {
+					l.tok = Tok{typ: TNum, num: math.Inf(-1), pos: start, isFlt: true}
+				} else {
+					l.tok = Tok{typ: TNum, num: math.Inf(1), pos: start, isFlt: true}
+				}
+				return l.tok
+			}
+		} else if numStr != "" {
+			l.tok = Tok{typ: TNum, num: math.Inf(1), pos: start, isFlt: true}
+			return l.tok
+		}
 		return l.lexSymFrom(start)
+	}
+	if math.IsInf(f, 0) {
+		// Preserve infinity from overflow
+		l.tok = Tok{typ: TNum, num: f, pos: start, isFlt: true}
+		return l.tok
 	}
 	l.tok = Tok{typ: TNum, num: f, pos: start, isFlt: hasDecimal || hasExponent}
 	return l.tok

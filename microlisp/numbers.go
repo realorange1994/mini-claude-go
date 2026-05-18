@@ -470,9 +470,9 @@ func builtinLog(args []*Value) (*Value, error) {
 		if base <= 0 || base == 1 {
 			return nil, fmt.Errorf("log: invalid base")
 		}
-		return vnum(math.Log(n) / math.Log(base)), nil
+		return vfloat(math.Log(n) / math.Log(base)), nil
 	}
-	return vnum(math.Log(n)), nil
+	return vfloat(math.Log(n)), nil
 }
 
 // -------- sqrt --------
@@ -485,7 +485,7 @@ func builtinSqrt(args []*Value) (*Value, error) {
 		// Return complex
 		return vcomplex(0, math.Sqrt(-n)), nil
 	}
-	return vnum(math.Sqrt(n)), nil
+	return vfloat(math.Sqrt(n)), nil
 }
 
 func toRational(f float64) *Value {
@@ -509,7 +509,7 @@ func builtinExpt(args []*Value) (*Value, error) {
 	// Check if exponent is an integer
 	expIsInt := (exp.typ == VNum && exp.num == math.Trunc(exp.num)) || exp.typ == VBigInt
 	if !expIsInt {
-		return vnum(math.Pow(toNum(base), toNum(exp))), nil
+		return vfloat(math.Pow(toNum(base), toNum(exp))), nil
 	}
 	// Get exponent as int64
 	var e int64
@@ -601,31 +601,31 @@ func builtinSin(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("sin: need a number")
 	}
 	n := toNum(args[0])
-	return vnum(float64(math.Sin(n))), nil
+	return vfloat(float64(math.Sin(n))), nil
 }
 func builtinCos(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("cos: need a number")
 	}
 	n := toNum(args[0])
-	return vnum(float64(math.Cos(n))), nil
+	return vfloat(float64(math.Cos(n))), nil
 }
 func builtinTan(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("tan: need a number")
 	}
 	n := toNum(args[0])
-	return vnum(float64(math.Tan(n))), nil
+	return vfloat(float64(math.Tan(n))), nil
 }
 func builtinAtan(args []*Value) (*Value, error) {
 	if len(args) == 1 {
 		n := toNum(args[0])
-		return vnum(float64(math.Atan(n))), nil
+		return vfloat(float64(math.Atan(n))), nil
 	}
 	// atan2: (atan y x)
 	y := toNum(args[0])
 	x := toNum(args[1])
-	return vnum(float64(math.Atan2(y, x))), nil
+	return vfloat(float64(math.Atan2(y, x))), nil
 }
 func builtinAtan2(args []*Value) (*Value, error) {
 	if len(args) < 2 {
@@ -633,35 +633,35 @@ func builtinAtan2(args []*Value) (*Value, error) {
 	}
 	y := toNum(args[0])
 	x := toNum(args[1])
-	return vnum(float64(math.Atan2(y, x))), nil
+	return vfloat(float64(math.Atan2(y, x))), nil
 }
 func builtinExp(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("exp: need a number")
 	}
 	n := toNum(args[0])
-	return vnum(float64(math.Exp(n))), nil
+	return vfloat(float64(math.Exp(n))), nil
 }
 func builtinSinh(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("sinh: need a number")
 	}
 	n := toNum(args[0])
-	return vnum(float64(math.Sinh(n))), nil
+	return vfloat(float64(math.Sinh(n))), nil
 }
 func builtinCosh(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("cosh: need a number")
 	}
 	n := toNum(args[0])
-	return vnum(float64(math.Cosh(n))), nil
+	return vfloat(float64(math.Cosh(n))), nil
 }
 func builtinTanh(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("tanh: need a number")
 	}
 	n := toNum(args[0])
-	return vnum(float64(math.Tanh(n))), nil
+	return vfloat(float64(math.Tanh(n))), nil
 }
 
 // -------- asinh / acosh / atanh (ANSI CL inverse hyperbolic) --------
@@ -671,7 +671,7 @@ func builtinAsinh(args []*Value) (*Value, error) {
 	}
 	n := toNum(args[0])
 	// asinh(x) = log(x + sqrt(x*x + 1))
-	return vnum(math.Log(n + math.Sqrt(n*n+1))), nil
+	return vfloat(math.Log(n + math.Sqrt(n*n+1))), nil
 }
 
 func builtinAcosh(args []*Value) (*Value, error) {
@@ -687,7 +687,7 @@ func builtinAcosh(args []*Value) (*Value, error) {
 		return vcomplex(0, ac), nil
 	}
 	// acosh(x) = log(x + sqrt(x-1)*sqrt(x+1))
-	return vnum(math.Log(n + math.Sqrt(n-1)*math.Sqrt(n+1))), nil
+	return vfloat(math.Log(n + math.Sqrt(n-1)*math.Sqrt(n+1))), nil
 }
 
 func builtinAtanh(args []*Value) (*Value, error) {
@@ -713,7 +713,7 @@ func builtinAtanh(args []*Value) (*Value, error) {
 		return vcomplex(0.5*(math.Log(1-n)-math.Log(-1-n)), math.Pi/2), nil
 	}
 	// atanh(x) = 0.5*log((1+x)/(1-x)) for |x| < 1
-	return vnum(0.5 * math.Log((1+n)/(1-n))), nil
+	return vfloat(0.5 * math.Log((1+n)/(1-n))), nil
 }
 
 // -------- evenp / oddp --------
@@ -782,7 +782,7 @@ func builtinOnePlus(args []*Value) (*Value, error) {
 	if v.typ == VBigInt {
 		return vbigint(new(big.Int).Add(v.bigInt, big.NewInt(1))), nil
 	}
-	return vnum(toNum(args[0]) + 1), nil
+	return numOrFloat(toNum(args[0]) + 1, args), nil
 }
 
 func builtinOneMinus(args []*Value) (*Value, error) {
@@ -793,7 +793,7 @@ func builtinOneMinus(args []*Value) (*Value, error) {
 	if v.typ == VBigInt {
 		return vbigint(new(big.Int).Sub(v.bigInt, big.NewInt(1))), nil
 	}
-	return vnum(toNum(args[0]) - 1), nil
+	return numOrFloat(toNum(args[0]) - 1, args), nil
 }
 
 // -------- incf / decf (implemented as special forms in eval) --------
@@ -846,13 +846,13 @@ func builtinPhase(args []*Value) (*Value, error) {
 	}
 	v := args[0]
 	if v.typ == VComplex {
-		return vnum(math.Atan2(v.imag, v.num)), nil
+		return vfloat(math.Atan2(v.imag, v.num)), nil
 	}
 	n := toNum(v)
 	if n >= 0 {
-		return vnum(0), nil
+		return vfloat(0.0), nil
 	}
-	return vnum(math.Pi), nil
+	return vfloat(math.Pi), nil
 }
 
 // -------- cis --------
@@ -878,7 +878,7 @@ func builtinAsin(args []*Value) (*Value, error) {
 		// Result is complex for |n| > 1
 		return vcomplex(0, math.Asin(n)), nil
 	}
-	return vnum(math.Asin(n)), nil
+	return vfloat(math.Asin(n)), nil
 }
 
 // -------- acos --------
@@ -893,7 +893,7 @@ func builtinAcos(args []*Value) (*Value, error) {
 	if n < -1 || n > 1 {
 		return vcomplex(math.Acos(n), 0), nil
 	}
-	return vnum(math.Acos(n)), nil
+	return vfloat(math.Acos(n)), nil
 }
 
 // -------- rationalize --------

@@ -32,6 +32,11 @@ func toRatParts(v *Value) (n, d int64, isInt bool) {
 	case VRat:
 		return v.irat, v.iden, true
 	case VNum:
+		// isFloat values must NOT participate in rational arithmetic;
+		// they should fall through to the float path.
+		if v.isFloat {
+			return 0, 0, false
+		}
 		if v.num == math.Trunc(v.num) && !math.IsInf(v.num, 0) && v.num >= -9e15 && v.num <= 9e15 {
 			return int64(v.num), 1, true
 		}

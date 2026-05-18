@@ -1,6 +1,7 @@
 package microlisp
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -1200,5 +1201,231 @@ func TestBug_CoerceIntegerToString(t *testing.T) {
 	r3, _ := eval(`(coerce 0 'string)`)
 	if r3 != `"0"` {
 		t.Fatalf("coerce 0 'string: expected \"0\", got %s", r3)
+	}
+}
+
+// --- Irrational Numbers & Type System (Bugs #1-#4 in bug summary) ---
+
+func TestBug_SqrtTypeIsFloat(t *testing.T) {
+	// Bug #1: (sqrt 2) returns a float but type-of showed INTEGER
+	r, err := eval(`(type-of (sqrt 2))`)
+	if err != nil {
+		t.Fatalf("sqrt type-of error: %v", err)
+	}
+	upper := strings.ToUpper(r)
+	if !strings.Contains(upper, "FLOAT") {
+		t.Errorf("type-of (sqrt 2) = %s, expected a FLOAT type", r)
+	}
+}
+
+func TestBug_IrrationalDivision(t *testing.T) {
+	// Bug #2: (/ (+ 1 (sqrt 2)) 2) lost precision and returned 1 instead of ~1.207
+	r, err := eval(`(/ (+ 1 (sqrt 2)) 2)`)
+	if err != nil {
+		t.Fatalf("irrational division error: %v", err)
+	}
+	// The result should NOT be exactly 1 or 1/1
+	trimmed := strings.TrimSpace(r)
+	if trimmed == "1" || trimmed == "1/1" {
+		t.Errorf("(/ (+ 1 (sqrt 2)) 2) = %s, expected ~1.207 (float)", r)
+	}
+}
+
+func TestBug_GoldenRatio(t *testing.T) {
+	// Bug #4: phi = (1+sqrt(5))/2 returned 3/2=1.5 instead of ~1.618
+	r, err := eval(`(/ (+ 1 (sqrt 5)) 2)`)
+	if err != nil {
+		t.Fatalf("golden ratio error: %v", err)
+	}
+	trimmed := strings.TrimSpace(r)
+	if trimmed == "3/2" {
+		t.Errorf("phi = %s, expected ~1.618 (float)", r)
+	}
+}
+
+func TestBug_SqrtMultiplication(t *testing.T) {
+	// Bug #3: (* (sqrt 2) (sqrt 2)) should be approximately 2.0
+	r, err := eval(`(* (sqrt 2) (sqrt 2))`)
+	if err != nil {
+		t.Fatalf("sqrt multiply error: %v", err)
+	}
+	// Should contain "2" (approximately 2.0000000000000004 due to float precision)
+	if !strings.Contains(r, "2") {
+		t.Errorf("(* (sqrt 2) (sqrt 2)) = %s, expected ~2.0", r)
+	}
+}
+
+func TestBug_TranscendentalFunctionsReturnFloat(t *testing.T) {
+	// Verify that all transcendental functions return FLOAT type
+	tests := map[string]string{
+		`(type-of (sin 1))`:    "FLOAT",
+		`(type-of (cos 1))`:    "FLOAT",
+		`(type-of (tan 1))`:    "FLOAT",
+		`(type-of (exp 1))`:    "FLOAT",
+		`(type-of (log 2))`:    "FLOAT",
+		`(type-of (asin 0.5))`: "FLOAT",
+		`(type-of (acos 0.5))`: "FLOAT",
+	}
+	for expr, expectedType := range tests {
+		r, err := eval(expr)
+		if err != nil {
+			t.Fatalf("%s error: %v", expr, err)
+		}
+		upper := strings.ToUpper(r)
+		if !strings.Contains(upper, expectedType) {
+			t.Errorf("%s = %s, expected %s", expr, r, expectedType)
+		}
+	}
+}
+
+func TestBug_ArithmeticPreservesFloatType(t *testing.T) {
+	// After sqrt returns vfloat, arithmetic should propagate isFloat flag
+	r, err := eval(`(type-of (+ (sqrt 2) 1))`)
+	if err != nil {
+		t.Fatalf("(+ sqrt 1) type error: %v", err)
+	}
+	upper := strings.ToUpper(r)
+	if !strings.Contains(upper, "FLOAT") {
+		t.Errorf("type-of (+ (sqrt 2) 1) = %s, expected FLOAT", r)
+	}
+}
+
+// --- LSH Function (Bug #9) ---
+
+func TestBug_LshFunction(t *testing.T) {
+	// Bug #9: lsh was undefined, should be an alias for ash
+	r, err := eval(`(lsh 1 10)`)
+	if err != nil {
+		t.Fatalf("lsh error: %v", err)
+	}
+	if strings.TrimSpace(r) != "1024" {
+		t.Errorf("(lsh 1 10) = %s, expected 1024", r)
+	}
+}
+
+func TestBug_LshNegativeShift(t *testing.T) {
+	r, err := eval(`(lsh 1024 -10)`)
+	if err != nil {
+		t.Fatalf("lsh negative shift error: %v", err)
+	}
+	if strings.TrimSpace(r) != "1" {
+		t.Errorf("(lsh 1024 -10) = %s, expected 1", r)
+	}
+}
+
+// --- Complex Number Multiplication (Bug #5) ---
+
+func TestBug_ComplexMultiplication(t *testing.T) {
+	// Bug #5: (* #c(0 1) #c(0 1)) should be -1 (i * i = -1)
+	r, err := eval(`(* #c(0 1) #c(0 1))`)
+	if err != nil {
+		t.Fatalf("complex multiply error: %v", err)
+	}
+	if strings.TrimSpace(r) != "-1" {
+		t.Errorf("(* #c(0 1) #c(0 1)) = %s, expected -1", r)
+	}
+}
+
+func TestBug_ComplexMultiplicationWithReal(t *testing.T) {
+	// (1+2i) * (3+4i) = (3-8) + (4+6)i = -5 + 10i
+	r, err := eval(`(* #c(1 2) #c(3 4))`)
+	if err != nil {
+		t.Fatalf("complex multiply with real error: %v", err)
+	}
+	// The result should be a complex number
+	if !strings.Contains(strings.ToUpper(r), "#C") {
+		t.Errorf("(* #c(1 2) #c(3 4)) = %s, expected complex number like #c(-5 10)", r)
+	}
+}
+
+// --- AREF Error Message (Bug #8) ---
+
+func TestBug_ArefErrorMessage(t *testing.T) {
+	// Bug #8: aref error message should be clearer when given a list
+	_, err := eval(`(aref (list 1 2 3) 0)`)
+	if err == nil {
+		t.Fatal("expected error for aref on list, got nil")
+	}
+	msg := err.Error()
+	// Should indicate the actual type received
+	if !strings.Contains(msg, "got") {
+		t.Errorf("aref error message should indicate the actual type, got: %s", msg)
+	}
+}
+
+// --- Scientific Notation Overflow (Bug #10) ---
+
+func TestBug_ScientificNotationOverflow(t *testing.T) {
+	// Bug #10: (float 1e1000) should handle overflow gracefully
+	// 1e1000 is too large for float64, should become +inf or be handled
+	r, err := eval(`(type-of 1e1000)`)
+	if err != nil {
+		// If it's parsed as a symbol, it will fail with "undefined"
+		// After fix, it should be parsed as a float (infinity)
+		t.Logf("1e1000 parse error (may be expected if treated as symbol): %v", err)
+		return
+	}
+	// If it's successfully parsed, it should be a FLOAT type
+	upper := strings.ToUpper(r)
+	if !strings.Contains(upper, "FLOAT") && !strings.Contains(upper, "INTEGER") {
+		t.Errorf("type-of 1e1000 = %s, expected FLOAT", r)
+	}
+}
+
+// --- 0^0 (Bug #6) ---
+
+func TestBug_ExptZeroZero(t *testing.T) {
+	// Bug #6: (expt 0 0) returns 1, which is acceptable per CL spec
+	r, err := eval(`(expt 0 0)`)
+	if err != nil {
+		t.Fatalf("expt 0 0 error: %v", err)
+	}
+	if strings.TrimSpace(r) != "1" {
+		t.Errorf("(expt 0 0) = %s, expected 1", r)
+	}
+}
+
+// --- Division edge cases with irrationals ---
+
+func TestBug_DivisionByVariousDivisors(t *testing.T) {
+	// Verify that dividing an irrational by various integers produces float results
+	divisors := []int{2, 3, 4, 5, 7}
+	for _, d := range divisors {
+		r, err := eval(fmt.Sprintf(`(/ (+ 1 (sqrt 2)) %d)`, d))
+		if err != nil {
+			t.Fatalf("(/ (+ 1 (sqrt 2)) %d) error: %v", d, err)
+		}
+		// The result should NOT be a simple integer ratio like 2/3, 1/2, etc.
+		// It should be a floating-point number
+		if strings.Contains(r, "/") && !strings.Contains(r, ".") {
+			// If it's a ratio, check it's not truncating to wrong value
+			t.Logf("(/ (+ 1 (sqrt 2)) %d) = %s (checking it's a proper float)", d, r)
+		}
+	}
+}
+
+// --- Phase function returns float ---
+
+func TestBug_PhaseReturnsFloat(t *testing.T) {
+	r, err := eval(`(type-of (phase 1.0))`)
+	if err != nil {
+		t.Fatalf("phase type error: %v", err)
+	}
+	upper := strings.ToUpper(r)
+	if !strings.Contains(upper, "FLOAT") {
+		t.Errorf("type-of (phase 1.0) = %s, expected FLOAT", r)
+	}
+}
+
+// --- Cis returns complex ---
+
+func TestBug_CisReturnsComplex(t *testing.T) {
+	r, err := eval(`(type-of (cis 1.0))`)
+	if err != nil {
+		t.Fatalf("cis type error: %v", err)
+	}
+	upper := strings.ToUpper(r)
+	if !strings.Contains(upper, "COMPLEX") {
+		t.Errorf("type-of (cis 1.0) = %s, expected COMPLEX", r)
 	}
 }

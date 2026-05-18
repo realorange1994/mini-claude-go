@@ -284,7 +284,7 @@ func builtinAref(args []*Value) (*Value, error) {
 		return vchar(ch), nil
 	}
 	if arr.typ != VArray || arr.array == nil {
-		return nil, fmt.Errorf("aref: first argument must be an array")
+		return nil, fmt.Errorf("aref: first argument must be an array or string, got %s", typeStr(arr))
 	}
 	indices := make([]int, len(args)-1)
 	for i := 1; i < len(args); i++ {

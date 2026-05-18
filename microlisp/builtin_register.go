@@ -728,6 +728,7 @@ var builtins = []builtinDef{
 	{"numerator", builtinNumerator},
 	{"denominator", builtinDenominator},
 	{"ash", builtinAsh},
+	{"lsh", builtinAsh},
 	{"logand", builtinLogand},
 	{"logior", builtinLogior},
 	{"logxor", builtinLogxor},
