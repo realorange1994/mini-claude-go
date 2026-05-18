@@ -154,3 +154,25 @@ func TestLispToReflectAutoPtrWrap(t *testing.T) {
 		t.Fatalf("expected 'PrivateKey' in type-of result, got: %s", result.str)
 	}
 }
+
+func TestGoInterfaceAutoWrap(t *testing.T) {
+	InitGlobalEnv()
+	// Test that VGoVal struct values are auto-wrapped to pointers when
+	// passed to functions expecting interface types.
+	// x509.MarshalPKIXPublicKey takes crypto.PublicKey interface,
+	// and internally does type switch on *rsa.PublicKey, *ecdsa.PublicKey, etc.
+	// go:field priv-key "PublicKey" returns rsa.PublicKey (value type).
+	// lispToReflectSafe should auto-wrap it to *rsa.PublicKey.
+	_, err := EvalString(`
+		(define generate-key (go:import "crypto/rsa.GenerateKey"))
+		(define priv-key (generate-key (go:import "crypto/rand.Reader") 2048))
+		; PublicKey field is rsa.PublicKey (value) - should auto-wrap to *rsa.PublicKey
+		(define pub-key (go:field priv-key "PublicKey"))
+		; MarshalPKIXPublicKey expects crypto.PublicKey interface
+		(define marshal-pub (go:import "crypto/x509.MarshalPKIXPublicKey"))
+		(marshal-pub pub-key)
+	`, globalEnv)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey failed (interface auto-wrap may be missing): %v", err)
+	}
+}

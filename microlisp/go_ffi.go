@@ -261,24 +261,23 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 	// If the Lisp value is a VGoVal, try to use the actual Go value directly.
 	if v.typ == VGoVal {
 		gv := reflect.ValueOf(v.goVal)
+		// For struct values with interface targets, prefer *T over T.
+		// Many Go APIs do type switches on pointer types (e.g. x509.MarshalPKIXPublicKey
+		// does type switch on *rsa.PublicKey, not rsa.PublicKey), even when the
+		// interface is any (crypto.PublicKey = any).
+		if gv.Kind() == reflect.Struct && t.Kind() == reflect.Interface {
+			ptrType := reflect.PtrTo(gv.Type())
+			if ptrType.Implements(t) || t.NumMethod() == 0 {
+				newPtr := reflect.New(gv.Type())
+				newPtr.Elem().Set(gv)
+				return newPtr, nil
+			}
+		}
 		// If the Go value's type is assignable to the target type, use it.
 		if gv.Type().AssignableTo(t) {
 			return gv, nil
 		}
-		// If the Go value implements the target interface, use it.
-		if t.Kind() == reflect.Interface && gv.Type().Implements(t) {
-			return gv, nil
-		}
-		// Try pointer-to-interface for interface targets.
-		if t.Kind() == reflect.Interface {
-			if gv.CanInterface() {
-				iface := gv.Interface()
-				rv := reflect.ValueOf(iface)
-				if rv.Type().Implements(t) {
-					return rv, nil
-				}
-			}
-		}
+
 		// Auto-wrap value in pointer when target is *T and value is T
 		if t.Kind() == reflect.Ptr && !gv.Type().AssignableTo(t) {
 			if gv.Kind() == reflect.Struct {
