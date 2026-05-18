@@ -2,64 +2,81 @@ package microlisp
 
 import (
 	"fmt"
-	"math"
-	"os"
 	"reflect"
+	"strings"
 )
 
 // -------- FFI --------
-var ffiRegistry = map[string]interface{}{
-	"math/sin":   math.Sin,
-	"math/cos":   math.Cos,
-	"math/tan":   math.Tan,
-	"math/sqrt":  math.Sqrt,
-	"math/abs":   math.Abs,
-	"math/floor": math.Floor,
-	"math/ceil":  math.Ceil,
-	"math/round": math.Round,
-	"math/exp":   math.Exp,
-	"math/log":   math.Log,
-	"math/pow":   math.Pow,
-	"os/getenv":  os.Getenv,
-	"os/getpid":  os.Getpid,
-}
+// The old ffiRegistry is kept for backward compatibility with ffi-register,
+// but (ffi "pkg.Func") now delegates to GoPackageRegistry (same as go:import).
+
+var ffiRegistry = map[string]interface{}{}
 
 func builtinFFI(args []*Value) (*Value, error) {
 	if len(args) < 1 || args[0].typ != VStr {
 		return nil, fmt.Errorf("ffi: need string function name")
 	}
 	name := args[0].str
-	fn, ok := ffiRegistry[name]
-	if !ok {
-		return nil, fmt.Errorf("ffi: unknown function: %s", name)
+
+	// First try the old ffiRegistry for backward compat
+	if fn, ok := ffiRegistry[name]; ok {
+		fnVal := reflect.ValueOf(fn)
+		if fnVal.Kind() != reflect.Func {
+			return reflectToLisp(fnVal), nil
+		}
+		fnType := fnVal.Type()
+		numIn := fnType.NumIn()
+		callArgs := make([]reflect.Value, 0, len(args)-1)
+		for i := 1; i < len(args); i++ {
+			callArgs = append(callArgs, lispToReflect(args[i], fnType.In(min(i-1, numIn-1))))
+		}
+		if fnType.IsVariadic() {
+			fixedArgs := callArgs
+			if len(fixedArgs) > numIn-1 {
+				fixedArgs = callArgs[:numIn-1]
+				varArgs := callArgs[numIn-1:]
+				fixedArgs = append(fixedArgs, varArgs...)
+				callArgs = fixedArgs
+			}
+		}
+		results := fnVal.Call(callArgs)
+		if len(results) == 0 {
+			return vnil(), nil
+		}
+		return reflectToLisp(results[0]), nil
 	}
-	fnVal := reflect.ValueOf(fn)
-	// Handle non-function registered values
-	if fnVal.Kind() != reflect.Func {
-		return reflectToLisp(fnVal), nil
+
+	// Convert "pkg/func" format to "pkg.Func" for GoPackageRegistry
+	goName := name
+	if strings.Contains(name, "/") && !strings.Contains(name, ".") {
+		// "crypto/rand/Reader" -> find the package and symbol
+		// Try splitting at last /
+		lastSlash := strings.LastIndex(name, "/")
+		pkgPart := name[:lastSlash]
+		symPart := name[lastSlash+1:]
+		goName = pkgPart + "." + symPart
 	}
-	fnType := fnVal.Type()
-	numIn := fnType.NumIn()
-	// if variadic...
-	callArgs := make([]reflect.Value, 0, len(args)-1)
-	for i := 1; i < len(args); i++ {
-		callArgs = append(callArgs, lispToReflect(args[i], fnType.In(min(i-1, numIn-1))))
-	}
-	// Handle variadic
-	if fnType.IsVariadic() {
-		fixedArgs := callArgs
-		if len(fixedArgs) > numIn-1 {
-			fixedArgs = callArgs[:numIn-1]
-			varArgs := callArgs[numIn-1:]
-			fixedArgs = append(fixedArgs, varArgs...)
-			callArgs = fixedArgs
+
+	// Delegate to go:import logic
+	parts := strings.SplitN(goName, ".", 2)
+	if len(parts) == 2 {
+		pkgName, symName := parts[0], parts[1]
+		if pkg, ok := GoPackageRegistry[pkgName]; ok {
+			if fnVal, ok := pkg[symName]; ok {
+				if fnVal.Kind() == reflect.Func {
+					wrapper := &goFunc{fn: fnVal, name: goName}
+					return &Value{
+						typ:  VPrim,
+						fn:   makeGoPrim(wrapper),
+						name: goName,
+					}, nil
+				}
+				return reflectToLisp(fnVal), nil
+			}
 		}
 	}
-	results := fnVal.Call(callArgs)
-	if len(results) == 0 {
-		return vnil(), nil
-	}
-	return reflectToLisp(results[0]), nil
+
+	return nil, fmt.Errorf("ffi: unknown function: %s", name)
 }
 
 func builtinFFIRegister(args []*Value) (*Value, error) {

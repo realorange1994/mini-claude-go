@@ -343,6 +343,8 @@ var builtins = []builtinDef{
 	{"go:new", builtinGoNew},
 	{"go:field", builtinGoField},
 	{"go:set-field", builtinGoSetField},
+	{"go:type-of", builtinGoTypeOf},
+	{"go:call", builtinGoCall},
 	{"help", builtinHelp},
 	{"ffi", builtinFFI},
 	{"ffi-register", builtinFFIRegister},

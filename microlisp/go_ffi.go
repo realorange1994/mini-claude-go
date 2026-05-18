@@ -142,6 +142,10 @@ func makeGoPrim(wf *goFunc) NativeFunc {
 				if !results[lastIdx].IsNil() {
 					return nil, fmt.Errorf("go:import %s: %v", wf.name, results[lastIdx].Interface())
 				}
+				// If there's only 1 non-error return value, return it directly (not wrapped in a list)
+				if lastIdx == 1 {
+					return reflectToLisp(results[0]), nil
+				}
 				lispResults := make([]*Value, lastIdx)
 				for i := 0; i < lastIdx; i++ {
 					lispResults[i] = reflectToLisp(results[i])
@@ -400,9 +404,11 @@ func builtinGoRegister(args []*Value) (*Value, error) {
 
 // vgoval creates a VGoVal Value wrapping a Go interface value.
 func vgoval(val interface{}, typ reflect.Type) *Value {
+	rv := reflect.ValueOf(val)
 	return &Value{
-		typ:       VGoVal,
-		goVal:     val,
-		goValType: typ,
+		typ:           VGoVal,
+		goVal:         val,
+		goValType:     typ,
+		goValReflect:  rv,
 	}
 }

@@ -184,3 +184,90 @@ func builtinGoSetField(args []*Value) (*Value, error) {
 	field.Set(reflectVal)
 	return vnil(), nil
 }
+
+// builtinGoTypeOf returns the Go type name of a VGoVal.
+// (go:type-of obj) => type name string or nil.
+func builtinGoTypeOf(args []*Value) (*Value, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("go:type-of: need a value")
+	}
+	v := args[0]
+	if v.typ != VGoVal {
+		return nil, fmt.Errorf("go:type-of: expected a Go value, got %s", typeStr(v))
+	}
+	// Use goValReflect if available (more accurate type info)
+	var rv reflect.Value
+	if v.goValReflect.IsValid() {
+		rv = v.goValReflect
+	} else {
+		rv = reflect.ValueOf(v.goVal)
+	}
+	if !rv.IsValid() {
+		return vnil(), nil
+	}
+	typeStr := rv.Type().String()
+	return vstr(typeStr), nil
+}
+
+// builtinGoCall calls a named method on a Go value.
+// (go:call obj "MethodName" args...) => return value(s).
+func builtinGoCall(args []*Value) (*Value, error) {
+	if len(args) < 2 || args[0].typ != VGoVal || args[1].typ != VStr {
+		return nil, fmt.Errorf("go:call: need a Go value, method name, and optional arguments")
+	}
+	obj := args[0]
+	methodName := args[1].str
+
+	var rv reflect.Value
+	if obj.goValReflect.IsValid() {
+		rv = obj.goValReflect
+	} else {
+		rv = reflect.ValueOf(obj.goVal)
+	}
+	if !rv.IsValid() {
+		return nil, fmt.Errorf("go:call: invalid Go value")
+	}
+
+	// For pointer values, dereference to get the struct/method set
+	origRv := rv
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return nil, fmt.Errorf("go:call: nil pointer")
+		}
+		rv = rv.Elem()
+	}
+
+	method := rv.MethodByName(methodName)
+	if !method.IsValid() {
+		// Try on the original value (some methods are on pointer receiver)
+		method = origRv.MethodByName(methodName)
+		if !method.IsValid() {
+			return nil, fmt.Errorf("go:call: no method %q on %s", methodName, rv.Type())
+		}
+	}
+
+	fnType := method.Type()
+	callArgs := make([]reflect.Value, 0, len(args)-2)
+	for i, arg := range args[2:] {
+		paramIdx := i // method receiver is index 0, so first arg is index 1
+		paramType := fnType.In(paramIdx + 1)
+		rvArg, err := lispToReflectSafe(arg, paramType)
+		if err != nil {
+			return nil, fmt.Errorf("go:call: method %s arg %d: %w", methodName, i+1, err)
+		}
+		callArgs = append(callArgs, rvArg)
+	}
+
+	results := method.Call(callArgs)
+	if len(results) == 0 {
+		return vnil(), nil
+	}
+	if len(results) == 1 {
+		return reflectToLisp(results[0]), nil
+	}
+	lispResults := make([]*Value, len(results))
+	for i, r := range results {
+		lispResults[i] = reflectToLisp(r)
+	}
+	return listFromSlice(lispResults), nil
+}

@@ -217,6 +217,13 @@ var goDocMap = map[string]string{
   Supported field types: integers, booleans, strings, slices, *big.Int, nested structs.
   Pointer fields can be set to nil. Lisp lists convert to Go slices.
   Example: (go:set-field cert "IsCA" t) => nil`,
+
+		"go:type-of": `(go:type-of obj) — Return the Go type name of a VGoVal as a string.
+  Example: (go:type-of key) => "*rsa.PrivateKey"`,
+
+		"go:call": `(go:call obj "MethodName" args...) — Call a Go method on a VGoVal.
+  Automatically finds methods on both value and pointer receivers.
+  Example: (go:call cert "Equal" otherCert) => t/nil`,
 }
 
 func helpAll() string {
