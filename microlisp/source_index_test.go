@@ -244,3 +244,23 @@ func TestHelperCountSignificant(t *testing.T) {
 		t.Fatalf("expected at least 100 helper functions, got: %d", helperCount)
 	}
 }
+
+func TestGetSourceGoFFI(t *testing.T) {
+	out := GetSource("crypto/x509.CreateCertificate", 0, 5)
+	if strings.Contains(out, "No source found") {
+		t.Fatalf("expected source for Go FFI function, got: %s", out)
+	}
+	if !strings.Contains(out, "go-ffi") {
+		t.Fatalf("expected 'go-ffi' kind, got: %s", out)
+	}
+	if !strings.Contains(out, "Go stdlib:") {
+		t.Fatalf("expected Go stdlib signature, got: %s", out)
+	}
+}
+
+func TestSourceListIncludesGoFFI(t *testing.T) {
+	out := SourceList("crypto/x509", 0, 10)
+	if strings.Contains(out, "No functions found") {
+		t.Fatalf("expected Go FFI functions in source list, got: %s", out)
+	}
+}

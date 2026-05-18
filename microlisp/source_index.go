@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -14,12 +15,13 @@ import (
 
 // SourceEntry holds location info for a function.
 type SourceEntry struct {
-	Kind   string // "builtin", "stdlib", "special", "helper"
-	File   string // Go source file or "stdlib.go"
+	Kind   string // "builtin", "stdlib", "special", "helper", "go-ffi"
+	File   string // Go source file or "stdlib.go" (absolute for go-ffi)
 	Start  int    // 1-based line number
 	End    int    // 1-based line number
 	Doc    string // brief description
-	GoFunc string // Go function name (for builtins/helpers)
+	GoFunc string // Go function name (for builtins/helpers/go-ffi)
+	GoSrc  string // relative Go source path from GOROOT/src (for go-ffi)
 }
 
 var sourceIndex map[string]*SourceEntry
@@ -55,6 +57,9 @@ func init() {
 
 	// Scan all non-builtin Go functions as helpers
 	scanHelperFunctions()
+
+	// Index Go FFI functions from GoPackageRegistry
+	indexGoFFIFunctions()
 }
 
 // loadBuiltinRegistry parses builtin_register.go to extract {lisp-name, go-func} pairs.
@@ -375,6 +380,64 @@ func scanHelperFunctions() {
 	}
 }
 
+// indexGoFFIFunctions scans GoPackageRegistry and registers each function
+// in sourceIndex with Kind "go-ffi" and absolute Go source file paths.
+func indexGoFFIFunctions() {
+	goroot := runtime.GOROOT()
+	if goroot == "" {
+		return // can't locate Go source
+	}
+	// Normalize to forward slashes for consistent comparison
+	goroot = filepath.ToSlash(goroot)
+
+	for pkgName, pkg := range GoPackageRegistry {
+		for symName, fnVal := range pkg {
+			if fnVal.Kind() != reflect.Func {
+				continue
+			}
+			// Use runtime.FuncForPC to get source location
+			fn := runtime.FuncForPC(fnVal.Pointer())
+			if fn == nil {
+				continue
+			}
+			file, line := fn.FileLine(fn.Entry())
+			// Normalize file path to forward slashes
+			file = filepath.ToSlash(file)
+
+			// Only index if the file is under GOROOT (standard library)
+			if !strings.HasPrefix(file, goroot) {
+				continue
+			}
+			// Relative path from GOROOT/src/ for display
+			relFile := file
+			prefix := goroot + "/src/"
+			if strings.HasPrefix(file, prefix) {
+				relFile = strings.TrimPrefix(file, prefix)
+			}
+
+			sig := fnVal.Type()
+			params := make([]string, sig.NumIn())
+			for i := 0; i < sig.NumIn(); i++ {
+				params[i] = sig.In(i).String()
+			}
+			rets := make([]string, sig.NumOut())
+			for i := 0; i < sig.NumOut(); i++ {
+				rets[i] = sig.Out(i).String()
+			}
+			fullName := pkgName + "." + symName
+			sourceIndex[strings.ToLower(fullName)] = &SourceEntry{
+				Kind:    "go-ffi",
+				File:    file, // absolute path for reading source
+				Start:   line,
+				End:     line,
+				Doc:     fmt.Sprintf("Go stdlib: %s(%s) → %s", symName, strings.Join(params, ", "), strings.Join(rets, ", ")),
+				GoFunc:  fullName,
+				GoSrc:   relFile, // relative path for display
+			}
+		}
+	}
+}
+
 // GetSource returns the source code for a named function or special form.
 // offset/limit control how many lines of source to show (0 means unlimited).
 func GetSource(name string, offset, limit int) string {
@@ -442,8 +505,58 @@ func GetSource(name string, offset, limit int) string {
 		} else {
 			fmt.Fprintf(&b, "\nSpecial forms are handled directly by the evaluator (eval_core.go).")
 		}
+
+	case "go-ffi":
+		if entry.GoFunc != "" {
+			fmt.Fprintf(&b, "Go function: %s\n", entry.GoFunc)
+		}
+		if entry.GoSrc != "" {
+			fmt.Fprintf(&b, "Source: %s\n", entry.GoSrc)
+		}
+		fmt.Fprintf(&b, "%s\n", entry.Doc)
+		if entry.Start > 0 {
+			fmt.Fprintf(&b, "Line: %d\n", entry.Start)
+			fmt.Fprintf(&b, "\n%s", readAbsSourceSnippet(entry.File, entry.Start, offset, limit))
+		}
 	}
 
+	return b.String()
+}
+
+// readAbsSourceSnippet reads lines from an absolute-path Go source file (for go-ffi entries).
+// It reads from startLine, showing up to `limit` lines (default 40 if limit==0).
+func readAbsSourceSnippet(filename string, startLine, offset, limit int) string {
+	if limit == 0 {
+		limit = 40 // default: show 40 lines for Go stdlib functions
+	}
+	f, err := os.Open(filename)
+	if err != nil {
+		return fmt.Sprintf("(cannot open %s: %v)\n", filename, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	var b strings.Builder
+	lineNum := 0
+	shown := 0
+	for scanner.Scan() {
+		lineNum++
+		if lineNum >= startLine {
+			snippetLine := lineNum - startLine
+			if snippetLine < offset {
+				continue
+			}
+			if shown >= limit {
+				break
+			}
+			fmt.Fprintf(&b, "%4d  %s\n", lineNum, scanner.Text())
+			shown++
+		}
+	}
+	if shown >= limit {
+		fmt.Fprintf(&b, "\n  ... more lines (use offset=%d, limit=%d to continue)\n",
+			offset+shown, limit)
+	}
 	return b.String()
 }
 
