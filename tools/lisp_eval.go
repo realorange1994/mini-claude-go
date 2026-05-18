@@ -25,16 +25,10 @@ type evalResult struct {
 func (*LispEvalTool) Name() string { return "lisp_eval" }
 
 func (*LispEvalTool) Description() string {
-	return "Evaluate Common Lisp expressions for precise computation, logic, and data manipulation. " +
-		"Supports: arbitrary-precision integers, rationals, complex numbers, lists, strings, hash tables, " +
-		"lambda, macros, CLOS, conditions/restarts, format directives, sequence operations, and Go FFI. " +
-		"Use for: math calculations, string processing, list manipulation, algorithm prototyping, calling Go stdlib. " +
-		"State persists between calls (defvar, defun survive). " +
-		"Thread-safe: concurrent calls are serialized. " +
-		"FFI: use (ffi \"package.Func\") or (go:import \"package.Func\") to call Go stdlib. " +
-		"VGoVal: Go interface/pointer values are preserved when passed between FFI calls (e.g. crypto/rand.Reader as io.Reader). " +
-		"Use operation='skill' to learn how to use this Lisp interpreter, FFI, and all tool operations. Use operation='source' with a plain function name (NOT Lisp syntax) to view source of any builtin/stdlib function, 'source-list' to browse all available functions. " +
-		"Use operation='xref' to see callers/callees of a function, 'xref-list' to browse all cross-references."
+	return "Evaluate Common Lisp expressions. State persists between calls. " +
+		"Quick start: expression=\"(+ 1 2)\". " +
+		"Use operation=\"help\" for topic docs, \"examples\" for code samples, " +
+		"\"skill\" for a complete usage guide. FFI: (ffi \"math.Sqrt\") calls Go stdlib."
 }
 
 func (*LispEvalTool) InputSchema() map[string]any {
@@ -43,12 +37,12 @@ func (*LispEvalTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"expression": map[string]any{
 				"type":        "string",
-				"description": "Lisp expression to evaluate, e.g. (+ 1 2), (car '(1 2 3)), (format nil \"Hello ~A\" \"World\"). IMPORTANT for operation=source and operation=source-list: use a PLAIN FUNCTION NAME only, NOT a Lisp expression. Correct: expression=\"car\", expression=\"string-append\", expression=\"defclass\". WRONG: expression=\"(source 'car)\", expression=\"(source \\\"car\\\")\", expression=\"'car\". For operation=help: use topic name like \"arithmetic\", \"lists\", \"lambda\". For operation=examples: use category name like \"arithmetic\", \"recursion\", \"format\". For operation=source-list: optional filter substring like \"car\" to find all functions containing that string.",
+				"description": "Lisp expression to evaluate, e.g. (+ 1 2), (car '(1 2 3)). For source/xref operations: use a PLAIN function name only (e.g. \"car\"). For help/skill: use a topic name like \"arithmetic\" or \"ffi\".",
 			},
 			"operation": map[string]any{
-				"type":        "string",
-				"enum":        []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list", "xref", "xref-list", "skill"},
-				"description": "Action to perform: 'eval' to evaluate a Lisp expression (default), 'reset' to clear interpreter state, 'help' to show usage manual, 'examples' to show code examples, 'eval_file' to load and execute a Lisp file, 'lint' to check syntax without executing, 'source' to view source of a builtin/stdlib function (use PLAIN function name in expression, NOT Lisp syntax), 'source-list' to list all indexed functions (use optional filter string in expression), 'xref' to show callers/callees of a function (use PLAIN function name, limit=context lines), 'xref-list' to browse all cross-reference relationships (use optional filter string in expression), 'skill' to load a comprehensive guide teaching how to use this Lisp interpreter (expression='ffi' for FFI guide, expression='ops' for operations guide, expression='xref' for cross-reference guide, or empty for full guide).",
+				"type": "string",
+				"enum": []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list", "xref", "xref-list", "skill"},
+				"description": `Action: eval (default, evaluate expression), reset (clear state), help (topic docs), examples (code samples), skill (usage guide — expression="ffi"/"ops"/"xref" or empty for full), source (view function source — expression=plain name), source-list (browse indexed functions), xref (call graph — expression=plain name), xref-list (browse all xrefs), eval_file (run .lisp file), lint (check syntax)`,
 			},
 			"file": map[string]any{
 				"type":        "string",
@@ -840,85 +834,47 @@ The reader VGoVal (type *rand.reader) is automatically recognized as implementin
 
 		"ops": `=== lisp_eval Operations Guide ===
 
-The lisp_eval tool supports these operations (set via the "operation" parameter):
+--- Getting Started ---
+1. Evaluate:  expression="(+ 1 2)"
+2. Define:    expression="(defun square (x) (* x x))"
+3. Call:      expression="(square 7)"
 
---- eval (default) ---
-Evaluate a Lisp expression. State persists between calls.
-  expression: "(+ 1 2)"          => 3
-  expression: "(defun square (x) (* x x))"  => defines function
-  expression: "(square 7)"       => 49
-  limits: "default" | "strict" | "unlimited"
+--- Need Something Specific? ---
+- Function reference? → operation=help, expression="arithmetic" (or any topic)
+- Code examples?      → operation=examples, expression="lists" (or any category)
+- Go interop/FFI?     → operation=skill, expression="ffi"
+- View source code?   → operation=source, expression="car" (plain name)
+- Explore call graph? → operation=xref, expression="filter" (plain name)
+- List functions?     → operation=source-list, expression=""
+- Full guide?         → operation=skill, expression=""
 
---- reset ---
-Clear all interpreter state (variables, functions, macros, classes).
-  No parameters needed.
-
---- help ---
-Show usage manual for a topic.
-  expression: ""        => list all topics
-  expression: "arithmetic" => show arithmetic operations
-  expression: "lambda"  => show lambda/closures guide
-  Topics: arithmetic, lists, strings, lambda, recursion, format, hash, arrays, clos, conditions, macros, types, special
-
---- examples ---
-Show example expressions for a category.
-  expression: ""        => list all categories
-  expression: "arithmetic" => show arithmetic examples
-  Categories: arithmetic, lists, lambda, recursion, map, strings, format, hash, arrays, misc
-
---- eval_file ---
-Load and execute a Lisp file.
-  file: "/path/to/file.lisp" (required)
-  limits: "default" | "strict" | "unlimited"
-
---- lint ---
-Check syntax without executing. Use expression or file.
-  expression: "(defun foo (x) x)"  => check syntax
-  file: "/path/to/file.lisp"       => check file syntax
-  limits: "default" | "strict" | "unlimited"
-
---- source ---
-View source code of a builtin or stdlib function.
-  expression: "car"            => show car source (PLAIN NAME, not Lisp syntax!)
-  expression: "string-append"  => show string-append source
-  offset: 0 (line offset for large functions)
-  limit: 50 (max lines to show)
-  IMPORTANT: Use a plain function name, NOT a Lisp expression.
-  Correct: expression="car"  WRONG: expression="(source 'car)"
-
---- source-list ---
-List all indexed functions, optionally filtered.
-  expression: ""       => list all functions
-  expression: "car"    => list functions containing "car"
-  expression: "string" => list functions containing "string"
-  offset: 0 (entry offset for pagination)
-  limit: 50 (max entries per page)
-
---- xref ---
-Show cross-reference: callers and callees of a function.
-  expression: "car"            => who calls car, and what car calls
-  expression: "string-append"  => callers/callees of string-append
-  limit: 2 (context lines around each call site)
-  IMPORTANT: Use a plain function name, NOT a Lisp expression.
-
---- xref-list ---
-Browse all cross-reference relationships, optionally filtered.
-  expression: ""       => list all caller->callee pairs
-  expression: "string" => list pairs involving "string"
-  offset: 0 (entry offset for pagination)
-  limit: 50 (max entries per page)
-
---- skill ---
-Load a comprehensive guide for learning this Lisp interpreter.
-  expression: ""     => full guide (all topics)
-  expression: "ffi"  => FFI/Go interop guide
-  expression: "ops"  => operations guide
-  expression: "xref" => cross-reference guide
+--- All Operations ---
+  eval (default) — evaluate Lisp expression; state persists
+    expression: "(+ 1 2)"  →  3
+    limits: "default" | "strict" | "unlimited"
+  reset — clear all interpreter state
+  help — topic reference; expression="" lists topics
+    Topics: arithmetic, lists, strings, lambda, recursion, format,
+            hash, arrays, clos, conditions, macros, types, special
+  examples — code examples; expression="" lists categories
+    Categories: arithmetic, lists, lambda, recursion, map, strings,
+                format, hash, arrays, misc
+  skill — comprehensive guide; expression="ffi"/"ops"/"xref"
+  eval_file — run .lisp file; file="/path/to/file.lisp" (required)
+  lint — check syntax; expression="(defun foo (x) x)" or file="/path.lisp"
+  source — view function source; expression=PLAIN NAME (e.g. "car", NOT "(source 'car)")
+    offset: 0 (line offset), limit: 50 (max lines)
+  source-list — browse indexed functions; expression="string" filters
+    offset: 0 (entry offset), limit: 50 (max entries)
+  xref — callers/callees; expression=PLAIN NAME (e.g. "filter")
+    limit: 2 (context lines around each call site)
+  xref-list — browse all xrefs; expression="" lists all pairs
+    offset: 0, limit: 50
 
 --- Resource Limits ---
-  "default"  — 1M steps, 30s timeout, 256MB heap (normal use)
-  "strict"   — 100K steps, 10s timeout, 64MB heap (untrusted code)
-  "unlimited" — no limits (REPL mode only, use carefully)`,
+  "default"  — 1M steps, 30s, 256MB (normal use)
+  "strict"   — 100K steps, 10s, 64MB (untrusted code)
+  "unlimited" — no limits (REPL mode only)`,
 
 		"xref": `=== Cross-Reference (xref) Guide ===
 
@@ -984,52 +940,42 @@ Call sites section (with context):
 	// Full guide
 	return `=== Lisp Interpreter Skill: Complete Guide ===
 
-This guide teaches you everything you need to use this Lisp interpreter effectively.
-Use operation=skill with expression=<topic> for detailed guides on specific topics.
+--- Quick Start (3 steps) ---
+1. Calculate:  expression="(+ 1 2)" → 3
+2. Define:     expression="(defun square (x) (* x x))" → function
+3. Call:       expression="(square 7)" → 49
 
---- Quick Start ---
-1. Evaluate expressions:  operation=eval, expression="(+ 1 2)"
-2. Define functions:      operation=eval, expression="(defun square (x) (* x x))"
-3. Call Go functions:     operation=eval, expression="((ffi \"math.Sqrt\") 2.0)"
-4. View source code:      operation=source, expression="car"
-5. Find callers:          operation=xref, expression="car"
-6. List all functions:    operation=source-list, expression=""
-7. Get help on topics:    operation=help, expression="arithmetic"
-8. See examples:          operation=examples, expression="lists"
+--- Learn More ---
+- Arithmetic, lists, strings, lambda, etc.? → operation=help, expression="topic"
+- See code examples?                        → operation=examples, expression="category"
+- Call Go stdlib functions?                 → operation=skill, expression="ffi"
+- View source of a function?                → operation=source, expression="car"
+- Explore who calls what?                   → operation=xref, expression="filter"
+- All operations explained?                 → operation=skill, expression="ops"
 
---- Core Lisp Features ---
+--- Core Features ---
 - Arbitrary-precision integers, rationals, complex numbers
 - Lists, strings, hash tables, arrays, structs
 - Lambda, closures, macros, CLOS (object system)
 - Conditions/restarts (error handling)
 - Format directives (~A, ~D, ~F, ~%, ~{~})
 - State persists between calls (defvar, defun survive)
+- Thread-safe: concurrent calls serialized
 
---- FFI: Calling Go Standard Library ---
-Import: (ffi "package.Function") or (go:import "package.Function")
-Call:   ((ffi "math.Sin") 1.0)
-Vars:   (go:import "crypto/rand.Reader") => #<go-val *rand.reader>
-List:   (go:list) or (go:list "math")
-VGoVal: Go interface/pointer values are preserved — can be passed to other FFI functions
-See:    operation=skill, expression="ffi" for full FFI guide
-
---- Tool Operations ---
-eval, reset, help, examples, eval_file, lint, source, source-list, xref, xref-list, skill
-See:    operation=skill, expression="ops" for full operations guide
-
---- Cross-Reference ---
-Who calls X?   operation=xref, expression="car"
-What does X call? operation=xref, expression="filter"
-Browse all:     operation=xref-list, expression=""
-See:            operation=skill, expression="xref" for full xref guide
+--- FFI Quick Reference ---
+Import:  (ffi "math.Sqrt") or (go:import "math.Sin")
+Call:    ((ffi "math.Sqrt") 2.0) → 1.414...
+Structs: (go:new "crypto/x509.Certificate")
+Fields:  (go:field cert "Version"), (go:set-field cert "IsCA" t)
+Details: operation=skill, expression="ffi"
 
 --- Resource Limits ---
 default:  1M steps, 30s, 256MB — normal use
 strict:   100K steps, 10s, 64MB — untrusted code
-unlimited: no limits — REPL only
+unlimited: no limits — REPL mode only
 
---- Detailed Guides ---
-  operation=skill, expression="ffi"   — FFI/Go interop guide
-  operation=skill, expression="ops"   — operations guide
-  operation=skill, expression="xref"  — cross-reference guide`
+--- All Skill Topics ---
+  expression="ffi"   — FFI/Go interop guide (import, call, structs, VGoVal)
+  expression="ops"   — all operations explained (eval, help, source, xref, etc.)
+  expression="xref"  — cross-reference guide (call graph exploration)`
 }
