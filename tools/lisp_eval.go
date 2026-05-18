@@ -32,7 +32,8 @@ func (*LispEvalTool) Description() string {
 		"State persists between calls (defvar, defun survive). " +
 		"Thread-safe: concurrent calls are serialized. " +
 		"Limitations: no filesystem I/O, no network, no FFI — pure computation only. " +
-		"Use operation='source' with a plain function name (NOT Lisp syntax) to view source of any builtin/stdlib function, 'source-list' to browse all available functions."
+		"Use operation='skill' to learn how to use this Lisp interpreter, FFI, and all tool operations. Use operation='source' with a plain function name (NOT Lisp syntax) to view source of any builtin/stdlib function, 'source-list' to browse all available functions. " +
+		"Use operation='xref' to see callers/callees of a function, 'xref-list' to browse all cross-references."
 }
 
 func (*LispEvalTool) InputSchema() map[string]any {
@@ -45,8 +46,8 @@ func (*LispEvalTool) InputSchema() map[string]any {
 			},
 			"operation": map[string]any{
 				"type":        "string",
-				"enum":        []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list"},
-				"description": "Action to perform: 'eval' to evaluate a Lisp expression (default), 'reset' to clear interpreter state, 'help' to show usage manual, 'examples' to show code examples, 'eval_file' to load and execute a Lisp file, 'lint' to check syntax without executing, 'source' to view source of a builtin/stdlib function (use PLAIN function name in expression, NOT Lisp syntax), 'source-list' to list all indexed functions (use optional filter string in expression).",
+				"enum":        []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list", "xref", "xref-list", "skill"},
+				"description": "Action to perform: 'eval' to evaluate a Lisp expression (default), 'reset' to clear interpreter state, 'help' to show usage manual, 'examples' to show code examples, 'eval_file' to load and execute a Lisp file, 'lint' to check syntax without executing, 'source' to view source of a builtin/stdlib function (use PLAIN function name in expression, NOT Lisp syntax), 'source-list' to list all indexed functions (use optional filter string in expression), 'xref' to show callers/callees of a function (use PLAIN function name, limit=context lines), 'xref-list' to browse all cross-reference relationships (use optional filter string in expression), 'skill' to load a comprehensive guide teaching how to use this Lisp interpreter (expression='ffi' for FFI guide, expression='ops' for operations guide, expression='xref' for cross-reference guide, or empty for full guide).",
 			},
 			"file": map[string]any{
 				"type":        "string",
@@ -99,6 +100,9 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 
 	case "help":
 		return ToolResult{Output: lispHelp(expr)}
+
+	case "skill":
+		return ToolResult{Output: lispSkill(expr)}
 
 	case "examples":
 		return ToolResult{Output: lispExamples(expr)}
@@ -204,6 +208,27 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 			limit = int(v)
 		}
 		return ToolResult{Output: microlisp.SourceList(expr, offset, limit)}
+
+	case "xref":
+		if expr == "" {
+			return ToolResult{Output: "Error: expression is required for operation=xref. Use a plain function name like \"car\" or \"string-append\".", IsError: true}
+		}
+		contextLines := 2
+		if v, ok := params["limit"].(float64); ok {
+			contextLines = int(v)
+		}
+		return ToolResult{Output: microlisp.GetXRef(expr, contextLines)}
+
+	case "xref-list":
+		offset := 0
+		limit := 0
+		if v, ok := params["offset"].(float64); ok {
+			offset = int(v)
+		}
+		if v, ok := params["limit"].(float64); ok {
+			limit = int(v)
+		}
+		return ToolResult{Output: microlisp.XRefList(expr, offset, limit)}
 
 	default: // eval (default when operation is empty or unknown)
 		if expr == "" {
@@ -656,4 +681,304 @@ Use lisp_eval with operation="examples" and expression=<category> for details.`
 		}
 	}
 	return fmt.Sprintf("Unknown category: %s\n\nAvailable: arithmetic, lists, lambda, recursion, map, strings, format, hash, arrays, misc", category)
+}
+
+// lispSkill returns a comprehensive guide for learning how to use this Lisp interpreter.
+// topic: "ffi" for FFI/Go interop guide, "ops" for operations guide, "xref" for cross-reference guide,
+// empty for the full guide.
+func lispSkill(topic string) string {
+	guides := map[string]string{
+		"ffi": `=== FFI: Go Standard Library Interop Guide ===
+
+This Lisp interpreter can call Go standard library functions via FFI (Foreign Function Interface).
+Use the (ffi "package.Function") form to import and call Go functions.
+
+--- How to Import a Go Function ---
+(ffi "package.FunctionName")  => returns a callable function object
+
+Example: Import math.Sin and call it:
+  (ffi "math.Sin")        => returns a function
+  ((ffi "math.Sin") 1.0)  => calls math.Sin(1.0) => 0.8414709848...
+
+--- Available Go Packages ---
+  fmt             — Sprintf, Printf, Println, Errorf, Sprint, etc.
+  strings         — Contains, HasPrefix, HasSuffix, Split, Join, Replace, Trim, ToUpper, ToLower, etc.
+  strconv         — Atoi, Itoa, ParseFloat, FormatInt, Quote, Unquote, etc.
+  math            — Sin, Cos, Tan, Sqrt, Abs, Pow, Exp, Log, Floor, Ceil, Round, Max, Min, Pi, E, etc.
+  math/big        — NewInt, NewFloat, NewRat
+  math/rand       — Intn, Float64, Float32, Int63, Perm, Shuffle, Seed
+  math/bits       — Len, OnesCount, TrailingZeros, Reverse, RotateLeft, Add, Sub, Mul, Div
+  os              — Getenv, Setenv, Environ, Getwd, Mkdir, Remove, Stat, Open, Args, Exit, etc.
+  io              — Copy, ReadFull, WriteString, Pipe, MultiReader, MultiWriter
+  bytes           — Contains, Equal, Split, Join, Replace, Trim, Compare, NewBuffer
+  regexp          — MustCompile, Compile, QuoteMeta
+  sort            — Ints, Float64s, Strings, Search, Slice, SliceStable
+  time            — Now, Parse, Sleep, Since, Unix, Date, RFC3339, Hour, Minute, Second
+  net             — Dial, Listen, LookupHost, ParseIP, SplitHostPort
+  net/http        — Get, Post, NewRequest, ListenAndServe, StatusText, NewServeMux
+  net/url         — Parse, QueryEscape, PathEscape, JoinPath
+  encoding/json   — Marshal, Unmarshal, MarshalIndent, Valid, Compact, HTMLEscape
+  encoding/xml    — Marshal, Unmarshal, MarshalIndent, EscapeText
+  encoding/csv    — NewReader, NewWriter
+  encoding/base64 — StdEncoding, URLEncoding, EncodeToString, DecodeToString
+  log             — Print, Printf, Println, Fatal, SetFlags, SetPrefix
+  sync            — NewCond (types: Mutex, RWMutex, WaitGroup, Once, Map, Pool)
+  runtime         — GOOS, GOARCH, NumCPU, NumGoroutine, GC, Version, ReadMemStats
+  errors          — New, Is, As, Unwrap, Join
+  flag            — Parse, Bool, String, Int, Lookup, Args
+  path            — Base, Clean, Dir, Ext, IsAbs, Join, Match, Split
+  path/filepath   — Abs, Base, Clean, Dir, Glob, Join, Walk, WalkDir, Ext, IsAbs, Rel
+  context         — Background, TODO, WithCancel, WithTimeout, WithDeadline, WithValue
+  os/exec         — Command, CommandContext, LookPath
+  os/signal       — Notify, Stop, Reset
+  unicode         — IsLetter, IsDigit, IsLower, IsUpper, IsSpace, ToLower, ToUpper
+  unicode/utf8    — DecodeRune, EncodeRune, RuneCount, Valid, RuneLen, FullRune
+  unicode/utf16   — Decode, Encode, IsSurrogate
+  io/fs           — WalkDir, ReadDir, ReadFile, Glob, ValidPath
+  hash/crc32      — ChecksumIEEE, NewIEEE, MakeTable
+  hash/crc64      — Checksum, New, MakeTable
+  crypto/md5      — New, Sum, Size
+  crypto/sha1     — New, Sum, Size
+  crypto/sha256   — New, Sum256, Size
+  text/template   — New, Must, ParseFiles
+  text/scanner    — ScanInts, ScanFloats, TokenString
+  text/tabwriter  — NewWriter, FilterHTML
+  syscall         — Getpid, Getppid, Getuid, Getgid
+  runtime/debug   — FreeOSMemory, ReadBuildInfo, SetGCPercent, Stack
+
+--- Listing Available Symbols ---
+  (go:list)                => list all package names
+  (go:list "math")         => list all symbols in math package
+  (go:list "strings")      => list all symbols in strings package
+
+--- FFI Call Patterns ---
+1. Simple function call:
+   ((ffi "math.Sqrt") 2.0)  => 1.4142135623...
+
+2. Multi-argument function:
+   ((ffi "strings.Contains") "hello world" "world")  => true
+   ((ffi "math.Pow") 2.0 10.0)  => 1024.0
+   ((ffi "fmt.Sprintf") "%d items" 42)  => "42 items"
+
+3. Store imported function for reuse:
+   (defvar sin-fn (ffi "math.Sin"))
+   (funcall sin-fn 1.5708)  => ~1.0
+
+4. Variadic functions (like fmt.Sprintf):
+   ((ffi "fmt.Sprintf") "Hello, %s! You have %d messages." "Alice" 5)
+   => "Hello, Alice! You have 5 messages."
+
+5. Functions returning multiple values:
+   ((ffi "math.Modf") 3.14)  => returns a list of values
+
+6. Functions returning (value, error):
+   ((ffi "strconv.Atoi") "42")  => 42 (error is nil)
+   ((ffi "strconv.Atoi") "abc")  => Error: strconv.Atoi: parsing "abc": invalid syntax
+
+--- Registering Custom Go Values ---
+  (go:register "mypackage.myvalue" 42)   => register a number
+  (go:register "mypackage.mystring" "hello") => register a string
+
+--- Important Notes ---
+- All numeric arguments are converted to the Go type the function expects (int, float64, etc.)
+- String arguments pass directly to Go string parameters
+- Boolean arguments: Lisp t/nil map to Go true/false
+- List arguments convert to Go slices when the parameter expects a slice
+- If a Go function returns an error, it becomes a Lisp error (evaluation stops)
+- If a Go function panics, it is caught and reported as an error
+- Argument count must match exactly (non-variadic) or meet minimum (variadic)
+- Use operation=source with expression="ffi" to view the FFI builtin source code`,
+
+		"ops": `=== lisp_eval Operations Guide ===
+
+The lisp_eval tool supports these operations (set via the "operation" parameter):
+
+--- eval (default) ---
+Evaluate a Lisp expression. State persists between calls.
+  expression: "(+ 1 2)"          => 3
+  expression: "(defun square (x) (* x x))"  => defines function
+  expression: "(square 7)"       => 49
+  limits: "default" | "strict" | "unlimited"
+
+--- reset ---
+Clear all interpreter state (variables, functions, macros, classes).
+  No parameters needed.
+
+--- help ---
+Show usage manual for a topic.
+  expression: ""        => list all topics
+  expression: "arithmetic" => show arithmetic operations
+  expression: "lambda"  => show lambda/closures guide
+  Topics: arithmetic, lists, strings, lambda, recursion, format, hash, arrays, clos, conditions, macros, types, special
+
+--- examples ---
+Show example expressions for a category.
+  expression: ""        => list all categories
+  expression: "arithmetic" => show arithmetic examples
+  Categories: arithmetic, lists, lambda, recursion, map, strings, format, hash, arrays, misc
+
+--- eval_file ---
+Load and execute a Lisp file.
+  file: "/path/to/file.lisp" (required)
+  limits: "default" | "strict" | "unlimited"
+
+--- lint ---
+Check syntax without executing. Use expression or file.
+  expression: "(defun foo (x) x)"  => check syntax
+  file: "/path/to/file.lisp"       => check file syntax
+  limits: "default" | "strict" | "unlimited"
+
+--- source ---
+View source code of a builtin or stdlib function.
+  expression: "car"            => show car source (PLAIN NAME, not Lisp syntax!)
+  expression: "string-append"  => show string-append source
+  offset: 0 (line offset for large functions)
+  limit: 50 (max lines to show)
+  IMPORTANT: Use a plain function name, NOT a Lisp expression.
+  Correct: expression="car"  WRONG: expression="(source 'car)"
+
+--- source-list ---
+List all indexed functions, optionally filtered.
+  expression: ""       => list all functions
+  expression: "car"    => list functions containing "car"
+  expression: "string" => list functions containing "string"
+  offset: 0 (entry offset for pagination)
+  limit: 50 (max entries per page)
+
+--- xref ---
+Show cross-reference: callers and callees of a function.
+  expression: "car"            => who calls car, and what car calls
+  expression: "string-append"  => callers/callees of string-append
+  limit: 2 (context lines around each call site)
+  IMPORTANT: Use a plain function name, NOT a Lisp expression.
+
+--- xref-list ---
+Browse all cross-reference relationships, optionally filtered.
+  expression: ""       => list all caller->callee pairs
+  expression: "string" => list pairs involving "string"
+  offset: 0 (entry offset for pagination)
+  limit: 50 (max entries per page)
+
+--- skill ---
+Load a comprehensive guide for learning this Lisp interpreter.
+  expression: ""     => full guide (all topics)
+  expression: "ffi"  => FFI/Go interop guide
+  expression: "ops"  => operations guide
+  expression: "xref" => cross-reference guide
+
+--- Resource Limits ---
+  "default"  — 1M steps, 30s timeout, 256MB heap (normal use)
+  "strict"   — 100K steps, 10s timeout, 64MB heap (untrusted code)
+  "unlimited" — no limits (REPL mode only, use carefully)`,
+
+		"xref": `=== Cross-Reference (xref) Guide ===
+
+The xref feature lets you explore the call graph of the Lisp interpreter.
+It answers two questions:
+  1. Who calls X? (callers) — which functions reference or invoke function X
+  2. What does X call? (callees) — which functions does X invoke or reference
+
+--- How to Use ---
+operation=xref with expression=<function-name> (plain name, not Lisp syntax)
+
+Examples:
+  operation=xref, expression="car"
+    => Shows all functions that call car (callers), and what car calls (callees)
+    => Each reference shows: file, line number, and source snippet
+
+  operation=xref, expression="filter"
+    => Shows callers of filter AND callees of filter
+    => Callees might include: if, null?, car, cons, cdr, etc.
+
+  operation=xref, expression="string-append", limit=3
+    => limit controls how many context lines to show around each call site
+
+--- xref-list: Browse All Relationships ---
+  operation=xref-list, expression=""
+    => Show all caller->callee pairs (paginated)
+
+  operation=xref-list, expression="string"
+    => Filter to pairs involving "string" functions
+
+  operation=xref-list, expression="car", offset=0, limit=20
+    => First 20 pairs involving "car"
+
+--- Understanding the Output ---
+Callers section:
+  "filter (stdlib, stdlib.go:45)" — filter is called at line 45 of stdlib
+
+Callees section:
+  "if (special, conditions.go:12-45)" — filter calls the if special form
+  "car [called 3 times]" — filter calls car 3 times
+
+Call sites section (with context):
+  stdlib.go:45 → if
+    (if (null? lst) nil (cons (func (car lst)) (filter func (cdr lst))))
+  Shows the exact source line where the call happens
+
+--- Tips ---
+- Use operation=source to see full source code of any function
+- Use operation=source-list to discover function names you can query with xref
+- Cross-references cover both Go builtins and Lisp stdlib functions
+- The index is built lazily on first xref query (may take a moment)`,
+	}
+
+	if topic != "" {
+		for k, v := range guides {
+			if k == topic {
+				return v
+			}
+		}
+		return fmt.Sprintf("Unknown skill topic: %s\n\nAvailable: ffi, ops, xref (or empty for full guide)", topic)
+	}
+
+	// Full guide
+	return `=== Lisp Interpreter Skill: Complete Guide ===
+
+This guide teaches you everything you need to use this Lisp interpreter effectively.
+Use operation=skill with expression=<topic> for detailed guides on specific topics.
+
+--- Quick Start ---
+1. Evaluate expressions:  operation=eval, expression="(+ 1 2)"
+2. Define functions:      operation=eval, expression="(defun square (x) (* x x))"
+3. Call Go functions:     operation=eval, expression="((ffi \"math.Sqrt\") 2.0)"
+4. View source code:      operation=source, expression="car"
+5. Find callers:          operation=xref, expression="car"
+6. List all functions:    operation=source-list, expression=""
+7. Get help on topics:    operation=help, expression="arithmetic"
+8. See examples:          operation=examples, expression="lists"
+
+--- Core Lisp Features ---
+- Arbitrary-precision integers, rationals, complex numbers
+- Lists, strings, hash tables, arrays, structs
+- Lambda, closures, macros, CLOS (object system)
+- Conditions/restarts (error handling)
+- Format directives (~A, ~D, ~F, ~%, ~{~})
+- State persists between calls (defvar, defun survive)
+
+--- FFI: Calling Go Standard Library ---
+Import: (ffi "package.Function")
+Call:   ((ffi "math.Sin") 1.0)
+List:   (go:list) or (go:list "math")
+See:    operation=skill, expression="ffi" for full FFI guide
+
+--- Tool Operations ---
+eval, reset, help, examples, eval_file, lint, source, source-list, xref, xref-list, skill
+See:    operation=skill, expression="ops" for full operations guide
+
+--- Cross-Reference ---
+Who calls X?   operation=xref, expression="car"
+What does X call? operation=xref, expression="filter"
+Browse all:     operation=xref-list, expression=""
+See:            operation=skill, expression="xref" for full xref guide
+
+--- Resource Limits ---
+default:  1M steps, 30s, 256MB — normal use
+strict:   100K steps, 10s, 64MB — untrusted code
+unlimited: no limits — REPL only
+
+--- Detailed Guides ---
+  operation=skill, expression="ffi"   — FFI/Go interop guide
+  operation=skill, expression="ops"   — operations guide
+  operation=skill, expression="xref"  — cross-reference guide`
 }
