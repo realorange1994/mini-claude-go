@@ -61,6 +61,8 @@ func typeStr(v *Value) string {
 		return "RANDOM-STATE"
 	case VMethod:
 		return "METHOD"
+	case VGoVal:
+		return "GO-VAL"
 	default:
 		return "UNKNOWN"
 	}

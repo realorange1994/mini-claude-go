@@ -167,6 +167,29 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 	if v == nil || v.typ == VNil {
 		return reflect.Zero(t), nil
 	}
+	// If the Lisp value is a VGoVal, try to use the actual Go value directly.
+	if v.typ == VGoVal {
+		gv := reflect.ValueOf(v.goVal)
+		// If the Go value's type is assignable to the target type, use it.
+		if gv.Type().AssignableTo(t) {
+			return gv, nil
+		}
+		// If the Go value implements the target interface, use it.
+		if t.Kind() == reflect.Interface && gv.Type().Implements(t) {
+			return gv, nil
+		}
+		// Try pointer-to-interface for interface targets.
+		if t.Kind() == reflect.Interface {
+			if gv.CanInterface() {
+				iface := gv.Interface()
+				rv := reflect.ValueOf(iface)
+				if rv.Type().Implements(t) {
+					return rv, nil
+				}
+			}
+		}
+		return reflect.Value{}, fmt.Errorf("cannot convert Go value of type %T to %s", v.goVal, t)
+	}
 	switch t.Kind() {
 	case reflect.Float64:
 		if !isNumeric(v) {
@@ -299,6 +322,8 @@ func lispToInterface(v *Value) interface{} {
 			result = append(result, lispToInterface(p.car))
 		}
 		return result
+	case VGoVal:
+		return v.goVal
 	default:
 		return ToString(v)
 	}
@@ -371,4 +396,13 @@ func builtinGoRegister(args []*Value) (*Value, error) {
 	pkg[symName] = reflect.ValueOf(val)
 
 	return vstr(name), nil
+}
+
+// vgoval creates a VGoVal Value wrapping a Go interface value.
+func vgoval(val interface{}, typ reflect.Type) *Value {
+	return &Value{
+		typ:       VGoVal,
+		goVal:     val,
+		goValType: typ,
+	}
 }

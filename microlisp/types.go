@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"math/rand"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -46,6 +47,7 @@ const (
 	VReadtable
 	VRandomState
 	VMethod
+	VGoVal
 )
 
 // LispStream represents an I/O stream
@@ -144,6 +146,8 @@ type Value struct {
 	randState    *rand.Rand    // for VRandomState type
 	methodGF     *Value        // generic function for VMethod type
 	methodIdx    int           // method index in genMethods for VMethod type
+	goVal        interface{}   // for VGoVal type: holds the actual Go value
+	goValType    reflect.Type  // for VGoVal: stores the Go type for reflection
 }
 
 type genMethod struct {

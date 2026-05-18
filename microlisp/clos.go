@@ -1121,7 +1121,9 @@ func reflectToLisp(v reflect.Value) *Value {
 		}
 		return vnil()
 	default:
-		return vstr(fmt.Sprint(v.Interface()))
+		// For interfaces, pointers, structs, maps, arrays, channels:
+		// create a VGoVal that preserves the actual Go value and type.
+		return vgoval(v.Interface(), v.Type())
 	}
 }
 func builtinCopyStructure(args []*Value) (*Value, error) {

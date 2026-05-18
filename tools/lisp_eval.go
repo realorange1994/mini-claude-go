@@ -27,11 +27,12 @@ func (*LispEvalTool) Name() string { return "lisp_eval" }
 func (*LispEvalTool) Description() string {
 	return "Evaluate Common Lisp expressions for precise computation, logic, and data manipulation. " +
 		"Supports: arbitrary-precision integers, rationals, complex numbers, lists, strings, hash tables, " +
-		"lambda, macros, CLOS, conditions/restarts, format directives, and sequence operations. " +
-		"Use for: math calculations, string processing, list manipulation, algorithm prototyping. " +
+		"lambda, macros, CLOS, conditions/restarts, format directives, sequence operations, and Go FFI. " +
+		"Use for: math calculations, string processing, list manipulation, algorithm prototyping, calling Go stdlib. " +
 		"State persists between calls (defvar, defun survive). " +
 		"Thread-safe: concurrent calls are serialized. " +
-		"Limitations: no filesystem I/O, no network, no FFI — pure computation only. " +
+		"FFI: use (ffi \"package.Func\") or (go:import \"package.Func\") to call Go stdlib. " +
+		"VGoVal: Go interface/pointer values are preserved when passed between FFI calls (e.g. crypto/rand.Reader as io.Reader). " +
 		"Use operation='skill' to learn how to use this Lisp interpreter, FFI, and all tool operations. Use operation='source' with a plain function name (NOT Lisp syntax) to view source of any builtin/stdlib function, 'source-list' to browse all available functions. " +
 		"Use operation='xref' to see callers/callees of a function, 'xref-list' to browse all cross-references."
 }
@@ -691,14 +692,31 @@ func lispSkill(topic string) string {
 		"ffi": `=== FFI: Go Standard Library Interop Guide ===
 
 This Lisp interpreter can call Go standard library functions via FFI (Foreign Function Interface).
-Use the (ffi "package.Function") form to import and call Go functions.
+Use the (ffi "package.Function") or (go:import "package.Function") form to import and call Go functions.
 
 --- How to Import a Go Function ---
 (ffi "package.FunctionName")  => returns a callable function object
+(go:import "package.FunctionName")  => same, alias form
 
 Example: Import math.Sin and call it:
   (ffi "math.Sin")        => returns a function
   ((ffi "math.Sin") 1.0)  => calls math.Sin(1.0) => 0.8414709848...
+
+--- How to Import Go Variables ---
+(go:import "package.Variable")  => returns the actual Go value as a VGoVal
+(go:import "crypto/rand.Reader")  => #<go-val *rand.reader>
+
+VGoVal is an opaque Go value type that preserves the original Go interface/struct/pointer.
+When passed to another FFI function, the actual Go value is extracted automatically if the
+target parameter type is compatible (assignable or implements the required interface).
+
+Example: Pass crypto/rand.Reader to rsa.GenerateKey:
+  (funcall (go:import "crypto/rsa.GenerateKey")
+           (go:import "crypto/rand.Reader")
+           2048)
+  => #<go-val *rsa.PrivateKey>
+
+The reader VGoVal (type *rand.reader) is automatically recognized as implementing io.Reader.
 
 --- Available Go Packages ---
   fmt             — Sprintf, Printf, Println, Errorf, Sprint, etc.
@@ -775,6 +793,13 @@ Example: Import math.Sin and call it:
    ((ffi "strconv.Atoi") "42")  => 42 (error is nil)
    ((ffi "strconv.Atoi") "abc")  => Error: strconv.Atoi: parsing "abc": invalid syntax
 
+7. Passing Go values between functions (VGoVal):
+   (defvar reader (go:import "crypto/rand.Reader"))  => #<go-val *rand.reader>
+   (type-of reader)  => GO-VAL
+   ;; Pass VGoVal as argument — automatically extracts underlying Go value:
+   (funcall (go:import "crypto/rsa.GenerateKey") reader 2048)  => #<go-val *rsa.PrivateKey>
+   ;; Works for io.Reader, io.Writer, and other interfaces
+
 --- Registering Custom Go Values ---
   (go:register "mypackage.myvalue" 42)   => register a number
   (go:register "mypackage.mystring" "hello") => register a string
@@ -784,6 +809,8 @@ Example: Import math.Sin and call it:
 - String arguments pass directly to Go string parameters
 - Boolean arguments: Lisp t/nil map to Go true/false
 - List arguments convert to Go slices when the parameter expects a slice
+- VGoVal values (opaque Go values) are automatically unwrapped when passed to FFI functions
+  whose parameter type is compatible (assignable or implements the interface)
 - If a Go function returns an error, it becomes a Lisp error (evaluation stops)
 - If a Go function panics, it is caught and reported as an error
 - Argument count must match exactly (non-variadic) or meet minimum (variadic)
@@ -957,9 +984,11 @@ Use operation=skill with expression=<topic> for detailed guides on specific topi
 - State persists between calls (defvar, defun survive)
 
 --- FFI: Calling Go Standard Library ---
-Import: (ffi "package.Function")
+Import: (ffi "package.Function") or (go:import "package.Function")
 Call:   ((ffi "math.Sin") 1.0)
+Vars:   (go:import "crypto/rand.Reader") => #<go-val *rand.reader>
 List:   (go:list) or (go:list "math")
+VGoVal: Go interface/pointer values are preserved — can be passed to other FFI functions
 See:    operation=skill, expression="ffi" for full FFI guide
 
 --- Tool Operations ---

@@ -1,6 +1,7 @@
 package microlisp
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -213,6 +214,11 @@ func ToString(v *Value) string {
 		return "#<random-state>"
 	case VMethod:
 		return "#<method " + v.str + ">"
+	case VGoVal:
+		if v.goValType != nil {
+			return fmt.Sprintf("#<go-val %s>", v.goValType)
+		}
+		return "#<go-val>"
 	case VRestart:
 		return "#<restart " + v.str + ">"
 	default:
