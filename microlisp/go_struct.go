@@ -247,15 +247,38 @@ func builtinGoCall(args []*Value) (*Value, error) {
 	}
 
 	fnType := method.Type()
+	numParams := fnType.NumIn()
+	isVariadic := fnType.IsVariadic()
 	callArgs := make([]reflect.Value, 0, len(args)-2)
 	for i, arg := range args[2:] {
-		paramIdx := i // method receiver is index 0, so first arg is index 1
-		paramType := fnType.In(paramIdx + 1)
+		var paramType reflect.Type
+		if isVariadic && i >= numParams-1 {
+			// Variadic: all extra args get the slice element type
+			paramType = fnType.In(numParams - 1).Elem()
+		} else if i < numParams {
+			paramType = fnType.In(i)
+		} else {
+			return nil, fmt.Errorf("go:call: method %s takes %d params, got %d", methodName, numParams, len(args)-2)
+		}
 		rvArg, err := lispToReflectSafe(arg, paramType)
 		if err != nil {
 			return nil, fmt.Errorf("go:call: method %s arg %d: %w", methodName, i+1, err)
 		}
 		callArgs = append(callArgs, rvArg)
+	}
+
+	// Handle variadic: collapse trailing args into a slice
+	if isVariadic && len(args)-2 > numParams-1 {
+		fixedCount := numParams - 1
+		variadicType := fnType.In(fixedCount)
+		slice := reflect.MakeSlice(variadicType, len(callArgs)-fixedCount, len(callArgs)-fixedCount)
+		for j := fixedCount; j < len(callArgs); j++ {
+			slice.Index(j - fixedCount).Set(callArgs[j])
+		}
+		callArgs = append(callArgs[:fixedCount], slice)
+	} else if isVariadic && len(args)-2 == numParams-1 {
+		// No variadic args, append zero slice
+		callArgs = append(callArgs, reflect.Zero(fnType.In(numParams-1)))
 	}
 
 	results := method.Call(callArgs)

@@ -38,6 +38,18 @@ func builtinGoImport(args []*Value) (*Value, error) {
 
 	fnVal, ok := pkg[symName]
 	if !ok {
+		// Check if it's a method expression: "Type.Method" (e.g. "time.Time.AddDate")
+		typeParts := strings.SplitN(symName, ".", 2)
+		if len(typeParts) == 2 {
+			typeName, methodName := typeParts[0], typeParts[1]
+			if pkgTypes, ok := GoTypeRegistry[pkgName]; ok {
+				if t, ok := pkgTypes[typeName]; ok {
+					// Create a method expression: func(T, args...) -> result
+					// where T is the type (or *T for pointer methods)
+					return makeMethodExpr(pkgName, typeName, methodName, t)
+				}
+			}
+		}
 		// List available symbols in package
 		syms := make([]string, 0, len(pkg))
 		for k := range pkg {
@@ -57,6 +69,39 @@ func builtinGoImport(args []*Value) (*Value, error) {
 		typ:  VPrim,
 		fn:   makeGoPrim(wrapper),
 		name: name,
+	}, nil
+}
+
+// makeMethodExpr creates a method expression for a Go type.
+// e.g. "time.Time.AddDate" → func(time.Time, int, int, int) time.Time
+func makeMethodExpr(pkgName, typeName, methodName string, t reflect.Type) (*Value, error) {
+	// Try both value receiver and pointer receiver methods
+	var method reflect.Method
+	var found bool
+
+	// Try value receiver first
+	if m, ok := t.MethodByName(methodName); ok {
+		method = m
+		found = true
+	}
+	// Try pointer receiver
+	if !found {
+		ptrType := reflect.PtrTo(t)
+		if m, ok := ptrType.MethodByName(methodName); ok {
+			method = m
+			found = true
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("go:import: no method %q on type %s.%s", methodName, pkgName, typeName)
+	}
+
+	fullName := pkgName + "." + typeName + "." + methodName
+	wrapper := &goFunc{fn: method.Func, name: fullName}
+	return &Value{
+		typ:  VPrim,
+		fn:   makeGoPrim(wrapper),
+		name: fullName,
 	}, nil
 }
 

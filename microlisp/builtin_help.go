@@ -181,7 +181,8 @@ var goDocMap = map[string]string{
 	"go:import": `(go:import "pkg.Func"|"pkg.Var") — Import a Go function or variable from stdlib.
   Returns a callable function or a VGoVal (for interface/pointer variables).
   Example: (go:import "math.Sin") => function
-           (go:import "crypto/rand.Reader") => #<go-val *rand.reader>`,
+           (go:import "crypto/rand.Reader") => #<go-val *rand.reader>
+           (go:import "time.Time.AddDate") => method expression`,
 
 	"go:list": `(go:list ["package"]) — List all FFI packages or symbols in a package.
   Example: (go:list) => ("math" "strings" "fmt" ...)
