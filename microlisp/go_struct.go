@@ -134,9 +134,8 @@ func builtinGoSetField(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("go:set-field: field %q is not settable", fieldName)
 	}
 
-	// Special handling for pointer-to-struct and pointer-to-int (like *big.Int)
+	// Special handling for pointer-to-struct fields
 	if field.Kind() == reflect.Ptr && field.Type().Elem().Kind() == reflect.Struct && !isNil(lispVal) {
-		// For *big.Int, *x509.Certificate, etc.: create new instance
 		elemType := field.Type().Elem()
 		newPtr := reflect.New(elemType)
 		// Try to set fields if input is VGoVal with struct
@@ -148,8 +147,23 @@ func builtinGoSetField(args []*Value) (*Value, error) {
 			if srcVal.Kind() == reflect.Struct && srcVal.Type().AssignableTo(elemType) {
 				newPtr.Elem().Set(srcVal)
 			}
+			// If struct types don't match exactly, try field-by-field copy
+			if srcVal.Kind() == reflect.Struct && !srcVal.Type().AssignableTo(elemType) {
+				srcName := srcVal.Type().Name()
+				elemName := elemType.Name()
+				if srcName == elemName ||
+					strings.HasSuffix(srcVal.Type().String(), elemName) ||
+					strings.HasSuffix(elemType.String(), srcName) {
+					for i := 0; i < srcVal.NumField(); i++ {
+						sf := srcVal.Type().Field(i)
+						if f, ok := elemType.FieldByName(sf.Name); ok && f.Type.AssignableTo(sf.Type) {
+							newPtr.Elem().FieldByName(sf.Name).Set(srcVal.Field(i))
+						}
+					}
+				}
+			}
 		}
-		// For numeric input to *big.Int
+		// For *big.Int: accept numeric input
 		if elemType.String() == "big.Int" && isNumeric(lispVal) {
 			newPtr.Elem().Set(reflect.ValueOf(*new(big.Int).SetInt64(int64(toNum(lispVal)))))
 		}
@@ -160,6 +174,38 @@ func builtinGoSetField(args []*Value) (*Value, error) {
 	if field.Kind() == reflect.Ptr && isNil(lispVal) {
 		field.Set(reflect.Zero(field.Type()))
 		return vnil(), nil
+	}
+	// For type aliases (e.g. x509.KeyUsage is really int):
+	// if the underlying type is assignable, create a value of the named type
+	if lispVal.typ == VNum && isNumeric(lispVal) {
+		switch field.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if field.Type().ConvertibleTo(reflect.TypeOf(int64(0))) {
+				val := int64(toNum(lispVal))
+				newVal := reflect.New(field.Type()).Elem()
+				switch field.Kind() {
+				case reflect.Int:    newVal.SetInt(val)
+				case reflect.Int8:   newVal.SetInt(val)
+				case reflect.Int16:  newVal.SetInt(val)
+				case reflect.Int32:  newVal.SetInt(val)
+				case reflect.Int64:  newVal.SetInt(val)
+				}
+				field.Set(newVal)
+				return vnil(), nil
+			}
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			val := uint64(toNum(lispVal))
+			newVal := reflect.New(field.Type()).Elem()
+			switch field.Kind() {
+			case reflect.Uint:    newVal.SetUint(val)
+			case reflect.Uint8:   newVal.SetUint(val)
+			case reflect.Uint16:  newVal.SetUint(val)
+			case reflect.Uint32:  newVal.SetUint(val)
+			case reflect.Uint64:  newVal.SetUint(val)
+			}
+			field.Set(newVal)
+			return vnil(), nil
+		}
 	}
 	// For slices: convert Lisp list to Go slice
 	if field.Kind() == reflect.Slice && isList(lispVal) {

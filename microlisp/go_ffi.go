@@ -2,13 +2,55 @@ package microlisp
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // -------- Go FFI Call Mechanism --------
 // These functions provide the Lisp-level interface to GoPackageRegistry.
+
+func init() {
+	// Register Go constants that are commonly needed in FFI but not functions
+	constants := map[string]map[string]interface{}{
+		"os": {
+			"ModePerm":     os.ModePerm,
+			"ModeDir":      os.ModeDir,
+			"ModeAppend":   os.ModeAppend,
+			"ModeExclusive": os.ModeExclusive,
+			"ModeTemporary": os.ModeTemporary,
+			"ModeSymlink":  os.ModeSymlink,
+			"ModeDevice":   os.ModeDevice,
+			"ModeNamedPipe": os.ModeNamedPipe,
+			"ModeSocket":   os.ModeSocket,
+			"ModeSetuid":   os.ModeSetuid,
+			"ModeSetgid":   os.ModeSetgid,
+			"ModeCharDevice": os.ModeCharDevice,
+			"ModeSticky":   os.ModeSticky,
+			"ModeIrregular": os.ModeIrregular,
+			"ModeType":     os.ModeType,
+		},
+		"syscall": {
+			"Stdin":  syscall.Stdin,
+			"Stdout": syscall.Stdout,
+			"Stderr": syscall.Stderr,
+		},
+	}
+	for pkg, syms := range constants {
+		existing, ok := GoPackageRegistry[pkg]
+		if !ok {
+			existing = make(map[string]reflect.Value)
+			GoPackageRegistry[pkg] = existing
+		}
+		for name, val := range syms {
+			if _, exists := existing[name]; !exists {
+				existing[name] = reflect.ValueOf(val)
+			}
+		}
+	}
+}
 
 // builtinGoImport implements (go:import "package.FuncName").
 // Returns a callable Lisp function that wraps the Go function.
@@ -237,7 +279,33 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 				}
 			}
 		}
-		return reflect.Value{}, fmt.Errorf("cannot convert Go value of type %T to %s", v.goVal, t)
+		// Auto-wrap value in pointer when target is *T and value is T
+		if t.Kind() == reflect.Ptr && !gv.Type().AssignableTo(t) {
+			if gv.Kind() == reflect.Struct {
+				if gv.Type().AssignableTo(t.Elem()) {
+					newPtr := reflect.New(t.Elem())
+					newPtr.Elem().Set(gv)
+					return newPtr, nil
+				}
+			}
+			// If stored as pointer (e.g. *rsa.PrivateKey) and target is *X,
+			// check if the pointed-to type matches
+			if gv.Kind() == reflect.Ptr && gv.Type().Elem().AssignableTo(t.Elem()) {
+				return gv, nil
+			}
+		}
+		// Auto-dereference when target is T and value is *T
+		if gv.Kind() == reflect.Ptr && !gv.IsNil() && gv.Type().Elem().AssignableTo(t) {
+			return gv.Elem(), nil
+		}
+		// Auto-dereference pointer for interface targets
+		if gv.Kind() == reflect.Ptr && !gv.IsNil() {
+			ptrElem := gv.Elem()
+			if ptrElem.Kind() == reflect.Struct && ptrElem.Type().AssignableTo(t) {
+				return ptrElem, nil
+			}
+		}
+		return reflect.Value{}, fmt.Errorf("cannot convert Go value of type %s to %s", gv.Type(), t)
 	}
 	switch t.Kind() {
 	case reflect.Float64:
