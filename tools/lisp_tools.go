@@ -124,7 +124,13 @@ func (t *LispToolsTool) CheckPermissions(params map[string]any) PermissionResult
 	}
 }
 
-func (t *LispToolsTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+func (t *LispToolsTool) ExecuteContext(ctx context.Context, params map[string]any) (result ToolResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ToolResult{Output: fmt.Sprintf("Error: lisp_tools panic: %v", r), IsError: true}
+		}
+	}()
+
 	select {
 	case <-ctx.Done():
 		return ToolResult{Output: fmt.Sprintf("Error: lisp_tools timed out: %v", ctx.Err()), IsError: true}
@@ -419,6 +425,11 @@ func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult
 	limits := microlisp.DefaultLimits()
 	ch := make(chan evalResult, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- evalResult{"", fmt.Errorf("panic: %v", r)}
+			}
+		}()
 		captured, ret, err := microlisp.SafeEvalStringCaptureWithLimits(expr, limits)
 		if err != nil {
 			ch <- evalResult{"", err}
@@ -459,6 +470,11 @@ func (t *LispToolsTool) evalVoid(ctx context.Context, expr string) ToolResult {
 	limits := microlisp.DefaultLimits()
 	ch := make(chan evalResult, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- evalResult{"", fmt.Errorf("panic: %v", r)}
+			}
+		}()
 		result, err := microlisp.SafeEvalWithLimits(expr, limits)
 		ch <- evalResult{result, err}
 	}()

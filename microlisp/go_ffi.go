@@ -68,10 +68,27 @@ type goFunc struct {
 
 // makeGoPrim creates a NativeFunc that calls the wrapped Go function.
 func makeGoPrim(wf *goFunc) NativeFunc {
-	return func(args []*Value) (*Value, error) {
+	return func(args []*Value) (ret *Value, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("go:import %s: panic: %v", wf.name, r)
+			}
+		}()
+
 		fnType := wf.fn.Type()
 		numIn := fnType.NumIn()
 		isVariadic := fnType.IsVariadic()
+
+		// Validate argument count
+		if isVariadic {
+			if len(args) < numIn-1 {
+				return nil, fmt.Errorf("go:import %s: need at least %d argument(s), got %d", wf.name, numIn-1, len(args))
+			}
+		} else {
+			if len(args) != numIn {
+				return nil, fmt.Errorf("go:import %s: need %d argument(s), got %d", wf.name, numIn, len(args))
+			}
+		}
 
 		callArgs := make([]reflect.Value, 0, len(args))
 		for i, arg := range args {
@@ -83,7 +100,11 @@ func makeGoPrim(wf *goFunc) NativeFunc {
 			} else {
 				return nil, fmt.Errorf("go:import %s: too many arguments", wf.name)
 			}
-			callArgs = append(callArgs, lispToReflectCustom(arg, paramType))
+			rv, convErr := lispToReflectSafe(arg, paramType)
+			if convErr != nil {
+				return nil, fmt.Errorf("go:import %s: arg %d: %w", wf.name, i+1, convErr)
+			}
+			callArgs = append(callArgs, rv)
 		}
 
 		// Handle variadic: collapse trailing args into a slice
@@ -108,7 +129,7 @@ func makeGoPrim(wf *goFunc) NativeFunc {
 		case 0:
 			return vnil(), nil
 		case 1:
-			if results[0].Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
+			if isErrorType(results[0]) {
 				if results[0].IsNil() {
 					return vnil(), nil
 				}
@@ -116,13 +137,11 @@ func makeGoPrim(wf *goFunc) NativeFunc {
 			}
 			return reflectToLisp(results[0]), nil
 		default:
-			// Check if last result is error
 			lastIdx := len(results) - 1
-			if results[lastIdx].Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
+			if isErrorType(results[lastIdx]) {
 				if !results[lastIdx].IsNil() {
 					return nil, fmt.Errorf("go:import %s: %v", wf.name, results[lastIdx].Interface())
 				}
-				// Return remaining results
 				lispResults := make([]*Value, lastIdx)
 				for i := 0; i < lastIdx; i++ {
 					lispResults[i] = reflectToLisp(results[i])
@@ -138,64 +157,96 @@ func makeGoPrim(wf *goFunc) NativeFunc {
 	}
 }
 
-// lispToReflectCustom converts a Lisp Value to a reflect.Value of the given type.
-func lispToReflectCustom(v *Value, t reflect.Type) reflect.Value {
+// isErrorType checks if a reflect.Value implements the error interface.
+func isErrorType(v reflect.Value) bool {
+	return v.IsValid() && v.Type().Implements(reflect.TypeOf((*error)(nil)).Elem())
+}
+
+// lispToReflectSafe converts a Lisp Value to a reflect.Value with error reporting.
+func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 	if v == nil || v.typ == VNil {
-		return reflect.Zero(t)
+		return reflect.Zero(t), nil
 	}
 	switch t.Kind() {
 	case reflect.Float64:
-		return reflect.ValueOf(toNum(v))
+		if !isNumeric(v) {
+			return reflect.Value{}, fmt.Errorf("cannot convert %s to float64", typeStr(v))
+		}
+		return reflect.ValueOf(toNum(v)), nil
 	case reflect.Float32:
-		return reflect.ValueOf(float32(toNum(v)))
-	case reflect.Int:
-		return reflect.ValueOf(int(toNum(v)))
-	case reflect.Int8:
-		return reflect.ValueOf(int8(toNum(v)))
-	case reflect.Int16:
-		return reflect.ValueOf(int16(toNum(v)))
-	case reflect.Int32:
-		return reflect.ValueOf(int32(toNum(v)))
-	case reflect.Int64:
-		return reflect.ValueOf(int64(toNum(v)))
-	case reflect.Uint:
-		return reflect.ValueOf(uint(toNum(v)))
-	case reflect.Uint8:
-		return reflect.ValueOf(uint8(toNum(v)))
-	case reflect.Uint16:
-		return reflect.ValueOf(uint16(toNum(v)))
-	case reflect.Uint32:
-		return reflect.ValueOf(uint32(toNum(v)))
-	case reflect.Uint64:
-		return reflect.ValueOf(uint64(toNum(v)))
+		if !isNumeric(v) {
+			return reflect.Value{}, fmt.Errorf("cannot convert %s to float32", typeStr(v))
+		}
+		return reflect.ValueOf(float32(toNum(v))), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if !isNumeric(v) {
+			return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t.Kind())
+		}
+		n := toNum(v)
+		switch t.Kind() {
+		case reflect.Int:
+			return reflect.ValueOf(int(n)), nil
+		case reflect.Int8:
+			return reflect.ValueOf(int8(n)), nil
+		case reflect.Int16:
+			return reflect.ValueOf(int16(n)), nil
+		case reflect.Int32:
+			return reflect.ValueOf(int32(n)), nil
+		case reflect.Int64:
+			return reflect.ValueOf(int64(n)), nil
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if !isNumeric(v) {
+			return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t.Kind())
+		}
+		n := toNum(v)
+		if n < 0 {
+			return reflect.Value{}, fmt.Errorf("negative value %v cannot convert to %s", n, t.Kind())
+		}
+		switch t.Kind() {
+		case reflect.Uint:
+			return reflect.ValueOf(uint(n)), nil
+		case reflect.Uint8:
+			return reflect.ValueOf(uint8(n)), nil
+		case reflect.Uint16:
+			return reflect.ValueOf(uint16(n)), nil
+		case reflect.Uint32:
+			return reflect.ValueOf(uint32(n)), nil
+		case reflect.Uint64:
+			return reflect.ValueOf(uint64(n)), nil
+		}
 	case reflect.Bool:
-		return reflect.ValueOf(v.typ == VBool || v == globalEnv.bindings["#t"])
+		return reflect.ValueOf(v.typ == VBool && v == globalEnv.bindings["#t"]), nil
 	case reflect.String:
 		if v.typ == VStr {
-			return reflect.ValueOf(v.str)
+			return reflect.ValueOf(v.str), nil
 		}
 		if v.typ == VChar {
-			return reflect.ValueOf(string(v.ch))
+			return reflect.ValueOf(string(v.ch)), nil
 		}
-		return reflect.ValueOf(ToString(v))
+		return reflect.Value{}, fmt.Errorf("cannot convert %s to string", typeStr(v))
 	case reflect.Slice:
 		if v.typ == VStr && t.Elem().Kind() == reflect.Uint8 {
-			return reflect.ValueOf([]byte(v.str))
+			return reflect.ValueOf([]byte(v.str)), nil
 		}
 		if isList(v) {
 			slice := reflect.MakeSlice(t, 0, 8)
 			for p := v; !isNil(p); p = p.cdr {
-				elem := lispToReflectCustom(p.car, t.Elem())
+				elem, err := lispToReflectSafe(p.car, t.Elem())
+				if err != nil {
+					return reflect.Value{}, fmt.Errorf("list element: %w", err)
+				}
 				slice = reflect.Append(slice, elem)
 			}
-			return slice
+			return slice, nil
 		}
-		return reflect.Zero(t)
+		return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t)
 	case reflect.Interface:
-		return reflect.ValueOf(lispToInterface(v))
+		return reflect.ValueOf(lispToInterface(v)), nil
 	default:
-		return reflect.ValueOf(lispToInterface(v))
+		return reflect.ValueOf(lispToInterface(v)), nil
 	}
+	return reflect.Zero(t), nil
 }
 
 // isList checks if a value is a proper list

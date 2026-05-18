@@ -13,16 +13,26 @@ import (
 // handlerStack, etc.) and is NOT safe for concurrent use.
 var evalMu sync.Mutex
 
+// panicErr converts a recovered panic value into a consistent error string.
+func panicErr(r any) error {
+	return fmt.Errorf("lisp panic: %v", r)
+}
+
 // SafeEvalString evaluates a Lisp expression with thread safety.
 // InitGlobalEnv() must be called once before first use.
-func SafeEvalString(s string) (string, error) {
+func SafeEvalString(s string) (result string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result, err = "", panicErr(r)
+		}
+	}()
 	evalMu.Lock()
 	defer evalMu.Unlock()
-	result, err := EvalString(s, globalEnv)
+	v, err := EvalString(s, globalEnv)
 	if err != nil {
 		return "", err
 	}
-	return ToString(result), nil
+	return ToString(v), nil
 }
 
 // captureStdout captures output written to os.Stdout (fmt.Print etc.) during fn.
@@ -69,6 +79,11 @@ func captureStdout(fn func() error) (output string, err error) {
 // produced during evaluation (from display/newline etc.).
 // It returns (capturedStdout, returnValue, evalError).
 func SafeEvalStringCapture(s string) (captured, returnValue string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			captured, returnValue, err = "", "", panicErr(r)
+		}
+	}()
 	evalMu.Lock()
 	defer evalMu.Unlock()
 
@@ -89,6 +104,11 @@ func SafeEvalStringCapture(s string) (captured, returnValue string, err error) {
 // It captures all stdout output produced during loading (from display/newline etc.)
 // and returns it along with any error. InitGlobalEnv() must be called once before first use.
 func SafeLoadFile(fname string) (output string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			output, err = "", panicErr(r)
+		}
+	}()
 	evalMu.Lock()
 	defer evalMu.Unlock()
 

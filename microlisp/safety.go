@@ -147,23 +147,33 @@ func stopLimits() {
 // It is thread-safe (uses evalMu) and enforces the provided limits.
 // If any limit is exceeded, it returns an error describing which limit was hit.
 // InitGlobalEnv() must be called once before first use.
-func SafeEvalWithLimits(s string, limits ResourceLimits) (string, error) {
+func SafeEvalWithLimits(s string, limits ResourceLimits) (result string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result, err = "", fmt.Errorf("lisp panic: %v", r)
+		}
+	}()
 	evalMu.Lock()
 	defer evalMu.Unlock()
 
 	startLimits(limits)
 	defer stopLimits()
 
-	result, err := EvalString(s, globalEnv)
+	v, err := EvalString(s, globalEnv)
 	if err != nil {
 		return "", err
 	}
-	return ToString(result), nil
+	return ToString(v), nil
 }
 
 // SafeEvalStringCaptureWithLimits evaluates a Lisp expression with resource limits
 // and captures all stdout output. Returns (capturedStdout, returnValue, evalError).
 func SafeEvalStringCaptureWithLimits(s string, limits ResourceLimits) (captured, returnValue string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			captured, returnValue, err = "", "", fmt.Errorf("lisp panic: %v", r)
+		}
+	}()
 	evalMu.Lock()
 	defer evalMu.Unlock()
 
@@ -204,7 +214,12 @@ func SafeLoadFileWithLimits(fname string, limits ResourceLimits) (output string,
 
 // SafeLintWithLimits parses Lisp source without evaluating, with resource limits.
 // Returns any syntax errors found. Thread-safe (uses evalMu).
-func SafeLintWithLimits(s string, limits ResourceLimits) error {
+func SafeLintWithLimits(s string, limits ResourceLimits) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("lisp panic: %v", r)
+		}
+	}()
 	evalMu.Lock()
 	defer evalMu.Unlock()
 
@@ -216,7 +231,12 @@ func SafeLintWithLimits(s string, limits ResourceLimits) error {
 
 // SafeLintFileWithLimits parses a Lisp file without evaluating, with resource limits.
 // Returns any syntax errors found. Thread-safe (uses evalMu).
-func SafeLintFileWithLimits(fname string, limits ResourceLimits) error {
+func SafeLintFileWithLimits(fname string, limits ResourceLimits) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("lisp panic: %v", r)
+		}
+	}()
 	evalMu.Lock()
 	defer evalMu.Unlock()
 

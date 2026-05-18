@@ -78,13 +78,16 @@ func builtinGoChannelSend(args []*Value) (*Value, error) {
 	}
 
 	// Convert Lisp value to interface{} and send
+	defer func() {
+		recover() // ignore send panics (e.g. closed channel races)
+	}()
 	goVal := lispToInterface(args[1])
 	lch.ch.Send(reflect.ValueOf(goVal))
 	return vnil(), nil
 }
 
 // builtinGoChannelRecv receives a value from a channel.
-// (go:recv channel) => value or nil if closed
+// (go:recv channel) => value
 func builtinGoChannelRecv(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("go:recv: need a channel")
@@ -101,8 +104,13 @@ func builtinGoChannelRecv(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("go:recv: invalid channel")
 	}
 
-	result, ok := lch.ch.Recv()
-	if !ok {
+	var result reflect.Value
+	var recvOk bool
+	func() {
+		defer func() { recover() }()
+		result, recvOk = lch.ch.Recv()
+	}()
+	if !recvOk {
 		// Channel closed
 		return vnil(), nil
 	}
@@ -127,6 +135,7 @@ func builtinGoChannelClose(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("go:close: invalid channel")
 	}
 
+	defer func() { recover() }()
 	lch.ch.Close()
 	lch.closed = true
 	return vnil(), nil
@@ -141,11 +150,9 @@ func builtinGoChannelP(args []*Value) (*Value, error) {
 }
 
 // builtinGoSelect performs a Go-style select on multiple channel operations.
-// (go:send channel value) or (go:recv channel) operations
 // Returns (operation-index result) or nil if all channels closed
 func builtinGoSelect(args []*Value) (*Value, error) {
 	// Build select cases from arguments
-	// Each arg is either (list :send channel value) or (list :recv channel)
 	cases := make([]reflect.SelectCase, 0, len(args))
 
 	for i, arg := range args {
@@ -211,11 +218,11 @@ func builtinGoSelect(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("go:select: need at least one operation")
 	}
 
-	// Add a default case if requested (optional last arg = :default)
+	// Use panic recovery for reflect.Select (can panic on invalid cases)
+	defer func() { recover() }()
 	chosen, value, ok := reflect.Select(cases)
 
 	if !ok && cases[chosen].Dir == reflect.SelectRecv {
-		// Channel was closed
 		return listFromSlice([]*Value{vnum(float64(chosen)), vnil()}), nil
 	}
 
@@ -223,7 +230,7 @@ func builtinGoSelect(args []*Value) (*Value, error) {
 	if cases[chosen].Dir == reflect.SelectRecv {
 		result = interfaceToLisp(value.Interface())
 	} else {
-		result = vnil() // send succeeded
+		result = vnil()
 	}
 
 	return listFromSlice([]*Value{vnum(float64(chosen)), result}), nil

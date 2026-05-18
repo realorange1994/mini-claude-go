@@ -7,6 +7,11 @@ import (
 	"miniclaudecode-go/microlisp"
 )
 
+// panicResult converts a recovered panic into a ToolResult.
+func panicResult(op string, r any) ToolResult {
+	return ToolResult{Output: fmt.Sprintf("Error: lisp_eval panic during %s: %v", op, r), IsError: true}
+}
+
 // LispEvalTool evaluates Common Lisp expressions for arithmetic,
 // data structures, logic, and computation.
 type LispEvalTool struct{}
@@ -69,7 +74,13 @@ func (*LispEvalTool) CheckPermissions(params map[string]any) PermissionResult {
 	return PermissionResultPassthrough()
 }
 
-func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
+func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any) (result ToolResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = panicResult("execute", r)
+		}
+	}()
+
 	// Check context early
 	select {
 	case <-ctx.Done():
@@ -110,6 +121,11 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		limits.CancelChan = cancelChan
 		ch := make(chan evalResult, 1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					ch <- evalResult{"", fmt.Errorf("panic: %v", r)}
+				}
+			}()
 			output, err := microlisp.SafeLoadFileWithLimits(file, limits)
 			ch <- evalResult{output, err}
 		}()
@@ -220,6 +236,11 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		// the context is cancelled, ensuring evalMu is released promptly.
 		ch := make(chan evalResult, 1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					ch <- evalResult{"", fmt.Errorf("panic: %v", r)}
+				}
+			}()
 			result, err := microlisp.SafeEvalWithLimits(expr, limits)
 			ch <- evalResult{result, err}
 		}()
