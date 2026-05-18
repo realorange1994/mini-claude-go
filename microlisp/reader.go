@@ -471,7 +471,7 @@ func vbool(b bool) *Value {
 }
 func vchar(ch rune) *Value        { v := gcv(); v.typ = VChar; v.ch = ch; return v }
 func vnil() *Value                { return globalEnv.bindings["nil"] }
-func cons(a, b *Value) *Value     { v := gcv(); v.typ = VPair; v.car = a; v.cdr = b; return v }
+func cons(a, b *Value) *Value     { v := batchAlloc(); v.typ = VPair; v.car = a; v.cdr = b; return v }
 func list3(a, b, c *Value) *Value { return cons(a, cons(b, cons(c, vnil()))) }
 
 func isNil(v *Value) bool {

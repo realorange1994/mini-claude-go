@@ -573,6 +573,8 @@ func gcollect() {
 		}
 	}
 	allValues = allValues[:n]
+	// Reset batch allocation after GC so freed batch cells can be reused
+	batchGCollect()
 }
 
 func markRoots() {

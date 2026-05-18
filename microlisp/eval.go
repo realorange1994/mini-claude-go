@@ -126,6 +126,10 @@ func ResetGlobalEnv() {
 	lockMutexMap = make(map[int64]*sync.Mutex)
 	condVars = make(map[int64]*sync.Cond)
 	logicalPathnameTranslations = map[string]*Value{}
+	// Reset batch allocation pool and allValues for fresh start
+	allValues = nil
+	minorCount = 0
+	currentPool = nil
 	// These are set by InitGlobalEnv sub-calls (initFeatures/initPackages),
 	// so we clear them to empty; InitGlobalEnv will repopulate.
 	lispFeatures = make(map[string]bool)
