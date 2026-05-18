@@ -4523,11 +4523,131 @@ func (a *AgentLoop) buildPreCompactFileSnapshot(maxFiles int, maxTokensPerFile i
 	return sb.String()
 }
 
+// buildStructuredGoalBlock extracts goal state from in-memory structures.
+// Unlike upstream's LLM-based goal extraction (probabilistic), this uses
+// deterministic structured state that survives compaction intact.
+// Returns the goal block text and whether any content was generated.
+func (a *AgentLoop) buildStructuredGoalBlock(messages []anthropic.MessageParam) (string, bool) {
+	var sb strings.Builder
+
+	// 1. Pending Tasks from TodoList — the model's primary "what's left to do"
+	if a.todoList != nil {
+		pending := a.todoList.GetPendingTasks()
+		if len(pending) > 0 {
+			sb.WriteString("## Pending Tasks\n")
+			for i, item := range pending {
+				status := string(item.Status)
+				active := ""
+				if item.ActiveForm != "" {
+					active = " (" + item.ActiveForm + ")"
+				}
+				sb.WriteString(fmt.Sprintf("%d. [%s] %s%s\n", i+1, status, item.Content, active))
+			}
+		}
+	}
+
+	// 2. Completed Tasks — the anti-replay guard. Tells the model what's done
+	// so it doesn't re-execute completed work after compaction.
+	if a.todoList != nil {
+		completed := a.todoList.GetCompletedTasks()
+		if len(completed) > 0 {
+			sb.WriteString("\n## Completed Work (DO NOT RE-EXECUTE)\n")
+			for _, item := range completed {
+				active := ""
+				if item.ActiveForm != "" {
+					active = " (" + item.ActiveForm + ")"
+				}
+				sb.WriteString(fmt.Sprintf("- %s%s\n", item.Content, active))
+			}
+		}
+	}
+
+	// 3. Active task from toolStateTracker — what the model claims it's doing
+	if a.toolStateTracker != nil {
+		activeTask := a.toolStateTracker.GetActiveTask()
+		if activeTask != "" {
+			sb.WriteString(fmt.Sprintf("\n## Current Work\nActive task: %s\n", activeTask))
+		}
+	}
+
+	// 4. In-progress task from TodoList — cross-reference with tracker
+	if a.todoList != nil {
+		inProgress := a.todoList.GetInProgressTask()
+		if inProgress != "" {
+			sb.WriteString(fmt.Sprintf("Currently working on: %s\n", inProgress))
+		}
+	}
+
+	// 5. ToolStateTracker conclusions — key findings the agent claimed
+	if a.toolStateTracker != nil {
+		conclusions := a.toolStateTracker.GetConclusions()
+		if len(conclusions) > 0 {
+			sb.WriteString("\n## Key Findings\n")
+			for _, c := range conclusions {
+				sb.WriteString(fmt.Sprintf("- %s\n", c))
+			}
+		}
+	}
+
+	// 6. Error memory — errors encountered, extracted structurally from tool results
+	if len(messages) > 0 {
+		errorMem := a.extractErrorMemory(messages)
+		if len(errorMem) > 0 {
+			sb.WriteString("\n## Errors Encountered\n")
+			for _, e := range errorMem {
+				sb.WriteString(fmt.Sprintf("- %s\n", e))
+			}
+		}
+	}
+
+	return sb.String(), sb.Len() > 0
+}
+
+// extractErrorMemory extracts error messages from tool results structurally.
+// Unlike upstream's "Errors and fixes" section (LLM-extracted), this uses
+// deterministic regex-based extraction from tool_result content.
+func (a *AgentLoop) extractErrorMemory(messages []anthropic.MessageParam) []string {
+	seen := make(map[string]bool)
+	var errors []string
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if block.OfToolResult == nil {
+				continue
+			}
+			for _, tc := range block.OfToolResult.Content {
+				if tc.OfText == nil {
+					continue
+				}
+				text := tc.OfText.Text
+				for _, line := range strings.Split(text, "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					if strings.Contains(strings.ToLower(line), "error") {
+						if len(line) > 200 {
+							line = line[:200] + "..."
+						}
+						if !seen[line] {
+							seen[line] = true
+							errors = append(errors, line)
+						}
+					}
+				}
+			}
+		}
+	}
+	// Keep only the most recent errors (upstream only keeps what LLM remembers)
+	if len(errors) > 10 {
+		errors = errors[len(errors)-10:]
+	}
+	return errors
+}
+
 // buildCompactSummaryMessage generates a structured summary message for the non-LLM
 // compact path, matching upstream's getCompactUserSummaryMessage format.
-// It uses toolStateTracker conclusions and recent tool calls to tell the model
-// what was completed vs. pending — preventing the model from re-executing
-// already-done work.
+// It uses deterministic structured state from TodoList + toolStateTracker for
+// goal preservation (surpassing upstream's purely LLM-based goal extraction).
 //
 // messages and recentToolCalls are the pre-compacted conversation data.
 // If messages is nil, BuildMessages() is called (backwards compat).
@@ -4560,67 +4680,27 @@ func (a *AgentLoop) buildCompactSummaryMessage(preTokens int, messages []anthrop
 		sb.WriteString(fileSnapshot)
 	}
 
-	// Include toolStateTracker conclusions if available (what the agent claimed was done).
-	if a.toolStateTracker != nil {
-		if conclusions := a.toolStateTracker.GetConclusions(); len(conclusions) > 0 {
-			sb.WriteString("\n## Completed Work\n")
-			for _, c := range conclusions {
-				sb.WriteString(fmt.Sprintf("- %s\n", c))
-			}
-		}
+	// Inject the structured goal block — the key anti-amnesia mechanism.
+	// This replaces upstream's purely LLM-based goal extraction with
+	// deterministic structured state from TodoList + toolStateTracker.
+	if goalBlock, hasContent := a.buildStructuredGoalBlock(messages); hasContent {
+		sb.WriteString("\n")
+		sb.WriteString(goalBlock)
 	}
 
-	// Include recent tool calls to show what was being worked on.
-	// If recentToolCalls was pre-captured, use it; otherwise extract fresh.
-	if len(recentToolCalls) > 0 {
-		sb.WriteString("\n## Recent Tool Calls Before Compaction\n")
-		for _, tc := range recentToolCalls {
-			sb.WriteString(fmt.Sprintf("- %s\n", tc))
-		}
-	} else if calls := a.extractRecentToolCallsForSummary(5); len(calls) > 0 {
-		sb.WriteString("\n## Recent Tool Calls Before Compaction\n")
-		for _, tc := range calls {
-			sb.WriteString(fmt.Sprintf("- %s\n", tc))
-		}
-	}
+	sb.WriteString("\n(compact truncated the conversation — recent messages are preserved verbatim below)\n")
 
-	// Inject pending tasks and current work context — the key anti-amnesia mechanism.
-	// Without this, the model loses its goals when the conversation is compacted,
-	// because the structured metadata above captures what WAS done but not what's
-	// left to do. This matches upstream's compact prompt sections #7 (Pending Tasks)
-	// and #8/#9 (Current Work / Optional Next Step).
-	if a.todoList != nil {
-		pending := a.todoList.GetPendingTasks()
-		if len(pending) > 0 {
-			sb.WriteString("\n## Pending Tasks\n")
-			for i, item := range pending {
-				status := string(item.Status)
-				active := ""
-				if item.ActiveForm != "" {
-					active = " (" + item.ActiveForm + ")"
-				}
-				sb.WriteString(fmt.Sprintf("%d. [%s] %s%s\n", i+1, status, item.Content, active))
-			}
-		}
-	}
-
-	sb.WriteString("\n## Current Work\n")
-	// Extract current work context from toolStateTracker and todoList.
-	if a.toolStateTracker != nil {
-		activeTask := a.toolStateTracker.GetActiveTask()
-		if activeTask != "" {
-			sb.WriteString(fmt.Sprintf("Active task: %s\n", activeTask))
-		}
-	}
-	if a.todoList != nil {
-		inProgress := a.todoList.GetInProgressTask()
-		if inProgress != "" {
-			sb.WriteString(fmt.Sprintf("Currently working on: %s\n", inProgress))
-		}
-	}
-	sb.WriteString("(compact truncated the conversation — recent messages are preserved verbatim below)\n")
+	// Anti-replay directive: explicit rules to prevent re-execution
+	sb.WriteString("\n## Rules After Compaction\n")
+	sb.WriteString("1. DO NOT re-execute any task listed in \"Completed Work\" — those are done.\n")
+	sb.WriteString("2. Start from the first item in \"Pending Tasks\" that you have not yet completed.\n")
 
 	// Transcript path for detail recovery.
+	if tp := a.TranscriptPath(); tp != "" {
+		sb.WriteString(fmt.Sprintf("3. If unsure what to do next, read the transcript at: %s.\n", tp))
+	}
+	sb.WriteString("4. Do NOT ask the user what to work on — you already know.\n")
+
 	if tp := a.TranscriptPath(); tp != "" {
 		sb.WriteString(fmt.Sprintf("\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s\n", tp))
 	}

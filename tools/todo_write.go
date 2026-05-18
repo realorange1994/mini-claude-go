@@ -92,6 +92,20 @@ func (t *TodoList) GetPendingTasks() []TodoItem {
 	return pending
 }
 
+// GetCompletedTasks returns all completed tasks.
+// Used by compaction to list what has been done (anti-replay guard).
+func (t *TodoList) GetCompletedTasks() []TodoItem {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var done []TodoItem
+	for _, item := range t.Items {
+		if item.Status == TodoCompleted {
+			done = append(done, item)
+		}
+	}
+	return done
+}
+
 // GetInProgressTask returns the currently in-progress task, or empty string if none.
 func (t *TodoList) GetInProgressTask() string {
 	t.mu.RLock()

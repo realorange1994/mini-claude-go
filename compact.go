@@ -2385,23 +2385,30 @@ func entriesToSummaryText(entries []conversationEntry) string {
 // existing entriesToSummaryText works on internal conversationEntry slices.
 // Used by SM-compact and fallback paths to inject structured metadata into summaries.
 func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) string {
-	// First pass: collect structured data
+	// First pass: collect structured data + chronological events
+	type narrativeEvent struct {
+		Turn    int    // conversation turn number
+		Kind    string // "user", "tool_call", "tool_result", "error"
+		Content string // brief description
+	}
 	var userMessages []string
-	var toolCalls []map[string]any // name, args
-	var fileOperations []string    // "read: path" or "write: path"
+	var events []narrativeEvent
 	var filesMentioned []string
-	var errorMessages []string     // full error text (first 10)
-	var editOperations []string    // edit details: "edited path: old_string -> new_string"
+	var errorMessages []string
+	var editOps []string    // edit details
+	toolCounts := make(map[string]int)
 	totalToolCalls := 0
 	totalToolResults := 0
+	lastAssistantText := ""
 
-	for _, msg := range messages {
+	for turnIdx, msg := range messages {
 		role := string(msg.Role)
+		turnNum := turnIdx + 1
+
 		for _, block := range msg.Content {
 			if block.OfText != nil {
 				text := block.OfText.Text
 				if role == "user" {
-					// Skip tool_result user messages
 					isToolResult := false
 					for _, b := range msg.Content {
 						if b.OfToolResult != nil {
@@ -2415,24 +2422,45 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 							preview = preview[:1000] + "..."
 						}
 						userMessages = append(userMessages, preview)
+						events = append(events, narrativeEvent{
+							Turn:    turnNum,
+							Kind:    "user",
+							Content: preview,
+						})
 					}
+				} else if role == "assistant" {
+					// Track last non-tool assistant text for "Current Work"
+					lastAssistantText = text
 				}
 			}
 			if block.OfToolUse != nil {
 				totalToolCalls++
 				name := block.OfToolUse.Name
-				args := make(map[string]any)
+				toolCounts[name]++
+				actionDesc := name
 				if m, ok := block.OfToolUse.Input.(map[string]any); ok {
-					args = m
-					// Extract file paths
+					// Build brief action description
 					if path, ok := m["path"].(string); ok {
 						filesMentioned = append(filesMentioned, path)
-						fileOperations = append(fileOperations, fmt.Sprintf("used %s on: %s", name, path))
+						actionDesc = fmt.Sprintf("%s %s", name, shortPath(path))
 					} else if path, ok := m["file_path"].(string); ok {
 						filesMentioned = append(filesMentioned, path)
-						fileOperations = append(fileOperations, fmt.Sprintf("used %s on: %s", name, path))
+						actionDesc = fmt.Sprintf("%s %s", name, shortPath(path))
+					} else if query, ok := m["query"].(string); ok {
+						qPreview := query
+						if len(qPreview) > 80 {
+							qPreview = qPreview[:80] + "..."
+						}
+						actionDesc = fmt.Sprintf("%s: %s", name, qPreview)
+					} else if cmd, ok := m["command"].(string); ok {
+						cPreview := cmd
+						if len(cPreview) > 80 {
+							cPreview = cPreview[:80] + "..."
+						}
+						actionDesc = fmt.Sprintf("%s: %s", name, cPreview)
 					}
-					// Capture edit/write operation details
+
+					// Capture edit details
 					if name == "edit_file" || name == "write_file" || name == "multi_edit_file" {
 						pathStr := ""
 						if p, ok := m["path"].(string); ok {
@@ -2446,16 +2474,18 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 								if len(preview) > 100 {
 									preview = preview[:100] + "..."
 								}
-								editOperations = append(editOperations, fmt.Sprintf("%s %s: replaced \"%s\"", name, pathStr, preview))
+								editOps = append(editOps, fmt.Sprintf("%s %s: replaced \"%s\"", name, pathStr, preview))
 							} else {
-								editOperations = append(editOperations, fmt.Sprintf("%s %s: full rewrite", name, pathStr))
+								editOps = append(editOps, fmt.Sprintf("%s %s: full rewrite", name, pathStr))
 							}
 						}
 					}
 				}
-				toolCalls = append(toolCalls, map[string]any{
-					"name": name,
-					"args": args,
+
+				events = append(events, narrativeEvent{
+					Turn:    turnNum,
+					Kind:    "tool_call",
+					Content: actionDesc,
 				})
 			}
 			if block.OfToolResult != nil {
@@ -2464,13 +2494,27 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 					if tc.OfText != nil {
 						text := tc.OfText.Text
 						if strings.Contains(text, "Error") || strings.Contains(text, "error") {
-							// Collect full error text (up to 10 errors)
 							if len(errorMessages) < 10 {
 								errPreview := text
 								if len(errPreview) > 200 {
 									errPreview = errPreview[:200] + "..."
 								}
 								errorMessages = append(errorMessages, errPreview)
+							}
+							events = append(events, narrativeEvent{
+								Turn:    turnNum,
+								Kind:    "error",
+								Content: errPreview(text, 200),
+							})
+						} else {
+							// Successful result — extract a brief summary
+							summary := summarizeToolResult(text)
+							if summary != "" {
+								events = append(events, narrativeEvent{
+									Turn:    turnNum,
+									Kind:    "tool_result",
+									Content: summary,
+								})
 							}
 						}
 					}
@@ -2488,80 +2532,151 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 	// Overview paragraph
 	sb.WriteString(fmt.Sprintf("The conversation had %d turns with %d tool calls and %d tool results.\n", len(userMessages), totalToolCalls, totalToolResults))
 
+	// Chronological conversation flow — interleaved narrative
+	if len(events) > 0 {
+		sb.WriteString("## Conversation Flow\n")
+		sb.WriteString("What happened, in order:\n\n")
+		var lastKind string
+		for _, ev := range events {
+			switch ev.Kind {
+			case "user":
+				sb.WriteString(fmt.Sprintf("**User:** %s\n\n", ev.Content))
+				lastKind = "user"
+			case "tool_call":
+				if lastKind == "user" {
+					// After a user request, the tool calls are the response
+					sb.WriteString(fmt.Sprintf("  → Used tool: %s\n", ev.Content))
+				} else {
+					sb.WriteString(fmt.Sprintf("  → Used tool: %s\n", ev.Content))
+				}
+				lastKind = "tool_call"
+			case "tool_result":
+				sb.WriteString(fmt.Sprintf("    ✓ %s\n", ev.Content))
+				lastKind = "tool_result"
+			case "error":
+				sb.WriteString(fmt.Sprintf("    ✗ Error: %s\n", ev.Content))
+				lastKind = "error"
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// Errors encountered (condensed from the flow for visibility)
+	if len(errorMessages) > 0 {
+		sb.WriteString(fmt.Sprintf("## Errors (%d encountered)\n", len(errorMessages)))
+		for i, errMsg := range errorMessages {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, errMsg))
+		}
+		sb.WriteString("\n")
+	}
+
+	// File edits detail (for tasks that need to know exact changes)
+	if len(editOps) > 0 {
+		sb.WriteString("## File Changes\n")
+		for _, op := range editOps {
+			sb.WriteString("- " + op + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// Key files referenced
 	if len(filesMentioned) > 0 {
-		sb.WriteString(fmt.Sprintf("Files referenced: %s\n\n", strings.Join(filesMentioned, ", ")))
-	}
-
-	// User requests
-	if len(userMessages) > 0 {
-		sb.WriteString("## User Requests\n")
-		for i, msg := range userMessages {
-			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, msg))
-		}
-		sb.WriteString("\n")
-	}
-
-	// Tool activity summary
-	if totalToolCalls > 0 {
-		sb.WriteString("## Tool Activity\n")
-		// Group tool calls by name
-		toolCounts := make(map[string]int)
-		for _, tc := range toolCalls {
-			if name, ok := tc["name"].(string); ok {
-				toolCounts[name]++
-			}
-		}
-		sb.WriteString("Tools used (count per tool):\n")
-		for name, count := range toolCounts {
-			sb.WriteString(fmt.Sprintf("- %s: %d times\n", name, count))
-		}
-		if len(errorMessages) > 0 {
-			sb.WriteString(fmt.Sprintf("\nEncountered %d error(s) during tool execution:\n", len(errorMessages)))
-			for i, errMsg := range errorMessages {
-				sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, errMsg))
-			}
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	// File operations
-	if len(fileOperations) > 0 {
-		sb.WriteString("## File Operations\n")
-		for _, op := range fileOperations {
-			sb.WriteString("- " + op + "\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	// Edit details — what was changed in each file
-	if len(editOperations) > 0 {
-		sb.WriteString("## File Edits\n")
-		for _, op := range editOperations {
-			sb.WriteString("- " + op + "\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	// Work completed summary — extract what was accomplished from edit operations.
-	// This helps the model understand what's done vs what's pending after compaction.
-	if len(editOperations) > 0 {
-		sb.WriteString("## Work Completed\n")
-		sb.WriteString("The following changes were made to the codebase:\n")
-		for _, op := range editOperations {
-			sb.WriteString("- " + op + "\n")
-		}
-		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("## Files Referenced\n%s\n\n", strings.Join(filesMentioned, ", ")))
 	}
 
 	// Last user message — represents the most recent work direction.
-	// After compaction, this is the key signal for what the model should continue.
 	if len(userMessages) > 0 {
 		lastMsg := userMessages[len(userMessages)-1]
 		sb.WriteString(fmt.Sprintf("## Most Recent Direction\nThe user's most recent message was: %s\n\n", lastMsg))
 	}
 
+	// Last assistant text — useful for "Current Work" extraction
+	if lastAssistantText != "" {
+		preview := lastAssistantText
+		if len(preview) > 500 {
+			preview = preview[:500] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("## Last Assistant Response\n%s\n\n", preview))
+	}
+
 	return sb.String()
+}
+
+// shortPath returns the last 2-3 components of a file path for compact display.
+func shortPath(p string) string {
+	parts := strings.Split(p, string(filepath.Separator))
+	if len(parts) <= 3 {
+		return p
+	}
+	return "..." + string(filepath.Separator) + strings.Join(parts[len(parts)-2:], string(filepath.Separator))
+}
+
+// errPreview returns the first n characters of s with "..." appended if truncated.
+func errPreview(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// summarizeToolResult extracts a brief high-level summary from a tool result.
+// Returns empty string if no useful summary can be extracted.
+func summarizeToolResult(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	// For Bash tool results, extract the exit code info
+	if strings.Contains(text, "Exit code:") {
+		// Extract first meaningful line and exit code
+		lines := strings.Split(text, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "Exit code:") {
+				preview := line
+				if len(preview) > 100 {
+					preview = preview[:100] + "..."
+				}
+				return preview
+			}
+		}
+		return "Command executed"
+	}
+	// For file read results
+	if strings.Contains(text, "Successfully read") {
+		return "File read successfully"
+	}
+	// For grep results
+	if strings.Contains(text, "matching") || strings.Contains(text, "matches") {
+		// Extract match count if available
+		if idx := strings.Index(text, "match"); idx >= 0 {
+			end := idx + 7
+			if end > len(text) {
+				end = len(text)
+			}
+			return text[:end]
+		}
+		return "Found matches"
+	}
+	// For write/edit success
+	if strings.Contains(text, "successfully") {
+		return "Operation completed successfully"
+	}
+	// For TodoWrite results
+	if strings.Contains(text, "Todos updated") {
+		return "Todo list updated"
+	}
+	// Default: first non-empty line
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "Tool") && !strings.HasPrefix(line, "Result") {
+			if len(line) > 150 {
+				return line[:150] + "..."
+			}
+			return line
+		}
+	}
+	return ""
 }
 
 // uniqueStrings returns a deduplicated slice preserving first-occurrence order.

@@ -178,3 +178,78 @@ func TestTodoStatusConstants(t *testing.T) {
 		t.Errorf("TodoCompleted = %q, want 'completed'", TodoCompleted)
 	}
 }
+
+func TestTodoListGetPendingTasks(t *testing.T) {
+	list := NewTodoList()
+	list.Update([]TodoItem{
+		{Content: "Task 1", Status: TodoPending},
+		{Content: "Task 2", Status: TodoInProgress},
+		{Content: "Task 3", Status: TodoCompleted},
+	})
+	pending := list.GetPendingTasks()
+	if len(pending) != 2 {
+		t.Fatalf("expected 2 pending tasks, got %d", len(pending))
+	}
+	if pending[0].Content != "Task 1" {
+		t.Errorf("expected 'Task 1', got %q", pending[0].Content)
+	}
+	if pending[1].Content != "Task 2" {
+		t.Errorf("expected 'Task 2', got %q", pending[1].Content)
+	}
+}
+
+func TestTodoListGetPendingTasksEmpty(t *testing.T) {
+	list := NewTodoList()
+	pending := list.GetPendingTasks()
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending tasks, got %d", len(pending))
+	}
+}
+
+func TestTodoListGetCompletedTasks(t *testing.T) {
+	list := NewTodoList()
+	list.Update([]TodoItem{
+		{Content: "Task 1", Status: TodoPending},
+		{Content: "Task 2", Status: TodoCompleted},
+		{Content: "Task 3", Status: TodoCompleted},
+	})
+	completed := list.GetCompletedTasks()
+	if len(completed) != 2 {
+		t.Fatalf("expected 2 completed tasks, got %d", len(completed))
+	}
+	if completed[0].Content != "Task 2" {
+		t.Errorf("expected 'Task 2', got %q", completed[0].Content)
+	}
+	if completed[1].Content != "Task 3" {
+		t.Errorf("expected 'Task 3', got %q", completed[1].Content)
+	}
+}
+
+func TestTodoListGetCompletedTasksEmpty(t *testing.T) {
+	list := NewTodoList()
+	completed := list.GetCompletedTasks()
+	if len(completed) != 0 {
+		t.Errorf("expected 0 completed tasks, got %d", len(completed))
+	}
+}
+
+func TestTodoListGetInProgressTask(t *testing.T) {
+	list := NewTodoList()
+	list.Update([]TodoItem{
+		{Content: "Task 1", Status: TodoPending},
+		{Content: "Task 2", Status: TodoInProgress},
+		{Content: "Task 3", Status: TodoCompleted},
+	})
+	inProgress := list.GetInProgressTask()
+	if inProgress != "Task 2" {
+		t.Errorf("expected 'Task 2', got %q", inProgress)
+	}
+}
+
+func TestTodoListGetInProgressTaskEmpty(t *testing.T) {
+	list := NewTodoList()
+	inProgress := list.GetInProgressTask()
+	if inProgress != "" {
+		t.Errorf("expected empty string, got %q", inProgress)
+	}
+}
