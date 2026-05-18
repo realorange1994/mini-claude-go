@@ -381,38 +381,35 @@ func scanHelperFunctions() {
 }
 
 // indexGoFFIFunctions scans GoPackageRegistry and registers each function
-// in sourceIndex with Kind "go-ffi" and absolute Go source file paths.
+// in sourceIndex with Kind "go-ffi".
+// Source paths are stored as relative paths (e.g. "math/sin.go") resolved
+// at runtime via GOROOT/src/, so they work across platforms and toolchain versions.
 func indexGoFFIFunctions() {
-	goroot := runtime.GOROOT()
-	if goroot == "" {
-		return // can't locate Go source
-	}
-	// Normalize to forward slashes for consistent comparison
-	goroot = filepath.ToSlash(goroot)
-
 	for pkgName, pkg := range GoPackageRegistry {
 		for symName, fnVal := range pkg {
 			if fnVal.Kind() != reflect.Func {
 				continue
 			}
-			// Use runtime.FuncForPC to get source location
 			fn := runtime.FuncForPC(fnVal.Pointer())
 			if fn == nil {
 				continue
 			}
 			file, line := fn.FileLine(fn.Entry())
-			// Normalize file path to forward slashes
 			file = filepath.ToSlash(file)
 
-			// Only index if the file is under GOROOT (standard library)
-			if !strings.HasPrefix(file, goroot) {
-				continue
-			}
-			// Relative path from GOROOT/src/ for display
+			// Extract relative path from GOROOT/src/ by finding the "/src/"
+			// separator in the compiled path. This works regardless of where
+			// GOROOT actually lives (system install, toolchain in mod cache, etc.)
+			// e.g. ".../go1.25.0/src/math/sin.go" → "math/sin.go"
 			relFile := file
-			prefix := goroot + "/src/"
-			if strings.HasPrefix(file, prefix) {
-				relFile = strings.TrimPrefix(file, prefix)
+			if idx := strings.Index(file, "/src/"); idx >= 0 {
+				relFile = file[idx+5:] // skip "/src/"
+			}
+
+			// Only index standard library files (those with a recognizable
+			// relative path that starts with a known stdlib package)
+			if relFile == file {
+				continue // no "/src/" found, skip (vendor, third-party, etc.)
 			}
 
 			sig := fnVal.Type()
@@ -426,13 +423,13 @@ func indexGoFFIFunctions() {
 			}
 			fullName := pkgName + "." + symName
 			sourceIndex[strings.ToLower(fullName)] = &SourceEntry{
-				Kind:    "go-ffi",
-				File:    file, // absolute path for reading source
-				Start:   line,
-				End:     line,
-				Doc:     fmt.Sprintf("Go stdlib: %s(%s) → %s", symName, strings.Join(params, ", "), strings.Join(rets, ", ")),
-				GoFunc:  fullName,
-				GoSrc:   relFile, // relative path for display
+				Kind:   "go-ffi",
+				File:   relFile, // relative path like "math/sin.go"
+				Start:  line,
+				End:    line,
+				Doc:    fmt.Sprintf("Go stdlib: %s(%s) → %s", symName, strings.Join(params, ", "), strings.Join(rets, ", ")),
+				GoFunc: fullName,
+				GoSrc:  relFile, // same relative path for display
 			}
 		}
 	}
@@ -516,7 +513,13 @@ func GetSource(name string, offset, limit int) string {
 		fmt.Fprintf(&b, "%s\n", entry.Doc)
 		if entry.Start > 0 {
 			fmt.Fprintf(&b, "Line: %d\n", entry.Start)
-			fmt.Fprintf(&b, "\n%s", readAbsSourceSnippet(entry.File, entry.Start, offset, limit))
+			// Resolve the relative path dynamically using runtime GOROOT
+			resolved := resolveGoSrcPath(entry.File)
+			if resolved != "" {
+				fmt.Fprintf(&b, "\n%s", readAbsSourceSnippet(resolved, entry.Start, offset, limit))
+			} else {
+				fmt.Fprintf(&b, "\nGo source not found on this system. Function signature is available above.\n")
+			}
 		}
 	}
 
@@ -720,6 +723,63 @@ func getFFISignature(name string) string {
 				strings.Join(params, ", "),
 				isVariadic,
 				strings.Join(returns, ", "))
+		}
+	}
+	return ""
+}
+
+// resolveGoSrcPath resolves a relative Go stdlib source path (e.g. "math/sin.go")
+// to an absolute path by searching multiple candidate locations:
+//   1. runtime.GOROOT()/src/<relPath>  — standard Go install
+//   2. The compiled path from FuncForPC — toolchain in mod cache
+//   3. Common alternative locations
+// Returns "" if the file cannot be found.
+func resolveGoSrcPath(relPath string) string {
+	goroot := filepath.ToSlash(runtime.GOROOT())
+
+	// Candidate directories to search for Go stdlib source
+	candidates := []string{
+		goroot + "/src",
+	}
+
+	// Also try the compiled path from FuncForPC as a hint.
+	// If we can find any FFI function's compiled path, extract the src/ prefix
+	// to discover the actual toolchain source directory.
+	for _, pkg := range GoPackageRegistry {
+		for _, fnVal := range pkg {
+			if fnVal.Kind() != reflect.Func {
+				continue
+			}
+			fn := runtime.FuncForPC(fnVal.Pointer())
+			if fn == nil {
+				continue
+			}
+			compiledFile, _ := fn.FileLine(fn.Entry())
+			compiledFile = filepath.ToSlash(compiledFile)
+			if idx := strings.Index(compiledFile, "/src/"); idx >= 0 {
+				srcDir := compiledFile[:idx+4] // include "/src/"
+				// Deduplicate
+				found := false
+				for _, c := range candidates {
+					if c == srcDir {
+						found = true
+						break
+					}
+				}
+				if !found {
+					candidates = append(candidates, srcDir)
+				}
+			}
+			break // one hint is enough
+		}
+		break // one package is enough
+	}
+
+	// Search each candidate directory
+	for _, srcDir := range candidates {
+	 fullPath := filepath.Join(filepath.FromSlash(srcDir), filepath.FromSlash(relPath))
+		if _, err := os.Stat(fullPath); err == nil {
+			return fullPath
 		}
 	}
 	return ""
