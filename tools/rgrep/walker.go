@@ -195,6 +195,150 @@ func WalkDir(opts WalkOptions) ([]WalkEntry, error) {
 	return entries, nil
 }
 
+// WalkDirStream traverses a directory tree and calls fn for each matching file.
+// Unlike WalkDir, it does not collect entries into a slice — files are processed
+// one at a time via the callback, keeping memory usage constant regardless of
+// directory size. If fn returns an error, walking stops.
+func WalkDirStream(opts WalkOptions, fn func(WalkEntry) error) error {
+	if opts.Ctx == nil {
+		opts.Ctx = context.Background()
+	}
+
+	root, err := filepath.Abs(opts.Root)
+	if err != nil {
+		return err
+	}
+
+	// Load .gitignore if requested
+	var gitignore *GitIgnoreMatcher
+	if opts.RespectGitIgnore {
+		gitignore = LoadGitIgnoreFromRepoRoot(root)
+	}
+
+	// Resolve type filter extensions
+	var typeExts []string
+	if opts.TypeFilter != "" {
+		typeExts = ExtensionsForType(strings.ToLower(opts.TypeFilter))
+	}
+
+	rootDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
+
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil // skip errors, keep walking
+		}
+
+		// Check context cancellation
+		select {
+		case <-opts.Ctx.Done():
+			return opts.Ctx.Err()
+		default:
+		}
+
+		rel, _ := filepath.Rel(root, path)
+
+		if d.IsDir() {
+			// Skip default ignored directories
+			if defaultIgnoredDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+
+			// Skip .gitignore-ignored directories
+			if gitignore != nil && gitignore.IsIgnored(rel, true) {
+				return filepath.SkipDir
+			}
+
+			// Skip excluded directories (supports ** glob patterns)
+			for _, excl := range opts.Excludes {
+				if matchExcludePattern(excl, rel, true) {
+					return filepath.SkipDir
+				}
+			}
+
+			// Enforce max depth
+			if opts.MaxDepth > 0 {
+				curDepth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
+				if curDepth >= opts.MaxDepth {
+					return filepath.SkipDir
+				}
+			}
+
+			return nil
+		}
+
+		// It's a file
+
+		// Skip .gitignore-ignored files
+		if gitignore != nil && gitignore.IsIgnored(rel, false) {
+			return nil
+		}
+
+		// Skip excluded files
+		for _, excl := range opts.Excludes {
+			if matched, _ := filepath.Match(excl, d.Name()); matched {
+				return nil
+			}
+			if matched, _ := filepath.Match(excl, rel); matched {
+				return nil
+			}
+		}
+
+		// Apply glob filter(s)
+		if len(opts.Globs) > 0 {
+			matched := false
+			for _, g := range opts.Globs {
+				if m, _ := filepath.Match(g, d.Name()); m {
+					matched = true
+					break
+				}
+				if m, _ := filepath.Match(g, filepath.ToSlash(rel)); m {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return nil
+			}
+		}
+
+		// Apply type filter
+		if len(typeExts) > 0 {
+			ext := strings.ToLower(filepath.Ext(path))
+			found := false
+			for _, e := range typeExts {
+				if ext == e {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil
+			}
+		}
+
+		// Skip binary-ish extensions
+		ext := strings.ToLower(filepath.Ext(path))
+		if isBinaryExt(ext) {
+			return nil
+		}
+
+		if info, err := d.Info(); err == nil {
+			// Skip files exceeding max size
+			if opts.MaxFilesize > 0 && info.Size() > opts.MaxFilesize {
+				return nil
+			}
+			if err := fn(WalkEntry{
+				Path:    path,
+				RelPath: rel,
+				Info:    info,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // matchExcludePattern matches a path against an exclude pattern.
 // Supports gitignore-style patterns including ** for recursive matching.
 // relPath is the path relative to the search root (using forward slashes).
