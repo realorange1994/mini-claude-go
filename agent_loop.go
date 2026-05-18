@@ -5015,7 +5015,26 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 	if tp := a.TranscriptPath(); tp != "" {
 		summaryContent += fmt.Sprintf("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s", tp)
 	}
+
+	// Inject deterministic goal block — pending/completed tasks, current work,
+	// key findings, and errors. SM-compact uses session memory as the summary
+	// which has no explicit task tracking, so the structured goal block is the
+	// model's only signal for what's pending vs done.
+	if goalBlock, hasContent := a.buildStructuredGoalBlock(messages); hasContent {
+		summaryContent += "\n\n" + goalBlock
+	}
+
 	summaryContent += "\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+
+	// Anti-replay directive: explicit rules to prevent re-execution
+	summaryContent += "\n\n## Rules After Compaction\n"
+	summaryContent += "1. DO NOT re-execute any task listed in \"Completed Work\" — those are done.\n"
+	summaryContent += "2. Start from the first item in \"Pending Tasks\" that you have not yet completed.\n"
+	if tp := a.TranscriptPath(); tp != "" {
+		summaryContent += fmt.Sprintf("3. If unsure what to do next, read the transcript at: %s.\n", tp)
+	}
+	summaryContent += "4. Do NOT ask the user what to work on — you already know.\n"
+
 	if preCompactInst != "" {
 		summaryContent += "\n\n## Custom instructions for this compaction:\n" + preCompactInst
 	}
