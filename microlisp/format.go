@@ -87,6 +87,41 @@ func formatOldRoman(n int) string {
 	return b.String()
 }
 
+// formatToInt safely converts a Value to int, returning (int, true) if
+// the value fits in a Go int, or (0, false) if it overflows (e.g. huge VBigInt).
+func formatToInt(v *Value) (int, bool) {
+	if v.typ == VBigInt {
+		// Check if bigInt fits in int64 range
+		if v.bigInt.IsInt64() {
+			n := v.bigInt.Int64()
+			// On 64-bit platforms int == int64, on 32-bit int == int32
+			if int64(int(n)) == n {
+				return int(n), true
+			}
+		}
+		return 0, false
+	}
+	f := toNum(v)
+	// Check for NaN/Inf which produce undefined int conversion
+	if f != f || f == math.Inf(1) || f == math.Inf(-1) {
+		return 0, false
+	}
+	n := int(f)
+	// Verify roundtrip to catch overflow
+	if float64(n) != f {
+		return 0, false
+	}
+	return n, true
+}
+
+// formatAsNumber formats a Value as a plain numeric string (fallback for ~R overflow).
+func formatAsNumber(v *Value) string {
+	if v.typ == VBigInt {
+		return v.bigInt.String()
+	}
+	return strconv.FormatInt(int64(toNum(v)), 10)
+}
+
 // formatCardinal converts a number to English cardinal word form.
 // 0 -> "zero", 1 -> "one", 21 -> "twenty-one", 123 -> "one hundred twenty-three"
 func formatCardinal(n int) string {
@@ -322,6 +357,9 @@ func builtinFormat(args []*Value) (*Value, error) {
 	if stream.typ == VStream && stream.stream != nil && stream.stream.isOutput {
 		if stream.stream.isString && stream.stream.strBuf != nil {
 			stream.stream.strBuf.WriteString(result)
+		} else {
+			// File streams and other writable streams
+			stream.stream.writeString(result)
 		}
 		return vnil(), nil
 	}
@@ -598,30 +636,56 @@ func formatDispatch(fs *fmtState) {
 		fs.buf.WriteString(mantissa + "E" + expSign + expDigits)
 	case 'R':
 		arg := fs.popArg()
-		n := int(toNum(arg))
+		// Safely convert arg to int, handling VBigInt overflow
+		n, ok := formatToInt(arg)
 		// ~nR with radix parameter: print in base n (ANSI CL)
 		if len(params) >= 1 && !colon && !at {
 			radix := int(fs.getParam(params, 0, 10))
 			if radix < 2 || radix > 36 {
-				fs.buf.WriteString(formatCardinal(n))
+				if !ok {
+					// VBigInt too large for cardinal — print numeric form
+					fs.buf.WriteString(formatAsNumber(arg))
+				} else {
+					fs.buf.WriteString(formatCardinal(n))
+				}
 			} else {
-				fs.buf.WriteString(formatBigIntBase(big.NewInt(int64(n)), radix))
+				if !ok {
+					fs.buf.WriteString(formatBigIntBase(arg.bigInt, radix))
+				} else {
+					fs.buf.WriteString(formatBigIntBase(big.NewInt(int64(n)), radix))
+				}
 			}
 			break
 		}
 		switch {
 		case at && colon:
-			// ~:@R: old-style Roman numerals
-			fs.buf.WriteString(formatOldRoman(n))
+			// ~:@R: old-style Roman numerals (only valid 1..3999)
+			if !ok || n <= 0 || n >= 4000 {
+				fs.buf.WriteString(formatAsNumber(arg))
+			} else {
+				fs.buf.WriteString(formatOldRoman(n))
+			}
 		case at:
-			// ~@R: Roman numerals (uppercase)
-			fs.buf.WriteString(formatRomanUpper(n))
+			// ~@R: Roman numerals (only valid 1..3999)
+			if !ok || n <= 0 || n >= 4000 {
+				fs.buf.WriteString(formatAsNumber(arg))
+			} else {
+				fs.buf.WriteString(formatRomanUpper(n))
+			}
 		case colon:
 			// ~:R: ordinal
-			fs.buf.WriteString(formatOrdinal(n))
+			if !ok {
+				fs.buf.WriteString(formatAsNumber(arg))
+			} else {
+				fs.buf.WriteString(formatOrdinal(n))
+			}
 		default:
 			// ~R: cardinal
-			fs.buf.WriteString(formatCardinal(n))
+			if !ok {
+				fs.buf.WriteString(formatAsNumber(arg))
+			} else {
+				fs.buf.WriteString(formatCardinal(n))
+			}
 		}
 	case 'C':
 		arg := fs.popArg()

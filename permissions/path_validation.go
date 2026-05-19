@@ -3,6 +3,7 @@ package permissions
 import (
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"miniclaudecode-go/tools"
@@ -211,8 +212,14 @@ func resolveSymlinks(path string) string {
 }
 
 // isUncPath checks for vulnerable UNC paths.
+// On Windows, both \\server\share and //server/share are UNC paths.
+// On POSIX (Linux/macOS), // is not a UNC path — it's just a POSIX path
+// with a leading double slash that normalizes to /, so only \\ is blocked.
 func isUncPath(path string) bool {
-	return strings.HasPrefix(path, `\\`) || strings.HasPrefix(path, "//")
+	if runtime.GOOS == "windows" {
+		return strings.HasPrefix(path, `\\`) || strings.HasPrefix(path, "//")
+	}
+	return strings.HasPrefix(path, `\\`)
 }
 
 // hasSuspiciousWindowsPathPattern checks for suspicious Windows path patterns.

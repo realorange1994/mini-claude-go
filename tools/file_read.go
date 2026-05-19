@@ -486,9 +486,13 @@ func isBinaryMagic(header []byte) bool {
 
 // isUncPath checks if a path is a UNC network path (\\server\share or //server/share).
 // Accessing UNC paths triggers SMB authentication, potentially leaking NTLM credentials
-// to an untrusted network server. Matches official Claude Code behavior.
+// to an untrusted network server.
+// On Windows, both \\ and // UNC forms are recognized.
+// On POSIX (Linux/macOS), // is a normal path prefix that normalizes to /,
+// so only \\ is considered a vulnerable UNC pattern.
 func isUncPath(path string) bool {
-	// Normalize backslashes to forward slashes for consistent prefix checking
-	normalized := strings.ReplaceAll(path, "\\", "/")
-	return strings.HasPrefix(normalized, "//") || strings.HasPrefix(normalized, "\\\\")
+	if runtime.GOOS == "windows" {
+		return strings.HasPrefix(path, "//") || strings.HasPrefix(path, `\\`)
+	}
+	return strings.HasPrefix(path, `\\`)
 }

@@ -821,6 +821,8 @@ var (
 // containsVulnerableUncPath checks for UNC paths that could leak credentials
 // via SMB/WebDAV. This is a defense against attacks where a malicious command
 // references \\server\share paths to exfiltrate data or NTLM tokens.
+// On Windows, both \\ and // UNC forms are recognized.
+// On POSIX (Linux/macOS), // is a normal path prefix, so only \\ is checked.
 func containsVulnerableUncPath(cmd string) bool {
 	// Pattern 1: UNC paths with backslashes (\\server\share)
 	// Matches: \\server, \\server\share, \\foo.com\file
@@ -830,18 +832,21 @@ func containsVulnerableUncPath(cmd string) bool {
 	}
 
 	// Pattern 2: Forward-slash UNC paths (//server/share)
-	// Go regexp does not support lookbehind, so we match and then verify
-	// the match is NOT preceded by ':' (to exclude URLs like https://)
-	if loc := uncForwardRe.FindStringIndex(cmd); loc != nil {
-		start := loc[0]
-		if start == 0 || cmd[start-1] != ':' {
-			return true
+	// Only relevant on Windows. On POSIX, // is a normal path prefix.
+	if runtime.GOOS == "windows" {
+		// Go regexp does not support lookbehind, so we match and then verify
+		// the match is NOT preceded by ':' (to exclude URLs like https://)
+		if loc := uncForwardRe.FindStringIndex(cmd); loc != nil {
+			start := loc[0]
+			if start == 0 || cmd[start-1] != ':' {
+				return true
+			}
 		}
 	}
 
 	// Pattern 3: DavWWWRoot marker (Windows WebDAV redirector)
 	// Example: \\server\DavWWWRoot\path
-	if strings.Contains(cmd, "DavWWWRoot") {
+	if runtime.GOOS == "windows" && strings.Contains(cmd, "DavWWWRoot") {
 		return true
 	}
 

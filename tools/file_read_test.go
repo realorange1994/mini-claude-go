@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"runtime"
 	"testing"
 )
 
@@ -247,8 +248,12 @@ func TestIsBinaryMagicMP4(t *testing.T) {
 // ─── isUncPath ──────────────────────────────────────────────────────────────
 
 func TestIsUncPathForwardSlash(t *testing.T) {
-	if !isUncPath("//server/share") {
-		t.Error("//server/share should be UNC")
+	// On Windows, // is a UNC path form. On POSIX, it's a normal path prefix.
+	if runtime.GOOS == "windows" && !isUncPath("//server/share") {
+		t.Error("//server/share should be UNC on Windows")
+	}
+	if runtime.GOOS != "windows" && isUncPath("//server/share") {
+		t.Error("//server/share should NOT be UNC on non-Windows")
 	}
 }
 
@@ -514,16 +519,17 @@ func TestExpandPathIdempotent(t *testing.T) {
 // ─── Upstream Quality: isUncPath edge cases ──────────────────────────────────
 
 func TestIsUncPathEdgeCases(t *testing.T) {
+	forwardSlashWantTrue := runtime.GOOS == "windows"
 	tests := []struct {
 		path     string
 		expected bool
 	}{
-		{"//server/share", true},
+		{"//server/share", forwardSlashWantTrue},
 		{`\\server\share`, true},
 		{"/home/user/file", false},
 		{"C:\\Users\\file", false},
 		{"https://example.com", false}, // URL should not be UNC
-		{"//", true},                   // bare UNC prefix
+		{"//", forwardSlashWantTrue},   // bare UNC prefix (only on Windows)
 	}
 	for _, tt := range tests {
 		got := isUncPath(tt.path)

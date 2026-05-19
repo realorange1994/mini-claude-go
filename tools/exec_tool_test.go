@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -858,8 +859,8 @@ func TestContainsVulnerableUncPath(t *testing.T) {
 		{"UNC backslash share", `cat \\server\share\file.txt`, true},
 		{"UNC IPv4", `dir \\192.168.1.1\share`, true},
 
-		// UNC forward-slash paths (non-URL) — should detect
-		{"UNC forward slash", `echo //server/share`, true},
+		// UNC forward-slash paths (non-URL) — should detect on Windows only
+		{"UNC forward slash", `echo //server/share`, runtime.GOOS == "windows"},
 
 		// URLs — should NOT detect
 		{"https URL", "curl https://example.com/api", false},
