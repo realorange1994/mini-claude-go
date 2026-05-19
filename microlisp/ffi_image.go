@@ -37,6 +37,12 @@ func register_image() {
 			"White": image.White,
 			"ZP": image.ZP,
 			"ZR": image.ZR,
+			"YCbCrSubsampleRatio410": image.YCbCrSubsampleRatio410,
+			"YCbCrSubsampleRatio411": image.YCbCrSubsampleRatio411,
+			"YCbCrSubsampleRatio420": image.YCbCrSubsampleRatio420,
+			"YCbCrSubsampleRatio422": image.YCbCrSubsampleRatio422,
+			"YCbCrSubsampleRatio440": image.YCbCrSubsampleRatio440,
+			"YCbCrSubsampleRatio444": image.YCbCrSubsampleRatio444,
 		},
 	)
 	registerType("image", "Alpha", reflect.TypeOf((*image.Alpha)(nil)).Elem())

@@ -318,8 +318,17 @@ func extractFromTypes(pkgPath string, pkg *types.Package) (*PkgInfo, error) {
 			})
 
 		case *types.Const:
-			basic, ok := obj.Type().(*types.Basic)
-			if !ok {
+			// Handle both untyped and named type constants (e.g. x509.KeyUsageCertSign)
+			var basic *types.Basic
+			switch t := obj.Type().(type) {
+			case *types.Basic:
+				basic = t
+			case *types.Named:
+				if b, ok := t.Underlying().(*types.Basic); ok {
+					basic = b
+				}
+			}
+			if basic == nil {
 				continue
 			}
 			kind := basic.Kind()

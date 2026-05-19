@@ -17,6 +17,10 @@ func register_crypto_dsa() {
 			"Sign": dsa.Sign,
 			"Verify": dsa.Verify,
 			"ErrInvalidPublicKey": dsa.ErrInvalidPublicKey,
+			"L1024N160": dsa.L1024N160,
+			"L2048N224": dsa.L2048N224,
+			"L2048N256": dsa.L2048N256,
+			"L3072N256": dsa.L3072N256,
 		},
 	)
 	registerType("crypto/dsa", "ParameterSizes", reflect.TypeOf((*dsa.ParameterSizes)(nil)).Elem())

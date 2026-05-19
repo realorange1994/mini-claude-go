@@ -15,6 +15,10 @@ func register_image_png() {
 			"Decode": png.Decode,
 			"DecodeConfig": png.DecodeConfig,
 			"Encode": png.Encode,
+			"BestCompression": png.BestCompression,
+			"BestSpeed": png.BestSpeed,
+			"DefaultCompression": png.DefaultCompression,
+			"NoCompression": png.NoCompression,
 		},
 	)
 	registerType("image/png", "CompressionLevel", reflect.TypeOf((*png.CompressionLevel)(nil)).Elem())

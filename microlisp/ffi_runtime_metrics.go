@@ -14,6 +14,10 @@ func register_runtime_metrics() {
 		map[string]interface{}{
 			"All": metrics.All,
 			"Read": metrics.Read,
+			"KindBad": metrics.KindBad,
+			"KindFloat64": metrics.KindFloat64,
+			"KindFloat64Histogram": metrics.KindFloat64Histogram,
+			"KindUint64": metrics.KindUint64,
 		},
 	)
 	registerType("runtime/metrics", "Description", reflect.TypeOf((*metrics.Description)(nil)).Elem())

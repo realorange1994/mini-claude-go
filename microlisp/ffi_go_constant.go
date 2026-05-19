@@ -43,6 +43,12 @@ func register_go_constant() {
 			"Uint64Val": constant.Uint64Val,
 			"UnaryOp": constant.UnaryOp,
 			"Val": constant.Val,
+			"Bool": constant.Bool,
+			"Complex": constant.Complex,
+			"Float": constant.Float,
+			"Int": constant.Int,
+			"String": constant.String,
+			"Unknown": constant.Unknown,
 		},
 	)
 	registerType("go/constant", "Kind", reflect.TypeOf((*constant.Kind)(nil)).Elem())

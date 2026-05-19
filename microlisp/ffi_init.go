@@ -4,24 +4,24 @@
 package microlisp
 
 func init() {
-	register_archive_tar() // 26 symbols
+	register_archive_tar() // 30 symbols
 	register_archive_zip() // 19 symbols
 	register_bufio() // 25 symbols
 	register_bytes() // 59 symbols
 	register_compress_bzip2() // 2 symbols
 	register_compress_flate() // 16 symbols
 	register_compress_gzip() // 13 symbols
-	register_compress_lzw() // 5 symbols
+	register_compress_lzw() // 7 symbols
 	register_compress_zlib() // 15 symbols
 	register_container_heap() // 6 symbols
 	register_container_list() // 3 symbols
 	register_container_ring() // 2 symbols
 	register_context() // 17 symbols
-	register_crypto() // 8 symbols
+	register_crypto() // 27 symbols
 	register_crypto_aes() // 3 symbols
 	register_crypto_cipher() // 15 symbols
 	register_crypto_des() // 4 symbols
-	register_crypto_dsa() // 9 symbols
+	register_crypto_dsa() // 13 symbols
 	register_crypto_ecdh() // 7 symbols
 	register_crypto_ecdsa() // 7 symbols
 	register_crypto_ed25519() // 12 symbols
@@ -35,16 +35,16 @@ func init() {
 	register_crypto_sha256() // 7 symbols
 	register_crypto_sha512() // 13 symbols
 	register_crypto_subtle() // 7 symbols
-	register_crypto_tls() // 74 symbols
-	register_crypto_x509() // 46 symbols
+	register_crypto_tls() // 110 symbols
+	register_crypto_x509() // 106 symbols
 	register_crypto_x509_pkix() // 10 symbols
-	register_database_sql() // 31 symbols
+	register_database_sql() // 39 symbols
 	register_database_sql_driver() // 46 symbols
 	register_debug_buildinfo() // 3 symbols
-	register_debug_dwarf() // 39 symbols
-	register_debug_elf() // 80 symbols
+	register_debug_dwarf() // 249 symbols
+	register_debug_elf() // 1524 symbols
 	register_debug_gosym() // 10 symbols
-	register_debug_macho() // 72 symbols
+	register_debug_macho() // 128 symbols
 	register_debug_pe() // 114 symbols
 	register_debug_plan9obj() // 12 symbols
 	register_embed() // 1 symbols
@@ -62,21 +62,21 @@ func init() {
 	register_encoding_xml() // 32 symbols
 	register_errors() // 6 symbols
 	register_expvar() // 15 symbols
-	register_flag() // 41 symbols
+	register_flag() // 44 symbols
 	register_fmt() // 29 symbols
-	register_go_ast() // 90 symbols
-	register_go_build() // 12 symbols
+	register_go_ast() // 102 symbols
+	register_go_build() // 16 symbols
 	register_go_build_constraint() // 11 symbols
-	register_go_constant() // 33 symbols
-	register_go_doc() // 16 symbols
+	register_go_constant() // 39 symbols
+	register_go_doc() // 19 symbols
 	register_go_doc_comment() // 16 symbols
 	register_go_format() // 2 symbols
 	register_go_importer() // 4 symbols
-	register_go_parser() // 5 symbols
-	register_go_printer() // 4 symbols
-	register_go_scanner() // 6 symbols
-	register_go_token() // 13 symbols
-	register_go_types() // 106 symbols
+	register_go_parser() // 13 symbols
+	register_go_printer() // 8 symbols
+	register_go_scanner() // 7 symbols
+	register_go_token() // 96 symbols
+	register_go_types() // 150 symbols
 	register_hash() // 3 symbols
 	register_hash_adler32() // 3 symbols
 	register_hash_crc32() // 12 symbols
@@ -84,30 +84,30 @@ func init() {
 	register_hash_fnv() // 6 symbols
 	register_hash_maphash() // 5 symbols
 	register_html() // 2 symbols
-	register_html_template() // 24 symbols
-	register_image() // 45 symbols
+	register_html_template() // 37 symbols
+	register_image() // 51 symbols
 	register_image_color() // 34 symbols
 	register_image_color_palette() // 2 symbols
-	register_image_draw() // 8 symbols
+	register_image_draw() // 10 symbols
 	register_image_gif() // 10 symbols
 	register_image_jpeg() // 8 symbols
-	register_image_png() // 9 symbols
+	register_image_png() // 13 symbols
 	register_index_suffixarray() // 2 symbols
 	register_io() // 52 symbols
-	register_io_fs() // 30 symbols
+	register_io_fs() // 45 symbols
 	register_io_ioutil() // 8 symbols
 	register_log() // 27 symbols
-	register_log_slog() // 56 symbols
+	register_log_slog() // 70 symbols
 	register_math() // 95 symbols
-	register_math_big() // 16 symbols
+	register_math_big() // 25 symbols
 	register_math_bits() // 50 symbols
 	register_math_cmplx() // 27 symbols
 	register_math_rand() // 23 symbols
-	register_mime() // 8 symbols
+	register_mime() // 10 symbols
 	register_mime_multipart() // 9 symbols
 	register_mime_quotedprintable() // 4 symbols
-	register_net() // 95 symbols
-	register_net_http() // 168 symbols
+	register_net() // 101 symbols
+	register_net_http() // 177 symbols
 	register_net_http_cgi() // 4 symbols
 	register_net_http_cookiejar() // 4 symbols
 	register_net_http_fcgi() // 4 symbols
@@ -122,20 +122,20 @@ func init() {
 	register_net_smtp() // 8 symbols
 	register_net_textproto() // 14 symbols
 	register_net_url() // 16 symbols
-	register_os() // 99 symbols
+	register_os() // 114 symbols
 	register_os_exec() // 9 symbols
 	register_os_signal() // 6 symbols
 	register_os_user() // 11 symbols
 	register_path() // 9 symbols
 	register_path_filepath() // 26 symbols
 	register_plugin() // 3 symbols
-	register_reflect() // 39 symbols
+	register_reflect() // 73 symbols
 	register_regexp() // 9 symbols
-	register_regexp_syntax() // 13 symbols
+	register_regexp_syntax() // 78 symbols
 	register_runtime() // 48 symbols
 	register_runtime_coverage() // 5 symbols
 	register_runtime_debug() // 17 symbols
-	register_runtime_metrics() // 7 symbols
+	register_runtime_metrics() // 11 symbols
 	register_runtime_pprof() // 14 symbols
 	register_runtime_trace() // 10 symbols
 	register_sort() // 22 symbols
@@ -151,8 +151,8 @@ func init() {
 	register_text_scanner() // 21 symbols
 	register_text_tabwriter() // 9 symbols
 	register_text_template() // 16 symbols
-	register_text_template_parse() // 31 symbols
-	register_time() // 48 symbols
+	register_text_template_parse() // 54 symbols
+	register_time() // 73 symbols
 	register_unicode() // 291 symbols
 	register_unicode_utf16() // 6 symbols
 	register_unicode_utf8() // 19 symbols

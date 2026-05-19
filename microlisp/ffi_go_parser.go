@@ -16,6 +16,14 @@ func register_go_parser() {
 			"ParseExpr": parser.ParseExpr,
 			"ParseExprFrom": parser.ParseExprFrom,
 			"ParseFile": parser.ParseFile,
+			"AllErrors": parser.AllErrors,
+			"DeclarationErrors": parser.DeclarationErrors,
+			"ImportsOnly": parser.ImportsOnly,
+			"PackageClauseOnly": parser.PackageClauseOnly,
+			"ParseComments": parser.ParseComments,
+			"SkipObjectResolution": parser.SkipObjectResolution,
+			"SpuriousErrors": parser.SpuriousErrors,
+			"Trace": parser.Trace,
 		},
 	)
 	registerType("go/parser", "Mode", reflect.TypeOf((*parser.Mode)(nil)).Elem())

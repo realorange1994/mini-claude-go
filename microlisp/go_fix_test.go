@@ -244,3 +244,37 @@ func TestSelfSignedCertificateFullPipeline(t *testing.T) {
 		t.Fatalf("expected non-empty DER certificate bytes")
 	}
 }
+
+func TestGoImportX509Constants(t *testing.T) {
+	InitGlobalEnv()
+	// x509.KeyUsageCertSign is a named-type constant (x509.KeyUsage = int)
+	result, err := EvalString(`(go:import "crypto/x509.KeyUsageCertSign")`, globalEnv)
+	if err != nil {
+		t.Fatalf("go:import x509.KeyUsageCertSign failed: %v", err)
+	}
+	if !isNumeric(result) {
+		t.Fatalf("expected numeric from KeyUsageCertSign, got %s", typeStr(result))
+	}
+}
+
+func TestGoImportHTTPStatusConstants(t *testing.T) {
+	InitGlobalEnv()
+	result, err := EvalString(`(go:import "net/http.StatusOK")`, globalEnv)
+	if err != nil {
+		t.Fatalf("go:import http.StatusOK failed: %v", err)
+	}
+	if !isNumeric(result) || toNum(result) != 200 {
+		t.Fatalf("expected 200 from StatusOK, got %v", result)
+	}
+}
+
+func TestGoImportTimeFormatConstants(t *testing.T) {
+	InitGlobalEnv()
+	result, err := EvalString(`(go:import "time.RFC3339")`, globalEnv)
+	if err != nil {
+		t.Fatalf("go:import time.RFC3339 failed: %v", err)
+	}
+	if result.typ != VStr {
+		t.Fatalf("expected string from time.RFC3339, got %s", typeStr(result))
+	}
+}
