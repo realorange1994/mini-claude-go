@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,7 +46,10 @@ func (*ExecTool) Description() string {
 		"Supports running commands in the background with run_in_background=true. " +
 		"On timeout, the process continues running in the background — use task_output to check results later. " +
 		"SAFETY: Commands targeting system directories or using destructive patterns will be blocked. " +
-		"Use the env parameter to set environment variables (e.g. env={\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"})."
+		"Use the env parameter to set environment variables (e.g. env={\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}). " +
+		"IMPORTANT: stdin is disconnected — commands requiring user input (sudo password, ssh host verification, vim/nano/less, REPLs, confirmation prompts) will hang and be killed after ~15 seconds. " +
+		"Use non-interactive flags instead (e.g., sudo -S with echo, apt-get -y, ssh with StrictHostKeyChecking=no, echo y | command, --force, --yes). " +
+		"If a command needs to run for a long time without input, use run_in_background=true."
 }
 
 func (*ExecTool) InputSchema() map[string]any {
@@ -79,6 +84,128 @@ func (*ExecTool) InputSchema() map[string]any {
 		},
 		"required": []string{"command"},
 	}
+}
+
+// ─── Stall detection for interactive commands ─────────────────────────────────
+//
+// When a command requires user input (sudo password, ssh host verification,
+// confirmation prompts, REPLs) but stdin is disconnected (nil), the process
+// blocks indefinitely. The stall watchdog monitors output growth and checks
+// the tail against known interactive prompt patterns. If a stall is detected,
+// the process is killed with a helpful error message.
+//
+// Mirrors upstream's LocalShellTask.tsx stall watchdog (lines 48-144).
+
+const (
+	stallCheckIntervalMs = 5000  // check every 5s
+	stallThresholdMs     = 15000 // 15s with no output growth = stall
+)
+
+// interactivePromptPatterns matches common interactive prompts that would
+// block exec because stdin is disconnected (nil).
+var interactivePromptPatterns = []*regexp.Regexp{
+	// Yes/No confirmations
+	regexp.MustCompile(`(?i)\(y\/n\)`),
+	regexp.MustCompile(`(?i)\[y\/n\]`),
+	regexp.MustCompile(`(?i)\(yes\/no\)`),
+	regexp.MustCompile(`(?i)(?:do you|would you|shall i|are you sure|ready to).*\?`),
+	regexp.MustCompile(`(?i)press (any key|enter)`),
+	regexp.MustCompile(`(?i)continue\?`),
+	regexp.MustCompile(`(?i)overwrite\?`),
+	// Password / credentials
+	regexp.MustCompile(`(?i)password[:\s]`),
+	regexp.MustCompile(`(?i)passphrase[:\s]`),
+	regexp.MustCompile(`(?i)enter.*password`),
+	regexp.MustCompile(`(?i)sudo:.*password`),
+	// SSH host verification
+	regexp.MustCompile(`(?i)authenticity of host.*cannot be established`),
+	regexp.MustCompile(`(?i)are you sure you want to continue connecting`),
+	regexp.MustCompile(`(?i)host key verification`),
+	// Terminal type
+	regexp.MustCompile(`(?i)\(TERM=.*\)`),
+	regexp.MustCompile(`(?i)terminal type`),
+	// REPL prompts (last line only)
+	regexp.MustCompile(`(?m)^>>> $`),
+	regexp.MustCompile(`(?m)^In \[\d+\]:`),
+	regexp.MustCompile(`(?m)^\.\.\. $`),
+}
+
+// stallResult carries the detected prompt pattern when a stall is found.
+type stallResult struct {
+	matchedPattern string
+	tailOutput     string
+}
+
+// watchForStall monitors output growth and detects interactive prompts.
+// It reads output chunks from chunkCh and checks periodically whether
+// output has stopped growing. If it has AND the tail matches a prompt
+// pattern, it returns a non-nil stallResult.
+// Returns nil if the context is cancelled or the chunkCh is closed.
+func watchForStall(ctx context.Context, chunkCh <-chan []byte, totalWritten *atomic.Int64, lastWriteTime *atomic.Int64) *stallResult {
+	ticker := time.NewTicker(time.Duration(stallCheckIntervalMs) * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastTotal int64 = -1
+	var accumulated []byte
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case chunk, ok := <-chunkCh:
+			if !ok {
+				return nil // output closed, command finished
+			}
+			accumulated = append(accumulated, chunk...)
+			if len(accumulated) > 4096 {
+				accumulated = accumulated[len(accumulated)-4096:]
+			}
+		case <-ticker.C:
+			currentTotal := totalWritten.Load()
+			if lastTotal < 0 {
+				lastTotal = currentTotal
+				continue
+			}
+			if currentTotal == lastTotal {
+				// No output growth — check how long since last write
+				elapsed := time.Since(time.UnixMilli(lastWriteTime.Load()))
+				if elapsed < time.Duration(stallThresholdMs)*time.Millisecond {
+					continue
+				}
+				// Stall threshold reached — check tail for interactive prompt
+				tail := string(accumulated)
+				if len(tail) > 1024 {
+					tail = tail[len(tail)-1024:]
+				}
+				for _, pat := range interactivePromptPatterns {
+					if pat.MatchString(tail) {
+						return &stallResult{
+							matchedPattern: pat.String(),
+							tailOutput:     tail,
+						}
+					}
+				}
+				// No interactive prompt matched — reset counter
+				lastTotal = currentTotal
+			} else {
+				lastTotal = currentTotal
+			}
+		}
+	}
+}
+
+// looksLikeInteractivePrompt checks if the given output tail matches any
+// known interactive prompt pattern. Returns the matched pattern or "".
+func looksLikeInteractivePrompt(output string) string {
+	if len(output) > 1024 {
+		output = output[len(output)-1024:]
+	}
+	for _, pat := range interactivePromptPatterns {
+		if pat.MatchString(output) {
+			return pat.String()
+		}
+	}
+	return ""
 }
 
 var denyRegexps = compileDenyPatterns()
@@ -345,31 +472,61 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
 	}
 
-	// Read outputs concurrently
+	// Read outputs concurrently with stall detection.
 	type readResult struct {
 		data     string
 		isStderr bool
 	}
 	outputCh := make(chan readResult, 2)
 
+	// Stall detection: track output growth to detect interactive prompts.
+	// When stdin is nil and a command waits for input, output stalls.
+	var totalWritten atomic.Int64
+	var lastWriteTime atomic.Int64
+	lastWriteTime.Store(time.Now().UnixMilli())
+
+	// Channel for stall watchdog to signal detection.
+	stallCh := make(chan *stallResult, 1)
+
+	// Use countingReader to track output growth.
+	stdoutCounter := &countingReader{r: stdout, totalWritten: &totalWritten, lastWriteTime: &lastWriteTime}
+	stderrCounter := &countingReader{r: stderr, totalWritten: &totalWritten, lastWriteTime: &lastWriteTime}
+
+	stdoutCh := make(chan []byte, 100)
+	stderrCh := make(chan []byte, 100)
+
 	go func() {
-		data := readLimited(stdout, 50000)
+		data := readLimitedTracking(stdoutCounter, 50000, stdoutCh)
 		select {
 		case outputCh <- readResult{data, false}:
 		default:
 		}
 	}()
 	go func() {
-		data := readLimited(stderr, 25000)
+		data := readLimitedTracking(stderrCounter, 25000, stderrCh)
 		select {
 		case outputCh <- readResult{data, true}:
 		default:
 		}
 	}()
 
+	// Start the stall watchdog goroutine.
+	stallCtx, stallCancel := context.WithCancel(ctx)
+	defer stallCancel()
+	go func() {
+		result := watchForStall(stallCtx, mergeChunks(stdoutCh, stderrCh), &totalWritten, &lastWriteTime)
+		if result != nil {
+			select {
+			case stallCh <- result:
+			default:
+			}
+		}
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		waitErr := cmd.Wait()
+		stallCancel() // stop the stall watchdog
 		select {
 		case errCh <- waitErr:
 		default:
@@ -473,6 +630,41 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		}
 		<-errCh
 		return ToolResult{Output: "Interrupted by user", IsError: true}
+	case stall := <-stallCh:
+		// Stall detected: the process is waiting for input but stdin is disconnected.
+		// Kill the process and return a helpful error message.
+		if cmd.Process != nil {
+			killProcessGroup(cmd.Process.Pid)
+			cmd.Process.Kill()
+		}
+		<-errCh
+		var stdoutOut, stderrOut string
+		for i := 0; i < 2; i++ {
+			r := <-outputCh
+			if r.isStderr {
+				stderrOut = r.data
+			} else {
+				stdoutOut = r.data
+			}
+		}
+		output := stdoutOut + stderrOut
+		if len(output) > 2048 {
+			output = output[:2048]
+		}
+		return ToolResult{
+			Output: fmt.Sprintf(
+				"Error: command appears to be waiting for user input (interactive prompt detected).\n"+
+					"Stdin is disconnected — commands requiring user input cannot proceed.\n"+
+					"Detected pattern: %s\n\n"+
+					"Last output:\n%s\n\n"+
+					"Suggestions:\n"+
+					"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)\n"+
+					"  - For sudo: use 'echo password | sudo -S cmd' instead\n"+
+					"  - For SSH: use StrictHostKeyChecking=no\n"+
+					"  - Use run_in_background=true if the command will eventually complete without input",
+				stall.matchedPattern, output),
+			IsError: true,
+		}
 	case err := <-errCh:
 		var stdoutOut, stderrOut string
 		for i := 0; i < 2; i++ {
@@ -526,7 +718,7 @@ func isExitError(err error) bool {
 	return ok
 }
 
-func readLimited(r interface{ Read([]byte) (int, error) }, limit int) string {
+func readLimited(r io.Reader, limit int) string {
 	buf := make([]byte, limit)
 	off := 0
 	for {
@@ -540,6 +732,67 @@ func readLimited(r interface{ Read([]byte) (int, error) }, limit int) string {
 		}
 	}
 	return string(buf[:off])
+}
+
+// countingReader wraps an io.Reader to track total bytes read and last read time.
+// Used by the stall detection watchdog.
+type countingReader struct {
+	r             io.Reader
+	totalWritten  *atomic.Int64
+	lastWriteTime *atomic.Int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	if n > 0 {
+		cr.totalWritten.Add(int64(n))
+		cr.lastWriteTime.Store(time.Now().UnixMilli())
+	}
+	return n, err
+}
+
+// readLimitedTracking reads from a countingReader, tracking output bytes
+// and also sending chunks to the provided channel for stall detection.
+func readLimitedTracking(cr *countingReader, limit int, chunkCh chan<- []byte) string {
+	buf := make([]byte, limit)
+	off := 0
+	for {
+		n, err := cr.r.Read(buf[off:])
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[off:off+n])
+			select {
+			case chunkCh <- chunk:
+			default:
+				// chunkCh buffer full — non-blocking send, stall watcher will
+				// still get recent data via accumulated chunks
+			}
+		}
+		off += n
+		if err != nil {
+			break
+		}
+		if off >= limit {
+			break
+		}
+	}
+	close(chunkCh)
+	return string(buf[:off])
+}
+
+// mergeChunks merges two chunk channels into one for the stall watchdog.
+func mergeChunks(ch1, ch2 <-chan []byte) <-chan []byte {
+	out := make(chan []byte, 200)
+	go func() {
+		for c := range ch1 {
+			out <- c
+		}
+		for c := range ch2 {
+			out <- c
+		}
+		close(out)
+	}()
+	return out
 }
 
 var internalURLPatterns = []*regexp.Regexp{
