@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -537,4 +538,77 @@ func vgoval(val interface{}, typ reflect.Type) *Value {
 		goValType:     typ,
 		goValReflect:  rv,
 	}
+}
+
+// lazyGoLoaded tracks which Go FFI functions have been loaded (thread-safe).
+var lazyGoLoaded sync.Map
+
+// tryLazyGoImport checks GoFFILazyTable for an auto-importable Go function.
+// Called when a symbol lookup fails in the environment.
+// Returns the imported function (cached in globalEnv) or nil/error.
+func tryLazyGoImport(symName string, env *Env) (*Value, error) {
+	// Check if this symbol is in the lazy-load table
+	goPath, ok := GoFFILazyTable[symName]
+	if !ok {
+		// Try case-insensitive match (since readtable is UPCASE)
+		symLower := strings.ToLower(symName)
+		for k, v := range GoFFILazyTable {
+			if strings.ToLower(k) == symLower {
+				goPath = v
+				symName = k // use canonical name
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	// Thread-safe: only one goroutine loads this symbol
+	if _, loaded := lazyGoLoaded.LoadOrStore(symName, true); loaded {
+		// Another goroutine is loading or already loaded.
+		// Re-try env.Get in case it was registered.
+		val, err := env.Get(symName)
+		if err == nil {
+			return val, nil
+		}
+		// If the other goroutine hasn't finished registering yet,
+		// fall through and do the import ourselves (idempotent).
+	}
+
+	// Parse "pkg.Func" from goPath
+	parts := strings.SplitN(goPath, ".", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("lazy-import: invalid entry %q=%q", symName, goPath)
+	}
+
+	// Look up in GoPackageRegistry
+	pkgName, symGoName := parts[0], parts[1]
+	pkg, pkgOk := GoPackageRegistry[pkgName]
+	if !pkgOk {
+		return nil, fmt.Errorf("lazy-import: unknown package %q", pkgName)
+	}
+	fnVal, fnOk := pkg[symGoName]
+	if !fnOk {
+		return nil, fmt.Errorf("lazy-import: unknown symbol %q in package %q", symGoName, pkgName)
+	}
+
+	if fnVal.Kind() != reflect.Func {
+		// Not a function — register as a variable
+		goVal := vgoval(fnVal.Interface(), fnVal.Type())
+		globalEnv.Set(symName, goVal)
+		return goVal, nil
+	}
+
+	// Wrap as callable VPrim
+	wrapper := &goFunc{fn: fnVal, name: goPath}
+	fn := &Value{
+		typ:  VPrim,
+		fn:   makeGoPrim(wrapper),
+		name: goPath,
+	}
+	// Cache in globalEnv for future lookups
+	globalEnv.Set(symName, fn)
+	return fn, nil
 }

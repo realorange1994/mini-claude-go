@@ -43,6 +43,10 @@ evalLoop:
 			}
 			val, e := env.Get(v.str)
 			if e != nil {
+				// Lazy-load hook: check GoFFILazyTable for auto-import
+				if loaded, loadErr := tryLazyGoImport(v.str, env); loadErr == nil && loaded != nil {
+					return loaded, nil
+				}
 				return nil, e
 			}
 			if val == nil {
@@ -138,6 +142,10 @@ evalLoop:
 				if arg.typ == VSym {
 					val, err := env.Get(arg.str)
 					if err != nil {
+						// Lazy-load hook
+						if loaded, loadErr := tryLazyGoImport(arg.str, env); loadErr == nil && loaded != nil {
+							return loaded, nil
+						}
 						return nil, fmt.Errorf("function: undefined: %s", arg.str)
 					}
 					return val, nil

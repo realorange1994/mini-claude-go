@@ -123,7 +123,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Generate Lisp wrapper file
+	// Generate Go lazy-load lookup table (zero startup cost, auto-import on first use)
+	if err := generateGoLookupFile(allInfos); err != nil {
+		log.Printf("  WARN: failed to generate Go lazy table: %v", err)
+	}
+
+	// Generate Lisp wrapper file (for reference/debugging, not loaded at runtime)
 	if err := generateLispFile(allInfos); err != nil {
 		log.Printf("  WARN: failed to generate Lisp wrappers: %v", err)
 	}
