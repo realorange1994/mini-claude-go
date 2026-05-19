@@ -101,7 +101,7 @@ func (t *FileHistoryTool) listAllFiles(params map[string]any) tools.ToolResult {
 	if pattern, ok := params["pattern"].(string); ok && pattern != "" {
 		var filtered []string
 		for _, f := range files {
-			if matched, _ := filepath.Match(pattern, filepath.Base(f)); matched {
+			if globMatch(pattern, f) {
 				filtered = append(filtered, f)
 			}
 		}
