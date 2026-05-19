@@ -213,9 +213,8 @@ var goStdlibLisp = `
 
 ;; (parse-time format str) -> unix time number
 (define (parse-time format str)
-  (let* ((t (funcall (go:import "time.Parse") format str))
-         (unix (funcall (go:call t "Unix"))))
-    unix))
+  (let ((t (funcall (go:import "time.Parse") format str)))
+    (go:call t "Unix")))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; 5. Regular Expressions
@@ -346,7 +345,7 @@ var goStdlibLisp = `
          (scheme (go:field u "Scheme"))
          (host (go:field u "Host"))
          (path (go:field u "Path"))
-         (query (funcall (go:call (go:field u "Query") "Encode"))))
+         (query (go:call (go:call u "Query") "Encode")))
     (list (cons ':scheme scheme)
           (cons ':host host)
           (cons ':path path)
@@ -372,8 +371,8 @@ var goStdlibLisp = `
 ;; (run-command command &rest args) -> (output exit-code)
 (define (run-command command . args)
   (let* ((cmd (apply (go:import "os/exec.Command") (cons command args)))
-         (output (funcall (go:call cmd "CombinedOutput")))
-         (exit-code (funcall (go:call (go:field cmd "ProcessState") "ExitCode"))))
+         (output (go:call cmd "CombinedOutput"))
+         (exit-code (go:call (go:field cmd "ProcessState") "ExitCode")))
     (list output exit-code)))
 
 ;; (shell command-string) -> (output exit-code)
