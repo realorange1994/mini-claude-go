@@ -61,13 +61,25 @@ var goStdlibLisp = `
   (funcall (go:import "os.Rename") old new)
   t)
 
-;; (directory path) -> list of file names
+;; (directory path) -> list of file paths or glob matches
+;; Supports both plain directory listing and glob patterns (* ? [)
 (define (directory path)
-  (let ((entries (funcall (go:import "os.ReadDir") path))
-        (result '()))
-    (dolist (entry entries)
-      (set! result (cons (funcall (go:call entry "Name")) result)))
-    (nreverse result)))
+  (let ((results (funcall (go:import "path/filepath.Glob") path)))
+    (if (and (consp results) (= (length results) 1))
+        ;; Single result: check if it's a directory that was listed
+        (let ((dir (car results)))
+          (let ((info (ignore-errors (funcall (go:import "os.Stat") dir))))
+            (if (and info (funcall (go:call (go:field info "Mode") "IsDir")))
+                ;; It's a directory — enumerate its contents
+                (let ((entries (funcall (go:import "os.ReadDir") dir))
+                      (result '()))
+                  (dolist (entry entries)
+                    (set! result (cons (funcall (go:import "path/filepath.Join") dir (funcall (go:call entry "Name"))) result)))
+                  (nreverse result))
+                ;; Not a directory — return the matched file(s)
+                results)))
+        ;; Multiple results (glob pattern) or empty — return as-is
+        results)))
 
 ;; (mkdir path &key parents) -> t
 (define (mkdir path &key parents)

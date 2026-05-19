@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"miniclaudecode-go/microlisp"
 )
@@ -12,6 +13,59 @@ import (
 // LispToolsTool provides a backup toolset that uses the Lisp interpreter
 // for core file/text operations when Go-native tools are unavailable.
 type LispToolsTool struct{}
+
+// lispToolsLoaded tracks whether lispToolsLib has been loaded into globalEnv.
+// ResetGlobalEnv clears all function definitions, so we need to reload.
+// Call ResetLispToolsState() after any ResetGlobalEnv call.
+var lispToolsLoaded bool
+var lispToolsMu sync.Mutex
+
+// ResetLispToolsState clears the library loaded flag so the library
+// will be reloaded on the next ExecuteContext call. Call this after
+// any microlisp.ResetGlobalEnv() to ensure stdlib functions are restored.
+func ResetLispToolsState() {
+	lispToolsMu.Lock()
+	defer lispToolsMu.Unlock()
+	lispToolsLoaded = false
+}
+
+// ensureLispToolsLoaded loads lispToolsLib if not already loaded.
+// It is context-aware: if the context is cancelled while waiting for evalMu,
+// it returns an error instead of blocking indefinitely.
+func ensureLispToolsLoaded(ctx context.Context) error {
+	lispToolsMu.Lock()
+	if lispToolsLoaded {
+		lispToolsMu.Unlock()
+		return nil
+	}
+	lispToolsMu.Unlock()
+
+	// Load in a goroutine so we can respect context cancellation.
+	// SafeEvalString acquires evalMu; if held by another caller, this
+	// would block indefinitely without the goroutine + select pattern.
+	ch := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- fmt.Errorf("panic loading lispToolsLib: %v", r)
+			}
+		}()
+		_, err := microlisp.SafeEvalString(lispToolsLib)
+		ch <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("lisp_tools lib load timed out: %v", ctx.Err())
+	case err := <-ch:
+		if err == nil {
+			lispToolsMu.Lock()
+			lispToolsLoaded = true
+			lispToolsMu.Unlock()
+		}
+		return err
+	}
+}
 
 func (*LispToolsTool) Name() string { return "lisp_tools" }
 
@@ -137,8 +191,10 @@ func (t *LispToolsTool) ExecuteContext(ctx context.Context, params map[string]an
 	default:
 	}
 
-	// Load helper library (idempotent: redefines functions, harmless)
-	microlisp.SafeEvalString(lispToolsLib)
+	// Load helper library (idempotent: loaded once, reloaded after ResetGlobalEnv)
+	if err := ensureLispToolsLoaded(ctx); err != nil {
+		return ToolResult{Output: fmt.Sprintf("Error: failed to load lisp_tools library: %v", err), IsError: true}
+	}
 
 	op, _ := params["operation"].(string)
 	if op == "" {
@@ -423,6 +479,11 @@ func paramInt(v any) (int, bool) {
 
 func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult {
 	limits := microlisp.DefaultLimits()
+	// Wire context cancellation into CancelChan so stepCheck() aborts
+	// mid-evaluation when ctx.Done() fires, releasing evalMu promptly.
+	cancelChan := microlisp.NewCancelChannel()
+	limits.CancelChan = cancelChan
+
 	ch := make(chan evalResult, 1)
 	go func() {
 		defer func() {
@@ -449,6 +510,7 @@ func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult
 	}()
 	select {
 	case <-ctx.Done():
+		close(cancelChan) // Trigger stepCheck() abort to release evalMu
 		return ToolResult{Output: "Error: lisp_tools timed out", IsError: true}
 	case r := <-ch:
 		if r.err != nil {
@@ -468,6 +530,11 @@ func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult
 
 func (t *LispToolsTool) evalVoid(ctx context.Context, expr string) ToolResult {
 	limits := microlisp.DefaultLimits()
+	// Wire context cancellation into CancelChan so stepCheck() aborts
+	// mid-evaluation when ctx.Done() fires, releasing evalMu promptly.
+	cancelChan := microlisp.NewCancelChannel()
+	limits.CancelChan = cancelChan
+
 	ch := make(chan evalResult, 1)
 	go func() {
 		defer func() {
@@ -480,6 +547,7 @@ func (t *LispToolsTool) evalVoid(ctx context.Context, expr string) ToolResult {
 	}()
 	select {
 	case <-ctx.Done():
+		close(cancelChan) // Trigger stepCheck() abort to release evalMu
 		return ToolResult{Output: "Error: lisp_tools timed out", IsError: true}
 	case r := <-ch:
 		if r.err != nil {
@@ -695,15 +763,15 @@ const lispToolsLib = `
 ;; Directory listing
 (define (lisp-list-dir path recursive max-entries show-hidden)
   (handler-case
-    (let ((entries (directory (string-append (safe-path? path) "/*"))))
+    (let ((entries (path-glob (path-join (safe-path? path) "*"))))
       (let ((filtered (if show-hidden entries
                           (remove-if (lambda (p)
-                                       (let ((name (file-namestring (namestring p))))
+                                       (let ((name (path-base p)))
                                          (and (> (string-length name) 0)
                                               (char= (char name 0) #\.))))
                                      entries))))
         (let ((limited (subseq filtered 0 (min (length filtered) max-entries))))
-          (string-join (mapcar (function namestring) limited) "\n"))))
+          (string-join limited "\n"))))
     (condition (c) (format nil "Error: ~A" c))))
 
 ;; Text search (substring matching, no regex)
@@ -721,10 +789,10 @@ const lispToolsLib = `
 ;; Glob file matching
 (define (lisp-glob pattern path head-limit)
   (handler-case
-    (let ((full-pattern (string-append (safe-path? path) "/" pattern)))
-      (let ((results (directory full-pattern)))
+    (let ((full-pattern (path-join (safe-path? path) pattern)))
+      (let ((results (path-glob full-pattern)))
         (let ((limited (subseq results 0 (min (length results) head-limit))))
-          (string-join (mapcar (function namestring) limited) "\n"))))
+          (string-join limited "\n"))))
     (condition (c) (format nil "Error: ~A" c))))
 
 ;; Create directory

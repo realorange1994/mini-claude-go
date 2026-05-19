@@ -1133,7 +1133,17 @@ func reflectToLisp(v reflect.Value) *Value {
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			return vstr(string(v.Bytes()))
 		}
-		return vnil()
+		// Convert []string to Lisp list of strings
+		if v.Type().Elem().Kind() == reflect.String {
+			n := v.Len()
+			result := vnil()
+			for i := n - 1; i >= 0; i-- {
+				result = cons(vstr(v.Index(i).String()), result)
+			}
+			return result
+		}
+		// For other slice types, wrap as VGoVal to preserve the value
+		return vgoval(v.Interface(), v.Type())
 	default:
 		// For interfaces, pointers, structs, maps, arrays, channels:
 		// create a VGoVal that preserves the actual Go value and type.
