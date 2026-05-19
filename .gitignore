@@ -14,3 +14,4 @@ Thumbs.db
 
 # User settings (may contain API keys)
 .claude/settings.json
+diff_upstream/
