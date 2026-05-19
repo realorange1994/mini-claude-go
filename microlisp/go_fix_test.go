@@ -200,3 +200,47 @@ func TestGoListIncludesTypes(t *testing.T) {
 		t.Fatalf("expected PublicKey type in go:list output, got: %s", output)
 	}
 }
+
+func TestSelfSignedCertificateFullPipeline(t *testing.T) {
+	InitGlobalEnv()
+	// Full self-signed certificate creation via FFI:
+	// 1. Generate RSA key
+	// 2. Create x509.Certificate template with fields
+	// 3. Call x509.CreateCertificate to self-sign
+	// 4. Marshal the DER-encoded certificate
+	result, err := EvalString(`
+		; Step 1: Generate RSA private key
+		(define gen-key (go:import "crypto/rsa.GenerateKey"))
+		(define priv (gen-key (go:import "crypto/rand.Reader") 2048))
+
+		; Step 2: Create certificate template
+		(define tmpl (go:new "crypto/x509.Certificate"))
+		(define serial (go:new "math/big.Int"))
+		(go:call serial "SetInt64" 1)
+		(go:set-field tmpl "SerialNumber" serial)
+
+		; Set NotBefore/NotAfter using time.Now
+		(define now-fn (go:import "time.Now"))
+		(define now (now-fn))
+		(go:set-field tmpl "NotBefore" now)
+		(go:set-field tmpl "NotAfter" (go:call now "Add" 86400000000000))
+
+		; Step 3: Self-sign - CreateCertificate(rand, template, parent, pub, priv)
+		(define create-cert (go:import "crypto/x509.CreateCertificate"))
+		(define der-bytes (create-cert (go:import "crypto/rand.Reader") tmpl tmpl (go:field priv "PublicKey") priv))
+
+		; Step 4: der-bytes is []byte -> reflectToLisp converts to string
+		der-bytes
+	`, globalEnv)
+	if err != nil {
+		t.Fatalf("self-signed certificate creation failed: %v", err)
+	}
+	// []byte is converted to string by reflectToLisp
+	if result.typ != VStr {
+		t.Fatalf("expected string (from []byte DER), got %s", typeStr(result))
+	}
+	// DER-encoded X.509 cert should be non-empty
+	if len(result.str) == 0 {
+		t.Fatalf("expected non-empty DER certificate bytes")
+	}
+}

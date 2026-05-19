@@ -311,29 +311,25 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 		if !isNumeric(v) {
 			return reflect.Value{}, fmt.Errorf("cannot convert %s to float64", typeStr(v))
 		}
-		return reflect.ValueOf(toNum(v)), nil
+		newVal := reflect.New(t).Elem()
+		newVal.SetFloat(toNum(v))
+		return newVal, nil
 	case reflect.Float32:
 		if !isNumeric(v) {
 			return reflect.Value{}, fmt.Errorf("cannot convert %s to float32", typeStr(v))
 		}
-		return reflect.ValueOf(float32(toNum(v))), nil
+		newVal := reflect.New(t).Elem()
+		newVal.SetFloat(float64(toNum(v)))
+		return newVal, nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if !isNumeric(v) {
 			return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t.Kind())
 		}
 		n := toNum(v)
-		switch t.Kind() {
-		case reflect.Int:
-			return reflect.ValueOf(int(n)), nil
-		case reflect.Int8:
-			return reflect.ValueOf(int8(n)), nil
-		case reflect.Int16:
-			return reflect.ValueOf(int16(n)), nil
-		case reflect.Int32:
-			return reflect.ValueOf(int32(n)), nil
-		case reflect.Int64:
-			return reflect.ValueOf(int64(n)), nil
-		}
+		// Create a value of the target type (handles named types like time.Duration)
+		newVal := reflect.New(t).Elem()
+		newVal.SetInt(int64(n))
+		return newVal, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		if !isNumeric(v) {
 			return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t.Kind())
@@ -342,18 +338,9 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 		if n < 0 {
 			return reflect.Value{}, fmt.Errorf("negative value %v cannot convert to %s", n, t.Kind())
 		}
-		switch t.Kind() {
-		case reflect.Uint:
-			return reflect.ValueOf(uint(n)), nil
-		case reflect.Uint8:
-			return reflect.ValueOf(uint8(n)), nil
-		case reflect.Uint16:
-			return reflect.ValueOf(uint16(n)), nil
-		case reflect.Uint32:
-			return reflect.ValueOf(uint32(n)), nil
-		case reflect.Uint64:
-			return reflect.ValueOf(uint64(n)), nil
-		}
+		newVal := reflect.New(t).Elem()
+		newVal.SetUint(uint64(n))
+		return newVal, nil
 	case reflect.Bool:
 		return reflect.ValueOf(v.typ == VBool && v == globalEnv.bindings["#t"]), nil
 	case reflect.String:
