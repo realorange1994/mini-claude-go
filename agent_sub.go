@@ -902,8 +902,29 @@ func (a *AgentLoop) runChildAgentSync(
 		userPrompt = forkUserMessage
 	}
 
+	// Propagate parent interrupt to child so Ctrl+C stops sync sub-agents.
+	// Without this, childLoop.Run() blocks with its own independent
+	// interrupted flag that never gets set by the SIGINT handler.
+	stopMonitor := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopMonitor:
+				return
+			case <-ticker.C:
+				if a.IsInterrupted() {
+					childLoop.SetInterrupted(true)
+					return
+				}
+			}
+		}
+	}()
+
 	// Run the child agent synchronously
 	childResult := childLoop.Run(userPrompt)
+	close(stopMonitor)
 
 	// If Run returned empty, try to recover partial results
 	if childResult == "" {
