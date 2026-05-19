@@ -323,6 +323,9 @@ var skipFuncs = map[string]bool{
 	"strings.Replace":        true,
 	"strings.ReplaceAll":     true,
 	"strings.TrimSpace":      true,
+	"strings.Trim":           true,
+	"strings.TrimLeft":       true,
+	"strings.TrimRight":      true,
 	"strings.ToUpper":        true,
 	"strings.ToLower":        true,
 	"strings.Repeat":         true,
@@ -416,9 +419,9 @@ func generateWrapperForFn(importPath, pkgName string, sig FuncSig) (string, stri
 		}
 	}
 
-	if len(sig.ReturnType) == 1 && sig.ReturnType[0] == "error" {
-		return "", "returns only error"
-	}
+	// Functions that return only error are still useful for creating/testing errors.
+	// The error is returned as a VGoVal in Lisp, which can be passed to errors.Is/As.
+	// NOTE: Previously we skipped these, but they're needed for (errors-new "msg"), etc.
 
 	if sig.Variadic && len(sig.ParamTypes) > 0 {
 		lastParam := sig.ParamTypes[len(sig.ParamTypes)-1]

@@ -778,10 +778,10 @@ func TestLazy_RandFloat64(t *testing.T) {
 
 func TestLazy_DataPipeline(t *testing.T) {
 	InitGlobalEnv()
-	// Pipeline: trim -> upper -> hex encode
+	// Pipeline: trim-space -> upper -> hex encode
 	result, err := EvalString(`
 		(define input "  hello world  ")
-		(define trimmed (string-trim input))
+		(define trimmed (string-trim-space input))
 		(define uppered (string-to-upper trimmed))
 		(hex-encode-to-string uppered)
 	`, globalEnv)

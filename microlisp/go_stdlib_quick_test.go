@@ -44,10 +44,10 @@ func TestGoStdlibStringWrappers(t *testing.T) {
 		t.Fatalf("expected 'HELLO', got: %v", result)
 	}
 
-	// Test string-trim
-	result, err = EvalString(`(string-trim "  hello  ")`, globalEnv)
+	// Test string-trim-space (Go wrapper wrapping strings.TrimSpace)
+	result, err = EvalString(`(string-trim-space "  hello  ")`, globalEnv)
 	if err != nil {
-		t.Fatalf("string-trim failed: %v", err)
+		t.Fatalf("string-trim-space failed: %v", err)
 	}
 	if result.typ != VStr || result.str != "hello" {
 		t.Fatalf("expected 'hello', got: %v", result)

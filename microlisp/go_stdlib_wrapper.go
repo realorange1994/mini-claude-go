@@ -419,8 +419,9 @@ var goStdlibLisp = `
       (funcall (go:import "strings.Replace") s old new count)
       (funcall (go:import "strings.ReplaceAll") s old new)))
 
-;; (string-trim s) -> string (trims whitespace)
-(define (string-trim s)
+;; (string-trim-space s) -> string (trims whitespace only)
+;; Note: CL's (string-trim char-bag string) is a builtin — don't override it.
+(define (string-trim-space s)
   (funcall (go:import "strings.TrimSpace") s))
 
 ;; (string-to-upper s) -> string
