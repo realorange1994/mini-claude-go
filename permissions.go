@@ -260,7 +260,17 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	} // end bypass skip for steps 1d-1e
 
 	// STEP 2: tool-level self-check
-	result := tool.CheckPermissions(params)
+	// CheckPermissions must never panic — recover and convert to deny
+	var result tools.PermissionResult
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				result = tools.PermissionResultDeny(fmt.Sprintf(
+					"internal error in %s.CheckPermissions: %v", tool.Name(), r))
+			}
+		}()
+		result = tool.CheckPermissions(params)
+	}()
 
 	// Step 2d: deny is always bypass-immune
 	if result.Behavior == tools.PermissionDeny {

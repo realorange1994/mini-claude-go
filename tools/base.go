@@ -225,7 +225,17 @@ type ContextTool interface {
 
 // ExecuteWithContext calls ExecuteContext if the tool implements ContextTool,
 // otherwise falls back to Execute (ignoring the context).
-func ExecuteWithContext(ctx context.Context, tool Tool, params map[string]any) ToolResult {
+// Includes panic recovery so that no tool panic can crash the process.
+func ExecuteWithContext(ctx context.Context, tool Tool, params map[string]any) (result ToolResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ToolResult{
+				Output:  fmt.Sprintf("Error: tool %s panicked: %v", tool.Name(), r),
+				IsError: true,
+			}
+		}
+	}()
+
 	if ct, ok := tool.(ContextTool); ok {
 		return ct.ExecuteContext(ctx, params)
 	}

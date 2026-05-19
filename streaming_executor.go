@@ -353,6 +353,19 @@ func (e *StreamingToolExecutor) createSyntheticErrorMessage(tc ToolCallInfo) str
 func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Tool, tracked *TrackedTool) {
 	start := time.Now()
 
+	// TOP-LEVEL PANIC RECOVERY: No matter where a panic occurs inside execute
+	// (permission check, hooks, snapshots, tool execution, post-hooks),
+	// it must be recovered and returned as a tool error rather than crashing
+	// the entire process. This matches upstream's safety guarantee.
+	panicked := false
+	var panicValue any
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			panicValue = r
+		}
+	}()
+
 	// Check if cancelled by sibling error (pre-execution abort check)
 	if tracked.cancelled {
 		e.recordResult(toolExecResult{
@@ -440,6 +453,8 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	// Recover from panics inside tool execution, matching agent_loop.go's
 	// panic safety net.
 	var result tools.ToolResult
+	// Double recovery: ExecuteWithContext already has its own panic recovery,
+	// but this provides an extra safety net for any future code changes.
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -526,18 +541,40 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	}
 	e.mu.Unlock()
 
-	// CRITICAL: Only Bash errors cancel sibling tools.
-	// Matching upstream (StreamingToolExecutor.ts:368):
-	// "Only Bash errors cancel siblings. Bash commands often have implicit
-	// dependency chains (e.g. mkdir fails -> subsequent commands pointless).
-	// Read/WebFetch/etc are independent - one failure shouldn't nuke the rest."
-	if wasError && tc.Name == "exec" {
-		e.hasErrored.Store(true)
-		e.erroredToolDescription = e.getToolDescription(tc)
-		e.siblingCtxDone()
-		// Cancel queued unsafe tools. Safe tools are left queued and will
-		// be caught by the post-execution siblingCtx.Err() check.
-		e.cancelRemaining(idx)
+	// If a panic was caught anywhere in execute (permission check, hooks,
+	// snapshots, tool execution, post-hooks), record it as an error result.
+	if panicked {
+		e.recordResult(toolExecResult{
+			index:     idx,
+			toolName:  tc.Name,
+			toolUseID: tc.ID,
+			isError:   true,
+			output:    fmt.Sprintf("Error: tool call panicked: %v", panicValue),
+			duration:  time.Since(start),
+		})
+		// Mark as error but do NOT cancel siblings for non-Bash panics.
+		e.mu.Lock()
+		for _, t := range e.tools {
+			if t.index == idx && t.status == toolExecuting {
+				t.status = toolCompleted
+				break
+			}
+		}
+		e.mu.Unlock()
+	} else {
+		// CRITICAL: Only Bash errors cancel sibling tools.
+		// Matching upstream (StreamingToolExecutor.ts:368):
+		// "Only Bash errors cancel siblings. Bash commands often have implicit
+		// dependency chains (e.g. mkdir fails -> subsequent commands pointless).
+		// Read/WebFetch/etc are independent - one failure shouldn't nuke the rest."
+		if wasError && tc.Name == "exec" {
+			e.hasErrored.Store(true)
+			e.erroredToolDescription = e.getToolDescription(tc)
+			e.siblingCtxDone()
+			// Cancel queued unsafe tools. Safe tools are left queued and will
+			// be caught by the post-execution siblingCtx.Err() check.
+			e.cancelRemaining(idx)
+		}
 	}
 
 	e.completed.Add(1)
