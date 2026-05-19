@@ -20,6 +20,14 @@ func register_database_sql() {
 			"ErrConnDone": sql.ErrConnDone,
 			"ErrNoRows": sql.ErrNoRows,
 			"ErrTxDone": sql.ErrTxDone,
+			"LevelDefault": sql.LevelDefault,
+			"LevelLinearizable": sql.LevelLinearizable,
+			"LevelReadCommitted": sql.LevelReadCommitted,
+			"LevelReadUncommitted": sql.LevelReadUncommitted,
+			"LevelRepeatableRead": sql.LevelRepeatableRead,
+			"LevelSerializable": sql.LevelSerializable,
+			"LevelSnapshot": sql.LevelSnapshot,
+			"LevelWriteCommitted": sql.LevelWriteCommitted,
 		},
 	)
 	registerType("database/sql", "ColumnType", reflect.TypeOf((*sql.ColumnType)(nil)).Elem())

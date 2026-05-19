@@ -14,6 +14,8 @@ func register_compress_lzw() {
 		map[string]interface{}{
 			"NewReader": lzw.NewReader,
 			"NewWriter": lzw.NewWriter,
+			"LSB": lzw.LSB,
+			"MSB": lzw.MSB,
 		},
 	)
 	registerType("compress/lzw", "Order", reflect.TypeOf((*lzw.Order)(nil)).Elem())

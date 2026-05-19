@@ -34,12 +34,20 @@ type PkgInfo struct {
 	Types      []Sym
 }
 
+type FuncSig struct {
+	Name       string
+	ParamTypes []string // Go type strings, e.g. "string", "int", "io.Reader"
+	ReturnType []string // Go type strings for each return value
+	Variadic   bool     // true if function is variadic
+}
+
 type Sym struct {
 	Name          string
 	Kind          string // "func", "var", "const", "type"
 	ConstType     string // for constants: "int", "float", "string", "bool"
 	ConstVal      string // for constants: value as string
 	ConstOverflow bool   // for constants: true if value overflows int64
+	Signature     FuncSig // for functions: full type signature
 }
 
 var (
@@ -113,6 +121,11 @@ func main() {
 	// Generate master init file
 	if err := generateInitFile(allInfos); err != nil {
 		log.Fatal(err)
+	}
+
+	// Generate Lisp wrapper file
+	if err := generateLispFile(allInfos); err != nil {
+		log.Printf("  WARN: failed to generate Lisp wrappers: %v", err)
 	}
 
 	log.Printf("Generated %d registration files, %d total symbols", len(allInfos), totalSymbols)
@@ -306,9 +319,23 @@ func extractFromTypes(pkgPath string, pkg *types.Package) (*PkgInfo, error) {
 			if sig.TypeParams().Len() > 0 {
 				continue // skip generic functions
 			}
+			paramTypes := make([]string, sig.Params().Len())
+			for i := 0; i < sig.Params().Len(); i++ {
+				paramTypes[i] = sig.Params().At(i).Type().String()
+			}
+			returnTypes := make([]string, sig.Results().Len())
+			for i := 0; i < sig.Results().Len(); i++ {
+				returnTypes[i] = sig.Results().At(i).Type().String()
+			}
 			result.Functions = append(result.Functions, Sym{
 				Name: name,
 				Kind: "func",
+				Signature: FuncSig{
+					Name:       name,
+					ParamTypes: paramTypes,
+					ReturnType: returnTypes,
+					Variadic:   sig.Variadic(),
+				},
 			})
 
 		case *types.Var:

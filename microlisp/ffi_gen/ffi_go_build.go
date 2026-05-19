@@ -18,6 +18,10 @@ func register_go_build() {
 			"IsLocalImport": build.IsLocalImport,
 			"Default": build.Default,
 			"ToolDir": build.ToolDir,
+			"AllowBinary": build.AllowBinary,
+			"FindOnly": build.FindOnly,
+			"IgnoreVendor": build.IgnoreVendor,
+			"ImportComment": build.ImportComment,
 		},
 	)
 	registerType("go/build", "Context", reflect.TypeOf((*build.Context)(nil)).Elem())

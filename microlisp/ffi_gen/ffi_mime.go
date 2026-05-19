@@ -18,6 +18,8 @@ func register_mime() {
 			"ParseMediaType": mime.ParseMediaType,
 			"TypeByExtension": mime.TypeByExtension,
 			"ErrInvalidMediaParameter": mime.ErrInvalidMediaParameter,
+			"BEncoding": mime.BEncoding,
+			"QEncoding": mime.QEncoding,
 		},
 	)
 	registerType("mime", "WordDecoder", reflect.TypeOf((*mime.WordDecoder)(nil)).Elem())

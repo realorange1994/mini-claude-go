@@ -13,6 +13,10 @@ func register_go_printer() {
 		"go/printer",
 		map[string]interface{}{
 			"Fprint": printer.Fprint,
+			"RawFormat": printer.RawFormat,
+			"SourcePos": printer.SourcePos,
+			"TabIndent": printer.TabIndent,
+			"UseSpaces": printer.UseSpaces,
 		},
 	)
 	registerType("go/printer", "CommentedNode", reflect.TypeOf((*printer.CommentedNode)(nil)).Elem())

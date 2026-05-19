@@ -20,6 +20,9 @@ func register_go_doc() {
 			"ToHTML": doc.ToHTML,
 			"ToText": doc.ToText,
 			"IllegalPrefixes": doc.IllegalPrefixes,
+			"AllDecls": doc.AllDecls,
+			"AllMethods": doc.AllMethods,
+			"PreserveAST": doc.PreserveAST,
 		},
 	)
 	registerType("go/doc", "Example", reflect.TypeOf((*doc.Example)(nil)).Elem())

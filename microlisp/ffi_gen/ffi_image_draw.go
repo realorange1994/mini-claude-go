@@ -15,6 +15,8 @@ func register_image_draw() {
 			"Draw": draw.Draw,
 			"DrawMask": draw.DrawMask,
 			"FloydSteinberg": draw.FloydSteinberg,
+			"Over": draw.Over,
+			"Src": draw.Src,
 		},
 	)
 	registerType("image/draw", "Drawer", reflect.TypeOf((*draw.Drawer)(nil)).Elem())

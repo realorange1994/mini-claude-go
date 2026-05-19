@@ -13,6 +13,7 @@ func register_go_scanner() {
 		"go/scanner",
 		map[string]interface{}{
 			"PrintError": scanner.PrintError,
+			"ScanComments": scanner.ScanComments,
 		},
 	)
 	registerType("go/scanner", "Error", reflect.TypeOf((*scanner.Error)(nil)).Elem())

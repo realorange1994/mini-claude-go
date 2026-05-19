@@ -31,6 +31,18 @@ func register_go_ast() {
 			"Print": ast.Print,
 			"SortImports": ast.SortImports,
 			"Walk": ast.Walk,
+			"Bad": ast.Bad,
+			"Con": ast.Con,
+			"FilterFuncDuplicates": ast.FilterFuncDuplicates,
+			"FilterImportDuplicates": ast.FilterImportDuplicates,
+			"FilterUnassociatedComments": ast.FilterUnassociatedComments,
+			"Fun": ast.Fun,
+			"Lbl": ast.Lbl,
+			"Pkg": ast.Pkg,
+			"RECV": ast.RECV,
+			"SEND": ast.SEND,
+			"Typ": ast.Typ,
+			"Var": ast.Var,
 		},
 	)
 	registerType("go/ast", "ArrayType", reflect.TypeOf((*ast.ArrayType)(nil)).Elem())

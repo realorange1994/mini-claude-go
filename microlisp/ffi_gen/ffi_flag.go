@@ -48,6 +48,9 @@ func register_flag() {
 			"CommandLine": flag.CommandLine,
 			"ErrHelp": flag.ErrHelp,
 			"Usage": flag.Usage,
+			"ContinueOnError": flag.ContinueOnError,
+			"ExitOnError": flag.ExitOnError,
+			"PanicOnError": flag.PanicOnError,
 		},
 	)
 	registerType("flag", "ErrorHandling", reflect.TypeOf((*flag.ErrorHandling)(nil)).Elem())
