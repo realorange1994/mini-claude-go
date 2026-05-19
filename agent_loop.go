@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -787,7 +788,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 
 	maxTurns := cfg.MaxTurns
 	if maxTurns <= 0 {
-		maxTurns = 20
+		maxTurns = math.MaxInt
 	}
 
 	// Create transcript writer: continue original file or start a new session

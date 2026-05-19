@@ -24,7 +24,7 @@ func main() {
 	apiKey := flag.String("api-key", "", "API key (overrides ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN env and config file)")
 	baseURL := flag.String("base-url", "", "Custom API base URL (overrides config file)")
 	mode := flag.String("mode", "ask", "Permission mode (ask|auto|bypass|plan)")
-	maxTurns := flag.Int("max-turns", 90, "Max agent loop turns per message")
+	maxTurns := flag.Int("max-turns", 0, "Max agent loop turns per message (0 = unlimited)")
 	stream := flag.Bool("stream", false, "Enable streaming output")
 	projectDir := flag.String("dir", "", "Project directory (change working directory before starting)")
 	resumeFile := flag.String("resume", "", "Resume from a transcript file path or 'last' for most recent")

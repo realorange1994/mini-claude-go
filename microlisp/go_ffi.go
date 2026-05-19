@@ -467,6 +467,11 @@ func lispToInterface(v *Value) interface{} {
 	case VPair:
 		result := make([]interface{}, 0)
 		for p := v; !isNil(p); p = p.cdr {
+			if p.typ != VPair {
+				// Dotted pair tail — append as-is
+				result = append(result, lispToInterface(p))
+				break
+			}
 			result = append(result, lispToInterface(p.car))
 		}
 		return result

@@ -13,8 +13,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Model != "" {
 		t.Errorf("default model should be empty, got %q", cfg.Model)
 	}
-	if cfg.MaxTurns != 90 {
-		t.Errorf("expected MaxTurns=90, got %d", cfg.MaxTurns)
+	if cfg.MaxTurns != 0 {
+		t.Errorf("expected MaxTurns=0 (unlimited), got %d", cfg.MaxTurns)
 	}
 	if cfg.MaxContextMsgs != 100 {
 		t.Errorf("expected MaxContextMsgs=100, got %d", cfg.MaxContextMsgs)

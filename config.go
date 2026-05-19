@@ -322,7 +322,7 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 func DefaultConfig() Config {
 	return Config{
 		Model:          "",
-		MaxTurns:       90,
+		MaxTurns:       0, // unlimited
 		MaxContextMsgs: 100,
 		PermissionMode: ModeAsk,
 		AllowedCommands: []string{

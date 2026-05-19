@@ -160,7 +160,7 @@ func TestBufferWriterBasic(t *testing.T) {
 		(let* ((w (funcall (go:import "microlisp/io.NewBufferWriter"))))
 		  (go:call w "WriteString" "buffer write")
 		  (let ((bytes (funcall (go:import "microlisp/io.BufferWriterBytes") w)))
-		    (funcall (go:import "string") bytes)))
+		    (coerce bytes 'string)))
 	`, globalEnv)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

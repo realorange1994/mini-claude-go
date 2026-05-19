@@ -57,6 +57,12 @@ func builtinCoerce(args []*Value) (*Value, error) {
 			}
 			return vstr(sb.String()), nil
 		}
+		// VGoVal []byte -> string (FFI byte slice conversion)
+		if obj.typ == VGoVal {
+			if b, ok := obj.goVal.([]byte); ok {
+				return vstr(string(b)), nil
+			}
+		}
 		elems := seqToList(obj)
 		var sb2 strings.Builder
 		for _, v := range elems {

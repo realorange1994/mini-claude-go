@@ -2418,14 +2418,21 @@ func TestLazy_FmtSprintfFloat(t *testing.T) {
 
 func TestLazy_JsonMarshalIndent(t *testing.T) {
 	InitGlobalEnv()
-	// Test JSON encoding through json.Valid and string-based operations
-	// (json.Marshal through FFI has edge cases with interface{} conversion)
-	result, err := EvalString(`(funcall (go:import "encoding/json.Valid") "{\"test\": true}")`, globalEnv)
+	// Test 1: simple list (same as adapter test)
+	result, err := EvalString(`(json-marshal-indent (list 1 2 3) "" "  ")`, globalEnv)
 	if err != nil {
-		t.Fatalf("json-valid failed: %v", err)
+		t.Fatalf("json-marshal-indent simple list failed: %v", err)
 	}
-	if !isTruthy(result) {
-		t.Fatal("expected json.Valid to return true")
+	if result.typ != VStr {
+		t.Fatalf("expected string, got: %s", typeStr(result))
+	}
+	// Test 2: with cons cell (a-list style)
+	result2, err2 := EvalString(`(json-marshal-indent (list (cons "key" "value")) "" "  ")`, globalEnv)
+	if err2 != nil {
+		t.Fatalf("json-marshal-indent with cons failed: %v", err2)
+	}
+	if result2.typ != VStr {
+		t.Fatalf("expected string, got: %s", typeStr(result2))
 	}
 }
 
