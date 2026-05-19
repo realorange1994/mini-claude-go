@@ -89,7 +89,20 @@ func builtinGoField(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("go:field: no field %q on %s", fieldName, rv.Type())
 	}
 
-	return reflectToLisp(field), nil
+	// For struct fields from a settable parent, preserve the settable reflect.Value
+	// so nested struct fields can be modified via go:set-field.
+	// For primitive types, convert to Lisp values directly.
+	switch field.Kind() {
+	case reflect.Struct, reflect.Ptr, reflect.Interface, reflect.Slice, reflect.Map:
+		return &Value{
+			typ:          VGoVal,
+			goVal:        field.Interface(),
+			goValType:    field.Type(),
+			goValReflect: field,
+		}, nil
+	default:
+		return reflectToLisp(field), nil
+	}
 }
 
 // builtinGoSetField sets a struct field on a VGoVal.
