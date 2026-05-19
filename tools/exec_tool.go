@@ -1323,8 +1323,8 @@ func validateRedirectPath(target string) string {
 
 	// Strip surrounding quotes for path validation
 	trimmed := target
-	if (strings.HasPrefix(trimmed, "'") && strings.HasSuffix(trimmed, "'")) ||
-		(strings.HasPrefix(trimmed, "\"") && strings.HasSuffix(trimmed, "\"")) {
+	if len(trimmed) >= 2 && ((strings.HasPrefix(trimmed, "'") && strings.HasSuffix(trimmed, "'")) ||
+		(strings.HasPrefix(trimmed, "\"") && strings.HasSuffix(trimmed, "\""))) {
 		trimmed = trimmed[1 : len(trimmed)-1]
 	}
 	if trimmed == "" {
