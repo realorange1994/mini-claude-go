@@ -703,6 +703,35 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent.registerAskUserQuestionTool()
 	agent.registerPlanModeTools()
 
+	// Wire LispGuideTool to the built-in LLM client.
+	if lg, ok := agent.registry.Get("lisp_guide"); ok {
+		if lg, ok := lg.(*tools.LispGuideTool); ok {
+			lg.LLMCall = func(ctx context.Context, systemPrompt, userPrompt string, maxTokens int) (string, error) {
+				params := anthropic.MessageNewParams{
+					Model:     GetModelForAPI(agent.config.Model),
+					MaxTokens: int64(maxTokens),
+					Messages: []anthropic.MessageParam{
+						anthropic.NewUserMessage(anthropic.NewTextBlock(userPrompt)),
+					},
+					System: []anthropic.TextBlockParam{
+						{Text: systemPrompt},
+					},
+				}
+				resp, err := agent.client.Messages.New(ctx, params)
+				if err != nil {
+					return "", err
+				}
+				var sb strings.Builder
+				for _, block := range resp.Content {
+					if tb, ok := block.AsAny().(anthropic.TextBlock); ok {
+						sb.WriteString(tb.Text)
+					}
+				}
+				return sb.String(), nil
+			}
+		}
+	}
+
 	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
 	if tst, ok := agent.registry.Get("tool_search"); ok {
 		if tst, ok := tst.(*tools.ToolSearchTool); ok {
@@ -874,6 +903,35 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	agent.registerAgentManagementTools()
 	agent.registerAskUserQuestionTool()
 	agent.registerPlanModeTools()
+
+	// Wire LispGuideTool to the built-in LLM client.
+	if lg, ok := agent.registry.Get("lisp_guide"); ok {
+		if lg, ok := lg.(*tools.LispGuideTool); ok {
+			lg.LLMCall = func(ctx context.Context, systemPrompt, userPrompt string, maxTokens int) (string, error) {
+				params := anthropic.MessageNewParams{
+					Model:     GetModelForAPI(agent.config.Model),
+					MaxTokens: int64(maxTokens),
+					Messages: []anthropic.MessageParam{
+						anthropic.NewUserMessage(anthropic.NewTextBlock(userPrompt)),
+					},
+					System: []anthropic.TextBlockParam{
+						{Text: systemPrompt},
+					},
+				}
+				resp, err := agent.client.Messages.New(ctx, params)
+				if err != nil {
+					return "", err
+				}
+				var sb strings.Builder
+				for _, block := range resp.Content {
+					if tb, ok := block.AsAny().(anthropic.TextBlock); ok {
+						sb.WriteString(tb.Text)
+					}
+				}
+				return sb.String(), nil
+			}
+		}
+	}
 
 	// Wire ToolSearchTool to the registry so it can look up tools at runtime.
 	if tst, ok := agent.registry.Get("tool_search"); ok {

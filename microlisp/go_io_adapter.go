@@ -273,7 +273,8 @@ func makeGoCallback(lispFn *Value, sig string) (reflect.Value, error) {
 // makeApplyForm creates a Lisp form (funcall fn arg1 arg2 ...) for Eval.
 func makeApplyForm(fn *Value, args []*Value) *Value {
 	// Build (funcall fn arg1 arg2 ...)
-	applyForm := vstr("funcall")
+	// NOTE: must use vsym, not vstr — Eval dispatches special forms by symbol name
+	applyForm := vsym("funcall")
 	forms := []*Value{applyForm, fn}
 	for _, a := range args {
 		forms = append(forms, a)

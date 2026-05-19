@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func builtinMakeInstance(args []*Value) (*Value, error) {
@@ -1104,6 +1105,19 @@ func lispToReflect(v *Value, t reflect.Type) reflect.Value {
 }
 
 func reflectToLisp(v reflect.Value) *Value {
+	// Special case: time.Time — convert to an inspectable VGoVal that preserves
+	// the full value including timezone. Without this, time.Time round-trips
+	// through interface{} can lose the *time.Location pointer, causing UTC↔local
+	// mismatches (e.g. NotBefore=UTC but NotAfter=CST).
+	if v.IsValid() && v.Type() == reflect.TypeOf(time.Time{}) {
+		t := v.Interface().(time.Time)
+		return &Value{
+			typ:        VGoVal,
+			goVal:      t,
+			goValType:  reflect.TypeOf(time.Time{}),
+			goValReflect: v,
+		}
+	}
 	switch v.Kind() {
 	case reflect.Float64, reflect.Float32:
 		return vnum(v.Float())

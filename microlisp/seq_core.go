@@ -2,6 +2,7 @@ package microlisp
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -293,6 +294,43 @@ func callFnOnSeq(fn *Value, args []*Value, env *Env) (*Value, error) {
 				continue
 			}
 			return nil, err
+		}
+	case VGoVal:
+		// Go function value — call via reflect (same logic as Apply's VGoVal case)
+		if callFn.goValType == nil || callFn.goValType.Kind() != reflect.Func {
+			return nil, fmt.Errorf("callFnOnSeq: not a procedure: %s", typeStr(callFn))
+		}
+		fnType := callFn.goValType
+		goArgs := make([]reflect.Value, fnType.NumIn())
+		for i := 0; i < fnType.NumIn(); i++ {
+			paramType := fnType.In(i)
+			if fnType.IsVariadic() && i == fnType.NumIn()-1 {
+				paramType = paramType.Elem()
+			}
+			if i < len(args) {
+				val, _ := lispToReflectSafe(args[i], paramType)
+				goArgs[i] = val
+			} else {
+				goArgs[i] = reflect.Zero(paramType)
+			}
+		}
+		var results []reflect.Value
+		if fnType.IsVariadic() {
+			results = callFn.goValReflect.CallSlice(goArgs)
+		} else {
+			results = callFn.goValReflect.Call(goArgs)
+		}
+		switch len(results) {
+		case 0:
+			return vnil(), nil
+		case 1:
+			return reflectToLisp(results[0]), nil
+		default:
+			lispResults := make([]*Value, len(results))
+			for i, r := range results {
+				lispResults[i] = reflectToLisp(r)
+			}
+			return listFromSlice(lispResults), nil
 		}
 	default:
 		// Fallback: construct form and eval (for other function types)

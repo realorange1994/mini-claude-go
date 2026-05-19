@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -12,6 +14,25 @@ import (
 	"miniclaudecode-go/skills"
 	"miniclaudecode-go/tools"
 )
+
+// MicrolispSources embeds all microlisp source files (plaintext, no compression).
+// Note: go:embed does NOT include *_test.go files — use MicrolispTestSources for those.
+//
+//go:embed microlisp/*.go
+var MicrolispSources embed.FS
+
+// MicrolispTestSources embeds all microlisp *_test.go test files.
+// Go's embed excludes test files from regular embed patterns, so we use
+// a separate directive with an explicit glob.
+//
+//go:embed microlisp/*_test.go
+var MicrolispTestSources embed.FS
+
+// LispTestData embeds all Common Lisp test files from microlisp/testdata/.
+// These provide practical Lisp syntax examples for the lisp_guide tool.
+//
+//go:embed microlisp/testdata/*.lisp
+var LispTestData embed.FS
 
 // PermissionMode defines the permission checking strategy.
 type PermissionMode string
@@ -386,6 +407,13 @@ func RegisterMCPAndSkills(r *tools.Registry, cfg *Config) {
 	r.Register(&tools.ListMCPTools{Manager: cfg.MCPManager})
 	r.Register(&tools.MCPToolCaller{Manager: cfg.MCPManager})
 	r.Register(&tools.MCPServerStatus{Manager: cfg.MCPManager})
+	// Create a sub-FS rooted at microlisp/ so .go files can be read by basename.
+	microlispFS, _ := fs.Sub(MicrolispSources, "microlisp")
+	// Create a sub-FS for *_test.go files.
+	testSourceFS, _ := fs.Sub(MicrolispTestSources, "microlisp")
+	// Create a sub-FS rooted at microlisp/testdata/ so .lisp files can be read by basename.
+	testdataFS, _ := fs.Sub(LispTestData, "microlisp/testdata")
+	r.Register(&tools.LispGuideTool{SourceFS: microlispFS, TestSourceFS: testSourceFS, TestDataFS: testdataFS})
 	r.Register(&tools.ReadSkillTool{Loader: cfg.SkillLoader})
 	r.Register(&tools.ListSkillsTool{Loader: cfg.SkillLoader})
 	r.Register(&tools.SearchSkillsTool{Loader: cfg.SkillLoader})

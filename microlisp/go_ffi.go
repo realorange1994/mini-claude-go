@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // -------- Go FFI Call Mechanism --------
@@ -266,6 +267,41 @@ func isErrorType(v reflect.Value) bool {
 func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 	if v == nil || v.typ == VNil {
 		return reflect.Zero(t), nil
+	}
+	// Special case: time.Time target type.
+	// time.Time contains an internal *time.Location pointer that can be lost
+	// when round-tripping through interface{} → reflect.ValueOf(). This caused
+	// bugs where NotBefore showed UTC but NotAfter showed CST because the
+	// Location was dropped during conversion.
+	if t == reflect.TypeOf(time.Time{}) {
+		if v.typ == VGoVal {
+			gv := reflect.ValueOf(v.goVal)
+			// If the stored value is already a time.Time, use it directly
+			// (preserving the *time.Location).
+			if gv.Type() == reflect.TypeOf(time.Time{}) {
+				return gv, nil
+			}
+			// If stored as *time.Time, dereference
+			if gv.Kind() == reflect.Ptr && gv.Type().Elem() == reflect.TypeOf(time.Time{}) {
+				if gv.IsNil() {
+					return reflect.Zero(t), nil
+				}
+				return gv.Elem(), nil
+			}
+		}
+		// If we have a goValReflect that's a time.Time, use it
+		if v.typ == VGoVal && v.goValReflect.IsValid() {
+			rv := v.goValReflect
+			if rv.Kind() == reflect.Ptr {
+				if rv.IsNil() {
+					return reflect.Zero(t), nil
+				}
+				rv = rv.Elem()
+			}
+			if rv.Type() == reflect.TypeOf(time.Time{}) {
+				return rv, nil
+			}
+		}
 	}
 	// If the Lisp value is a VGoVal, try to use the actual Go value directly.
 	if v.typ == VGoVal {
