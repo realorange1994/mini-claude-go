@@ -1,10 +1,8 @@
 package tools
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -131,7 +129,6 @@ func (t *AskUserQuestionTool) ExecuteContext(ctx context.Context, params map[str
 		return ToolResultError("at most 4 questions allowed")
 	}
 
-	reader := bufio.NewReader(os.Stdin)
 	answers := make(map[string]string)
 
 	for _, q := range questions {
@@ -147,16 +144,18 @@ func (t *AskUserQuestionTool) ExecuteContext(ctx context.Context, params map[str
 		fmt.Printf("└─────────────────────────────────────────────\n")
 
 		for {
-			// Check context before reading input
-			select {
-			case <-ctx.Done():
-				return ToolResult{Output: fmt.Sprintf("Error: AskUserQuestion timed out waiting for user input"), IsError: true}
-			default:
-			}
-			input, err := reader.ReadString('\n')
+			// Use readLineWithContext which polls stdin with 100ms intervals,
+			// checking context between each poll. This ensures context
+			// cancellation properly interrupts the read without leaving
+			// orphaned goroutines that steal REPL input.
+			input, err := readLineWithContext(ctx)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ToolResult{Output: fmt.Sprintf("Error: AskUserQuestion timed out waiting for user input"), IsError: true}
+				}
 				return ToolResultError(fmt.Sprintf("failed to read input: %v", err))
 			}
+
 			input = strings.TrimSpace(input)
 			if len(input) > 3 {
 				input = input[:3]
@@ -199,4 +198,3 @@ func parseNumber(s string) (int, error) {
 	}
 	return num, nil
 }
-
