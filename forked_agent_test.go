@@ -547,7 +547,7 @@ func TestPermissionDeniedResult(t *testing.T) {
 	result := anthropic.ToolResultBlockParam{
 		ToolUseID: tc.ID,
 		Content: []anthropic.ToolResultBlockParamContentUnion{
-			{OfText: &anthropic.TextBlockParam{Text: "Permission denied: test reason"}},
+			{OfText: &anthropic.TextBlockParam{Text: "<system-reminder>Permission denied: test reason</system-reminder>"}},
 		},
 	}
 

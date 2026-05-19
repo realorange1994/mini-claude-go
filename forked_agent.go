@@ -192,7 +192,7 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 							result: anthropic.ToolResultBlockParam{
 								ToolUseID: tc.ID,
 								Content: []anthropic.ToolResultBlockParamContentUnion{
-									{OfText: &anthropic.TextBlockParam{Text: "Permission denied: " + reason}},
+									{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("<system-reminder>Permission denied: %s</system-reminder>", reason)}},
 								},
 								IsError: param.NewOpt(true),
 							},

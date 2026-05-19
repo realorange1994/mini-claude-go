@@ -19,6 +19,15 @@ type PermissionDenied struct {
 
 func (e PermissionDenied) Error() string { return e.Reason }
 
+// denyResult wraps a permission denial message in <system-reminder> tags
+// so the LLM recognizes it as a system-level security block, not tool output.
+func denyResult(msg string) *tools.ToolResult {
+	return &tools.ToolResult{
+		Output:  fmt.Sprintf("<system-reminder>Permission denied: %s</system-reminder>", msg),
+		IsError: true,
+	}
+}
+
 // PermissionGate implements the two-layer permission check.
 type PermissionGate struct {
 	config        *Config
@@ -130,19 +139,13 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	// STEP 1a: Tool-level deny rule (bypass-immune)
 	if rule := g.findToolLevelDeny(upstreamName); rule != nil {
 		restoreStripped()
-		return &tools.ToolResult{
-			Output:  fmt.Sprintf("Permission denied by rule: %s", rule.Content),
-			IsError: true,
-		}
+		return denyResult(fmt.Sprintf("by rule: %s", rule.Content))
 	}
 
 	// STEP 1b: Content-specific deny rule (bypass-immune)
 	if rule := g.findContentDeny(upstreamName, content); rule != nil {
 		restoreStripped()
-		return &tools.ToolResult{
-			Output:  fmt.Sprintf("Permission denied by rule: %s", rule.Content),
-			IsError: true,
-		}
+		return denyResult(fmt.Sprintf("by rule: %s", rule.Content))
 	}
 
 	// Plan mode: read tools are always allowed (skip path validation for reads),
@@ -204,20 +207,14 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 					askResult := tools.PermissionResultAsk(vResult.Message, vResult.Reason)
 					askResult.MatchedRule = vResult.Reason
 					if g.shouldAvoidPrompts() {
-						return &tools.ToolResult{
-							Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", askResult.Message),
-							IsError: true,
-						}
+						return denyResult(fmt.Sprintf("%s (interactive prompts disabled for sub-agent)", askResult.Message))
 					}
 					if !g.askUserWithWarning(tool.Name(), params, askResult.Message) {
-						return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+						return denyResult("user rejected.")
 					}
 					// User approved — allow to continue
 				} else {
-					return &tools.ToolResult{
-						Output:  fmt.Sprintf("Permission denied: %s", vResult.Message),
-						IsError: true,
-					}
+					return denyResult(vResult.Message)
 				}
 			}
 		}
@@ -230,14 +227,11 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	if rule := g.findToolLevelAsk(upstreamName); rule != nil {
 		restoreStripped()
 		if g.shouldAvoidPrompts() {
-			return &tools.ToolResult{
-				Output:  fmt.Sprintf("Permission denied: %s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content),
-				IsError: true,
-			}
+			return denyResult(fmt.Sprintf("%s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content))
 		}
 		msg := fmt.Sprintf("Tool requires confirmation by rule: %s", rule.Content)
 		if !g.askUserWithWarning(tool.Name(), params, msg) {
-			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+			return denyResult("user rejected.")
 		}
 		return nil // user approved
 	}
@@ -246,14 +240,11 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	if rule := g.findContentAsk(upstreamName, content); rule != nil {
 		restoreStripped()
 		if g.shouldAvoidPrompts() {
-			return &tools.ToolResult{
-				Output:  fmt.Sprintf("Permission denied: %s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content),
-				IsError: true,
-			}
+			return denyResult(fmt.Sprintf("%s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content))
 		}
 		msg := fmt.Sprintf("Tool requires confirmation by rule: %s", rule.Content)
 		if !g.askUserWithWarning(tool.Name(), params, msg) {
-			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+			return denyResult("user rejected.")
 		}
 		return nil // user approved
 	}
@@ -275,10 +266,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	// Step 2d: deny is always bypass-immune
 	if result.Behavior == tools.PermissionDeny {
 		restoreStripped()
-		return &tools.ToolResult{
-			Output:  fmt.Sprintf("Permission denied: %s", result.Message),
-			IsError: true,
-		}
+		return denyResult(result.Message)
 	}
 
 	// Step 2e: ask from safetyCheck is bypass-immune
@@ -286,13 +274,10 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	if g.config.PermissionMode != ModeBypass && result.Behavior == tools.PermissionAsk && result.DecisionReason == "safetyCheck" {
 		restoreStripped()
 		if g.shouldAvoidPrompts() {
-			return &tools.ToolResult{
-				Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", result.Message),
-				IsError: true,
-			}
+			return denyResult(fmt.Sprintf("%s (interactive prompts disabled for sub-agent)", result.Message))
 		}
 		if !g.askUserWithWarning(tool.Name(), params, result.Message) {
-			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+			return denyResult("user rejected.")
 		}
 		return nil // user approved
 	}
@@ -302,13 +287,10 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	if g.config.PermissionMode != ModeBypass && result.Behavior == tools.PermissionAsk {
 		restoreStripped()
 		if g.shouldAvoidPrompts() {
-			return &tools.ToolResult{
-				Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", result.Message),
-				IsError: true,
-			}
+			return denyResult(fmt.Sprintf("%s (interactive prompts disabled for sub-agent)", result.Message))
 		}
 		if !g.askUserWithWarning(tool.Name(), params, result.Message) {
-			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+			return denyResult("user rejected.")
 		}
 		return nil // user approved
 	}
@@ -329,10 +311,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 			for _, pattern := range g.config.DeniedPatterns {
 				if strings.Contains(lower, strings.ToLower(pattern)) {
 					restoreStripped()
-					return &tools.ToolResult{
-						Output:  fmt.Sprintf("Permission denied: matches denied pattern %q", pattern),
-						IsError: true,
-					}
+					return denyResult(fmt.Sprintf("matches denied pattern %q", pattern))
 				}
 			}
 		}
@@ -347,10 +326,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		writeTools := map[string]bool{"exec": true, "write_file": true, "edit_file": true, "multi_edit": true, "fileops": true}
 		if writeTools[tool.Name()] {
 			restoreStripped()
-			return &tools.ToolResult{
-				Output:  fmt.Sprintf("Permission denied: '%s' is blocked in plan (read-only) mode.", tool.Name()),
-				IsError: true,
-			}
+			return denyResult(fmt.Sprintf("'%s' is blocked in plan (read-only) mode.", tool.Name()))
 		}
 
 	case ModeAsk:
@@ -363,7 +339,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		if g.shouldAvoidPrompts() {
 			if isDangerous {
 				restoreStripped()
-				return &tools.ToolResult{Output: fmt.Sprintf("Permission denied: '%s' requires user approval (interactive prompts disabled for sub-agent).", tool.Name()), IsError: true}
+				return denyResult(fmt.Sprintf("'%s' requires user approval (interactive prompts disabled for sub-agent).", tool.Name()))
 			}
 			restoreStripped()
 			return nil // non-dangerous tool, allow
@@ -379,7 +355,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 			}
 			if !g.askUser(tool.Name(), params) {
 				restoreStripped()
-				return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+				return denyResult("user rejected.")
 			}
 		}
 
@@ -461,13 +437,10 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 	// (classifier cannot approve suspicious Windows patterns, etc.)
 	if toolResult.Behavior == tools.PermissionAsk && !toolResult.ClassifierApprovable {
 		if g.shouldAvoidPrompts() {
-			return &tools.ToolResult{
-				Output:  fmt.Sprintf("Permission denied: %s (interactive prompts disabled for sub-agent)", toolResult.Message),
-				IsError: true,
-			}
+			return denyResult(fmt.Sprintf("%s (interactive prompts disabled for sub-agent)", toolResult.Message))
 		}
 		if !g.askUserWithWarning(tool.Name(), params, toolResult.Message) {
-			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+			return denyResult("user rejected.")
 		}
 		return nil // user approved
 	}
@@ -519,7 +492,7 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 				g.denialCount = 0
 				return nil
 			}
-			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+			return denyResult("user rejected.")
 		}
 		// Session-level cap: after 20 total denials, force interactive review
 		// to prevent the classifier from silently blocking all work.
@@ -530,12 +503,9 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 				g.denialCount = 0
 				return nil
 			}
-			return &tools.ToolResult{Output: "Permission denied: user rejected.", IsError: true}
+			return denyResult("user rejected.")
 		}
-		return &tools.ToolResult{
-			Output:  fmt.Sprintf("Permission denied: %s", result.Reason),
-			IsError: true,
-		}
+		return denyResult(result.Reason)
 	}
 
 	// Allowed: reset denial count
