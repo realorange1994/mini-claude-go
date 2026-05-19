@@ -91,8 +91,29 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 
 	switch op {
 	case "reset":
-		microlisp.ResetGlobalEnv()
-		return ToolResult{Output: "Lisp interpreter state has been reset. All user-defined variables, functions, macros, and classes have been cleared."}
+		// Run ResetGlobalEnv in a goroutine so we can respect context
+		// cancellation. ResetGlobalEnv acquires evalMu, which may be held
+		// by a prior eval that's still running. Without this, reset would
+		// block indefinitely on evalMu, causing a 10-minute timeout.
+		ch := make(chan evalResult, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					ch <- evalResult{"", fmt.Errorf("panic: %v", r)}
+				}
+			}()
+			microlisp.ResetGlobalEnv()
+			ch <- evalResult{"Lisp interpreter state has been reset. All user-defined variables, functions, macros, and classes have been cleared.", nil}
+		}()
+		select {
+		case <-ctx.Done():
+			return ToolResult{Output: "Error: lisp_eval timed out during reset (evalMu may be held by a prior evaluation)", IsError: true}
+		case r := <-ch:
+			if r.err != nil {
+				return ToolResult{Output: fmt.Sprintf("Error: %v", r.err), IsError: true}
+			}
+			return ToolResult{Output: r.output}
+		}
 
 	case "help":
 		return ToolResult{Output: lispHelp(expr)}
@@ -146,25 +167,6 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 
 	case "lint":
 		file, _ := params["file"].(string)
-		if file != "" {
-			var limits microlisp.ResourceLimits
-			switch limitsProfile {
-			case "strict":
-				limits = microlisp.StrictLimits()
-			case "unlimited":
-				limits = microlisp.UnlimitedLimits()
-			default:
-				limits = microlisp.DefaultLimits()
-			}
-			err := microlisp.SafeLintFileWithLimits(file, limits)
-			if err != nil {
-				return ToolResult{Output: fmt.Sprintf("Lint error: %v", err), IsError: true}
-			}
-			return ToolResult{Output: "No syntax errors found."}
-		}
-		if expr == "" {
-			return ToolResult{Output: "Error: expression or file is required for operation=lint", IsError: true}
-		}
 		var limits microlisp.ResourceLimits
 		switch limitsProfile {
 		case "strict":
@@ -174,11 +176,61 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		default:
 			limits = microlisp.DefaultLimits()
 		}
-		err := microlisp.SafeLintWithLimits(expr, limits)
-		if err != nil {
-			return ToolResult{Output: fmt.Sprintf("Lint error: %v", err), IsError: true}
+		cancelChan := microlisp.NewCancelChannel()
+		limits.CancelChan = cancelChan
+		if file != "" {
+			ch := make(chan evalResult, 1)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						ch <- evalResult{"", fmt.Errorf("panic: %v", r)}
+					}
+				}()
+				err := microlisp.SafeLintFileWithLimits(file, limits)
+				if err != nil {
+					ch <- evalResult{"", err}
+				} else {
+					ch <- evalResult{"No syntax errors found.", nil}
+				}
+			}()
+			select {
+			case <-ctx.Done():
+				close(cancelChan)
+				return ToolResult{Output: "Error: lisp_eval timed out during lint", IsError: true}
+			case r := <-ch:
+				if r.err != nil {
+					return ToolResult{Output: fmt.Sprintf("Lint error: %v", r.err), IsError: true}
+				}
+				return ToolResult{Output: r.output}
+			}
 		}
-		return ToolResult{Output: "No syntax errors found."}
+		if expr == "" {
+			return ToolResult{Output: "Error: expression or file is required for operation=lint", IsError: true}
+		}
+		ch := make(chan evalResult, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					ch <- evalResult{"", fmt.Errorf("panic: %v", r)}
+				}
+			}()
+			err := microlisp.SafeLintWithLimits(expr, limits)
+			if err != nil {
+				ch <- evalResult{"", err}
+			} else {
+				ch <- evalResult{"No syntax errors found.", nil}
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			close(cancelChan)
+			return ToolResult{Output: "Error: lisp_eval timed out during lint", IsError: true}
+		case r := <-ch:
+			if r.err != nil {
+				return ToolResult{Output: fmt.Sprintf("Lint error: %v", r.err), IsError: true}
+			}
+			return ToolResult{Output: r.output}
+		}
 
 	case "define":
 		if expr == "" {
