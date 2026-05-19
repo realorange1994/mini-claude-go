@@ -889,7 +889,103 @@ The reader VGoVal (type *rand.reader) is automatically recognized as implementin
 - If a Go function returns an error, it becomes a Lisp error (evaluation stops)
 - If a Go function panics, it is caught and reported as an error
 - Argument count must match exactly (non-variadic) or meet minimum (variadic)
-- Use operation=source with expression="ffi" to view the FFI builtin source code`,
+- Use operation=source with expression="ffi" to view the FFI builtin source code
+
+--- Stdlib Wrappers (Typeless API) ---
+These Lisp functions wrap Go stdlib operations with automatic type handling.
+No need to deal with Go types, error tuples, or VGoVal — just call and get Lisp values.
+
+File I/O:
+  (read-file path)                    => string
+  (write-file path content)           => t
+  (append-file path content)          => t
+  (file-exists-p path)                => t/nil
+  (directory-exists-p path)           => t/nil
+  (file-size path)                    => number
+  (delete-file path)                  => t
+  (rename-file old new)               => t
+  (directory path)                    => list of filenames
+  (mkdir path &key parents)           => t
+  (temp-file &key prefix suffix dir)  => path string
+
+HTTP:
+  (http-get url &key headers)         => string (body)
+  (http-post url content &key content-type) => string
+  (http-get-json url)                 => string (raw JSON)
+  (http-post-json url data)           => string
+
+JSON:
+  (json-encode obj)                   => JSON string
+  (json-valid-p str)                  => t/nil
+  ;; obj can be: nil, t, string, number, list (array), alist (object)
+
+Time:
+  (sleep seconds)                     => nil
+  (format-time fmt &optional unix)    => string
+  (current-timestamp)                 => "2006-01-02 15:04:05"
+  (parse-time fmt str)                => unix timestamp
+
+Regex:
+  (regex-match pattern str)           => t/nil
+  (regex-find-all pattern str &optional count) => list
+  (regex-replace pattern str replacement) => string
+  (regex-split pattern str)           => list
+
+Path:
+  (path-absolute path)                => string
+  (path-base path)                    => string
+  (path-dir path)                     => string
+  (path-ext path)                     => string
+  (path-join &rest paths)             => string
+  (path-clean path)                   => string
+  (path-exists-p path)                => t/nil
+  (path-is-absolute path)             => t/nil
+
+Environment:
+  (getenv key &optional default)      => string
+  (setenv key value)                  => t
+  (unsetenv key)                      => t
+  (getenv-all)                        => alist of (key . value)
+  (current-dir)                       => string
+  (change-dir dir)                    => t
+
+Encoding:
+  (base64-encode str)                 => base64 string
+  (base64-decode str)                 => decoded string
+  (url-encode str)                    => URL-encoded string
+  (url-decode str)                    => decoded string
+  (url-parse url-str)                 => alist (:scheme . s) (:host . h) ...
+
+Crypto:
+  (md5 str)                           => hex digest string
+  (sha1 str)                          => hex digest string
+  (sha256 str)                        => hex digest string
+
+Process:
+  (run-command cmd &rest args)        => (output exit-code)
+  (shell command-string)              => (output exit-code)
+  (which command)                     => path or nil
+
+String Utilities:
+  (string-contains s substr)          => t/nil
+  (string-starts-with s prefix)       => t/nil
+  (string-ends-with s suffix)         => t/nil
+  (string-split s sep &optional max)  => list
+  (string-join lst sep)               => string
+  (string-replace s old new &optional count) => string
+  (string-trim s)                     => string
+  (string-to-upper s)                 => string
+  (string-to-lower s)                 => string
+  (string-repeat s count)             => string
+
+System Info:
+  (go-os)                             => "windows"/"linux"/"darwin"
+  (go-arch)                           => "amd64"/"arm64"
+  (go-version)                        => Go version string
+  (num-cpus)                          => number
+  (pid)                               => process ID
+  (hostname)                          => machine hostname
+  (expand-env str)                    => expand $ENV_VAR in string`,
 
 		"ops": `=== lisp_eval Operations Guide ===
 

@@ -210,7 +210,15 @@ func makeGoPrim(wf *goFunc) NativeFunc {
 			}
 		}
 
-		results := wf.fn.Call(callArgs)
+		// For variadic functions, use CallSlice which properly expands
+		// a slice argument into individual variadic arguments.
+		// For non-variadic functions, use regular Call.
+		var results []reflect.Value
+		if isVariadic {
+			results = wf.fn.CallSlice(callArgs)
+		} else {
+			results = wf.fn.Call(callArgs)
+		}
 
 		switch len(results) {
 		case 0:

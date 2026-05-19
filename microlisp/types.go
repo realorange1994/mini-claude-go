@@ -487,6 +487,12 @@ func InitGlobalEnv() {
 			fmt.Fprintf(os.Stderr, "initLib error: %v\n", err)
 		}
 	}
+	if goStdlibLisp != "" {
+		_, err := EvalString(goStdlibLisp, globalEnv)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "goStdlibLisp error: %v\n", err)
+		}
+	}
 	// Sync CL package with USER package (after all builtins/initLib are registered)
 	syncCLPackage()
 	// Set *readtable* variable (readtable is already initialized above)
