@@ -1,6 +1,8 @@
 package microlisp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -262,5 +264,106 @@ func TestSourceListIncludesGoFFI(t *testing.T) {
 	out := SourceList("crypto/x509", 0, 10)
 	if strings.Contains(out, "No functions found") {
 		t.Fatalf("expected Go FFI functions in source list, got: %s", out)
+	}
+}
+
+// ─── nth-value builtin registration tests ──────────────────────────────────────
+// Consolidated from debug_scan{1..13}_test.go
+//
+// NOTE: nth-value has a known dual-registration issue: it appears both in
+// specialOpNames (eval_core.go special form handler) AND in the builtin registry
+// (seq_map.go builtinNthValue). The special form registration takes precedence
+// in sourceIndex, so the entry Kind is "special" rather than "builtin".
+
+func TestNthValueInBuiltinRegistry(t *testing.T) {
+	bm := loadBuiltinRegistry()
+	name, ok := bm["builtinNthValue"]
+	if !ok {
+		t.Fatal("builtinRegistry should contain builtinNthValue → nth-value mapping")
+	}
+	if name != "nth-value" {
+		t.Errorf("expected builtinNthValue to map to 'nth-value', got %q", name)
+	}
+}
+
+func TestNthValueIndexed(t *testing.T) {
+	entry, ok := sourceIndex["nth-value"]
+	if !ok {
+		t.Fatal("nth-value should be registered in sourceIndex")
+	}
+	// Currently indexed as "special" due to dual-registration (known issue)
+	if entry.Kind != "special" && entry.Kind != "builtin" {
+		t.Errorf("expected nth-value kind='special' or 'builtin', got %q", entry.Kind)
+	}
+	if entry.File == "" {
+		t.Error("expected nth-value to have a non-empty File")
+	}
+	if entry.Start == 0 || entry.End == 0 {
+		t.Errorf("expected nth-value to have Start/End line numbers, got Start=%d End=%d", entry.Start, entry.End)
+	}
+}
+
+func TestNthValueGetSource(t *testing.T) {
+	out := GetSource("nth-value", 0, 0)
+	if strings.Contains(out, "No source found") {
+		t.Fatalf("GetSource should return source for nth-value, got: %s", out)
+	}
+	if !strings.Contains(out, "Lines:") {
+		t.Fatalf("expected line range for nth-value, got: %s", out)
+	}
+}
+
+func TestNthValueDualRegistration(t *testing.T) {
+	// nth-value appears in both specialOpNames AND builtin registry — known issue.
+	// This test documents the current behavior.
+	inSpecial := false
+	for _, name := range specialOpNames {
+		if strings.ToLower(name) == "nth-value" {
+			inSpecial = true
+			break
+		}
+	}
+	if !inSpecial {
+		t.Error("nth-value should be in specialOpNames (currently is due to dual-reg)")
+	}
+
+	bm := loadBuiltinRegistry()
+	inBuiltin := false
+	for _, lispName := range bm {
+		if lispName == "nth-value" {
+			inBuiltin = true
+			break
+		}
+	}
+	if !inBuiltin {
+		t.Error("nth-value should also be in builtinRegistry")
+	}
+}
+
+func TestNthValueSourceEntryFileExists(t *testing.T) {
+	entry := sourceIndex["nth-value"]
+	if entry == nil {
+		t.Skip("nth-value not indexed")
+	}
+	dir := findMicrolispDir()
+	fpath := filepath.Join(dir, entry.File)
+	if _, err := os.Stat(fpath); err != nil {
+		t.Fatalf("nth-value source file %q not found: %v", entry.File, err)
+	}
+}
+
+func TestBuiltinRegistryHasNthValue(t *testing.T) {
+	bm := loadBuiltinRegistry()
+	found := false
+	for goFunc, lispName := range bm {
+		if lispName == "nth-value" {
+			found = true
+			if goFunc != "builtinNthValue" {
+				t.Errorf("expected nth-value to map from builtinNthValue, got %q", goFunc)
+			}
+		}
+	}
+	if !found {
+		t.Error("no builtinRegistry entry maps to 'nth-value'")
 	}
 }
