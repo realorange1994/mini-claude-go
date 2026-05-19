@@ -595,7 +595,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 
 	maxTurns := cfg.MaxTurns
 	if maxTurns <= 0 {
-		maxTurns = 20 // default from ggbot
+		maxTurns = math.MaxInt
 	}
 
 	agent := &AgentLoop{
