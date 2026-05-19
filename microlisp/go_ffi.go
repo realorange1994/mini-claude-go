@@ -447,28 +447,47 @@ func lispToInterface(v *Value) interface{} {
 
 // builtinGoList lists all available Go packages and their symbols.
 func builtinGoList(args []*Value) (*Value, error) {
-	// If a package name is given, list its symbols
+	// If a package name is given, list its symbols (functions + types)
 	if len(args) >= 1 && args[0].typ == VStr {
 		pkgName := args[0].str
-		pkg, ok := GoPackageRegistry[pkgName]
-		if !ok {
+		result := make([]string, 0)
+
+		// List functions from GoPackageRegistry
+		if pkg, ok := GoPackageRegistry[pkgName]; ok {
+			for k := range pkg {
+				result = append(result, pkgName+"."+k)
+			}
+		}
+
+		// List types from GoTypeRegistry
+		if pkgTypes, ok := GoTypeRegistry[pkgName]; ok {
+			for k := range pkgTypes {
+				result = append(result, pkgName+"."+k)
+			}
+		}
+
+		if len(result) == 0 {
 			return nil, fmt.Errorf("go:list: unknown package \"%s\"", pkgName)
 		}
-		keys := make([]string, 0, len(pkg))
-		for k := range pkg {
-			keys = append(keys, k)
+
+		sort.Strings(result)
+		values := make([]*Value, len(result))
+		for i, s := range result {
+			values[i] = vstr(s)
 		}
-		sort.Strings(keys)
-		result := make([]*Value, len(keys))
-		for i, k := range keys {
-			result[i] = vstr(pkgName + "." + k)
-		}
-		return listFromSlice(result), nil
+		return listFromSlice(values), nil
 	}
 
-	// List all packages
-	pkgs := make([]string, 0, len(GoPackageRegistry))
+	// List all packages (merge keys from both registries)
+	allPkgs := make(map[string]bool)
 	for k := range GoPackageRegistry {
+		allPkgs[k] = true
+	}
+	for k := range GoTypeRegistry {
+		allPkgs[k] = true
+	}
+	pkgs := make([]string, 0, len(allPkgs))
+	for k := range allPkgs {
 		pkgs = append(pkgs, k)
 	}
 	sort.Strings(pkgs)

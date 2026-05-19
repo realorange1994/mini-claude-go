@@ -176,3 +176,27 @@ func TestGoInterfaceAutoWrap(t *testing.T) {
 		t.Fatalf("MarshalPKIXPublicKey failed (interface auto-wrap may be missing): %v", err)
 	}
 }
+
+func TestGoListIncludesTypes(t *testing.T) {
+	InitGlobalEnv()
+	// go:list should include both functions (from GoPackageRegistry) and
+	// types (from GoTypeRegistry) for a given package
+	result, err := EvalString(`(go:list "crypto/x509")`, globalEnv)
+	if err != nil {
+		t.Fatalf("go:list crypto/x509 failed: %v", err)
+	}
+	if !isList(result) {
+		t.Fatalf("expected list from go:list, got %s", typeStr(result))
+	}
+	// Should contain both functions and types
+	output := ToString(result)
+	if !strings.Contains(output, "CreateCertificate") {
+		t.Fatalf("expected CreateCertificate in go:list output, got: %s", output)
+	}
+	if !strings.Contains(output, "Certificate") {
+		t.Fatalf("expected Certificate type in go:list output, got: %s", output)
+	}
+	if !strings.Contains(output, "PublicKey") {
+		t.Fatalf("expected PublicKey type in go:list output, got: %s", output)
+	}
+}
