@@ -345,6 +345,20 @@ var builtins = []builtinDef{
 	{"go:set-field", builtinGoSetField},
 	{"go:type-of", builtinGoTypeOf},
 	{"go:call", builtinGoCall},
+	// I/O adapters (take *Value — can't go through reflect FFI)
+	{"reader-read-all", builtinReaderReadAll},
+	{"io-copy-to-string", builtinIoCopyToString},
+	{"io-copy-to-file", builtinIoCopyToFile},
+	{"io-limit-string", builtinIoLimitString},
+	{"io-nop-closer", builtinIoNopCloser},
+	// Context adapters
+	{"ctx-with-timeout", builtinCtxWithTimeout},
+	{"ctx-with-cancel", builtinCtxWithCancel},
+	// Go callback adapter
+	{"go:callback", builtinGoCallback},
+	// HTTP adapters
+	{"http-request", builtinHttpRequest},
+	{"http-do", builtinHttpDo},
 	{"base64-encode", builtinBase64Encode},
 	{"base64-decode", builtinBase64Decode},
 	{"md5", builtinMD5},

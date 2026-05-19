@@ -467,4 +467,168 @@ var goStdlibLisp = `
 ;; (expand-env str) -> expand $ENV_VAR in string
 (define (expand-env str)
   (funcall (go:import "os.ExpandEnv") str))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 13. I/O Adapter Functions
+;; Bridge between Lisp and Go's io.Reader/io.Writer interfaces.
+;; These enable calling the 278 Go stdlib functions that take
+;; io.Reader, io.Writer, context.Context, etc.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; (reader-from-string s) -> io.Reader
+;; Create an io.Reader from a string.
+(define (reader-from-string s)
+  (funcall (go:import "microlisp/io.NewStringReader") s))
+
+;; (reader-from-file path) -> io.ReadCloser
+;; Open a file as an io.Reader.
+(define (reader-from-file path)
+  (funcall (go:import "microlisp/io.NewFileReader") path))
+
+;; (writer-to-string) -> io.Writer
+;; Create an io.Writer that accumulates written data into a string.
+(define (writer-to-string)
+  (funcall (go:import "microlisp/io.NewStringWriter")))
+
+;; (writer-to-file path) -> io.WriteCloser
+;; Create an io.Writer that writes to a file.
+(define (writer-to-file path)
+  (funcall (go:import "microlisp/io.NewFileWriter") path))
+
+;; (writer-get-string w) -> string
+;; Retrieve the accumulated string from a string writer.
+(define (writer-get-string w)
+  (funcall (go:import "microlisp/io.StringWriterString") w))
+
+;; (writer-reset w) -> nil
+;; Reset a string writer's buffer.
+(define (writer-reset w)
+  (funcall (go:import "microlisp/io.StringWriterReset") w))
+
+;; (reader-close r) -> nil
+;; Close a file reader.
+(define (reader-close r)
+  (funcall (go:import "microlisp/io.FileReaderClose") r))
+
+;; (writer-close w) -> nil
+;; Close a file writer.
+(define (writer-close w)
+  (funcall (go:import "microlisp/io.FileWriterClose") w))
+
+;; (reader-read-all r) -> string
+;; Read all data from an io.Reader into a string.
+;; This is a builtin (takes *Value, not reflect-compatible).
+
+;; (io-copy-to-string r) -> string
+;; Alias for reader-read-all.
+
+;; (io-copy-to-file r path) -> nil
+;; Copy all data from an io.Reader to a file.
+
+;; (io-limit-string r n) -> string
+;; Read up to n bytes from an io.Reader.
+
+;; (io-nop-closer r) -> io.ReadCloser
+;; Wrap an io.Reader as io.ReadCloser with a no-op Close.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 14. Context Adapters
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; (ctx-with-timeout seconds) -> (ctx cancel-fn)
+;; Create a context with a timeout. Parent defaults to Background.
+;; (ctx-with-timeout parent-ctx seconds) -> (ctx cancel-fn)
+;; Create with an explicit parent context.
+
+;; (ctx-with-cancel &optional parent) -> (ctx cancel-fn)
+;; Create a cancellable context.
+
+;; (ctx-cancel cancel-fn) -> nil
+;; Cancel a context using its cancel function.
+(define (ctx-cancel cancel-fn)
+  (funcall (go:import "microlisp/io.ContextCancel") cancel-fn))
+
+;; (ctx-done ctx) -> t/nil
+;; Check if a context is done (expired or cancelled).
+(define (ctx-done ctx)
+  (let ((result (funcall (go:import "microlisp/io.ContextDone") ctx)))
+    (if result t nil)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 15. Go Callback Adapter
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; (go:callback lisp-fn "signature") -> Go function value
+;; Create a Go callback from a Lisp function.
+;; Signatures: "int32->bool", "int32->int32", "int->int",
+;;   "int->bool", "int,int->", "string->string", "()->", "string->error"
+;; This is a builtin (takes *Value, not reflect-compatible).
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 16. HTTP Request Adapters
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; (http-request method url &optional body) -> *http.Request
+;; Create an HTTP request object. Body can be a string or io.Reader.
+;; This is a builtin (takes *Value, not reflect-compatible).
+
+;; (http-do req &optional client) -> (body-string status-code)
+;; Execute an HTTP request. Client defaults to http.DefaultClient.
+;; This is a builtin (takes *Value, not reflect-compatible).
+
+;; (http-fetch method url &optional body) -> string
+;; Convenience: create request, execute, return body.
+(define (http-fetch method url . rest)
+  (let* ((body (if rest (car rest) ""))
+         (req (http-request method url body))
+         (result (http-do req))
+         (resp-body (car result))
+         (status (cadr result)))
+    resp-body))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 17. Binary Encoding
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; (binary-read-uint32 data order) -> uint32
+;; Read a uint32 from a byte string. Order: "big" or "little".
+(define (binary-read-uint32 data order)
+  (funcall (go:import "microlisp/binary.BinaryReadUint32") data order))
+
+;; (binary-read-uint64 data order) -> uint64
+(define (binary-read-uint64 data order)
+  (funcall (go:import "microlisp/binary.BinaryReadUint64") data order))
+
+;; (binary-read-int32 data order) -> int32
+(define (binary-read-int32 data order)
+  (funcall (go:import "microlisp/binary.BinaryReadInt32") data order))
+
+;; (binary-read-int64 data order) -> int64
+(define (binary-read-int64 data order)
+  (funcall (go:import "microlisp/binary.BinaryReadInt64") data order))
+
+;; (binary-write-uint32 n order) -> byte string
+(define (binary-write-uint32 n order)
+  (funcall (go:import "microlisp/binary.BinaryWriteUint32") n order))
+
+;; (binary-write-uint64 n order) -> byte string
+(define (binary-write-uint64 n order)
+  (funcall (go:import "microlisp/binary.BinaryWriteUint64") n order))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 18. fmt.Sprintf
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; (fmt-sprintf format &rest args) -> string
+;; Go's fmt.Sprintf via FFI.
+(define (fmt-sprintf format . args)
+  (apply (go:import "microlisp/fmt.FormatString") (cons format args)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 19. JSON MarshalIndent
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; (json-marshal-indent v prefix indent) -> string
+(define (json-marshal-indent v prefix indent)
+  (funcall (go:import "microlisp/jsonx.JsonMarshalIndent") v prefix indent))
 `
