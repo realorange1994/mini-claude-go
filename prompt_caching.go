@@ -167,7 +167,7 @@ func cacheMessageParams(params *anthropic.MessageNewParams) {
 
 	// Add cache_control to system prompt
 	if len(params.System) > 0 {
-		params.System[0].CacheControl = anthropic.CacheControlEphemeralParam{}
+		params.System[0].CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
 }
 

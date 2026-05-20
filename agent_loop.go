@@ -2154,7 +2154,7 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 		}
 
 		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
-		response, err := a.client.Messages.New(ctx, params)
+		response, err := a.client.Messages.New(ctx, params, option.WithJSONSet("stream", false))
 		cancel()
 
 		if err == nil {
@@ -2624,7 +2624,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		}
 
 		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
-		response, err := a.client.Messages.New(ctx, params)
+		response, err := a.client.Messages.New(ctx, params, option.WithJSONSet("stream", false))
 		cancel()
 
 		if err == nil {
@@ -2735,7 +2735,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		}
 
 		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
-		response, err := a.client.Messages.New(ctx, params)
+		response, err := a.client.Messages.New(ctx, params, option.WithJSONSet("stream", false))
 		cancel()
 
 		if err == nil {
