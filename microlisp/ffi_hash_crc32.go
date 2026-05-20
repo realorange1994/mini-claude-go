@@ -19,9 +19,9 @@ func register_hash_crc32() {
 			"NewIEEE": crc32.NewIEEE,
 			"Update": crc32.Update,
 			"IEEETable": crc32.IEEETable,
-			"Castagnoli": crc32.Castagnoli,
-			"IEEE": crc32.IEEE,
-			"Koopman": crc32.Koopman,
+			"Castagnoli": uint32(crc32.Castagnoli),
+			"IEEE": uint32(crc32.IEEE),
+			"Koopman": uint32(crc32.Koopman),
 			"Size": crc32.Size,
 		},
 	)

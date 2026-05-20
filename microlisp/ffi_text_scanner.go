@@ -18,7 +18,7 @@ func register_text_scanner() {
 			"EOF": scanner.EOF,
 			"Float": scanner.Float,
 			"GoTokens": scanner.GoTokens,
-			"GoWhitespace": scanner.GoWhitespace,
+			"GoWhitespace": uint64(scanner.GoWhitespace),
 			"Ident": scanner.Ident,
 			"Int": scanner.Int,
 			"RawString": scanner.RawString,

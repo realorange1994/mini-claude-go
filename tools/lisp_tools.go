@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -17,6 +18,14 @@ type LispToolsTool struct{}
 // lispToolsLoaded tracks whether lispToolsLib has been loaded into globalEnv.
 // ResetGlobalEnv clears all function definitions, so we need to reload.
 // Call ResetLispToolsState() after any ResetGlobalEnv call.
+// resolvePath converts Unix-style paths (especially /tmp) to native paths on Windows.
+func resolvePath(path string) string {
+	if runtime.GOOS == "windows" {
+		return PosixToWindowsPath(path)
+	}
+	return path
+}
+
 var lispToolsLoaded bool
 var lispToolsMu sync.Mutex
 
@@ -240,6 +249,7 @@ func (t *LispToolsTool) doRead(ctx context.Context, params map[string]any) ToolR
 	if path == "" {
 		return ToolResult{Output: "Error: file_path is required for read", IsError: true}
 	}
+	path = resolvePath(path)
 	offset := 1
 	if v, ok := paramInt(params["offset"]); ok {
 		offset = v
@@ -257,6 +267,7 @@ func (t *LispToolsTool) doWrite(ctx context.Context, params map[string]any) Tool
 	if path == "" {
 		return ToolResult{Output: "Error: file_path is required for write", IsError: true}
 	}
+	path = resolvePath(path)
 	content, hasContent := params["content"]
 	if !hasContent {
 		return ToolResult{Output: "Error: content is required for write", IsError: true}
@@ -271,6 +282,7 @@ func (t *LispToolsTool) doEdit(ctx context.Context, params map[string]any) ToolR
 	if path == "" {
 		return ToolResult{Output: "Error: file_path is required for edit", IsError: true}
 	}
+	path = resolvePath(path)
 	oldStr, _ := params["old_string"].(string)
 	newStr, _ := params["new_string"].(string)
 	if oldStr == "" {
@@ -289,6 +301,7 @@ func (t *LispToolsTool) doMultiEdit(ctx context.Context, params map[string]any) 
 	if path == "" {
 		return ToolResult{Output: "Error: file_path is required for multi_edit", IsError: true}
 	}
+	path = resolvePath(path)
 	editsVal, ok := params["edits"]
 	if !ok {
 		return ToolResult{Output: "Error: edits array is required for multi_edit", IsError: true}
@@ -321,6 +334,7 @@ func (t *LispToolsTool) doList(ctx context.Context, params map[string]any) ToolR
 	if path == "" {
 		path = "."
 	}
+	path = resolvePath(path)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return ToolResult{Output: fmt.Sprintf("Error: no such directory: %s", path), IsError: true}
 	}
@@ -349,6 +363,7 @@ func (t *LispToolsTool) doSearch(ctx context.Context, params map[string]any) Too
 	if path == "" {
 		path = "."
 	}
+	path = resolvePath(path)
 	outputMode := "content"
 	if v, ok := params["output_mode"].(string); ok && v != "" {
 		outputMode = v
@@ -379,6 +394,7 @@ func (t *LispToolsTool) doGlob(ctx context.Context, params map[string]any) ToolR
 	if path == "" {
 		path = "."
 	}
+	path = resolvePath(path)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return ToolResult{Output: fmt.Sprintf("Error: no such directory: %s", path), IsError: true}
 	}
@@ -395,6 +411,7 @@ func (t *LispToolsTool) doMkdir(ctx context.Context, params map[string]any) Tool
 	if path == "" {
 		return ToolResult{Output: "Error: path is required for mkdir", IsError: true}
 	}
+	path = resolvePath(path)
 	recursive := "nil"
 	if v, ok := params["recursive"].(bool); ok && v {
 		recursive = "t"
@@ -411,6 +428,7 @@ func (t *LispToolsTool) doRm(ctx context.Context, params map[string]any) ToolRes
 	if path == "" {
 		return ToolResult{Output: "Error: path is required for rm", IsError: true}
 	}
+	path = resolvePath(path)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return ToolResult{Output: fmt.Sprintf("Error: no such file or directory: %s", path), IsError: true}
 	}
@@ -427,6 +445,8 @@ func (t *LispToolsTool) doMv(ctx context.Context, params map[string]any) ToolRes
 	if src == "" || dst == "" {
 		return ToolResult{Output: "Error: file_path and destination are required for mv", IsError: true}
 	}
+	src = resolvePath(src)
+	dst = resolvePath(dst)
 	if _, err := os.Stat(src); os.IsNotExist(err) {
 		return ToolResult{Output: fmt.Sprintf("Error: no such file or directory: %s", src), IsError: true}
 	}
@@ -443,6 +463,8 @@ func (t *LispToolsTool) doCp(ctx context.Context, params map[string]any) ToolRes
 	if src == "" || dst == "" {
 		return ToolResult{Output: "Error: file_path and destination are required for cp", IsError: true}
 	}
+	src = resolvePath(src)
+	dst = resolvePath(dst)
 	expr := fmt.Sprintf(`(lisp-cp %s %s)`, lispStr(src), lispStr(dst))
 	return t.evalVoid(ctx, expr)
 }

@@ -23,7 +23,7 @@ func register_math_big() {
 			"Exact": big.Exact,
 			"MaxBase": big.MaxBase,
 			"MaxExp": big.MaxExp,
-			"MaxPrec": big.MaxPrec,
+			"MaxPrec": uint(big.MaxPrec),
 			"MinExp": big.MinExp,
 			"ToNearestAway": big.ToNearestAway,
 			"ToNearestEven": big.ToNearestEven,
