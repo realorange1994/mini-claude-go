@@ -155,25 +155,30 @@ var goStdlibLisp = `
           (let ((s (string-replace s "\t" "\\t")))
             s))))))
 
-;; Check if a list is an alist
+;; Check if a list is an alist (association list of dotted pairs)
+;; An alist is a list where every element is a cons cell (pair).
+;; Empty list is a valid alist (encodes to {}).
 (define (alist-p lst)
   (if (null lst)
-      #f
+      #t
       (if (consp (car lst))
-          (let ((pair (car lst)))
-            (if (consp (cdr pair))  ; has both car and cdr
-                (if (null (cdr lst))
-                    #t
-                    (alist-p (cdr lst)))
-                #f))
+          (if (null (cdr lst))
+              #t
+              (alist-p (cdr lst)))
           #f)))
 
 ;; Encode alist as JSON object string
+;; Handles both canonical dotted pairs (key . val) and list-form (key val)
 (define (json-encode-alist alist)
   (let ((pairs '()))
     (dolist (kv alist)
       (let* ((key (car kv))
-             (val (cdr kv))
+             (val-cdr (cdr kv))
+             ;; For dotted pair (key . val), val-cdr is the value directly.
+             ;; For list-form (key val), val-cdr is (val) — take its car.
+             (val (if (and (consp val-cdr) (null (cdr val-cdr)))
+                      (car val-cdr)
+                      val-cdr))
              (key-str (if (symbolp key)
                          (symbol->string key)
                          (if (stringp key) key "null")))
