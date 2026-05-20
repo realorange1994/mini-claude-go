@@ -351,3 +351,71 @@ func TestGlobAbsolutePathsContainFilename(t *testing.T) {
 		t.Errorf("expected filename in output, got:\n%s", result.Output)
 	}
 }
+
+// ─── Regression: glob deduplication (Bug 4) ─────────────────────────────────
+// When a directory matches the glob pattern and walk continues into it,
+// the final results must not contain duplicate entries.
+
+func TestGlobNoDuplicateResults(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "src", "pkg"), 0755)
+	os.WriteFile(filepath.Join(dir, "src", "main.go"), []byte("package main"), 0644)
+	os.WriteFile(filepath.Join(dir, "src", "pkg", "lib.go"), []byte("package lib"), 0644)
+
+	tool := &GlobTool{}
+	// **/* matches both directories and files
+	result := tool.Execute(map[string]any{
+		"pattern": "**/*",
+		"path":    dir,
+		"type":    "all",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+
+	// Count occurrences of each path
+	lines := strings.Split(strings.TrimSpace(result.Output), "\n")
+	counts := make(map[string]int)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "(") {
+			continue
+		}
+		counts[line]++
+	}
+
+	// No path should appear more than once
+	for path, count := range counts {
+		if count > 1 {
+			t.Errorf("duplicate path in glob results: %s appeared %d times", path, count)
+		}
+	}
+}
+
+// ─── Regression: glob excludes with directory patterns ────────────────────────
+// Ensure excludes properly skip directories and their contents.
+
+func TestGlobExcludesDirectory(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "src", "vendor", "pkg"), 0755)
+	os.MkdirAll(filepath.Join(dir, "src", "main"), 0755)
+	os.WriteFile(filepath.Join(dir, "src", "vendor", "pkg", "lib.go"), []byte("package lib"), 0644)
+	os.WriteFile(filepath.Join(dir, "src", "main", "app.go"), []byte("package main"), 0644)
+
+	tool := &GlobTool{}
+	result := tool.Execute(map[string]any{
+		"pattern":  "**/*.go",
+		"path":     dir,
+		"excludes": []any{"vendor"},
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Output)
+	}
+
+	if contains(result.Output, "lib.go") {
+		t.Errorf("vendor files should be excluded, got:\n%s", result.Output)
+	}
+	if !contains(result.Output, "app.go") {
+		t.Errorf("expected app.go in output:\n%s", result.Output)
+	}
+}

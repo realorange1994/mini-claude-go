@@ -57,15 +57,15 @@ func (*FileEncodingTool) InputSchema() map[string]any {
 			},
 			"content": map[string]any{
 				"type":        "string",
-				"description": "Content to write (required for write operation, or new_string for edit operation).",
+				"description": "Text content to write. REQUIRED for 'write' operation. For 'edit', use old_string/new_string instead.",
 			},
 			"old_string": map[string]any{
 				"type":        "string",
-				"description": "Text to find and replace (required for edit operation).",
+				"description": "Exact text to find and replace. REQUIRED for 'edit' operation. Must be non-empty.",
 			},
 			"new_string": map[string]any{
 				"type":        "string",
-				"description": "Replacement text (for edit operation, defaults to content if not provided).",
+				"description": "Replacement text. REQUIRED for 'edit' operation. Falls back to content if not provided.",
 			},
 			"replace_all": map[string]any{
 				"type":        "boolean",

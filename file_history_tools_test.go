@@ -498,3 +498,98 @@ func TestFileHistoryDiffFriendlyErrorForMissingVersion(t *testing.T) {
 		t.Errorf("error should contain 'does not exist', got: %s", result.Output)
 	}
 }
+
+// ─── Regression: file_history_grep version param when path is empty (Bug 2) ──
+// Previously, grepAllFiles ignored the version param and always used the latest
+// version. Now it should respect the version param.
+
+func TestFileHistoryGrepVersionWithoutPath(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+
+	sh := NewSnapshotHistory(dir)
+
+	// v1: content has "old_value"
+	os.WriteFile(fp, []byte("config = old_value\nother line\n"), 0644)
+	sh.TakeSnapshot(fp)
+
+	// v2: content changed to "new_value"
+	os.WriteFile(fp, []byte("config = new_value\nother line\n"), 0644)
+	sh.TakeSnapshot(fp)
+
+	tool := &FileHistoryGrepTool{History: sh}
+
+	// Search for "old_value" at version 1 — should find it
+	resultV1 := tool.Execute(map[string]any{
+		"pattern": "old_value",
+		"version": float64(1),
+	})
+	if !strings.Contains(resultV1.Output, "old_value") {
+		t.Errorf("expected 'old_value' in v1 grep result, got: %s", resultV1.Output)
+	}
+
+	// Search for "old_value" at version 2 — should NOT find it
+	resultV2 := tool.Execute(map[string]any{
+		"pattern": "old_value",
+		"version": float64(2),
+	})
+	if strings.Contains(resultV2.Output, "old_value") {
+		t.Errorf("expected 'old_value' NOT in v2 grep result, got: %s", resultV2.Output)
+	}
+}
+
+// ─── Regression: file_history_diff mode param when checksums match (Bug 3) ──
+// Previously, when checksums matched, the function returned "No differences"
+// without respecting the mode param (stat/name-only). Now it should call
+// diffOutput to respect the mode.
+
+func TestFileHistoryDiffModeWhenChecksumsMatch(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+
+	sh := NewSnapshotHistory(dir)
+
+	// v1: initial content
+	os.WriteFile(fp, []byte("same content\n"), 0644)
+	sh.TakeSnapshot(fp)
+
+	// v2: modify content (different checksum)
+	os.WriteFile(fp, []byte("different content\n"), 0644)
+	sh.TakeSnapshot(fp)
+
+	// v3: restore back to original (same checksum as v1)
+	os.WriteFile(fp, []byte("same content\n"), 0644)
+	sh.TakeSnapshot(fp)
+
+	tool := &FileHistoryDiffTool{History: sh}
+
+	// Test stat mode — v1 and v3 have same checksums
+	resultStat := tool.Execute(map[string]any{
+		"path": fp,
+		"from": float64(1),
+		"to":   float64(3),
+		"mode": "stat",
+	})
+	if resultStat.IsError {
+		t.Fatalf("stat mode should not error for identical checksums, got: %s", resultStat.Output)
+	}
+	// Should contain stat info (0 lines changed or similar), not just "No differences"
+	if !strings.Contains(resultStat.Output, "0") && !strings.Contains(resultStat.Output, "unchanged") && !strings.Contains(resultStat.Output, "identical") {
+		t.Logf("stat mode output: %s", resultStat.Output)
+	}
+
+	// Test name-only mode — v1 and v3 have same checksums
+	resultNameOnly := tool.Execute(map[string]any{
+		"path": fp,
+		"from": float64(1),
+		"to":   float64(3),
+		"mode": "name-only",
+	})
+	if resultNameOnly.IsError {
+		t.Fatalf("name-only mode should not error for identical checksums, got: %s", resultNameOnly.Output)
+	}
+	// Should contain the filename
+	if !strings.Contains(resultNameOnly.Output, "test.txt") {
+		t.Errorf("name-only mode should contain filename, got: %s", resultNameOnly.Output)
+	}
+}

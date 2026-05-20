@@ -125,12 +125,9 @@ func WalkDir(opts WalkOptions) ([]WalkEntry, error) {
 			return nil
 		}
 
-		// Skip excluded files
+		// Skip excluded files (supports ** glob patterns)
 		for _, excl := range opts.Excludes {
-			if matched, _ := filepath.Match(excl, d.Name()); matched {
-				return nil
-			}
-			if matched, _ := filepath.Match(excl, rel); matched {
+			if matchExcludePattern(excl, rel, false) {
 				return nil
 			}
 		}
@@ -273,12 +270,9 @@ func WalkDirStream(opts WalkOptions, fn func(WalkEntry) error) error {
 			return nil
 		}
 
-		// Skip excluded files
+		// Skip excluded files (supports ** glob patterns)
 		for _, excl := range opts.Excludes {
-			if matched, _ := filepath.Match(excl, d.Name()); matched {
-				return nil
-			}
-			if matched, _ := filepath.Match(excl, rel); matched {
+			if matchExcludePattern(excl, rel, false) {
 				return nil
 			}
 		}

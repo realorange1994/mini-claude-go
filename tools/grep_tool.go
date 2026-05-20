@@ -458,16 +458,62 @@ func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, ca
 		lines = strings.Split(output, "\n")
 	}
 
-	// Apply offset
-	if offset > 0 && offset < len(lines) {
-		lines = lines[offset:]
+	// Group lines by match group, then apply offset/head_limit per group.
+	// Normal mode: rg uses "--" as separator between non-contiguous match groups.
+	// Multiline mode (--null-data): each NUL-delimited record is already one match group.
+	var groups [][]string
+	if multiline && outputMode == "content" {
+		// Each element in lines is one complete match record (already split by NUL)
+		for _, line := range lines {
+			groups = append(groups, []string{line})
+		}
+	} else {
+		groups = groupMatchLines(lines)
 	}
-	// Apply head_limit if set (0 means unlimited)
-	if headLimit > 0 && len(lines) > headLimit {
-		lines = lines[:headLimit]
-		lines = append(lines, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
+
+	if offset > 0 && offset < len(groups) {
+		groups = groups[offset:]
 	}
-	return ToolResult{Output: strings.Join(lines, "\n")}
+	wasTruncated := false
+	if headLimit > 0 && len(groups) > headLimit {
+		wasTruncated = true
+		groups = groups[:headLimit]
+	}
+
+	// Rejoin groups with "--" separators
+	var resultLines []string
+	for i, g := range groups {
+		if i > 0 {
+			resultLines = append(resultLines, "--")
+		}
+		resultLines = append(resultLines, g...)
+	}
+	if wasTruncated {
+		resultLines = append(resultLines, fmt.Sprintf("(showing first %d matches, truncated)", headLimit))
+	}
+
+	return ToolResult{Output: strings.Join(resultLines, "\n")}
+}
+
+// groupMatchLines splits rg output lines into match groups.
+// rg uses "--" as a separator between non-contiguous match groups.
+func groupMatchLines(lines []string) [][]string {
+	var groups [][]string
+	var current []string
+	for _, line := range lines {
+		if line == "--" {
+			if len(current) > 0 {
+				groups = append(groups, current)
+				current = nil
+			}
+		} else {
+			current = append(current, line)
+		}
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+	return groups
 }
 
 // parseFilesize parses a file size string like "1M", "500K", "100B" into bytes.

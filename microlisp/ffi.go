@@ -64,6 +64,13 @@ func builtinFFI(args []*Value) (*Value, error) {
 		if pkg, ok := GoPackageRegistry[pkgName]; ok {
 			if fnVal, ok := pkg[symName]; ok {
 				if fnVal.Kind() == reflect.Func {
+					// If extra arguments are provided, call the function directly
+					if len(args) > 1 {
+						wrapper := &goFunc{fn: fnVal, name: goName}
+						callArgs := make([]*Value, len(args)-1)
+						copy(callArgs, args[1:])
+						return makeGoPrim(wrapper)(callArgs)
+					}
 					wrapper := &goFunc{fn: fnVal, name: goName}
 					return &Value{
 						typ:  VPrim,

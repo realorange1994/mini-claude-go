@@ -15,6 +15,20 @@ import (
 	"miniclaudecode-go/tools"
 )
 
+// parseIntParam safely extracts an int from params,
+// supporting both float64 (JSON numbers) and int.
+func parseIntParam(params map[string]any, key string, defaultValue int) int {
+	if v, ok := params[key]; ok {
+		switch val := v.(type) {
+		case float64:
+			return int(val)
+		case int:
+			return val
+		}
+	}
+	return defaultValue
+}
+
 // ─── file_history ───
 
 type FileHistoryTool struct {
@@ -108,13 +122,9 @@ func (t *FileHistoryTool) listAllFiles(params map[string]any) tools.ToolResult {
 		files = filtered
 	}
 	offset := 0
-	if v, ok := params["offset"].(float64); ok {
-		offset = int(v)
-	}
+	offset = parseIntParam(params, "offset", offset)
 	limit := 10
-	if v, ok := params["limit"].(float64); ok {
-		limit = int(v)
-	}
+	limit = parseIntParam(params, "limit", limit)
 	if offset >= len(files) {
 		offset = 0
 	}
@@ -173,22 +183,16 @@ func (t *FileHistoryReadTool) Execute(params map[string]any) tools.ToolResult {
 		return tools.ToolResult{Output: fmt.Sprintf("No history for %s", fullPath), IsError: true}
 	}
 	version := len(snaps)
-	if v, ok := params["version"].(float64); ok {
-		version = int(v)
-	}
+	version = parseIntParam(params, "version", version)
 	if version < 1 || version > len(snaps) {
 		return tools.ToolResult{Output: fmt.Sprintf("Version %d out of range (1-%d)", version, len(snaps)), IsError: true}
 	}
 	snap := snaps[version-1]
 	lines := strings.Split(snap.Content, "\n")
 	offset := 1
-	if v, ok := params["offset"].(float64); ok {
-		offset = int(v)
-	}
+	offset = parseIntParam(params, "offset", offset)
 	limit := 2000
-	if v, ok := params["limit"].(float64); ok {
-		limit = int(v)
-	}
+	limit = parseIntParam(params, "limit", limit)
 	if offset < 1 {
 		offset = 1
 	}
@@ -249,14 +253,12 @@ func (t *FileHistoryGrepTool) Execute(params map[string]any) tools.ToolResult {
 		return tools.ToolResult{Output: fmt.Sprintf("Invalid regex: %v", err), IsError: true}
 	}
 	context := 2
-	if v, ok := params["context"].(float64); ok {
-		context = int(v)
-	}
+	context = parseIntParam(params, "context", context)
 	pathVal, hasPath := params["path"].(string)
 	if hasPath && pathVal != "" {
 		return t.grepFile(pathVal, re, context, params)
 	}
-	return t.grepAllFiles(re, context)
+	return t.grepAllFiles(re, context, params)
 }
 
 func (t *FileHistoryGrepTool) grepFile(path string, re *regexp.Regexp, context int, params map[string]any) tools.ToolResult {
@@ -266,9 +268,7 @@ func (t *FileHistoryGrepTool) grepFile(path string, re *regexp.Regexp, context i
 		return tools.ToolResult{Output: fmt.Sprintf("No history for %s", fullPath), IsError: true}
 	}
 	version := len(snaps)
-	if v, ok := params["version"].(float64); ok {
-		version = int(v)
-	}
+	version = parseIntParam(params, "version", version)
 	if version < 1 || version > len(snaps) {
 		return tools.ToolResult{Output: fmt.Sprintf("Version %d out of range", version), IsError: true}
 	}
@@ -301,7 +301,7 @@ func (t *FileHistoryGrepTool) grepFile(path string, re *regexp.Regexp, context i
 	return tools.ToolResult{Output: sb.String()}
 }
 
-func (t *FileHistoryGrepTool) grepAllFiles(re *regexp.Regexp, context int) tools.ToolResult {
+func (t *FileHistoryGrepTool) grepAllFiles(re *regexp.Regexp, context int, params map[string]any) tools.ToolResult {
 	files := t.History.ListAllFiles()
 	var sb strings.Builder
 	totalMatches := 0
@@ -310,7 +310,12 @@ func (t *FileHistoryGrepTool) grepAllFiles(re *regexp.Regexp, context int) tools
 		if len(snaps) == 0 {
 			continue
 		}
-		snap := snaps[len(snaps)-1]
+		// Use specified version if provided, otherwise latest
+		version := parseIntParam(params, "version", len(snaps))
+		if version < 1 || version > len(snaps) {
+			version = len(snaps)
+		}
+		snap := snaps[version-1]
 		lines := strings.Split(snap.Content, "\n")
 		for i, line := range lines {
 			if re.MatchString(line) {
@@ -492,7 +497,7 @@ func (t *FileHistoryDiffTool) Execute(params map[string]any) tools.ToolResult {
 	fromSnap := snaps[fromVer-1]
 	toSnap := snaps[toVer-1]
 	if fromSnap.Checksum == toSnap.Checksum {
-		return tools.ToolResult{Output: "No differences between v" + fmt.Sprintf("%d", fromVer) + " and v" + fmt.Sprintf("%d", toVer)}
+		return t.diffOutput(fullPath, fromVer, toVer, fromSnap.Content, toSnap.Content, mode, params)
 	}
 	return t.diffOutput(fullPath, fromVer, toVer, fromSnap.Content, toSnap.Content, mode, params)
 }
@@ -537,10 +542,7 @@ func (t *FileHistoryDiffTool) diffOutput(fullPath string, fromVer, toVer int, fr
 	case "name-only":
 		return tools.ToolResult{Output: fmt.Sprintf("%s (v%d → v%d)", filepath.Base(fullPath), fromVer, toVer)}
 	default:
-		contextLines := 3
-		if v, ok := params["context"].(float64); ok {
-			contextLines = int(v)
-		}
+		contextLines := parseIntParam(params, "context", 3)
 		diffStr := generateUnifiedDiff(fromContent, toContent, fmt.Sprintf("v%d", fromVer), fmt.Sprintf("v%d", toVer), contextLines)
 		if diffStr == "" {
 			return tools.ToolResult{Output: "No differences found"}
@@ -735,10 +737,7 @@ func (t *FileHistoryTimelineTool) Execute(params map[string]any) tools.ToolResul
 	if s, ok := params["since"].(string); ok && s != "" {
 		since = parseDuration(s)
 	}
-	limit := 20
-	if v, ok := params["limit"].(float64); ok {
-		limit = int(v)
-	}
+	limit := parseIntParam(params, "limit", 20)
 	entries := t.History.GetTimeline(since)
 	if len(entries) == 0 {
 		return tools.ToolResult{Output: "No timeline entries found"}
@@ -819,12 +818,7 @@ func (t *FileHistoryTagTool) Execute(params map[string]any) tools.ToolResult {
 		if tagVal == "" {
 			return tools.ToolResult{Output: "Error: tag is required for delete", IsError: true}
 		}
-		versionVal := 0
-		if v, ok := params["version"].(float64); ok {
-			versionVal = int(v)
-		} else if v, ok := params["version"].(int); ok {
-			versionVal = v
-		}
+		versionVal := parseIntParam(params, "version", 0)
 		if versionVal == 0 {
 			return tools.ToolResult{Output: "Error: version is required for delete", IsError: true}
 		}
@@ -916,11 +910,7 @@ func (t *FileHistoryAnnotateTool) Execute(params map[string]any) tools.ToolResul
 		return tools.ToolResult{Output: "Error: missing required parameter: \"message\"", IsError: true}
 	}
 	version := 0
-	if v, ok := params["version"].(float64); ok {
-		version = int(v)
-	} else if v, ok := params["version"].(int); ok {
-		version = v
-	}
+	version = parseIntParam(params, "version", version)
 	if version < 1 {
 		return tools.ToolResult{Output: "Error: version must be at least 1", IsError: true}
 	}

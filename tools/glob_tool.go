@@ -192,6 +192,18 @@ func (t *GlobTool) ExecuteContext(ctx context.Context, params map[string]any) To
 		return ToolResult{Output: "No files matched."}
 	}
 
+	// Deduplicate matches (can happen when directory matches pattern
+	// and walk continues into it with overlapping patterns)
+	seen := make(map[string]bool)
+	unique := matches[:0]
+	for _, m := range matches {
+		if !seen[m] {
+			seen[m] = true
+			unique = append(unique, m)
+		}
+	}
+	matches = unique
+
 	// Sort by modification time (newest first)
 	type fileInfo struct {
 		path     string

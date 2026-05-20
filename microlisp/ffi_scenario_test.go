@@ -990,3 +990,57 @@ func TestScenario_FFITypeVerification(t *testing.T) {
 		t.Fatalf("expected Time type, got: %v", result)
 	}
 }
+
+// ===========================================================================
+// Regression: FFI with args returns result, not #<primitive> (Bug 7)
+// ===========================================================================
+// Previously, (ffi "math.Sqrt" 16.0) returned #<primitive> instead of 4.0.
+// The fix makes builtinFFI call the function directly when extra args are given.
+
+func TestRegression_FFIWithArgsReturnsResult(t *testing.T) {
+	InitGlobalEnv()
+	// (ffi "math.Sqrt" 16.0) should return 4.0, not #<primitive>
+	result, err := EvalString(`(ffi "math.Sqrt" 16.0)`, globalEnv)
+	if err != nil {
+		t.Fatalf("ffi with args failed: %v", err)
+	}
+	if !isNumeric(result) {
+		t.Fatalf("expected numeric result from (ffi \"math.Sqrt\" 16.0), got %s: %v", typeStr(result), result)
+	}
+	if toNum(result) != 4.0 {
+		t.Fatalf("expected 4.0 from Sqrt(16), got %v", toNum(result))
+	}
+}
+
+func TestRegression_FFIWithArgsStringsToUpper(t *testing.T) {
+	InitGlobalEnv()
+	// (ffi "strings.ToUpper" "hello") should return "HELLO"
+	result, err := EvalString(`(ffi "strings.ToUpper" "hello")`, globalEnv)
+	if err != nil {
+		t.Fatalf("ffi strings.ToUpper with args failed: %v", err)
+	}
+	if result.typ != VStr || result.str != "HELLO" {
+		t.Fatalf("expected 'HELLO', got %v", result)
+	}
+}
+
+func TestRegression_FFIWithoutArgsReturnsCallable(t *testing.T) {
+	InitGlobalEnv()
+	// (ffi "math.Sqrt") without args should return a callable function
+	result, err := EvalString(`(ffi "math.Sqrt")`, globalEnv)
+	if err != nil {
+		t.Fatalf("ffi without args failed: %v", err)
+	}
+	// Should return a primitive (callable), not a number
+	if result.typ != VPrim {
+		t.Fatalf("expected VPrim from (ffi \"math.Sqrt\"), got %s", typeStr(result))
+	}
+	// And it should be callable
+	result2, err := EvalString(`((ffi "math.Sqrt") 25.0)`, globalEnv)
+	if err != nil {
+		t.Fatalf("calling ffi result failed: %v", err)
+	}
+	if !isNumeric(result2) || toNum(result2) != 5.0 {
+		t.Fatalf("expected 5.0 from calling (ffi \"math.Sqrt\"), got %v", result2)
+	}
+}

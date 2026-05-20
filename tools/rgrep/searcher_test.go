@@ -282,6 +282,115 @@ func TestCountModeIgnoresContextParams(t *testing.T) {
 	}
 }
 
+// ─── Context: -B and -A must both work (Bug 1) ──────────────────────────────
+
+func TestContextBeforeAndAfterBothWork(t *testing.T) {
+	// File with content where we can verify before/after context
+	dir := t.TempDir()
+	content := "before1\nbefore2\nMATCH_HERE\nafter1\nafter2\n"
+	os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0644)
+
+	cfg := SearchConfig{
+		Pattern:       "MATCH_HERE",
+		Path:          dir,
+		OutputMode:    OutputContent,
+		ContextBefore:  2,
+		ContextAfter:   2,
+		Ctx:           context.Background(),
+	}
+	result := Search(cfg)
+	if len(result.Results) == 0 {
+		t.Fatal("expected match")
+	}
+
+	// Should have: 2 before-context lines + 1 match + 2 after-context = 5 lines
+	// With line numbers, total results should be 5
+	if len(result.Results) != 5 {
+		t.Errorf("expected 5 results (2 before + match + 2 after), got %d", len(result.Results))
+	}
+
+	// Verify the match line is in the middle (position 3, 1-indexed)
+	matchFound := false
+	for _, r := range result.Results {
+		if strings.Contains(r.Line, "MATCH_HERE") {
+			matchFound = true
+		}
+	}
+	if !matchFound {
+		t.Error("MATCH_HERE should be in results")
+	}
+}
+
+func TestContextBeforeOnly(t *testing.T) {
+	dir := t.TempDir()
+	content := "line1\nline2\nMATCH\nafter\n"
+	os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0644)
+
+	cfg := SearchConfig{
+		Pattern:       "MATCH",
+		Path:          dir,
+		OutputMode:    OutputContent,
+		ContextBefore: 2,
+		ContextAfter:  0,
+		Ctx:           context.Background(),
+	}
+	result := Search(cfg)
+	if len(result.Results) != 3 {
+		t.Errorf("expected 3 results (2 before + match), got %d", len(result.Results))
+	}
+}
+
+func TestContextAfterOnly(t *testing.T) {
+	dir := t.TempDir()
+	content := "before\nMATCH\nafter1\nafter2\n"
+	os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0644)
+
+	cfg := SearchConfig{
+		Pattern:       "MATCH",
+		Path:          dir,
+		OutputMode:    OutputContent,
+		ContextBefore: 0,
+		ContextAfter:  2,
+		Ctx:           context.Background(),
+	}
+	result := Search(cfg)
+	if len(result.Results) != 3 {
+		t.Errorf("expected 3 results (match + 2 after), got %d", len(result.Results))
+	}
+}
+
+func TestContextMultipleMatches(t *testing.T) {
+	dir := t.TempDir()
+	content := "before1\nMATCH1\nshared\nbefore2\nMATCH2\nafter\n"
+	os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0644)
+
+	cfg := SearchConfig{
+		Pattern:       "MATCH",
+		Path:          dir,
+		OutputMode:    OutputContent,
+		ContextBefore: 1,
+		ContextAfter:  1,
+		Ctx:           context.Background(),
+	}
+	result := Search(cfg)
+
+	// Both matches should have context
+	matchCount := 0
+	for _, r := range result.Results {
+		if strings.Contains(r.Line, "MATCH") {
+			matchCount++
+		}
+	}
+	if matchCount != 2 {
+		t.Errorf("expected 2 matches, got %d", matchCount)
+	}
+
+	// Should have context lines too
+	if len(result.Results) < 4 {
+		t.Errorf("expected at least 4 results (2 matches + context), got %d", len(result.Results))
+	}
+}
+
 // ─── Result line computation in multiline mode ──────────────────────────────
 
 func TestMultilineResultLineNumber(t *testing.T) {
