@@ -2164,6 +2164,8 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
+				// Anchor the token estimate to the actual API response to prevent drift
+				a.context.SetAPITokenAnchor(response.Usage.InputTokens)
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
 					a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
@@ -2464,6 +2466,8 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		a.recordTokenUsageWithCache(
 			int64(collect.Usage.InputTokens), int64(collect.Usage.OutputTokens),
 			int64(collect.Usage.CacheWriteTokens), int64(collect.Usage.CacheReadTokens))
+			// Anchor the token estimate to the actual API response to prevent drift
+			a.context.SetAPITokenAnchor(int64(collect.Usage.InputTokens))
 		// Detect cache break: warn if cache reuse dropped significantly from previous call
 		if a.cacheBreakDetector.DetectBreak(int64(collect.Usage.CacheReadTokens)) {
 			a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
@@ -2631,6 +2635,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
+			a.context.SetAPITokenAnchor(response.Usage.InputTokens)
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
 					a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
 				}
@@ -2741,6 +2746,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
+			a.context.SetAPITokenAnchor(response.Usage.InputTokens)
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
 					a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
 				}

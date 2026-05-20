@@ -850,6 +850,12 @@ type ConversationContext struct {
 	// contentReplacementState tracks replacement decisions across turns for
 	// prompt cache stability. Matching upstream's ContentReplacementState.
 	contentReplacementState *ContentReplacementState
+	// apiTokenAnchor stores the exact input_tokens from the most recent API
+	// response, along with the entry count at that point. This enables hybrid
+	// token estimation: use the exact API count as anchor, then only estimate
+	// the delta for entries added since. Matching upstream's tokenCountWithEstimation().
+	apiTokenAnchor int64 // exact input_tokens from last API response
+	apiAnchorEntries int  // number of entries in context when anchor was recorded
 }
 
 // NewConversationContext creates a new context.
@@ -857,8 +863,30 @@ func NewConversationContext(cfg Config) *ConversationContext {
 	return &ConversationContext{config: cfg}
 }
 
-// EstimatedTokens returns a content-type-aware token estimate with 4/3 safety margin.
-// Uses DetectContentType + EstimateContentTokens for more accurate estimation than chars/4.
+// SetAPITokenAnchor records the exact input_tokens from an API response along
+// with the current entry count. This enables hybrid token estimation in
+// EstimatedTokens(): use the API anchor as a precise baseline, then only
+// estimate the delta for entries added since. Matching upstream's
+// tokenCountWithEstimation() which finds the last assistant message with
+// usage data and uses that as the anchor point.
+func (c *ConversationContext) SetAPITokenAnchor(inputTokens int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.apiTokenAnchor = inputTokens
+	c.apiAnchorEntries = len(c.entries)
+}
+
+// EstimatedTokens returns a hybrid token estimate using API anchor + incremental
+// heuristic estimation. This matches upstream's tokenCountWithEstimation() approach:
+//
+//  1. If we have an API anchor (exact input_tokens from a prior API response),
+//     use that as the baseline and only estimate the delta for entries added since.
+//     This prevents cumulative drift that occurs when estimating ALL messages from
+//     scratch using heuristics.
+//
+//  2. If no API anchor exists (early conversation), fall back to full heuristic
+//     estimation with content-type-aware token counting and 4/3 safety margin.
+//
 // Only counts entries after the most recent compact boundary — entries before the
 // boundary are not sent to the API (BuildMessages skips them), so counting them
 // would inflate the estimate and cause false compaction triggers on resume.
@@ -880,8 +908,42 @@ func (c *ConversationContext) EstimatedTokens() int {
 		startIdx = boundaryIdx
 	}
 
+	// Hybrid estimation: use API anchor if available and valid
+	if c.apiTokenAnchor > 0 && c.apiAnchorEntries > 0 {
+		// The anchor was recorded when there were apiAnchorEntries entries.
+		// If compaction happened after the anchor, the anchor is stale — fall
+		// through to full estimation.
+		if c.apiAnchorEntries >= startIdx && c.apiAnchorEntries <= len(c.entries) {
+			// Count how many entries exist after the anchor point
+			deltaStart := c.apiAnchorEntries
+			if deltaStart < startIdx {
+				deltaStart = startIdx
+			}
+			deltaEstimate := estimateEntriesTokens(c.entries[deltaStart:])
+			if deltaEstimate == 0 {
+				return int(c.apiTokenAnchor)
+			}
+			// Apply 4/3 safety margin to the delta only
+			deltaWithMargin := int(math.Ceil(float64(deltaEstimate) * 4.0 / 3.0))
+			return int(c.apiTokenAnchor) + deltaWithMargin
+		}
+	}
+
+	// Full heuristic estimation (no anchor or stale anchor)
+	rawTotal := estimateEntriesTokens(c.entries[startIdx:])
+	if rawTotal == 0 {
+		return 0
+	}
+	// Apply 4/3 safety margin
+	return int(math.Ceil(float64(rawTotal) * 4.0 / 3.0))
+}
+
+// estimateEntriesTokens estimates token count for a slice of conversation entries
+// using content-type-aware heuristic estimation. No safety margin is applied —
+// the caller applies it if needed.
+func estimateEntriesTokens(entries []conversationEntry) int {
 	rawTotal := 0
-	for _, entry := range c.entries[startIdx:] {
+	for _, entry := range entries {
 		switch v := entry.content.(type) {
 		case TextContent:
 			ct := DetectContentType(string(v))
@@ -917,11 +979,7 @@ func (c *ConversationContext) EstimatedTokens() int {
 			rawTotal += EstimateContentTokens(string(v), "natural")
 		}
 	}
-	if rawTotal == 0 {
-		return 0
-	}
-	// Apply 4/3 safety margin (same as estimateMessageParamsTokens)
-	return int(math.Ceil(float64(rawTotal) * 4.0 / 3.0))
+	return rawTotal
 }
 
 // SetSystemPrompt sets the system prompt.

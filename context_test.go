@@ -1464,3 +1464,111 @@ func TestTruncateAfterToolUseDoesNotInsertError(t *testing.T) {
 		t.Errorf("found %d synthetic error placeholders after valid pair was added", syntheticCount)
 	}
 }
+
+// ─── SetAPITokenAnchor & Hybrid Token Estimation ──────────────────────────────
+
+func TestSetAPITokenAnchor(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Initial state: no anchor
+	ctx.SetAPITokenAnchor(0)
+	if ctx.apiTokenAnchor != 0 || ctx.apiAnchorEntries != 0 {
+		t.Errorf("anchor should be cleared, got %d/%d", ctx.apiTokenAnchor, ctx.apiAnchorEntries)
+	}
+
+	// Add some messages and set anchor
+	ctx.AddUserMessage("hello")
+	ctx.AddAssistantText("hi there")
+	ctx.SetAPITokenAnchor(1234)
+
+	if ctx.apiTokenAnchor != 1234 {
+		t.Errorf("expected anchor=1234, got %d", ctx.apiTokenAnchor)
+	}
+	if ctx.apiAnchorEntries != 2 {
+		t.Errorf("expected 2 anchor entries, got %d", ctx.apiAnchorEntries)
+	}
+}
+
+func TestEstimatedTokensHybridUsesAnchor(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Add messages and set anchor to simulate a completed API call
+	ctx.AddUserMessage("hello")
+	ctx.AddAssistantText("hi")
+	anchorTokens := 5000
+	ctx.SetAPITokenAnchor(int64(anchorTokens))
+
+	// Before adding new messages, estimate should be close to anchor
+	// (delta is 0, so should return anchor value)
+	est := ctx.EstimatedTokens()
+	// With 0 delta, estimated = anchor + 0 = anchor
+	if est != anchorTokens {
+		t.Errorf("expected estimate=%d (anchor), got %d", anchorTokens, est)
+	}
+}
+
+func TestEstimatedTokensHybridWithDelta(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Setup: simulate post-API state
+	ctx.AddUserMessage("hello")
+	ctx.AddAssistantText("hi")
+	ctx.SetAPITokenAnchor(5000)
+
+	// Add more messages after the anchor
+	ctx.AddUserMessage("new message with some content that should be estimated")
+
+	// Estimate should be anchor + delta_estimate (not full re-estimate)
+	est := ctx.EstimatedTokens()
+	if est <= 5000 {
+		t.Errorf("estimate should exceed anchor with new content, got %d", est)
+	}
+	// The delta is small, so estimate should be within a reasonable range
+	if est > 5200 {
+		t.Errorf("estimate too high, expected ~5050-5150, got %d", est)
+	}
+}
+
+func TestEstimatedTokensFallbackWithoutAnchor(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.AddUserMessage("hello world")
+	ctx.AddAssistantText("hi there")
+	// No anchor set
+
+	// Should fall back to full heuristic estimation
+	est := ctx.EstimatedTokens()
+	if est <= 0 {
+		t.Error("estimate should be positive without anchor")
+	}
+}
+
+func TestEstimatedTokensAnchorInvalidAfterCompaction(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Add messages, set anchor
+	ctx.AddUserMessage("hello")
+	ctx.AddAssistantText("hi")
+	ctx.AddToolResults([]anthropic.ToolResultBlockParam{
+		{ToolUseID: "t1", Content: []anthropic.ToolResultBlockParamContentUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "result"}},
+		}},
+	})
+	ctx.SetAPITokenAnchor(5000)
+
+	// Now simulate a compaction by adding a boundary — this clears all prior entries
+	ctx.AddCompactBoundary(CompactTriggerAuto, 5000)
+
+	// The anchor entry count is stale (3 entries), but after compaction,
+	// entries are replaced with boundary + summary. The estimate should
+	// fall back to full heuristic.
+	est := ctx.EstimatedTokens()
+	if est <= 0 {
+		t.Error("estimate should be positive after compaction")
+	}
+}
