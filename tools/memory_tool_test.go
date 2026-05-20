@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,20 @@ func TestMemoryAddToolExecuteMissingContent(t *testing.T) {
 	result := tool.Execute(map[string]any{"category": "state"})
 	if !result.IsError {
 		t.Error("missing content should return error")
+	}
+}
+
+func TestMemoryAddToolExecuteInvalidCategory(t *testing.T) {
+	tool := &MemoryAddTool{OnAdd: func(c, ct, s string) {}}
+	result := tool.Execute(map[string]any{
+		"category": "bug",
+		"content":  "test",
+	})
+	if !result.IsError {
+		t.Fatal("invalid category should return error")
+	}
+	if !strings.Contains(result.Output, "invalid category") {
+		t.Errorf("error should mention 'invalid category', got: %s", result.Output)
 	}
 }
 

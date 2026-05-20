@@ -1240,6 +1240,28 @@ func (a *AgentLoop) interruptCtx(baseCtx context.Context, timeout time.Duration)
 	return ctx, cancel
 }
 
+// interruptibleSleep sleeps for the given duration but returns early
+// if the agent is interrupted (Ctrl+C). Returns true if interrupted.
+func (a *AgentLoop) interruptibleSleep(d time.Duration) bool {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	elapsed := time.Duration(0)
+	for elapsed < d {
+		select {
+		case <-ticker.C:
+			if a.IsInterrupted() {
+				return true
+			}
+			if elapsed+100*time.Millisecond > d {
+				return false
+			}
+			elapsed += 100 * time.Millisecond
+		}
+	}
+	return false
+}
+
 // Run processes a user message through the agent loop, returning the final text response.
 func (a *AgentLoop) Run(userMessage string) string {
 	// Clear any stale interrupted flag from previous run
@@ -2125,7 +2147,10 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			}
 			a.out("\n[WARN] Retrying API (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
-			time.Sleep(delay)
+			if a.interruptibleSleep(delay) {
+				a.out("\nInterrupted during retry backoff.\n")
+				return nil, fmt.Errorf("interrupted during retry backoff")
+			}
 		}
 
 		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
@@ -2286,7 +2311,10 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 			}
 			a.out("\n[WARN] Retrying stream (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxStreamRetries+1, delay)
-			time.Sleep(delay)
+			if a.interruptibleSleep(delay) {
+				a.out("\nInterrupted during retry backoff.\n")
+				return nil, nil, fmt.Errorf("interrupted during retry backoff")
+			}
 		}
 
 		toolCalls, textParts, err := a.tryStreamOnce(params, collect, toolCallDoneCh, executor)
@@ -2585,7 +2613,10 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 			delay := jitteredBackoff(attempt)
 			a.out("\n[WARN] Retrying final call (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
-			time.Sleep(delay)
+			if a.interruptibleSleep(delay) {
+				a.out("\nInterrupted during retry backoff.\n")
+				return nil, nil, fmt.Errorf("interrupted during retry backoff")
+			}
 		}
 
 		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
@@ -2692,7 +2723,10 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			}
 			a.out("\n[WARN] Retrying non-streaming call (attempt %d/%d), waiting %v...\n",
 				attempt+1, maxRetries+1, delay)
-			time.Sleep(delay)
+			if a.interruptibleSleep(delay) {
+				a.out("\nInterrupted during retry backoff.\n")
+				return nil, nil, fmt.Errorf("interrupted during retry backoff")
+			}
 		}
 
 		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)

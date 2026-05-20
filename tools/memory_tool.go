@@ -5,6 +5,13 @@ import (
 	"strings"
 )
 
+var validMemoryCategories = map[string]bool{
+	"preference": true,
+	"decision":   true,
+	"state":      true,
+	"reference":  true,
+}
+
 // MemoryAddCallback is the function signature for adding a memory note.
 type MemoryAddCallback func(category, content, source string)
 
@@ -33,7 +40,7 @@ func (t *MemoryAddTool) InputSchema() map[string]any {
 			"category": map[string]any{
 				"type":        "string",
 				"enum":        []any{"preference", "decision", "state", "reference"},
-				"description": "Category of the memory note",
+				"description": "Category of the memory note. Only 'preference', 'decision', 'state', 'reference' are accepted.",
 			},
 			"content": map[string]any{
 				"type":        "string",
@@ -50,6 +57,9 @@ func (t *MemoryAddTool) Execute(params map[string]any) ToolResult {
 	content, _ := params["content"].(string)
 	if category == "" || content == "" {
 		return ToolResultError("category and content are required")
+	}
+	if !validMemoryCategories[category] {
+		return ToolResultError(fmt.Sprintf("invalid category %q — must be one of: preference, decision, state, reference", category))
 	}
 	if t.OnAdd == nil {
 		return ToolResultError("memory system not initialized")
