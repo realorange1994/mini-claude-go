@@ -221,6 +221,8 @@ func makeGoCallback(lispFn *Value, sig string) (reflect.Value, error) {
 		goFnType = reflect.TypeOf(func(int) int { return 0 })
 	case "int->bool":
 		goFnType = reflect.TypeOf(func(int) bool { return false })
+	case "int,int->bool":
+		goFnType = reflect.TypeOf(func(int, int) bool { return false })
 	case "int,int->":
 		goFnType = reflect.TypeOf(func(int, int) {})
 	case "string->string":
