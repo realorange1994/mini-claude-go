@@ -45,6 +45,11 @@ type PermissionGate struct {
 	projectDir string
 	// strippedRules holds dangerous rules stripped in auto mode for restoration.
 	strippedRules map[string][]*permissions.ParsedRule
+	// runtimeDisallowedTools blocks tool execution at runtime without removing
+	// them from the registry. Used by fork sub-agents to keep tool schemas
+	// identical to the parent (for prompt cache sharing) while preventing
+	// execution of tools like "agent" that should not be called recursively.
+	runtimeDisallowedTools map[string]bool
 }
 
 // approvedAction records a user-approved dangerous tool call via AskUserQuestion.
@@ -73,6 +78,13 @@ func (g *PermissionGate) WithRuleStore(rs *permissions.RuleStore, projectDir str
 // WithClassifier sets the auto mode classifier.
 func (g *PermissionGate) WithClassifier(c *AutoModeClassifier) *PermissionGate {
 	g.classifier = c
+	return g
+}
+
+// WithRuntimeDisallowedTools sets tools that are blocked at execution time
+// but remain in the registry (preserving tool schemas for prompt cache sharing).
+func (g *PermissionGate) WithRuntimeDisallowedTools(tools map[string]bool) *PermissionGate {
+	g.runtimeDisallowedTools = tools
 	return g
 }
 
@@ -109,7 +121,13 @@ func (g *PermissionGate) ResetPostCompact() {
 //   3b: allow rule → allow
 //   4: passthrough → ask (mode-based)
 func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.ToolResult {
-	// STEP 0: Auto mode — strip dangerous allow rules on entry
+	// STEP 0a: Runtime disallowed — tool is in registry (schema matches parent)
+	// but blocked at execution time. Used by fork sub-agents for cache sharing.
+	if g.runtimeDisallowedTools != nil && g.runtimeDisallowedTools[tool.Name()] {
+		return denyResult(fmt.Sprintf("tool '%s' is not available in this context", tool.Name()))
+	}
+
+	// STEP 0b: Auto mode — strip dangerous allow rules on entry
 	autoModeStripped := false
 	if g.config.PermissionMode == ModeAuto && g.ruleStore != nil && !g.shouldAvoidPrompts() {
 		if g.strippedRules == nil {

@@ -113,6 +113,12 @@ func RunForkedAgent(cfg ForkedAgentConfig) (*ForkedAgentResult, error) {
 	toolCallCount := 0
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
+		// Apply cache_control markers for prompt caching.
+		// SkipCacheWrite: true because forked agents are fire-and-forget —
+		// we don't want to write to the last KV position since the parent
+		// may continue the conversation from there.
+		applyForkedAgentCaching(&params)
+
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		client := cfg.Client
 		resp, err := client.Messages.New(ctx, params)
@@ -353,8 +359,8 @@ func executeForkedTool(cfg ForkedAgentConfig, toolName string, args map[string]a
 	output := result.Output
 
 	// Truncate long outputs
-	if len(output) > 50000 {
-		output = output[:50000] + "\n\n[... output truncated, 50000 char limit ...]"
+	if len(output) > 8000 {
+		output = output[:8000] + "\n\n[... output truncated, 8000 char limit ...]"
 	}
 	return output
 }
@@ -398,5 +404,29 @@ func CaptureCacheSafeParams(systemPrompt string, model string, registry *tools.R
 		Model:       model,
 		Tools:       buildForkedToolParams(registry),
 		Messages:    messages,
+	}
+}
+
+// applyForkedAgentCaching applies prompt caching markers to forked agent API params.
+// Uses SkipCacheWrite: true because forked agents are fire-and-forget — the parent
+// will continue the conversation from its own last position, so we protect the
+// parent's last KV page by shifting our breakpoint to the second-to-last message.
+func applyForkedAgentCaching(params *anthropic.MessageNewParams) {
+	// Convert messages to maps for caching
+	msgMaps := messageParamToMaps(params.Messages)
+
+	// Apply caching with SkipCacheWrite for fire-and-forget forked agents
+	cacheCfg := CacheBreakpointConfig{
+		MaxBreakpoints: 1,
+		SkipCacheWrite: true,
+	}
+	msgMaps = ApplyPromptCachingWithConfig(msgMaps, "5m", cacheCfg)
+
+	// Convert back to MessageParam
+	params.Messages = mapsToMessageParam(msgMaps)
+
+	// Apply cache_control to system prompt
+	if len(params.System) > 0 {
+		params.System[0].CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
 }

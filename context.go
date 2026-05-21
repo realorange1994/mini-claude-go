@@ -36,9 +36,9 @@ const (
 	// TOOL_RESULT_CLEARED_MESSAGE is used when tool result content was cleared without persisting.
 	TOOL_RESULT_CLEARED_MESSAGE = "[Old tool result content cleared]"
 	// DEFAULT_MAX_RESULT_SIZE_CHARS is the default threshold before persistence kicks in.
-	DEFAULT_MAX_RESULT_SIZE_CHARS = 50000
+	DEFAULT_MAX_RESULT_SIZE_CHARS = 8000
 	// MAX_TOOL_RESULTS_PER_MESSAGE_CHARS is the per-message aggregate budget limit.
-	MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 100000
+	MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 20000
 	// SystemInjectedPrefix is prepended to auto-injected content (session memory,
 	// file recovery, skill recovery) so ApplyPromptCaching can skip these messages
 	// when placing cache breakpoints.

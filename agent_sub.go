@@ -353,7 +353,11 @@ func (a *AgentLoop) SpawnSubAgent(
 	// For fork mode, wrap the user's directive with the fork boilerplate.
 	forkUserMessage := ""
 	if isForkMode {
-		forkUserMessage = fmt.Sprintf("%s\n%s\n</fork_directive>", forkBoilerplate, prompt)
+		// sharedSubAgentNotes (efficiency rules) are injected into the first user
+		// message instead of the system prompt, so the system prompt remains
+		// byte-identical to the parent for prompt cache sharing.
+		notes := sharedSubAgentNotes()
+		forkUserMessage = fmt.Sprintf("%s\n\n%s\n%s\n</fork_directive>", forkBoilerplate, notes, prompt)
 
 		// Hook: OnFork — when a session is forked with inherited context
 		if a.hooks != nil {
@@ -638,10 +642,23 @@ func (a *AgentLoop) buildSubAgentConfig(model string, maxTurns int) Config {
 // Layer 3: agent type specific denyTools
 // Layer 4: explicit disallowedTools from the caller
 //
+// For fork agents (AgentTypeFork), NO filtering is applied — all parent tools
+// are copied to preserve identical tool schemas for prompt cache sharing.
+// Disallowed tools are blocked at runtime via PermissionGate.runtimeDisallowedTools.
+//
 // After filtering, if allowedTools (whitelist) is provided, only those tools
 // are included. A wildcard "*" in allowedTools means "all non-disallowed tools".
 func (a *AgentLoop) buildSubAgentRegistry(agentType AgentType, allowedTools, disallowedTools []string, runInBackground bool) *tools.Registry {
 	childRegistry := tools.NewRegistry()
+
+	// Fork agents: copy ALL parent tools to keep schemas identical for cache sharing.
+	// Disallowed tools are blocked at runtime via PermissionGate.runtimeDisallowedTools.
+	if agentType == AgentTypeFork {
+		for _, tool := range a.registry.AllTools() {
+			childRegistry.Register(tool)
+		}
+		return childRegistry
+	}
 
 	disallowed := make(map[string]bool)
 
@@ -705,15 +722,10 @@ func (a *AgentLoop) buildSubAgentRegistry(agentType AgentType, allowedTools, dis
 // For Explore/Plan agents, CLAUDE.md and gitStatus are omitted for efficiency
 // (saves ~5-15 Gtok/week and ~1-3 Gtok/week respectively).
 func buildSubAgentSystemPrompt(registry *tools.Registry, cfg Config, agentType AgentType, parentSystemPrompt string) string {
-	// Fork mode: use the parent's system prompt verbatim, just like Claude Code's fork path.
-	// The fork boilerplate directive is prepended to the user's message (not the system prompt).
+	// Fork mode: use the parent's system prompt byte-for-byte for cache sharing.
+	// The shared Notes and fork boilerplate are injected into the user message instead.
 	if agentType == AgentTypeFork && parentSystemPrompt != "" {
-		var sb strings.Builder
-		sb.WriteString(parentSystemPrompt)
-		sb.WriteString("\n\n")
-		// Append the Notes section which is shared across all agent types
-		sb.WriteString(sharedSubAgentNotes())
-		return sb.String()
+		return parentSystemPrompt
 	}
 
 	toolList := buildToolList(registry)
@@ -1014,6 +1026,17 @@ maxTurns := cfg.MaxTurns
 			cachedMC:         NewCachedMicrocompactTracker(), // cache_edits tracking for sub-agent
 	}
 	child.gate = NewPermissionGate(&child.config)
+
+	// For fork agents: block disallowed tools at runtime (not in registry)
+	// to keep tool schemas identical to parent for prompt cache sharing.
+	if agentType == AgentTypeFork {
+		runtimeDisallowed := make(map[string]bool)
+		for t := range allAgentDisallowedTools {
+			runtimeDisallowed[t] = true
+		}
+		child.gate.WithRuntimeDisallowedTools(runtimeDisallowed)
+	}
+
 	child.currentMaxTokens.Store(int64(child.config.MaxOutputTokens))
 
 	// Wire ExecTool's BackgroundTaskCallback so sub-agents can spawn background

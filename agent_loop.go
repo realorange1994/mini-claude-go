@@ -338,7 +338,7 @@ type AgentLoop struct {
 	skillTracker             *skills.SkillTracker
 	compactor                *Compactor
 	useStream                bool
-	maxToolChars             int // max chars per tool result (default 50000, matching upstream)
+	maxToolChars             int // max chars per tool result (default 8000, matching openclacky's 4000-byte terminal budget)
 	toolTimeoutMs            int // per-tool execution timeout in ms (default 600000 = 10min)
 	maxTurns                 int // hard cap on turns (default from config.MaxTurns)
 	budget                   *IterationBudget
@@ -609,7 +609,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		skillTracker:      cfg.SkillTracker,
 		compactor:         NewCompactor(),
 		useStream:         useStream,
-		maxToolChars:      50000,
+		maxToolChars:      8000,
 		toolTimeoutMs:     600000, // 10 minutes
 		maxTurns:          maxTurns,
 		budget:            NewIterationBudget(maxTurns),
@@ -814,7 +814,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		skillTracker:      cfg.SkillTracker,
 		compactor:         NewCompactor(),
 		useStream:         useStream,
-		maxToolChars:      50000,
+		maxToolChars:      8000,
 		toolTimeoutMs:     600000, // 10 minutes
 		maxTurns:          maxTurns,
 		budget:            NewIterationBudget(maxTurns),
@@ -2917,6 +2917,12 @@ func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
 				},
 			},
 		})
+	}
+	// Mark last tool definition for cache — same as openclacky's api_tools.last[:cache_control].
+	// This keeps the tool schema prefix in the cached KV, so subsequent turns
+	// hit cache_read instead of re-parsing all tool definitions.
+	if len(toolParams) > 0 && toolParams[len(toolParams)-1].OfTool != nil {
+		toolParams[len(toolParams)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
 	return toolParams
 }
