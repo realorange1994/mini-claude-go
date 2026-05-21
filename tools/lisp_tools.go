@@ -792,8 +792,9 @@ const lispToolsLib = `
                                          (and (> (string-length name) 0)
                                               (char= (char name 0) #\.))))
                                      entries))))
-        (let ((limited (subseq filtered 0 (min (length filtered) max-entries))))
-          (string-join limited "\n"))))
+        (let ((limit (if max-entries max-entries (length filtered))))
+          (let ((limited (subseq filtered 0 (min (length filtered) limit))))
+            (string-join limited "\n")))))
     (condition (c) (format nil "Error: ~A" c))))
 
 ;; Text search (substring matching, no regex)
