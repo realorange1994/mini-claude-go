@@ -3050,6 +3050,11 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 	// Print all tool calls upfront
 	for _, call := range toolCalls {
 		toolName, _ := call["name"].(string)
+		// Resolve aliases: LLMs often use non-canonical names (bash, read, cat, etc.)
+		if resolved, _ := a.registry.Resolve(toolName); resolved != "" && resolved != toolName {
+			call["name"] = resolved
+			toolName = resolved
+		}
 		input, _ := call["input"].(map[string]any)
 		inputPreview := formatToolArgs(toolName, input)
 
@@ -3160,6 +3165,11 @@ func (a *AgentLoop) executeSingleToolApproved(call map[string]any) (anthropic.To
 func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (anthropic.ToolResultBlockParam, string) {
 	toolUseID, _ := call["id"].(string)
 	toolName, _ := call["name"].(string)
+	// Resolve aliases: LLMs often use non-canonical names (bash, read, cat, etc.)
+	if resolved, _ := a.registry.Resolve(toolName); resolved != "" && resolved != toolName {
+		call["name"] = resolved
+		toolName = resolved
+	}
 	input, _ := call["input"].(map[string]any)
 	if input == nil {
 		input = make(map[string]any)

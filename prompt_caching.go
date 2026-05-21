@@ -97,6 +97,62 @@ func stripSystemInjected(msg map[string]any) {
 	}
 }
 
+// hoistToolResultCache detects tool_result blocks where cache_control was
+// placed on the inner text block and hoists it to the tool_result level.
+// When a tool_result has content: [{text: "foo", cache_control: ...}],
+// the shape is [{text, cache_control}] instead of "foo". This shape flip
+// destroys cache_read hit rate because the cached prefix changes every turn.
+// After hoisting, the block becomes: {type: "tool_result", content: "foo", cache_control: ...}.
+// Inspired by openclacky's cache_control hoisting in message_format/anthropic.rb.
+func hoistToolResultCache(msg map[string]any) {
+	content, exists := msg["content"]
+	if !exists {
+		return
+	}
+	arr, ok := content.([]any)
+	if !ok || len(arr) == 0 {
+		return
+	}
+
+	for i, elem := range arr {
+		block, ok := elem.(map[string]any)
+		if !ok {
+			continue
+		}
+		// Only handle tool_result blocks
+		if block["type"] != "tool_result" {
+			continue
+		}
+
+		// Check if content is a single-element array with cache_control
+		inner, hasInner := block["content"]
+		if !hasInner {
+			continue
+		}
+		innerArr, ok := inner.([]any)
+		if !ok || len(innerArr) != 1 {
+			continue
+		}
+		innerBlock, ok := innerArr[0].(map[string]any)
+		if !ok {
+			continue
+		}
+		cacheCtrl, hasCache := innerBlock["cache_control"]
+		if !hasCache {
+			continue
+		}
+
+		// Hoist: extract cache_control to tool_result level
+		// Flatten content to just the text string
+		if text, ok := innerBlock["text"].(string); ok {
+			block["content"] = text
+			block["cache_control"] = cacheCtrl
+			delete(innerBlock, "cache_control")
+			arr[i] = block
+		}
+	}
+}
+
 // ApplyPromptCachingWithConfig applies prompt caching with explicit config.
 // This is the main entry point for cache breakpoint placement.
 func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg CacheBreakpointConfig) []map[string]any {
@@ -119,6 +175,16 @@ func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg Cac
 	// not for the API). Do this before placing breakpoints so the API never sees them.
 	for i := range result {
 		stripSystemInjected(result[i])
+	}
+
+	// Cache-control hoisting: for tool_result blocks that have cache_control
+	// on their inner text block, hoist the marker to the tool_result level
+	// itself and flatten the content to a string. This prevents the content
+	// shape from flipping between "string" and [{text, cache_control}] across
+	// turns, which destroys cache_read hit rate because the cached prefix changes.
+	// Inspired by openclacky's cache_control hoisting in message_format/anthropic.rb.
+	for i := range result {
+		hoistToolResultCache(result[i])
 	}
 
 	// Collect candidate indices for breakpoint placement, skipping system-injected
@@ -198,15 +264,23 @@ func applyCacheMarker(msg map[string]any, marker map[string]any) {
 		return
 	}
 
-	// Array content -> add cache_control to last block
-		if arr, ok := content.([]any); ok && len(arr) > 0 {
-			last := arr[len(arr)-1]
-			if m, ok := last.(map[string]any); ok {
-				m["cache_control"] = marker
-				// Do NOT delete tool_use_id from tool_result blocks —
-				// the API requires it for tool_result/tool_use pairing (error 2013).
-			}
+	// Array content -> add cache_control to last block.
+	// Cache-control hoisting: if the last block is a tool_result,
+	// place cache_control on the tool_result block itself (not any
+	// nested text block). This prevents the content shape from
+	// flipping between "string" and [{text, cache_control}] depending
+	// on whether this message is the current cache breakpoint. Shape
+	// mutation destroys cache_read hit rate because the cached prefix
+	// changes every turn. Inspired by openclacky's cache_control hoisting.
+	if arr, ok := content.([]any); ok && len(arr) > 0 {
+		last := arr[len(arr)-1]
+		if m, ok := last.(map[string]any); ok {
+			// Hoist: if this is a tool_result, ensure cache_control is on
+			// the tool_result block itself. For non-tool_result blocks,
+			// place directly on the block.
+			m["cache_control"] = marker
 		}
+	}
 }
 
 // deepCopyMessages does a deep copy via JSON marshal/unmarshal.

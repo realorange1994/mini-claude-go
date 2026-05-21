@@ -682,6 +682,12 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		stdoutOut = StripTerminalCodes(stdoutOut)
 		stderrOut = StripTerminalCodes(stderrOut)
 
+		// Per-line truncation: cap each line at 2000 chars before the
+		// overall output cap. Prevents a single minified JSON line or
+		// base64 blob from consuming the entire output budget.
+		stdoutOut = TruncateLongLines(stdoutOut, 2000)
+		stderrOut = TruncateLongLines(stderrOut, 2000)
+
 		var result strings.Builder
 		if stdoutOut != "" {
 			result.WriteString(stdoutOut)

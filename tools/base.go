@@ -24,12 +24,91 @@ const (
 )
 
 // Upstream tool name aliases for rule system compatibility.
-// Maps upstream tool names to our internal names.
+// Maps upstream tool names to our internal names (bidirectional).
+// Used by InternalToUpstreamName / UpstreamToInternalName for rule matching.
 var UpstreamToolAliases = map[string]string{
 	"Read":  FileReadToolName,
 	"Write": FileWriteToolName,
 	"Edit":  FileEditToolName,
 	"Bash":  ExecToolName,
+}
+
+// ToolNameAliases maps common LLM tool name variations to our canonical names.
+// This is a one-way mapping (alias → canonical), used by Registry.Resolve().
+// LLMs frequently use non-canonical names (read, bash, cat, etc.) which would
+// cause "unknown tool" errors without alias resolution. Keeping tool schemas
+// stable preserves cache hit rates because the tool definition prefix doesn't
+// change. Inspired by openclacky's TOOL_ALIASES in tool_registry.rb.
+var ToolNameAliases = map[string]string{
+	// file_reader / read_file aliases
+	"read":       FileReadToolName,
+	"filereader": FileReadToolName,
+	"file_read":  FileReadToolName,
+	"cat":        FileReadToolName,
+	// write_file aliases
+	"write":       FileWriteToolName,
+	"create_file": FileWriteToolName,
+	"file_write":  FileWriteToolName,
+	// edit_file aliases
+	"edit":            FileEditToolName,
+	"replace":         FileEditToolName,
+	"replace_in_file": FileEditToolName,
+	"str_replace":     FileEditToolName,
+	"file_edit":       FileEditToolName,
+	// exec aliases
+	"bash":        ExecToolName,
+	"shell":       ExecToolName,
+	"terminal":    ExecToolName,
+	"execute":     ExecToolName,
+	"run_command": ExecToolName,
+	"run":         ExecToolName,
+	"command":     ExecToolName,
+	// grep aliases
+	"search_files":    "grep",
+	"search_in_files": "grep",
+	"find_in_files":   "grep",
+	"search_code":     "grep",
+	// glob aliases
+	"find_files":       "glob",
+	"list_files":       "glob",
+	"file_glob":        "glob",
+	"search_filenames": "glob",
+	// web_search aliases
+	"search":          "web_search",
+	"websearch":       "web_search",
+	"internet_search": "web_search",
+	"online_search":   "web_search",
+	// web_fetch aliases
+	"fetch":     "web_fetch",
+	"webfetch":  "web_fetch",
+	"browse":    "web_fetch",
+	"url_fetch": "web_fetch",
+	"http_get":  "web_fetch",
+	// list_dir aliases
+	"ls":             "list_dir",
+	"list_directory": "list_dir",
+	"dir":            "list_dir",
+	// multi_edit aliases
+	"multi_edit_file": "multi_edit",
+	"batch_edit":      "multi_edit",
+	// agent aliases
+	"subagent":    "agent",
+	"sub_agent":   "agent",
+	"spawn_agent": "agent",
+	// git aliases
+	"git_tool": "git",
+	// skill aliases
+	"skill":     "read_skill",
+	"run_skill": "read_skill",
+	// memory aliases
+	"remember": "memory_add",
+	// task aliases
+	"todo":         "task_create",
+	"task_manager": "task_create",
+	// ask_user aliases
+	"ask_user":   "AskUserQuestion",
+	"ask":        "AskUserQuestion",
+	"user_input": "AskUserQuestion",
 }
 
 // canonicalPath normalizes a file path for consistent registry lookups.
@@ -330,6 +409,61 @@ func (r *Registry) Register(t Tool) {
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]
 	return t, ok
+}
+
+// Resolve resolves a tool name (possibly misspelt or aliased) to the canonical
+// registered name, then returns the tool. Resolution order (matching openclacky's
+// ToolRegistry#resolve):
+//  1. Exact match in the registry
+//  2. Case-insensitive match (e.g. "Read" → "read_file")
+//  3. Alias lookup (e.g. "bash" → "exec", "cat" → "read_file")
+//  4. Hyphen-to-underscore normalization (e.g. "file-read" → "file_read")
+//
+// Returns the resolved canonical name and the tool, or the original name and nil
+// if nothing matched. This prevents "unknown tool" errors when LLMs use common
+// name variations, while keeping tool schemas stable for cache hit rates.
+func (r *Registry) Resolve(name string) (string, Tool) {
+	// 1. Exact match
+	if t, ok := r.tools[name]; ok {
+		return name, t
+	}
+
+	downcased := strings.ToLower(name)
+
+	// 2. Case-insensitive match
+	for registeredName, tool := range r.tools {
+		if strings.ToLower(registeredName) == downcased {
+			return registeredName, tool
+		}
+	}
+
+	// 3. Alias lookup
+	if canonical, ok := ToolNameAliases[downcased]; ok {
+		if t, ok := r.tools[canonical]; ok {
+			return canonical, t
+		}
+	}
+	// Alias lookup: upstream names (Read, Write, Edit, Bash)
+	if canonical, ok := UpstreamToolAliases[name]; ok {
+		if t, ok := r.tools[canonical]; ok {
+			return canonical, t
+		}
+	}
+
+	// 4. Hyphen-to-underscore normalization (e.g. "file-read" → "file_read")
+	normalized := strings.ReplaceAll(downcased, "-", "_")
+	if normalized != downcased {
+		if t, ok := r.tools[normalized]; ok {
+			return normalized, t
+		}
+		if canonical, ok := ToolNameAliases[normalized]; ok {
+			if t, ok := r.tools[canonical]; ok {
+				return canonical, t
+			}
+		}
+	}
+
+	return name, nil
 }
 
 // AllTools returns all registered tools, sorted by name for deterministic ordering.

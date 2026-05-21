@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -62,4 +63,29 @@ func StripTerminalCodes(raw string) string {
 	s = strings.ReplaceAll(s, "\r", "")
 
 	return s
+}
+
+// TruncateLongLines caps each line at maxLen characters.
+// A single minified JSON line or base64 blob can consume the entire
+// output budget (e.g., 50K chars on one line). Per-line truncation
+// prevents this by shortening each line before the overall output cap.
+// Inspired by openclacky's per-line truncation in the terminal tool.
+func TruncateLongLines(raw string, maxLen int) string {
+	if raw == "" || maxLen <= 0 {
+		return raw
+	}
+
+	lines := strings.Split(raw, "\n")
+	truncated := 0
+	for i, line := range lines {
+		if len(line) > maxLen {
+			lines[i] = line[:maxLen] + " [... truncated]"
+			truncated++
+		}
+	}
+	if truncated > 0 {
+		// Append notice at the end so the LLM knows lines were shortened
+		return strings.Join(lines, "\n") + fmt.Sprintf("\n[%d lines truncated to %d chars]", truncated, maxLen)
+	}
+	return strings.Join(lines, "\n")
 }
