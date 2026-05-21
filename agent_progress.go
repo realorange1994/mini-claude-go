@@ -102,12 +102,6 @@ func (w *subAgentProgressWriter) processLine(line string) {
 	w.writeProgressUnsafe()
 }
 
-func (w *subAgentProgressWriter) writeProgress() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.writeProgressUnsafe()
-}
-
 // writeProgressUnsafe writes the progress line without acquiring the lock.
 // Caller must hold w.mu.
 func (w *subAgentProgressWriter) writeProgressUnsafe() {

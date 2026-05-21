@@ -1188,9 +1188,6 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 // Shared utility functions
 // ---------------------------------------------------------------------------
 
-func runGitCommand(ctx context.Context, args []string, workDir string, proxy string) (string, int, error) {
-	return runGitCommandWithExitCode(ctx, args, workDir, proxy)
-}
 
 func runGitCommandWithExitCode(ctx context.Context, args []string, workDir string, proxy string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)

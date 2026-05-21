@@ -725,27 +725,6 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	}
 }
 
-func isExitError(err error) bool {
-	_, ok := err.(*exec.ExitError)
-	return ok
-}
-
-func readLimited(r io.Reader, limit int) string {
-	buf := make([]byte, limit)
-	off := 0
-	for {
-		n, err := r.Read(buf[off:])
-		off += n
-		if err != nil {
-			break
-		}
-		if off >= limit {
-			break
-		}
-	}
-	return string(buf[:off])
-}
-
 // countingReader wraps an io.Reader to track total bytes read and last read time.
 // Used by the stall detection watchdog.
 type countingReader struct {

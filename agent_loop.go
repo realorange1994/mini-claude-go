@@ -23,7 +23,6 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
 	"miniclaudecode-go/mcp"
 	"miniclaudecode-go/skills"
@@ -5359,10 +5358,6 @@ func (h *CollectHandler) AsMessageContent() []anthropic.ContentBlockUnion {
 	return content
 }
 
-// StreamAdapter.Process takes a *ssestream.Stream directly
-func (sa *StreamAdapter) ProcessStream(stream *ssestream.Stream[anthropic.MessageStreamEventUnion]) error {
-	return sa.Process(stream, nil)
-}
 
 // runSessionMemoryExtraction runs a forked agent to update session_memory.md.
 // It captures the parent's cache-safe params and uses a restricted canUseTool
