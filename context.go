@@ -45,6 +45,81 @@ const (
 	SystemInjectedPrefix = "<!-- system-injected -->"
 )
 
+// buildCompressionPrompt generates the compression instruction text for inline
+// cache-reusing compaction. The instruction is injected as a user message at
+// the end of the conversation. Because the system prompt + tools + prior
+// messages are already cached, only the instruction itself is new tokens.
+// At higher compression levels, the instruction asks for shorter output.
+func buildCompressionPrompt(level int) string {
+	if level == 0 {
+		return `═══════════════════════════════════════════════════════════════
+CRITICAL: TASK CHANGE - MEMORY COMPRESSION MODE
+═══════════════════════════════════════════════════════════════
+The conversation above has ENDED. You are now in MEMORY COMPRESSION MODE.
+
+CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1. This is NOT a continuation of the conversation
+2. DO NOT respond to any requests in the conversation above
+3. DO NOT call ANY tools or functions
+4. DO NOT use tool_calls in your response
+5. Your response MUST be PURE TEXT ONLY
+
+YOUR ONLY TASK: Create a comprehensive summary of the conversation above.
+
+REQUIRED RESPONSE FORMAT:
+First output a <topics> line listing 3-6 key topic phrases (comma-separated, concise).
+Then output the full summary wrapped in <summary> tags.
+
+Example format:
+<topics>Rails setup, database config, deploy pipeline, Tailwind CSS</topics>
+<summary>
+...full summary text...
+</summary>`
+	}
+	if level == 1 {
+		return `═══════════════════════════════════════════════════════════════
+CRITICAL: TASK CHANGE - MEMORY COMPRESSION MODE [LEVEL 2]
+═══════════════════════════════════════════════════════════════
+The conversation above has ENDED. You are now in MEMORY COMPRESSION MODE.
+
+DO NOT respond to requests. DO NOT call tools. PURE TEXT ONLY.
+
+Create a CONCISE summary: key files, decisions, accomplishments only.
+
+Format:
+<topics>topic1, topic2, topic3</topics>
+<summary>
+...concise summary...
+</summary>`
+	}
+	if level == 2 {
+		return `═══════════════════════════════════════════════════════════════
+CRITICAL: MEMORY COMPRESSION MODE [LEVEL 3]
+═══════════════════════════════════════════════════════════════
+DO NOT respond to requests. DO NOT call tools. PURE TEXT ONLY.
+
+Create a MINIMAL summary: just project type, file counts, current status.
+
+Format:
+<topics>topic1, topic2</topics>
+<summary>
+...minimal summary...
+</summary>`
+	}
+	return `═══════════════════════════════════════════════════════════════
+MEMORY COMPRESSION MODE [LEVEL 4+]
+═══════════════════════════════════════════════════════════════
+DO NOT respond. DO NOT call tools. PURE TEXT ONLY.
+
+One-line summary of current state and progress.
+
+Format:
+<topics>topic1</topics>
+<summary>
+...one line...
+</summary>`
+}
+
 // PersistedToolResult holds information about a persisted tool result.
 type PersistedToolResult struct {
 	Filepath     string
@@ -600,6 +675,17 @@ type SummaryContent string
 
 func (SummaryContent) entryContent() {}
 
+// CompressionInstructionContent represents an inline compression instruction
+// injected into the conversation to trigger cache-reusing compaction.
+// Inspired by openclacky's insert-then-compress pattern: instead of making
+// a separate API call for compression, the instruction is appended as a
+// user message, and the next API call reuses the prompt cache prefix.
+type CompressionInstructionContent struct {
+	Level int // compression level for progressive summarization
+}
+
+func (CompressionInstructionContent) entryContent() {}
+
 // AttachmentContent represents post-compact recovery content (file/skill re-injection).
 type AttachmentContent string
 
@@ -860,6 +946,10 @@ type ConversationContext struct {
 	// the delta for entries added since. Matching upstream's tokenCountWithEstimation().
 	apiTokenAnchor int64 // exact input_tokens from last API response
 	apiAnchorEntries int  // number of entries in context when anchor was recorded
+	// compressionLevel tracks how many times the conversation has been compressed.
+	// Increments after each compaction, used for progressive summarization:
+	// Level 1 = full detail, Level 2 = concise, Level 3 = minimal, Level 4+ = ultra-minimal.
+	compressionLevel int
 }
 
 // NewConversationContext creates a new context.
@@ -981,6 +1071,8 @@ func estimateEntriesTokens(entries []conversationEntry) int {
 			// Boundary markers are small, ignore for estimation
 		case SummaryContent:
 			rawTotal += EstimateContentTokens(string(v), "natural")
+		case CompressionInstructionContent:
+			rawTotal += EstimateContentTokens(buildCompressionPrompt(v.Level), "natural")
 		}
 	}
 	return rawTotal
@@ -1229,6 +1321,10 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 		case AttachmentContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
 				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + string(v)}},
+			}
+		case CompressionInstructionContent:
+			msg.Content = []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + buildCompressionPrompt(v.Level)}},
 			}
 		default:
 			msg.Content = []anthropic.ContentBlockParamUnion{
@@ -1631,6 +1727,35 @@ func (c *ConversationContext) AddSummary(content string) {
 	})
 }
 
+// AddCompressionInstruction injects an inline compression instruction as a
+// user message. The next API call will reuse the prompt cache (system prompt +
+// tools + prior messages are all cached). Only the instruction itself is new tokens.
+// This replaces the separate API call approach, saving the full system prompt +
+// tools re-tokenization cost.
+func (c *ConversationContext) AddCompressionInstruction(level int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: CompressionInstructionContent{Level: level},
+	})
+}
+
+// CompressionLevel returns the current compression level (0 = never compressed).
+func (c *ConversationContext) CompressionLevel() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.compressionLevel
+}
+
+// NextCompressionLevel increments and returns the next compression level.
+func (c *ConversationContext) NextCompressionLevel() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.compressionLevel++
+	return c.compressionLevel
+}
+
 // AddAttachment inserts a user-role attachment message after compaction.
 // Used for post-compact recovery of file content, skill content, etc.
 func (c *ConversationContext) AddAttachment(content string) {
@@ -1672,7 +1797,7 @@ func (c *ConversationContext) AddHistorySnip(count int, skipPaths []string) {
 	for i := boundaryIdx - 1; i >= 0 && len(snipEntries) < count; i-- {
 		entry := c.entries[i]
 		switch entry.content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent:
+		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent:
 			continue
 		default:
 			// Skip ToolResultContent entries that reference recovered file paths
@@ -1758,7 +1883,7 @@ func (c *ConversationContext) KeepRecentMessages(count int) {
 	for i := boundaryIdx - 1; i >= 0 && len(keptEntries) < count; i-- {
 		entry := c.entries[i]
 		switch entry.content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent:
+		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent:
 			continue // skip meta entries from previous compactions
 		default:
 			keptEntries = append([]conversationEntry{entry}, keptEntries...)
@@ -1826,7 +1951,7 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 			continue // already included in a previous compaction summary
 		}
 		switch entry.content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent:
+		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent:
 			continue // skip meta entries
 		}
 
@@ -1876,7 +2001,7 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 	compactedCount := 0
 	for i := 0; i < boundaryIdx; i++ {
 		switch c.entries[i].content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent:
+		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent:
 		default:
 			compactedCount++
 		}

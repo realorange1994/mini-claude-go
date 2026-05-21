@@ -403,6 +403,7 @@ type AgentLoop struct {
 	modelCapabilities        *ModelCapabilitiesCache   // per-model context window and capability lookup
 	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
 	timeoutHintInjected      bool                       // one-shot: timeout hint injected this session (openclacky pattern)
+	inlineCompressionMode    bool                       // set during inline cache-reusing compaction (openclacky pattern)
 	errorReporter              *ErrorReporter            // captures error events for analysis
 	featureFlags               *FeatureFlagStore         // feature flag store
 	lastTransition          LoopTransitionReason       // reason for the most recent loop continue
@@ -5295,8 +5296,34 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 // Returns true if compaction was performed.
 func (a *AgentLoop) tryLLMCompaction(preCompactInst string) {
 	messages := a.context.BuildMessages()
+
+	// Advance compression level for progressive summarization.
+	// Higher levels produce shorter summaries, preventing summary bloat
+	// across multiple compactions. Inspired by openclacky's hierarchical
+	// summarization (Level 1=full, 2=concise, 3=minimal, 4+=ultra-minimal).
+	level := a.context.NextCompressionLevel()
+
+	// Chunk archival: archive pre-compaction messages to disk for
+	// on-demand recall. Matches openclacky's chunk archival pattern.
+	var chunkPath string
+	var prevChunksIndex string
+	if a.config.ProjectDir != "" {
+		chunkMsgs := messagesToChunkMessages(messages)
+		chunkPath = archiveChunkMessages(a.config.ProjectDir, level, chunkMsgs)
+		// Discover existing chunks and build index for the summary
+		prevChunksIndex = tools.BuildPreviousChunksIndex(
+			tools.ListChunks(a.config.ProjectDir, ""))
+	}
+
 	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL, a.context.SystemPrompt(), a.TranscriptPath())
 	if performed && summary != "" {
+		// Augment summary with chunk path reference and previous chunks index
+		if chunkPath != "" {
+			summary = augmentSummaryWithChunk(summary, chunkPath)
+		}
+		if prevChunksIndex != "" {
+			summary += prevChunksIndex
+		}
 		// Advance compaction epoch BEFORE clearing context — marks all tracked items as stale.
 		if a.toolStateTracker != nil {
 			a.toolStateTracker.OnCompaction()
@@ -5386,6 +5413,62 @@ func (a *AgentLoop) tryLLMCompaction(preCompactInst string) {
 	// LLM compaction was not performed (not needed or disabled).
 	// Do NOT fall through to CompactContext() -- the LLM compactor's
 	// ShouldCompact() check already determined that compaction isn't needed.
+}
+
+// messagesToChunkMessages converts API message params into simplified
+// ChunkMessage format for archival to disk.
+func messagesToChunkMessages(messages []anthropic.MessageParam) []tools.ChunkMessage {
+	var result []tools.ChunkMessage
+	for _, msg := range messages {
+		role := string(msg.Role)
+		var content strings.Builder
+		for _, block := range msg.Content {
+			if block.OfText != nil {
+				content.WriteString(block.OfText.Text)
+			} else if block.OfToolResult != nil {
+				for _, cb := range block.OfToolResult.Content {
+					if cb.OfText != nil {
+						content.WriteString(cb.OfText.Text)
+					}
+				}
+			} else if block.OfToolUse != nil {
+				fmt.Fprintf(&content, "_Tool call: %s_", block.OfToolUse.Name)
+			}
+		}
+		text := content.String()
+		if text == "" {
+			continue
+		}
+		result = append(result, tools.ChunkMessage{
+			Role:    role,
+			Content: text,
+		})
+	}
+	return result
+}
+
+// archiveChunkMessages writes conversation messages to a chunk .md file
+// on disk and returns the path. Returns empty string on error or if
+// projectDir is empty. Matches openclacky's chunk archival pattern.
+func archiveChunkMessages(projectDir string, level int, msgs []tools.ChunkMessage) string {
+	if projectDir == "" || len(msgs) == 0 {
+		return ""
+	}
+	// Use the tool-results directory's parent as the base for chunks
+	chunkDir := filepath.Join(projectDir, "chunks")
+	chunkIndex := tools.NextChunkIndex(chunkDir, "")
+	path, err := tools.ArchiveChunk(chunkDir, "", chunkIndex, level, "", msgs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n[WARN] Chunk archival failed: %v\n", err)
+		return ""
+	}
+	return path
+}
+
+// augmentSummaryWithChunk appends a chunk path reference to the summary,
+// enabling on-demand recall via file_reader. Matches openclacky's pattern.
+func augmentSummaryWithChunk(summary, chunkPath string) string {
+	return summary + fmt.Sprintf("\n\n---\nCurrent chunk archived at: %s\nUse file_reader to recall details from this chunk.", chunkPath)
 }
 
 // isLocalEndpoint detects if the base URL points to a local provider.

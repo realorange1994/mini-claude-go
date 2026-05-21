@@ -1094,6 +1094,99 @@ Here's an example of how your output should be structured:
 Please provide your summary based on the RECENT messages only (after the retained earlier context), following this structure and ensuring precision and thoroughness in your response.
 `
 
+// Progressive summarization prompts: at higher compression levels, produce
+// shorter summaries to prevent summary bloat across multiple compactions.
+// Inspired by openclacky's hierarchical summarization (Level 1=full, 2=concise,
+// 3=minimal, 4+=ultra-minimal).
+
+const conciseCompactPrompt = `Summarize the conversation below CONCISELY. Focus on:
+- Key files created/modified (top 5 only)
+- Completed tasks and accomplishments
+- Current in-progress work
+- Key decisions made
+
+Skip detailed code snippets, error traces, and verbose explanations.
+Keep the summary under 500 words.
+
+` + detailedAnalysisInstructionBase + `
+
+`
+
+const minimalCompactPrompt = `Summarize the conversation below MINIMALLY. Focus on:
+- Project type and file counts
+- Completed vs pending tasks
+- Current status only
+
+Keep the summary under 200 words.
+
+` + detailedAnalysisInstructionBase + `
+
+`
+
+const ultraMinimalCompactPrompt = `One-line summary of current state and progress. Under 50 words.
+
+` + detailedAnalysisInstructionBase + `
+
+`
+
+// compactPromptForLevel returns the appropriate base prompt based on
+// compression level. Higher levels produce shorter summaries.
+func compactPromptForLevel(level int) string {
+	switch {
+	case level <= 1:
+		return baseCompactPrompt
+	case level == 2:
+		return conciseCompactPrompt
+	case level == 3:
+		return minimalCompactPrompt
+	default:
+		return ultraMinimalCompactPrompt
+	}
+}
+
+// iterativeCompactPromptForLevel returns the appropriate iterative prompt
+// based on compression level. Higher levels produce shorter updates.
+func iterativeCompactPromptForLevel(level int) string {
+	switch {
+	case level <= 1:
+		return iterativeCompactPrompt
+	case level == 2:
+		return `Update the previous summary CONCISELY. Merge key new information only.
+Remove details no longer relevant. Keep under 500 words.
+
+` + detailedAnalysisInstructionBase + `
+
+{previous_summary}
+
+---
+
+New messages to incorporate:
+
+`
+	case level == 3:
+		return `Update the previous summary MINIMALLY. Only add critical new facts.
+Keep under 200 words.
+
+{previous_summary}
+
+---
+
+New messages to incorporate:
+
+`
+	default:
+		return `One-line update to the previous summary. Under 50 words.
+
+{previous_summary}
+
+---
+
+New messages to incorporate:
+
+`
+	}
+}
+
 // ITERATIVE_COMPACT_PROMPT is used when there's a previous summary to update.
 // The {previous_summary} placeholder is replaced with the prior summary text.
 const iterativeCompactPrompt = `Below is the previous summary followed by new conversation messages. Update the summary by:
@@ -1304,6 +1397,7 @@ type Compactor struct {
 	lastSummary           string   // for iterative summary updates
 	lastCompactSavings    []float64 // track savings ratio for anti-thrashing
 	postCompactTokens     int      // token count after last compaction, for cooldown
+	compressionLevel      int      // progressive summarization level (1=full, 2=concise, 3=minimal, 4+=ultra-minimal)
 }
 
 // NewCompactor creates a new compactor with default settings.
@@ -1332,6 +1426,21 @@ func (c *Compactor) SetPostCompactTokens(tokens int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.postCompactTokens = tokens
+}
+
+// SetCompressionLevel sets the progressive summarization level.
+// Higher levels produce shorter summaries.
+func (c *Compactor) SetCompressionLevel(level int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.compressionLevel = level
+}
+
+// CompressionLevel returns the current compression level.
+func (c *Compactor) CompressionLevel() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.compressionLevel
 }
 
 // ShouldCompact checks if compaction is needed based on token count and cooldown.
@@ -1396,7 +1505,7 @@ func (c *Compactor) Compact(
 	}
 	c.mu.Unlock()
 
-	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary, systemPrompt, transcriptPath)
+	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary, systemPrompt, transcriptPath, c.compressionLevel+1)
 	if err != nil {
 		c.mu.Lock()
 		c.llmCompactFailedCount++
@@ -1438,7 +1547,7 @@ func (c *Compactor) Compact(
 // retry, up to MAX_PTL_RETRIES times.
 const MAX_PTL_RETRIES = 3
 
-func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string) (*CompactionResultLLM, error) {
+func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int) (*CompactionResultLLM, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages to compact")
 	}
@@ -1447,7 +1556,7 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 	// prompt-too-long, progressively drop the oldest rounds and retry.
 	var lastErr error
 	for attempt := 0; attempt <= MAX_PTL_RETRIES; attempt++ {
-		result, err := doCompactLLMCallWithRetry(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath)
+		result, err := doCompactLLMCallWithRetry(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath, compressionLevel)
 		if err == nil {
 			return result, nil
 		}
@@ -1550,7 +1659,7 @@ var ErrCompactStreamIncomplete = fmt.Errorf("stream ended without receiving any 
 // doCompactLLMCall makes a single streaming compaction API call.
 // Collects text incrementally and returns the result. The caller should retry on
 // transient failures (rate limit, timeout, network).
-func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string) (*CompactionResultLLM, error) {
+func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int) (*CompactionResultLLM, error) {
 	preTokens := estimateMessageParamsTokens(messages)
 
 	// Apply 3-pass pre-pruning before sending to LLM
@@ -1576,14 +1685,15 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 		}
 	}
 
-	// Choose prompt based on whether we have a previous summary.
+	// Choose prompt based on whether we have a previous summary and compression level.
+	// Higher levels produce shorter summaries (progressive summarization).
 	// All prompts are wrapped with noToolsPreamble + noToolsTrailer to prevent
 	// the model from wasting a turn on tool calls.
 	var userPrompt string
 	if previousSummary != "" {
-		userPrompt = noToolsPreamble + strings.Replace(iterativeCompactPrompt, "{previous_summary}", previousSummary, 1) + noToolsTrailer
+		userPrompt = noToolsPreamble + strings.Replace(iterativeCompactPromptForLevel(compressionLevel), "{previous_summary}", previousSummary, 1) + noToolsTrailer
 	} else {
-		userPrompt = noToolsPreamble + baseCompactPrompt + noToolsTrailer
+		userPrompt = noToolsPreamble + compactPromptForLevel(compressionLevel) + noToolsTrailer
 	}
 
 	// Append the summary prompt as the final user message
@@ -1696,7 +1806,7 @@ func isTransientCompactError(errMsg string) bool {
 // backoff, matching upstream's streamCompactSummary retry behavior.
 const MAX_COMPACT_STREAMING_RETRIES = 2
 
-func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string) (*CompactionResultLLM, error) {
+func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int) (*CompactionResultLLM, error) {
 	var lastErr error
 	for attempt := 0; attempt <= MAX_COMPACT_STREAMING_RETRIES; attempt++ {
 		if attempt > 0 {
@@ -1712,7 +1822,7 @@ func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, 
 			}
 		}
 
-		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath)
+		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath, compressionLevel)
 		if err == nil {
 			return result, nil
 		}
