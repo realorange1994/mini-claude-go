@@ -2101,6 +2101,12 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
 
+	// Inject current time as a system-injected user message.
+	// This replaces the time that was previously inside the system prompt.
+	// By injecting it here, the system prompt stays fully static and cacheable,
+	// and the time message is skipped for cache breakpoint placement.
+	a.context.InjectTimeContext()
+
 	// Apply per-message budget enforcement on tool results. Large results
 	// are persisted to disk and replaced with <persisted-output> previews.
 	// This matches upstream's applyToolResultBudget() which runs before

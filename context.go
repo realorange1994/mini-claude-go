@@ -1263,6 +1263,34 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	return merged
 }
 
+// InjectTimeContext adds the current date/time as a user message with the
+// system-injected prefix. This replaces the time injection that was previously
+// inside the system prompt. By keeping it as a separate injected message, the
+// system prompt remains fully static and cacheable, and the time message can
+// be skipped for cache breakpoint placement.
+func (c *ConversationContext) InjectTimeContext() {
+	now := time.Now()
+	currentTime := now.Format("2006-01-02 15:04:05")
+	_, offset := now.Zone()
+	sign := "+"
+	if offset < 0 {
+		sign = "-"
+		offset = -offset
+	}
+	hours := offset / 3600
+	minutes := (offset % 3600) / 60
+	timezone := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
+
+	timeMsg := fmt.Sprintf("%s[Current time: %s (%s)]", SystemInjectedPrefix, currentTime, timezone)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: TextContent(timeMsg),
+	})
+}
+
 // must hold c.mu write lock
 func (c *ConversationContext) truncateIfNeeded() {
 	maxMsgs := c.config.MaxContextMsgs

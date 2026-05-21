@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"miniclaudecode-go/skills"
 	"miniclaudecode-go/tools"
@@ -25,7 +24,6 @@ const systemPromptTemplateStatic = `You are miniClaudeCode (model: %s), a lightw
 ## Environment
 - OS: %s
 - Working Directory: %s
-- Current Date/Time: %s (%s)
 - Platform: %s
 - Shell: %s
 - Path Format: %s
@@ -334,22 +332,14 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 		}
 	}
 
-	currentTime := time.Now().Format("2006-01-02 15:04:05")
-	_, offset := time.Now().Zone()
-	sign := "+"
-	if offset < 0 {
-		sign = "-"
-		offset = -offset
-	}
-	hours := offset / 3600
-	minutes := (offset % 3600) / 60
-	timezone := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
+	// Time is no longer injected into the system prompt to keep it fully static
+	// for prompt caching. It's injected as a separate user message in callAPI().
 
 	// Build static part (environment, tool descriptions, operating rules)
 	gitCtx := tools.GetGitContext()
 	shellInfo := tools.GetShellInfo()
 	pathFormat := tools.GetPathFormatInfo()
-	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, runtime.GOOS, shellInfo, pathFormat, gitCtx, toolList)
+	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, runtime.GOOS, shellInfo, pathFormat, gitCtx, toolList)
 
 	// Build dynamic part (permission mode, project instructions, skills)
 	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection, 5)
@@ -485,21 +475,13 @@ func buildStaticPart(registry *tools.Registry, modelName string) (string, uint64
 	wd, _ := os.Getwd()
 	envInfo := fmt.Sprintf("%s / %s / %s", runtime.GOOS, runtime.Version(), runtime.GOARCH)
 
-	currentTime := time.Now().Format("2006-01-02 15:04:05")
-	_, offset := time.Now().Zone()
-	sign := "+"
-	if offset < 0 {
-		sign = "-"
-		offset = -offset
-	}
-	hours := offset / 3600
-	minutes := (offset % 3600) / 60
-	timezone := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, minutes)
+	// Time is no longer injected into the system prompt to keep it fully static
+	// for prompt caching. It's injected as a separate user message in callAPI().
 
 	gitCtx := tools.GetGitContext()
 	shellInfo := tools.GetShellInfo()
 	pathFormat := tools.GetPathFormatInfo()
-	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, currentTime, timezone, runtime.GOOS, shellInfo, pathFormat, gitCtx, toolList)
+	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, runtime.GOOS, shellInfo, pathFormat, gitCtx, toolList)
 	hash := fnvHash(staticPart)
 	return staticPart, hash
 }
