@@ -792,7 +792,7 @@ const lispToolsLib = `
                                          (and (> (string-length name) 0)
                                               (char= (char name 0) #\.))))
                                      entries))))
-        (let ((limit (if max-entries max-entries (length filtered))))
+        (let ((limit (if (and max-entries (> max-entries 0)) max-entries (length filtered))))
           (let ((limited (subseq filtered 0 (min (length filtered) limit))))
             (string-join limited "\n")))))
     (condition (c) (format nil "Error: ~A" c))))

@@ -94,7 +94,7 @@ func (t *ListDirTool) ExecuteContext(ctx context.Context, params map[string]any)
 	}
 
 	result := strings.Join(entries, "\n")
-	if total > maxEntries {
+	if total > 0 && maxEntries > 0 && total > maxEntries {
 		result += fmt.Sprintf("\n\n(truncated, showing first %d of %d entries)", maxEntries, total)
 	}
 
@@ -125,7 +125,7 @@ func listDirSimple(dir string, maxEntries int, showHidden bool) ([]string, int) 
 				continue
 			}
 			total++
-			if len(entries) >= maxEntries {
+			if maxEntries > 0 && len(entries) >= maxEntries {
 				continue
 			}
 			fullPath := filepath.Join(dir, name)
