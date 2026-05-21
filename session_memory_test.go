@@ -408,52 +408,52 @@ func TestExtractionStateShouldExtractNotInitialized(t *testing.T) {
 		t.Error("should not extract below minimumMessageTokensToInit")
 	}
 	// At threshold
-	if !es.ShouldExtract(10000, false) {
+	if !es.ShouldExtract(20000, false) {
 		t.Error("should extract at minimumMessageTokensToInit")
 	}
 }
 
 func TestExtractionStateShouldExtractAfterInit(t *testing.T) {
 	es := NewExtractionState()
-	es.MarkExtracted(10000)
+	es.MarkExtracted(20000)
 
 	// Below growth threshold
-	if es.ShouldExtract(12000, true) {
+	if es.ShouldExtract(25000, true) {
 		t.Error("should not extract below minimumTokensBetweenUpdate")
 	}
 	// At growth threshold + 3 tool calls
 	es.IncrementToolCall()
 	es.IncrementToolCall()
 	es.IncrementToolCall()
-	if !es.ShouldExtract(15000, true) {
+	if !es.ShouldExtract(30000, true) {
 		t.Error("should extract at growth threshold with tool calls")
 	}
 }
 
 func TestExtractionStateShouldExtractWithToolCalls(t *testing.T) {
 	es := NewExtractionState()
-	es.MarkExtracted(10000)
+	es.MarkExtracted(20000)
 
 	// Growth threshold met but no tool calls
 	es.IncrementToolCall()
 	es.IncrementToolCall()
 	// Only 2 tool calls, need 3
-	if es.ShouldExtract(15000, true) {
+	if es.ShouldExtract(30000, true) {
 		t.Error("should not extract with only 2 tool calls")
 	}
 	es.IncrementToolCall()
 	// Now 3 tool calls
-	if !es.ShouldExtract(15000, true) {
+	if !es.ShouldExtract(30000, true) {
 		t.Error("should extract with 3 tool calls and growth threshold")
 	}
 }
 
 func TestExtractionStateShouldExtractNoToolCallsInLastTurn(t *testing.T) {
 	es := NewExtractionState()
-	es.MarkExtracted(10000)
+	es.MarkExtracted(20000)
 
 	// Growth threshold met, no tool calls in last turn → extract
-	if !es.ShouldExtract(15000, false) {
+	if !es.ShouldExtract(30000, false) {
 		t.Error("should extract when no tool calls in last turn and growth threshold met")
 	}
 }

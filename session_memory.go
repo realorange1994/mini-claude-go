@@ -47,12 +47,11 @@ _If the user asked for a specific output (answer, table, document), repeat the e
 _Step by step, what was attempted and done? Very terse summary for each step._
 `
 
-	// Token budget constants (matching upstream: MAX_SECTION_LENGTH=2000, MAX_TOTAL=12000)
-	// Increased to 20000 per section and 60000 total to preserve more context across
-	// compaction cycles. 12000 total tokens is insufficient for long coding sessions
-	// where session memory accumulates important state, decisions, and reference info.
-	maxTokensPerSection           = 20000
-	maxTotalSessionMemoryTokens   = 60000
+	// Token budget constants — reduced from 20000/60000 to improve cache hit rates.
+	// For a coding agent, most sections (Learnings, Key Results, Worklog) are
+	// redundant with git/file state. Keeping Current State and Errors is sufficient.
+	maxTokensPerSection           = 2500
+	maxTotalSessionMemoryTokens   = 10000
 
 	// Entry expiration: state entries expire after 7 days,
 	// other categories expire after 30 days.
@@ -902,14 +901,14 @@ func createMemoryFileCanUseTool(memoryPath string) CanUseToolFn {
 
 // ─── Extraction Thresholds ───────────────────────────────────────────────────
 //
-// Matching upstream's sessionMemoryUtils.ts defaults:
-//   - minimumMessageTokensToInit: 10000 (total context tokens before first extraction)
-//   - minimumTokensBetweenUpdate: 5000 (context growth since last extraction)
+// Raised from upstream defaults to reduce forked agent API calls.
+//   - minimumMessageTokensToInit: 20000 (delay first extraction until more context)
+//   - minimumTokensBetweenUpdate: 10000 (reduce extraction frequency)
 //   - toolCallsBetweenUpdates: 3 (minimum tool calls between updates)
 
 const (
-	minimumMessageTokensToInit  = 10000
-	minimumTokensBetweenUpdate  = 5000
+	minimumMessageTokensToInit  = 20000
+	minimumTokensBetweenUpdate  = 10000
 	toolCallsBetweenUpdates     = 3
 )
 

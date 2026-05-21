@@ -4,17 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // CacheBreakpointConfig controls the KV cache breakpoint strategy.
-// Upstream Anthropic uses exactly 1 breakpoint at the last message for optimal
-// Mycro KV cache manager behavior.
+// Uses 2 checkpoints (matching OpenClacky's rolling cache design) so that
+// Turn N's last message becomes Turn N+1's second-to-last → cache READ hit.
 type CacheBreakpointConfig struct {
 	// MaxBreakpoints is the maximum number of cache breakpoints to place.
-	// Set to 1 to match upstream's optimal strategy.
+	// Set to 2 for the rolling cache strategy.
 	MaxBreakpoints int
 	// SkipCacheWrite shifts the breakpoint from the last message to the
 	// second-to-last message, protecting the last position's KV pages.
@@ -22,32 +23,78 @@ type CacheBreakpointConfig struct {
 	SkipCacheWrite bool
 }
 
-// DefaultCacheBreakpointConfig returns the default config matching upstream's
-// optimal KV cache strategy: exactly 1 breakpoint at the last message.
+// DefaultCacheBreakpointConfig returns the default config with 2 breakpoints
+// for the rolling cache strategy: Turn N's last message (still marked) becomes
+// Turn N+1's second-to-last → cache READ hit on the prefix.
 func DefaultCacheBreakpointConfig() CacheBreakpointConfig {
 	return CacheBreakpointConfig{
-		MaxBreakpoints: 1,
+		MaxBreakpoints: 2,
 		SkipCacheWrite: false,
 	}
 }
 
 const (
 	// MaxCacheBreakpoints is the maximum number of cache breakpoints to place
-	// in the API message stream. Upstream Anthropic uses exactly 1 breakpoint
-	// at the last message, which is optimal for the Mycro KV cache manager.
-	MaxCacheBreakpoints = 1
+	// in the API message stream. 2 breakpoints enable the rolling cache strategy.
+	MaxCacheBreakpoints = 2
 )
 
 // ApplyPromptCaching applies Anthropic's optimal caching strategy to API messages.
-// Places exactly 1 cache_control breakpoint at the last message (or second-to-last
-// when skipCacheWrite is true for fire-and-forget scenarios like forked agents).
-// Returns a new slice with cache_control breakpoints injected into the messages.
+// Places 2 cache_control breakpoints using a rolling strategy (matching OpenClacky):
+//   - Turn N: marks messages[-2] and messages[-1]; server caches prefix up to [-1]
+//   - Turn N+1: messages[-2] is Turn N's last message (still marked) → cache READ hit
 //
-// This reduces input token costs by reusing cached prefixes across API calls.
-// The single-breakpoint strategy matches upstream's Mycro KV cache manager,
-// which writes the cache at exactly one position per request.
+// Auto-injected content (marked with SystemInjectedPrefix) is skipped for breakpoint
+// placement, preventing variable attachment/summary content from becoming cache
+// breakpoints that change every turn.
 func ApplyPromptCaching(messages []map[string]any, ttl string) []map[string]any {
 	return ApplyPromptCachingWithConfig(messages, ttl, DefaultCacheBreakpointConfig())
+}
+
+// isSystemInjected checks if a message's content starts with the SystemInjectedPrefix
+// marker, indicating it was auto-injected (session memory, file recovery, etc.)
+// and should be skipped for cache breakpoint placement.
+func isSystemInjected(msg map[string]any) bool {
+	content, exists := msg["content"]
+	if !exists {
+		return false
+	}
+	// String content
+	if s, ok := content.(string); ok {
+		return strings.HasPrefix(s, SystemInjectedPrefix)
+	}
+	// Array content — check first text block
+	if arr, ok := content.([]any); ok && len(arr) > 0 {
+		if m, ok := arr[0].(map[string]any); ok {
+			if text, ok := m["text"].(string); ok {
+				return strings.HasPrefix(text, SystemInjectedPrefix)
+			}
+		}
+	}
+	return false
+}
+
+// stripSystemInjected removes the SystemInjectedPrefix from a message's content.
+// The prefix is only used internally for breakpoint placement decisions and should
+// not be sent to the API.
+func stripSystemInjected(msg map[string]any) {
+	content, exists := msg["content"]
+	if !exists {
+		return
+	}
+	// String content
+	if s, ok := content.(string); ok {
+		msg["content"] = strings.TrimPrefix(s, SystemInjectedPrefix)
+		return
+	}
+	// Array content — strip from first text block
+	if arr, ok := content.([]any); ok && len(arr) > 0 {
+		if m, ok := arr[0].(map[string]any); ok {
+			if text, ok := m["text"].(string); ok {
+				m["text"] = strings.TrimPrefix(text, SystemInjectedPrefix)
+			}
+		}
+	}
 }
 
 // ApplyPromptCachingWithConfig applies prompt caching with explicit config.
@@ -68,24 +115,46 @@ func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg Cac
 		maxBP = MaxCacheBreakpoints
 	}
 
-	// Determine the breakpoint position: last message, or second-to-last
-	// if skipCacheWrite is set (protects the last position's KV pages for
-	// fire-and-forget scenarios like forked agents / background tasks).
-	breakpointIdx := len(result) - 1
-	if cfg.SkipCacheWrite && len(result) >= 2 {
-		breakpointIdx = len(result) - 2
+	// Strip system-injected prefixes from all messages (they're internal markers,
+	// not for the API). Do this before placing breakpoints so the API never sees them.
+	for i := range result {
+		stripSystemInjected(result[i])
 	}
 
-	// Apply the single breakpoint at the determined position.
-	applyCacheMarker(result[breakpointIdx], marker)
+	// Collect candidate indices for breakpoint placement, skipping system-injected
+	// messages. Injected content (session memory, file recovery) changes between
+	// turns, so placing breakpoints there would cause cache misses.
+	candidates := make([]int, 0, len(result))
+	for i := range result {
+		if !isSystemInjected(result[i]) {
+			candidates = append(candidates, i)
+		}
+	}
+
+	if len(candidates) == 0 {
+		// All messages are system-injected; fall back to last message
+		candidates = []int{len(result) - 1}
+	}
+
+	// Determine starting position for skipCacheWrite mode.
+	startOffset := 0
+	if cfg.SkipCacheWrite && len(candidates) >= 2 {
+		startOffset = 1 // skip the last candidate, use second-to-last as first breakpoint
+	}
+
+	// Place breakpoints on the last N non-injected candidates (up to maxBP).
+	// Rolling cache: Turn N's last message (marked) becomes Turn N+1's second-to-last
+	// → cache READ hit on the prefix.
+	breakpointsPlaced := 0
+	for i := len(candidates) - 1 - startOffset; i >= 0 && breakpointsPlaced < maxBP; i-- {
+		applyCacheMarker(result[candidates[i]], marker)
+		breakpointsPlaced++
+	}
 
 	// Also apply a breakpoint to the system prompt (first message if system role).
-	// The system prompt breakpoint is separate from the message breakpoints
-	// and counts as one of the total allowed breakpoints.
-	if breakpointIdx > 0 {
-		if role, _ := result[0]["role"].(string); role == "system" && maxBP >= 2 {
-			applyCacheMarker(result[0], marker)
-		}
+	// The system prompt breakpoint is separate from the message breakpoints.
+	if role, _ := result[0]["role"].(string); role == "system" {
+		applyCacheMarker(result[0], marker)
 	}
 
 	return result

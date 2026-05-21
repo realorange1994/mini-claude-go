@@ -39,6 +39,10 @@ const (
 	DEFAULT_MAX_RESULT_SIZE_CHARS = 50000
 	// MAX_TOOL_RESULTS_PER_MESSAGE_CHARS is the per-message aggregate budget limit.
 	MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 100000
+	// SystemInjectedPrefix is prepended to auto-injected content (session memory,
+	// file recovery, skill recovery) so ApplyPromptCaching can skip these messages
+	// when placing cache breakpoints.
+	SystemInjectedPrefix = "<!-- system-injected -->"
 )
 
 // PersistedToolResult holds information about a persisted tool result.
@@ -1220,11 +1224,11 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 			continue
 		case SummaryContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
-				{OfText: &anthropic.TextBlockParam{Text: string(v)}},
+				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + string(v)}},
 			}
 		case AttachmentContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
-				{OfText: &anthropic.TextBlockParam{Text: string(v)}},
+				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + string(v)}},
 			}
 		default:
 			msg.Content = []anthropic.ContentBlockParamUnion{

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -14,7 +15,7 @@ func TestApplyPromptCachingEmpty(t *testing.T) {
 }
 
 func TestApplyPromptCachingShort(t *testing.T) {
-	// Fewer than 4 messages: last message gets the single cache breakpoint
+	// Fewer than 2 non-system messages: last message gets the cache breakpoint
 	messages := []map[string]any{
 		{"role": "system", "content": "system prompt"},
 		{"role": "user", "content": "hello"},
@@ -25,14 +26,11 @@ func TestApplyPromptCachingShort(t *testing.T) {
 		t.Fatalf("expected 2 messages, got %d", len(result))
 	}
 
-	// System message: no cache_control (only 1 breakpoint, placed at last message)
-	if cc, ok := result[0]["cache_control"]; ok && cc != nil {
-		t.Errorf("system message should NOT have cache_control with single-breakpoint strategy, got %v", cc)
-	}
+	// System message: should have cache_control (system prompt breakpoint)
 	sysContent, ok := result[0]["content"].([]map[string]any)
 	if ok {
-		if _, ok2 := sysContent[len(sysContent)-1]["cache_control"]; ok2 {
-			t.Error("system message should NOT have cache_control with single-breakpoint strategy")
+		if _, ok2 := sysContent[len(sysContent)-1]["cache_control"]; !ok2 {
+			t.Error("system message should have cache_control")
 		}
 	}
 
@@ -47,8 +45,7 @@ func TestApplyPromptCachingShort(t *testing.T) {
 }
 
 func TestApplyPromptCachingLong(t *testing.T) {
-	// Many messages: only the last message gets the cache breakpoint
-	// (single-breakpoint strategy matching upstream)
+	// Many messages: 2 breakpoints on last 2 non-system messages (rolling cache)
 	messages := []map[string]any{
 		{"role": "system", "content": "system prompt"},
 		{"role": "user", "content": "msg1"},
@@ -74,11 +71,19 @@ func TestApplyPromptCachingLong(t *testing.T) {
 		return false
 	}
 
-	// With single-breakpoint strategy, only the last message (index 5) should have cache_control
-	for i := 0; i < 5; i++ {
+	// With 2-breakpoint rolling cache strategy:
+	// - System message (index 0) gets a breakpoint
+	// - Last 2 non-system messages get breakpoints (indices 4 and 5)
+	if !hasCC(result[0]) {
+		t.Error("system message (index 0) should have cache_control")
+	}
+	for i := 1; i < 4; i++ {
 		if hasCC(result[i]) {
-			t.Errorf("message at index %d should NOT have cache_control with single-breakpoint strategy", i)
+			t.Errorf("message at index %d should NOT have cache_control", i)
 		}
+	}
+	if !hasCC(result[4]) {
+		t.Error("second-to-last non-system message (index 4) should have cache_control")
 	}
 	if !hasCC(result[5]) {
 		t.Error("last message (index 5) should have cache_control")
@@ -255,8 +260,8 @@ func TestDeepCopyMessages(t *testing.T) {
 
 func TestCacheBreakpointConfigDefault(t *testing.T) {
 	cfg := DefaultCacheBreakpointConfig()
-	if cfg.MaxBreakpoints != 1 {
-		t.Errorf("expected MaxBreakpoints=1, got %d", cfg.MaxBreakpoints)
+	if cfg.MaxBreakpoints != 2 {
+		t.Errorf("expected MaxBreakpoints=2, got %d", cfg.MaxBreakpoints)
 	}
 	if cfg.SkipCacheWrite {
 		t.Error("expected SkipCacheWrite=false by default")
@@ -264,13 +269,14 @@ func TestCacheBreakpointConfigDefault(t *testing.T) {
 }
 
 func TestMaxCacheBreakpointsConstant(t *testing.T) {
-	if MaxCacheBreakpoints != 1 {
-		t.Errorf("expected MaxCacheBreakpoints=1, got %d", MaxCacheBreakpoints)
+	if MaxCacheBreakpoints != 2 {
+		t.Errorf("expected MaxCacheBreakpoints=2, got %d", MaxCacheBreakpoints)
 	}
 }
 
 func TestApplyPromptCachingWithConfigSkipCacheWrite(t *testing.T) {
-	// skipCacheWrite shifts breakpoint from last to second-to-last
+	// skipCacheWrite shifts the last breakpoint from index 5 to index 4.
+	// System message (index 0) always gets a breakpoint.
 	messages := []map[string]any{
 		{"role": "system", "content": "system prompt"},
 		{"role": "user", "content": "msg1"},
@@ -301,14 +307,19 @@ func TestApplyPromptCachingWithConfigSkipCacheWrite(t *testing.T) {
 		return false
 	}
 
-	// With skipCacheWrite, breakpoint is at length-2 (index 4), not length-1 (index 5)
-	for i := 0; i < 4; i++ {
+	// System message gets a breakpoint (always)
+	if !hasCC(result[0]) {
+		t.Error("system message (index 0) should have cache_control")
+	}
+	// Non-system, non-last messages should NOT have cache_control
+	for i := 1; i < 4; i++ {
 		if hasCC(result[i]) {
 			t.Errorf("message at index %d should NOT have cache_control", i)
 		}
 	}
+	// With skipCacheWrite, breakpoint is at index 4, not index 5
 	if !hasCC(result[4]) {
-		t.Error("second-to-last message (index 4) should have cache_control with skipCacheWrite=true")
+		t.Error("second-to-last non-system message (index 4) should have cache_control with skipCacheWrite=true")
 	}
 	if hasCC(result[5]) {
 		t.Error("last message (index 5) should NOT have cache_control with skipCacheWrite=true")
@@ -349,6 +360,58 @@ func TestApplyPromptCachingWithConfigTwoMessagesSkipCacheWrite(t *testing.T) {
 	}
 	if hasCC(result[1]) {
 		t.Error("last message (index 1) should NOT have cache_control with skipCacheWrite=true")
+	}
+}
+
+func TestApplyPromptCachingSkipsSystemInjected(t *testing.T) {
+	// System-injected messages should be skipped for breakpoint placement
+	prefix := "<!-- system-injected -->"
+	messages := []map[string]any{
+		{"role": "system", "content": "system prompt"},
+		{"role": "user", "content": "msg1"},
+		{"role": "assistant", "content": "resp1"},
+		{"role": "user", "content": prefix + "injected content"}, // should be skipped
+		{"role": "assistant", "content": "resp2"},
+		{"role": "user", "content": "msg3"},
+	}
+
+	result := ApplyPromptCaching(messages, "5m")
+	if len(result) != 6 {
+		t.Fatalf("expected 6 messages, got %d", len(result))
+	}
+
+	hasCC := func(msg map[string]any) bool {
+		if cc, ok := msg["cache_control"]; ok && cc != nil {
+			return true
+		}
+		if content, ok := msg["content"].([]map[string]any); ok && len(content) > 0 {
+			_, ok2 := content[len(content)-1]["cache_control"]
+			return ok2
+		}
+		return false
+	}
+
+	// The injected message (index 3) should NOT have cache_control
+	if hasCC(result[3]) {
+		t.Error("system-injected message (index 3) should NOT have cache_control")
+	}
+
+	// The prefix should be stripped from the injected message
+	userContent, ok := result[3]["content"].([]map[string]any)
+	if ok && len(userContent) > 0 {
+		if text, ok2 := userContent[0]["text"].(string); ok2 {
+			if strings.HasPrefix(text, prefix) {
+				t.Error("system-injected prefix should be stripped from message content")
+			}
+		}
+	}
+
+	// Last 2 non-injected messages (indices 4 and 5) should have cache_control
+	if !hasCC(result[4]) {
+		t.Error("second-to-last non-injected message (index 4) should have cache_control")
+	}
+	if !hasCC(result[5]) {
+		t.Error("last message (index 5) should have cache_control")
 	}
 }
 
