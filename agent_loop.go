@@ -379,6 +379,7 @@ type AgentLoop struct {
 	consecutive529Errors     int                       // tracks consecutive 529 overloaded errors for model fallback
 	modelCapabilities        *ModelCapabilitiesCache   // per-model context window and capability lookup
 	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
+	timeoutHintInjected      bool                       // one-shot: timeout hint injected this session (openclacky pattern)
 	errorReporter              *ErrorReporter            // captures error events for analysis
 	featureFlags               *FeatureFlagStore         // feature flag store
 	lastTransition          LoopTransitionReason       // reason for the most recent loop continue
@@ -2239,6 +2240,21 @@ func (a *AgentLoop) callAPI() (*anthropic.Message, error) {
 			}
 		}
 
+		// Timeout/deadline: inject one-shot hint telling the model to break work
+		// into smaller steps. Without this, the retry re-sends the same request
+		// and the model may try the same overly-long approach again.
+		// Inspired by openclacky's inject_large_output_hint_if_first_timeout().
+		if !a.timeoutHintInjected && (strings.Contains(errMsg, "deadline exceeded") || strings.Contains(errMsg, "timeout")) {
+			a.timeoutHintInjected = true
+			a.out("\n[WARN] Response timed out — injecting hint to split work into smaller steps\n")
+			a.context.AddUserMessage("[SYSTEM] The previous response timed out. This usually means the model was trying to produce too much output. Please adapt:\n- Break the task into multiple smaller steps with separate tool calls\n- For long files: first create a skeleton with `write`, then fill sections individually\n- Keep each single tool-call argument well under ~500 lines\n- Do NOT attempt to output the entire deliverable in one response")
+			// Rebuild messages so the hint takes effect in the retry
+			messages = a.context.BuildMessages()
+			messages = NormalizeAPIMessages(messages)
+			messages = a.injectCacheEdits(messages)
+			params.Messages = messages
+		}
+
 		// Transient error: retry
 		a.consecutive529Errors = 0
 		if isTransientError(errMsg) {
@@ -2383,6 +2399,21 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 			// a completely new response with new tool IDs on reconnect,
 			// so old collected data would have mismatched IDs.
 			collect.ClearAll()
+
+			// Timeout/deadline: inject one-shot hint telling the model to break work
+			// into smaller steps. Without this, the retry re-sends the same request
+			// and the model may try the same overly-long approach again.
+			// Inspired by openclacky's inject_large_output_hint_if_first_timeout().
+			if !a.timeoutHintInjected && (strings.Contains(errMsg, "deadline exceeded") || strings.Contains(errMsg, "timeout")) {
+				a.timeoutHintInjected = true
+				a.out("\n[WARN] Response timed out — injecting hint to split work into smaller steps\n")
+				a.context.AddUserMessage("[SYSTEM] The previous response timed out. This usually means the model was trying to produce too much output. Please adapt:\n- Break the task into multiple smaller steps with separate tool calls\n- For long files: first create a skeleton with `write`, then fill sections individually\n- Keep each single tool-call argument well under ~500 lines\n- Do NOT attempt to output the entire deliverable in one response")
+				messages = a.context.BuildMessages()
+				messages = NormalizeAPIMessages(messages)
+				messages = a.injectCacheEdits(messages)
+				params.Messages = messages
+			}
+
 			// Smart retry decision based on what was already delivered
 			switch a.lastDeltasState {
 			case DeltasStateNone:
@@ -2944,6 +2975,15 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 			}
 			if input == nil {
 				input = make(map[string]any)
+			}
+
+			// Detect upstream truncation: empty args mean the response was cut
+			// mid-tool_use by an API router (OpenRouter, etc.). Executing a
+			// malformed tool call would fail and waste tokens on error-retry.
+			// Inspired by openclacky's detect_upstream_truncation!()
+			if len(v.Input) == 0 {
+				a.out("\n[WARN] Upstream truncation: tool %q has empty arguments\n", v.Name)
+				return nil, nil, fmt.Sprintf("upstream truncated response: tool %q has empty arguments", v.Name)
 			}
 
 			call := map[string]any{

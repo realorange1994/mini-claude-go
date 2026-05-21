@@ -676,6 +676,12 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 			}
 		}
 
+		// Strip terminal control sequences (CSI, OSC, \r, backspace)
+		// before sending to the LLM. These consume tokens but convey
+		// no useful information. Inspired by openclacky's OutputCleaner.
+		stdoutOut = StripTerminalCodes(stdoutOut)
+		stderrOut = StripTerminalCodes(stderrOut)
+
 		var result strings.Builder
 		if stdoutOut != "" {
 			result.WriteString(stdoutOut)
