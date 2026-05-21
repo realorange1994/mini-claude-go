@@ -1129,6 +1129,12 @@ func reflectToLisp(v reflect.Value) *Value {
 		return vstr(v.String())
 	case reflect.Bool:
 		return vbool(v.Bool())
+	case reflect.Complex64:
+		c := v.Complex()
+		return vcomplex(float64(real(c)), float64(imag(c)))
+	case reflect.Complex128:
+		c := v.Complex()
+		return vcomplex(real(c), imag(c))
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			return vstr(string(v.Bytes()))

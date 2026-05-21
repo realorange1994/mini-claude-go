@@ -1134,8 +1134,11 @@ func (a *AgentLoop) SendMessageToSubAgent(agentID string, message string) (strin
 	if a.agentTaskStore != nil {
 		if task := a.agentTaskStore.Get(resolvedID); task != nil {
 			if task.IsTerminal() {
-				return fmt.Sprintf("Agent %s has completed.\nStatus: %s\nResult: %s",
-					resolvedID, task.Status, task.GetOutput()), ""
+				if message == "" {
+					return fmt.Sprintf("Agent %s has completed.\nStatus: %s\nResult: %s",
+						resolvedID, task.Status, task.GetOutput()), ""
+				}
+				return "", fmt.Sprintf("Agent %s has already completed", resolvedID)
 			}
 			if message != "" {
 				task.AddPendingMessage(message)
@@ -1148,8 +1151,11 @@ func (a *AgentLoop) SendMessageToSubAgent(agentID string, message string) (strin
 	if a.taskStore != nil {
 		if task := a.taskStore.GetTask(resolvedID); task != nil {
 			if task.IsTerminal() {
-				return fmt.Sprintf("Agent %s has completed.\nStatus: %d\nResult: %s",
-					resolvedID, task.Status, task.Result), ""
+				if message == "" {
+					return fmt.Sprintf("Agent %s has completed.\nStatus: %d\nResult: %s",
+						resolvedID, task.Status, task.Result), ""
+				}
+				return "", fmt.Sprintf("Agent %s has already completed", resolvedID)
 			}
 			if message != "" {
 				task.AddPendingMessage(message)

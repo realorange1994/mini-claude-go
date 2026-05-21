@@ -823,10 +823,22 @@ func (t *FileHistoryTagTool) Execute(params map[string]any) tools.ToolResult {
 			return tools.ToolResult{Output: "Error: version is required for delete", IsError: true}
 		}
 		fullPath := expandPath(pathVal)
+		// Check if the tag exists on a different version
+		allTags := t.History.ListTags(fullPath)
+		tagFoundElsewhere := 0
+		for _, tag := range allTags {
+			if tag.Tag == tagVal {
+				tagFoundElsewhere = tag.Version
+				break
+			}
+		}
 		if t.History.RemoveTag(fullPath, versionVal, tagVal) {
 			return tools.ToolResult{Output: fmt.Sprintf("Tag [%s] removed from %s v%d", tagVal, fullPath, versionVal)}
 		}
-		return tools.ToolResult{Output: fmt.Sprintf("Tag [%s] not found on %s v%d", tagVal, fullPath, versionVal), IsError: true}
+		if tagFoundElsewhere > 0 {
+			return tools.ToolResult{Output: fmt.Sprintf("Error: Tag [%s] found on %s v%d, not v%d", tagVal, fullPath, tagFoundElsewhere, versionVal), IsError: true}
+		}
+		return tools.ToolResult{Output: fmt.Sprintf("Error: Tag [%s] not found on any version of %s", tagVal, fullPath), IsError: true}
 	case "add":
 		pathVal, ok := params["path"].(string)
 		if !ok || pathVal == "" {

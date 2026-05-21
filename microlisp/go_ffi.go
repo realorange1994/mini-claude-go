@@ -1,7 +1,9 @@
 package microlisp
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"sort"
@@ -189,11 +191,17 @@ func makeGoPrim(wf *goFunc) NativeFunc {
 			} else {
 				return nil, fmt.Errorf("go:import %s: too many arguments", wf.name)
 			}
-			rv, convErr := lispToReflectSafe(arg, paramType)
-			if convErr != nil {
-				return nil, fmt.Errorf("go:import %s: arg %d: %w", wf.name, i+1, convErr)
+			// For variadic interface{} args, use lispToInterface directly
+			// since reflect.Interface needs a reflect.Value wrapping the interface{}
+			if isVariadic && i >= numIn-1 && paramType.Kind() == reflect.Interface {
+				callArgs = append(callArgs, reflect.ValueOf(lispToInterface(arg)))
+			} else {
+				rv, convErr := lispToReflectSafe(arg, paramType)
+				if convErr != nil {
+					return nil, fmt.Errorf("go:import %s: arg %d: %w", wf.name, i+1, convErr)
+				}
+				callArgs = append(callArgs, rv)
 			}
-			callArgs = append(callArgs, rv)
 		}
 
 		// Handle variadic: collapse trailing args into a slice
@@ -230,7 +238,11 @@ func makeGoPrim(wf *goFunc) NativeFunc {
 				if results[0].IsNil() {
 					return vnil(), nil
 				}
-				return nil, fmt.Errorf("go:import %s: %v", wf.name, results[0].Interface())
+				// If the function only returns an error (e.g. errors.New),
+				// return it as a value rather than treating it as a failure.
+				// Functions like os.Stat return (result, error) — those are
+				// handled in the multi-return case below.
+				return reflectToLisp(results[0]), nil
 			}
 			return reflectToLisp(results[0]), nil
 		default:
@@ -352,6 +364,20 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 		return reflect.Value{}, fmt.Errorf("cannot convert Go value of type %s to %s", gv.Type(), t)
 	}
 	switch t.Kind() {
+	case reflect.Complex64, reflect.Complex128:
+		if v.typ == VComplex {
+			return reflect.ValueOf(complex(v.num, v.imag)), nil
+		}
+		if v.typ == VGoVal {
+			gv := reflect.ValueOf(v.goVal)
+			if gv.Type().AssignableTo(t) {
+				return gv, nil
+			}
+		}
+		if isNumeric(v) {
+			return reflect.ValueOf(complex(toNum(v), 0)), nil
+		}
+		return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t.Kind())
 	case reflect.Float64:
 		if !isNumeric(v) {
 			return reflect.Value{}, fmt.Errorf("cannot convert %s to float64", typeStr(v))
@@ -367,6 +393,12 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 		newVal.SetFloat(float64(toNum(v)))
 		return newVal, nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		// VChar → int32 (rune) conversion for unicode/utf8 functions
+		if v.typ == VChar && t.Kind() == reflect.Int32 {
+			newVal := reflect.New(t).Elem()
+			newVal.SetInt(int64(v.ch))
+			return newVal, nil
+		}
 		if !isNumeric(v) {
 			return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t.Kind())
 		}
@@ -375,7 +407,13 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 		newVal := reflect.New(t).Elem()
 		newVal.SetInt(int64(n))
 		return newVal, nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		// VChar → uint8 conversion (e.g. os.IsPathSeparator)
+		if v.typ == VChar {
+			newVal := reflect.New(t).Elem()
+			newVal.SetUint(uint64(v.ch))
+			return newVal, nil
+		}
 		if !isNumeric(v) {
 			return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t.Kind())
 		}
@@ -397,9 +435,87 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 		}
 		return reflect.Value{}, fmt.Errorf("cannot convert %s to string", typeStr(v))
 	case reflect.Slice:
-		if v.typ == VStr && t.Elem().Kind() == reflect.Uint8 {
-			return reflect.ValueOf([]byte(v.str)), nil
+		if t.Elem().Kind() == reflect.Uint8 {
+			// VStr → []byte
+			if v.typ == VStr {
+				return reflect.ValueOf([]byte(v.str)), nil
+			}
+			// VArray → []uint8 (byte slice for bytes/hex/binary/crypto functions)
+			if v.typ == VArray && v.array != nil {
+				b := make([]byte, len(v.array.elements))
+				for i, elem := range v.array.elements {
+					if !isNumeric(elem) {
+						return reflect.Value{}, fmt.Errorf("array element %d: cannot convert %s to uint8", i, typeStr(elem))
+					}
+					n := toNum(elem)
+					if n < 0 || n > 255 {
+						return reflect.Value{}, fmt.Errorf("array element %d: value %v out of range for uint8", i, n)
+					}
+					b[i] = byte(n)
+				}
+				return reflect.ValueOf(b), nil
+			}
 		}
+		// Handle nested slices: VArray of VArray → [][]byte, [][]string, etc.
+		if v.typ == VArray && v.array != nil {
+			elemKind := t.Elem().Kind()
+			// VArray → []string
+			if elemKind == reflect.String {
+				strs := make([]string, len(v.array.elements))
+				for i, elem := range v.array.elements {
+					if elem.typ != VStr {
+						return reflect.Value{}, fmt.Errorf("array element %d: cannot convert %s to string", i, typeStr(elem))
+					}
+					strs[i] = elem.str
+				}
+				return reflect.ValueOf(strs), nil
+			}
+			// VArray → []int (for sort.SearchInts, etc.)
+			if elemKind == reflect.Int {
+				ints := make([]int, len(v.array.elements))
+				for i, elem := range v.array.elements {
+					if !isNumeric(elem) {
+						return reflect.Value{}, fmt.Errorf("array element %d: cannot convert %s to int", i, typeStr(elem))
+					}
+					ints[i] = int(toNum(elem))
+				}
+				return reflect.ValueOf(ints), nil
+			}
+			// VArray → []float64 (for sort.SearchFloat64s, etc.)
+			if elemKind == reflect.Float64 {
+				floats := make([]float64, len(v.array.elements))
+				for i, elem := range v.array.elements {
+					if !isNumeric(elem) {
+						return reflect.Value{}, fmt.Errorf("array element %d: cannot convert %s to float64", i, typeStr(elem))
+					}
+					floats[i] = toNum(elem)
+				}
+				return reflect.ValueOf(floats), nil
+			}
+			// VArray of VArray → [][]byte (for bytes.Join, etc.)
+			if elemKind == reflect.Slice && t.Elem().Elem().Kind() == reflect.Uint8 {
+				sliceOfSlices := reflect.MakeSlice(t, len(v.array.elements), len(v.array.elements))
+				for i, elem := range v.array.elements {
+					if elem.typ != VArray || elem.array == nil {
+						return reflect.Value{}, fmt.Errorf("array element %d: expected nested array, got %s", i, typeStr(elem))
+					}
+					b := make([]byte, len(elem.array.elements))
+					for j, inner := range elem.array.elements {
+						if !isNumeric(inner) {
+							return reflect.Value{}, fmt.Errorf("nested element %d[%d]: cannot convert %s to uint8", i, j, typeStr(inner))
+						}
+						n := toNum(inner)
+						if n < 0 || n > 255 {
+							return reflect.Value{}, fmt.Errorf("nested element %d[%d]: value %v out of range for uint8", i, j, n)
+						}
+						b[j] = byte(n)
+					}
+					sliceOfSlices.Index(i).SetBytes(b)
+				}
+				return sliceOfSlices, nil
+			}
+		}
+		// VList → slice
 		if isList(v) {
 			slice := reflect.MakeSlice(t, 0, 8)
 			for p := v; !isNil(p); p = p.cdr {
@@ -413,6 +529,62 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 		}
 		return reflect.Value{}, fmt.Errorf("cannot convert %s to %s", typeStr(v), t)
 	case reflect.Interface:
+		// Auto-wrap VArray for specific interface types that Go APIs expect
+		if v.typ == VArray && v.array != nil {
+			// VArray → io.ByteReader (e.g. binary.ReadUvarint)
+			if t == reflect.TypeOf((*io.ByteReader)(nil)).Elem() {
+				b := make([]byte, len(v.array.elements))
+				for i, elem := range v.array.elements {
+					if !isNumeric(elem) {
+						return reflect.Value{}, fmt.Errorf("array element %d: cannot convert %s to byte", i, typeStr(elem))
+					}
+					n := toNum(elem)
+					if n < 0 || n > 255 {
+						return reflect.Value{}, fmt.Errorf("array element %d: value %v out of range for byte", i, n)
+					}
+					b[i] = byte(n)
+				}
+				return reflect.ValueOf(bytes.NewReader(b)), nil
+			}
+			// Fallback: VArray → []byte as io.Reader
+			if t == reflect.TypeOf((*io.Reader)(nil)).Elem() {
+				b := make([]byte, len(v.array.elements))
+				for i, elem := range v.array.elements {
+					if !isNumeric(elem) {
+						return reflect.Value{}, fmt.Errorf("array element %d: cannot convert %s to byte", i, typeStr(elem))
+					}
+					n := toNum(elem)
+					if n < 0 || n > 255 {
+						return reflect.Value{}, fmt.Errorf("array element %d: value %v out of range for byte", i, n)
+					}
+					b[i] = byte(n)
+				}
+				return reflect.ValueOf(bytes.NewReader(b)), nil
+			}
+		}
+		return reflect.ValueOf(lispToInterface(v)), nil
+	case reflect.Ptr:
+		// Auto-wrap VArray as *bytes.Buffer for json.Compact, json.Indent, etc.
+		if t == reflect.TypeOf(&bytes.Buffer{}) && v.typ == VArray && v.array != nil {
+			b := make([]byte, len(v.array.elements))
+			for i, elem := range v.array.elements {
+				if !isNumeric(elem) {
+					return reflect.Value{}, fmt.Errorf("array element %d: cannot convert %s to byte", i, typeStr(elem))
+				}
+				n := toNum(elem)
+				if n < 0 || n > 255 {
+					return reflect.Value{}, fmt.Errorf("array element %d: value %v out of range for byte", i, n)
+				}
+				b[i] = byte(n)
+			}
+			buf := bytes.NewBuffer(b)
+			return reflect.ValueOf(buf), nil
+		}
+		// VStr → *bytes.Buffer
+		if t == reflect.TypeOf(&bytes.Buffer{}) && v.typ == VStr {
+			buf := bytes.NewBufferString(v.str)
+			return reflect.ValueOf(buf), nil
+		}
 		return reflect.ValueOf(lispToInterface(v)), nil
 	default:
 		return reflect.ValueOf(lispToInterface(v)), nil

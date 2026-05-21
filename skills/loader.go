@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -148,7 +149,8 @@ func (l *Loader) LoadSkillsForContext(names []string) string {
 	return strings.Join(parts, "\n\n---\n\n")
 }
 
-// GetAlwaysSkills returns skills with always=true that meet requirements.
+// GetAlwaysSkills returns skills with always=true that meet requirements,
+// sorted by name for deterministic ordering.
 func (l *Loader) GetAlwaysSkills() []SkillInfo {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -159,10 +161,14 @@ func (l *Loader) GetAlwaysSkills() []SkillInfo {
 			result = append(result, s)
 		}
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
 // ListSkills returns all available skills, optionally filtering by availability.
+// Skills are sorted by name for deterministic ordering.
 func (l *Loader) ListSkills(filterUnavailable bool) []SkillInfo {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -174,11 +180,15 @@ func (l *Loader) ListSkills(filterUnavailable bool) []SkillInfo {
 		}
 		result = append(result, s)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
 // ListSkillsForProject returns all available skills applicable to the given project directory.
 // Skills with a paths restriction are filtered; skills without paths are always included.
+// Skills are sorted by name for deterministic ordering.
 func (l *Loader) ListSkillsForProject(projectDir string, filterUnavailable bool) []SkillInfo {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -193,6 +203,9 @@ func (l *Loader) ListSkillsForProject(projectDir string, filterUnavailable bool)
 		}
 		result = append(result, s)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
@@ -235,6 +248,7 @@ func (l *Loader) BuildSystemPrompt(skillNames []string) string {
 }
 
 // BuildSkillsSummary builds an XML-formatted summary of all skills.
+// Skills are listed in alphabetical order by name for deterministic output.
 func (l *Loader) BuildSkillsSummary() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -243,9 +257,17 @@ func (l *Loader) BuildSkillsSummary() string {
 		return ""
 	}
 
+	// Collect and sort skill names for deterministic ordering
+	names := make([]string, 0, len(l.skillIndex))
+	for name := range l.skillIndex {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var sb strings.Builder
 	sb.WriteString("<skills>\n")
-	for _, s := range l.skillIndex {
+	for _, name := range names {
+		s := l.skillIndex[name]
 		avail := "true"
 		if !s.Available {
 			avail = "false"

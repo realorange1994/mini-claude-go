@@ -431,6 +431,38 @@ func TestLispFFI(t *testing.T) {
 	t.Log(output)
 }
 
+func TestLispFFIComprehensive(t *testing.T) {
+	t.Helper()
+	ResetGlobalEnv()
+
+	content, err := os.ReadFile(filepath.Join("testdata", "ffi_test_all.lisp"))
+	if err != nil {
+		t.Fatalf("failed to read ffi_test_all.lisp: %v", err)
+	}
+
+	// Remove (load "tests/framework.lisp") lines
+	re := regexp.MustCompile(`(?m)^\s*\(load\s+"[^"]*framework\.lisp"\)\s*$`)
+	processed := re.ReplaceAllString(string(content), "")
+
+	_, err = SafeEvalString(processed)
+	if err != nil {
+		t.Logf("SafeEvalString error: %v", err)
+	}
+
+	// Report results from the self-contained test framework
+	passCount, _ := SafeEvalString("pass-count")
+	failCount, _ := SafeEvalString("fail-count")
+	skipCount, _ := SafeEvalString("skip-count")
+	t.Logf("FFI comprehensive: PASSED=%s FAILED=%s SKIPPED=%s",
+		strings.TrimSpace(passCount), strings.TrimSpace(failCount), strings.TrimSpace(skipCount))
+
+	// Fail if any test failures occurred
+	if fc := strings.TrimSpace(failCount); fc != "" && fc != "0" {
+		failedFns, _ := SafeEvalString("failed-fns")
+		t.Fatalf("FFI comprehensive tests had %s failure(s). Failed: %s", fc, failedFns)
+	}
+}
+
 func TestLispIOStreams(t *testing.T) {
 	output, failures := runLispTest(t, "testdata/io-stream-tests.lisp")
 	if failures > 0 {

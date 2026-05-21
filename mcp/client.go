@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -934,13 +935,22 @@ func (m *Manager) CallToolWithServerWithTimeout(ctx context.Context, server, too
 	return client.CallToolWithTimeout(ctx, toolName, args, timeoutMs, resultCh)
 }
 
-// ListTools returns all discovered tools from all servers.
+// ListTools returns all discovered tools from all servers, sorted by server
+// name then tool name for deterministic ordering across requests (prompt caching).
 func (m *Manager) ListTools() []Tool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// Collect server names and sort them
+	servers := make([]string, 0, len(m.clients))
+	for name := range m.clients {
+		servers = append(servers, name)
+	}
+	sort.Strings(servers)
+
 	var all []Tool
-	for _, client := range m.clients {
+	for _, name := range servers {
+		client := m.clients[name]
 		all = append(all, client.tools...)
 	}
 	return all
@@ -962,15 +972,17 @@ func (m *Manager) FindTool(name string) *Tool {
 	return nil
 }
 
-// ListServers returns list of registered server names.
+// ListServers returns list of registered server names, sorted alphabetically
+// for deterministic ordering across requests (prompt caching).
 func (m *Manager) ListServers() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var servers []string
+	servers := make([]string, 0, len(m.clients))
 	for name := range m.clients {
 		servers = append(servers, name)
 	}
+	sort.Strings(servers)
 	return servers
 }
 
@@ -989,17 +1001,26 @@ func (m *Manager) GetServerStatus(name string) string {
 	return "disconnected"
 }
 
-// AllToolsWithServer returns all discovered tools annotated with their source server.
+// AllToolsWithServer returns all discovered tools annotated with their source server,
+// sorted by server name then tool name for deterministic ordering.
 func (m *Manager) AllToolsWithServer() []ToolWithServer {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// Collect server names and sort them
+	servers := make([]string, 0, len(m.clients))
+	for name := range m.clients {
+		servers = append(servers, name)
+	}
+	sort.Strings(servers)
+
 	var all []ToolWithServer
-	for serverName, client := range m.clients {
+	for _, name := range servers {
+		client := m.clients[name]
 		for _, tool := range client.tools {
 			all = append(all, ToolWithServer{
 				Tool:   tool,
-				Server: serverName,
+				Server: name,
 			})
 		}
 	}
@@ -1042,29 +1063,42 @@ func (m *Manager) StopAll() {
 }
 
 // DiscoverSkillResources queries all MCP servers for skill:// resources
-// and returns them as a list of (server, resource) pairs.
+// and returns them as a list of (server, resource) pairs, sorted by
+// server name then URI for deterministic ordering.
 func (m *Manager) DiscoverSkillResources(ctx context.Context) []SkillResource {
 	m.mu.RLock()
-	clients := make(map[string]*Client, len(m.clients))
-	for k, v := range m.clients {
-		clients[k] = v
+	// Collect and sort server names for deterministic ordering
+	servers := make([]string, 0, len(m.clients))
+	for name := range m.clients {
+		servers = append(servers, name)
+	}
+	sort.Strings(servers)
+	clientsCopy := make([]struct {
+		name   string
+		client *Client
+	}, len(servers))
+	for i, name := range servers {
+		clientsCopy[i] = struct {
+			name   string
+			client *Client
+		}{name, m.clients[name]}
 	}
 	m.mu.RUnlock()
 
 	var skills []SkillResource
-	for name, client := range clients {
-		resources, err := client.ListResources(ctx)
+	for _, sc := range clientsCopy {
+		resources, err := sc.client.ListResources(ctx)
 		if err != nil {
 			continue
 		}
 		for _, res := range resources {
 			if strings.HasPrefix(res.URI, "skill://") {
-				content, err := client.ReadResource(ctx, res.URI)
+				content, err := sc.client.ReadResource(ctx, res.URI)
 				if err != nil {
 					continue
 				}
 				skills = append(skills, SkillResource{
-					Server:      name,
+					Server:      sc.name,
 					URI:         res.URI,
 					Name:        res.Name,
 					Description: res.Description,

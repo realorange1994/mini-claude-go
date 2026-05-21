@@ -278,6 +278,7 @@ func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) To
 		MaxDepth:        maxDepth,
 		MaxFilesize:     maxFilesizeBytes,
 		Ctx:             ctx,
+		Excludes:        excludes,
 	}
 	sr := rgrep.Search(rgrepCfg)
 	return ToolResult{Output: rgrep.FormatResult(sr, rgrepCfg)}

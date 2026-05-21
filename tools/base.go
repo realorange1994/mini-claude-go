@@ -332,12 +332,17 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return t, ok
 }
 
-// AllTools returns all registered tools.
+// AllTools returns all registered tools, sorted by name for deterministic ordering.
+// Deterministic tool order is important for prompt caching — the API caches
+// prefixes of the tool list, so a stable order maximizes cache hit rates.
 func (r *Registry) AllTools() []Tool {
 	out := make([]Tool, 0, len(r.tools))
 	for _, t := range r.tools {
 		out = append(out, t)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name() < out[j].Name()
+	})
 	return out
 }
 
@@ -605,9 +610,12 @@ func RestoreCRLF(s string) string {
 }
 
 // APISchemas builds the tool definitions for the Anthropic API.
+// Tools are returned in alphabetical order by name to ensure deterministic
+// ordering for prompt caching across requests.
 func (r *Registry) APISchemas() []map[string]any {
-	out := make([]map[string]any, 0, len(r.tools))
-	for _, t := range r.tools {
+	tools := r.AllTools() // already sorted
+	out := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
 		out = append(out, map[string]any{
 			"name":         t.Name(),
 			"description":  t.Description(),
