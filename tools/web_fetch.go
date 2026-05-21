@@ -277,62 +277,6 @@ func stripTag(html, tag string) string {
 	return html
 }
 
-func stripHTML(html string) string {
-	html = stripTag(html, "script")
-	html = stripTag(html, "style")
-	html = stripTag(html, "nav")
-	html = stripTag(html, "header")
-	html = stripTag(html, "footer")
-	html = stripTag(html, "aside")
-
-	for {
-		start := strings.Index(html, "<!--")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(html[start+4:], "-->")
-		if end == -1 {
-			break
-		}
-		html = html[:start] + html[start+4+end+3:]
-	}
-
-	var sb strings.Builder
-	inTag := false
-	spaceCount := 0
-	for _, r := range html {
-		if r == '<' {
-			inTag = true
-			continue
-		}
-		if r == '>' {
-			inTag = false
-			if spaceCount > 0 {
-				sb.WriteRune(' ')
-				spaceCount = 0
-			}
-			continue
-		}
-		if inTag {
-			continue
-		}
-		if r == ' ' || r == '\n' || r == '\r' || r == '\t' {
-			spaceCount++
-			if spaceCount > 1 {
-				continue
-			}
-		} else {
-			spaceCount = 0
-		}
-		sb.WriteRune(r)
-	}
-
-	result := strings.TrimSpace(sb.String())
-	for strings.Contains(result, "  ") {
-		result = strings.ReplaceAll(result, "  ", " ")
-	}
-	return result
-}
 
 func extractHTMLTitle(html string) string {
 	if idx := strings.Index(strings.ToLower(html), "<title"); idx != -1 {

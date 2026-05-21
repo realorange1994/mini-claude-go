@@ -435,53 +435,6 @@ func TestCollectHandlerClearText(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// StreamResult tests
-// ---------------------------------------------------------------------------
-
-func TestStreamResultCompletedTrue(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: "Done"})
-	h.SetFinishReason("end_turn")
-
-	result := StreamResultFrom(h, true)
-	if !result.Completed {
-		t.Error("expected completed=true")
-	}
-	if result.Text != "Done" {
-		t.Errorf("expected text 'Done', got %q", result.Text)
-	}
-	if result.FinishReason != "end_turn" {
-		t.Errorf("expected finish_reason 'end_turn', got %q", result.FinishReason)
-	}
-}
-
-func TestStreamResultCompletedFalseHasPartial(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"command":"l`})
-
-	result := StreamResultFrom(h, false)
-	if result.Completed {
-		t.Error("expected completed=false")
-	}
-	if len(result.ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call in result, got %d", len(result.ToolCalls))
-	}
-	if result.ToolCalls[0].Name != "exec" {
-		t.Errorf("expected tool name 'exec', got %q", result.ToolCalls[0].Name)
-	}
-}
-
-func TestStreamResultThinkingFallback(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeThinking, Content: "Thinking..."})
-
-	result := StreamResultFrom(h, true)
-	if result.Text != "Thinking..." {
-		t.Errorf("expected thinking as text fallback, got %q", result.Text)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // DeltasState tracking tests

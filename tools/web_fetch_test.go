@@ -197,35 +197,6 @@ func TestStripTagNoTag(t *testing.T) {
 	}
 }
 
-// ─── stripHTML ──────────────────────────────────────────────────────────────
-
-func TestStripHTMLBasic(t *testing.T) {
-	result := stripHTML("<div>hello <b>world</b></div>")
-	if result == "" {
-		t.Error("should have content")
-	}
-}
-
-func TestStripHTMLWithScript(t *testing.T) {
-	result := stripHTML("before<script>bad()</script>after")
-	if result == "" {
-		t.Error("should have content after stripping")
-	}
-}
-
-func TestStripHTMLWithComments(t *testing.T) {
-	result := stripHTML("before<!-- comment -->after")
-	if result == "" {
-		t.Error("should have content after stripping comments")
-	}
-}
-
-func TestStripHTMLEmpty(t *testing.T) {
-	result := stripHTML("")
-	if result != "" {
-		t.Errorf("empty string should remain empty, got %q", result)
-	}
-}
 
 // ─── maxBodySize constant ───────────────────────────────────────────────────
 

@@ -102,29 +102,6 @@ type StreamResult struct {
 	FinishReason string
 }
 
-// StreamResult returns the complete streaming result from a CollectHandler.
-// When completed=false, partial results are returned after a failure.
-func StreamResultFrom(h *CollectHandler, completed bool) StreamResult {
-	h.mu.Lock()
-	text := h.Text
-	thinking := h.Thinking
-	finishReason := h.finishReason
-	toolCalls := make([]ToolCallInfo, len(h.ToolCalls))
-	copy(toolCalls, h.ToolCalls)
-	h.mu.Unlock()
-
-	if text == "" {
-		text = thinking
-	}
-	return StreamResult{
-		ToolCalls:    toolCalls,
-		Text:         text,
-		Thinking:     h.Thinking,
-		Completed:    completed,
-		FinishReason: finishReason,
-	}
-}
-
 // NewCollectHandler creates a ready-to-use handler.
 func NewCollectHandler() *CollectHandler {
 	return &CollectHandler{
