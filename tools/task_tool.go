@@ -375,6 +375,7 @@ func (t *TaskUpdateTool) Execute(params map[string]any) ToolResult {
 // TaskStopTool stops a running background task by its ID.
 type TaskStopTool struct {
 	StopFunc func(taskID string) error
+	GetFunc  WorkTaskGetFunc
 }
 
 func (t *TaskStopTool) Name() string { return "task_stop" }
@@ -404,6 +405,16 @@ func (t *TaskStopTool) Execute(params map[string]any) ToolResult {
 	taskID, _ := params["task_id"].(string)
 	if taskID == "" {
 		return ToolResultError("task_id is required")
+	}
+	// Check if task exists and is stoppable
+	if t.GetFunc != nil {
+		if task, found := t.GetFunc(taskID); found {
+			if task.Status == "completed" || task.Status == "deleted" {
+				return ToolResultError(fmt.Sprintf("Task #%s is not running (status: %s)", taskID, task.Status))
+			}
+		} else {
+			return ToolResultError(fmt.Sprintf("Task #%s not found", taskID))
+		}
 	}
 	err := t.StopFunc(taskID)
 	if err != nil {

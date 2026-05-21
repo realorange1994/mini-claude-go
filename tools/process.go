@@ -93,7 +93,7 @@ func (*ProcessTool) Execute(params map[string]any) ToolResult {
 	case "pstree":
 		return processPstree(isWindows)
 	default:
-		return ToolResult{Output: fmt.Sprintf("Error: unknown operation: %s", operation), IsError: true}
+		return ToolResult{Output: fmt.Sprintf("Error: unknown operation: %s. Available operations: list, kill, pkill, pgrep, top, pstree", operation), IsError: true}
 	}
 }
 

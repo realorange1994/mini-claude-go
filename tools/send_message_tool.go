@@ -1,5 +1,7 @@
 package tools
 
+import "fmt"
+
 // SendMessageFunc is the callback for sending a message to a running sub-agent.
 type SendMessageFunc func(agentID string, message string) (result string, errText string)
 
@@ -15,6 +17,7 @@ type SendMessageTool struct {
 	GetStatusFunc   GetStatusFunc
 	ResolveNameFunc ResolveNameFunc // for name -> agentID resolution
 	HandleStore     *AgentHandleStore
+	AgentStore      *AgentTaskStore
 }
 
 func (t *SendMessageTool) Name() string { return "send_message" }
@@ -75,6 +78,15 @@ func (t *SendMessageTool) Execute(params map[string]any) ToolResult {
 
 	if agentID == "" {
 		return ToolResultError("either agent_id or name is required")
+	}
+
+	// Check if agent is still running before sending
+	if t.AgentStore != nil {
+		if task := t.AgentStore.Get(agentID); task != nil {
+			if task.IsTerminal() {
+				return ToolResultError(fmt.Sprintf("Agent %s is not running (status: %s)", agentID, task.Status))
+			}
+		}
 	}
 
 	message, _ := params["message"].(string)

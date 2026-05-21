@@ -701,6 +701,9 @@ func (t *FileHistorySearchTool) Execute(params map[string]any) tools.ToolResult 
 	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Search results (%s: %q in %s):\n", modeStr, query, fullPath))
+	if modeStr == "added" || modeStr == "changed" || modeStr == "removed" {
+		sb.WriteString("  Prefix: + = added, - = removed\n")
+	}
 	for _, r := range results {
 		sb.WriteString(fmt.Sprintf("  v%d:\n", r.Version))
 		for _, l := range r.Lines {
@@ -928,7 +931,7 @@ func (t *FileHistoryAnnotateTool) Execute(params map[string]any) tools.ToolResul
 	}
 	fullPath := expandPath(pathVal)
 	if t.History.AnnotateSnapshot(fullPath, version, message) {
-		return tools.ToolResult{Output: fmt.Sprintf("Annotation added to %s v%d: %q", fullPath, version, message)}
+		return tools.ToolResult{Output: fmt.Sprintf("Annotation [%s] added to %s v%d", message, fullPath, version)}
 	}
 	return tools.ToolResult{Output: fmt.Sprintf("Cannot annotate %s v%d (version not found)", fullPath, version), IsError: true}
 }

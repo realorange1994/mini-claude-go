@@ -162,6 +162,29 @@ func (a *AgentLoop) registerTaskOutputTool() {
 func (a *AgentLoop) registerTaskStopTool() {
 	taskStopTool := &tools.TaskStopTool{
 		StopFunc: a.StopBackgroundTask,
+		GetFunc: func(id string) (*tools.WorkTaskInfo, bool) {
+			if a.workTaskStore == nil {
+				return nil, false
+			}
+			task := a.workTaskStore.GetTask(id)
+			if task == nil {
+				return nil, false
+			}
+			info := &tools.WorkTaskInfo{
+				ID:          task.ID,
+				Subject:     task.Subject,
+				Description: task.Description,
+				ActiveForm:  task.ActiveForm,
+				Status:      string(task.Status),
+				Owner:       task.Owner,
+				Metadata:    task.Metadata,
+				Blocks:      task.Blocks,
+				BlockedBy:   task.BlockedBy,
+				CreatedAt:   task.CreatedAt.Format(time.RFC3339),
+				UpdatedAt:   task.UpdatedAt.Format(time.RFC3339),
+			}
+			return info, true
+		},
 	}
 	a.registry.Register(taskStopTool)
 }

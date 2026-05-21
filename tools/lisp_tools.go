@@ -286,7 +286,7 @@ func (t *LispToolsTool) doEdit(ctx context.Context, params map[string]any) ToolR
 	oldStr, _ := params["old_string"].(string)
 	newStr, _ := params["new_string"].(string)
 	if oldStr == "" {
-		return ToolResult{Output: "Error: old_string is required for edit", IsError: true}
+		return ToolResult{Output: "Error: old_string is required for edit and must be non-empty", IsError: true}
 	}
 	replaceAll := "nil"
 	if v, ok := params["replace_all"].(bool); ok && v {
@@ -750,7 +750,7 @@ const lispToolsLib = `
       (let ((content (read-file-fully safe)))
         (let ((count (count-substring content old-str)))
           (if (= count 0)
-              (error "old_string not found in file")
+              (error "old_string not found in file (or is empty)")
               (if (and (not replace-all) (> count 1))
                   (error "old_string found multiple times; set replace_all=true to replace all")
                   (progn

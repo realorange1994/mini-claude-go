@@ -110,7 +110,7 @@ func (t *ToolSearchTool) selectTools(names []string) ToolResult {
 		}
 		tool, found := t.Registry.Get(name)
 		if !found {
-			results = append(results, fmt.Sprintf("Tool '%s' not found", name))
+			results = append(results, fmt.Sprintf("Error: Tool '%s' not found", name))
 			continue
 		}
 		results = append(results, formatToolDefinition(tool))
