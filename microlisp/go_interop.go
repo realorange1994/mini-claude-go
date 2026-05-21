@@ -2,6 +2,7 @@ package microlisp
 
 import (
 	"reflect"
+	"strings"
 )
 
 // GoPackageRegistry maps package name -> symbol name -> reflect.Value.
@@ -25,6 +26,11 @@ func registerPackage(name string, entries map[string]interface{}) {
 		GoPackageRegistry[name] = pkg
 	}
 	for sym, fn := range entries {
+		// Skip blacklisted functions at registry level (last line of defense)
+		pkgKey := name + "-" + sym
+		if ffiBlacklist[strings.ToLower(pkgKey)] {
+			continue
+		}
 		pkg[sym] = reflect.ValueOf(fn)
 	}
 }

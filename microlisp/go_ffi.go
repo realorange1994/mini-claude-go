@@ -64,6 +64,11 @@ func builtinGoImport(args []*Value) (*Value, error) {
 	}
 	name := args[0].str
 
+	// Check hard blacklist (supports "pkg.func" and "pkg-func" formats)
+	if ffiBlacklist[strings.ToLower(name)] || ffiBlacklist[strings.Replace(strings.ToLower(name), ".", "-", -1)] {
+		return nil, fmt.Errorf("go:import: %s is blocked — this function is not allowed via FFI", name)
+	}
+
 	// Parse "package.Func" format
 	parts := strings.SplitN(name, ".", 2)
 	if len(parts) != 2 {
@@ -720,6 +725,12 @@ func builtinGoRegister(args []*Value) (*Value, error) {
 	}
 	pkgName, symName := parts[0], parts[1]
 
+	// Block blacklisted names even via go:register
+	pkgKey := strings.ToLower(pkgName + "-" + symName)
+	if ffiBlacklist[pkgKey] {
+		return nil, fmt.Errorf("go:register: %s is blocked — this function is not allowed via FFI", name)
+	}
+
 	var val interface{}
 	switch args[1].typ {
 	case VNum:
@@ -759,7 +770,26 @@ var lazyGoLoaded sync.Map
 // tryLazyGoImport checks GoFFILazyTable for an auto-importable Go function.
 // Called when a symbol lookup fails in the environment.
 // Returns the imported function (cached in globalEnv) or nil/error.
+
+// ffiBlacklist contains function names that must never be exposed via FFI.
+var ffiBlacklist = map[string]bool{
+	"runtime-breakpoint": true,
+	"runtime-goexit":     true,
+	"log-fatal":          true,
+	"log-fatalf":         true,
+	"log-fatalln":        true,
+	"log-panic":          true,
+	"log-panicf":         true,
+	"log-panicln":        true,
+	"os-exit":            true,
+	"os-kill":            true,
+}
+
 func tryLazyGoImport(symName string, env *Env) (*Value, error) {
+	// Check hard blacklist
+	if ffiBlacklist[strings.ToLower(symName)] {
+		return nil, fmt.Errorf("go:import %s: blocked — this function is not allowed via FFI", symName)
+	}
 	// Check if this symbol is in the lazy-load table
 	goPath, ok := GoFFILazyTable[symName]
 	if !ok {
