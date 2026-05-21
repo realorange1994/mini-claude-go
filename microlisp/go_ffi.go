@@ -652,6 +652,13 @@ func lispToInterface(v *Value) interface{} {
 			result = append(result, lispToInterface(p.car))
 		}
 		return result
+	case VArray:
+		// VArray → []interface{} (for reflect.Swapper and similar any-accepting functions)
+		elems := make([]interface{}, len(v.array.elements))
+		for i, elem := range v.array.elements {
+			elems[i] = lispToInterface(elem)
+		}
+		return elems
 	case VGoVal:
 		return v.goVal
 	default:

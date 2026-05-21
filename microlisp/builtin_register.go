@@ -356,6 +356,10 @@ var builtins = []builtinDef{
 	{"ctx-with-cancel", builtinCtxWithCancel},
 	// Go callback adapter
 	{"go:callback", builtinGoCallback},
+	// Sort interface adapters (take *Value — can't go through reflect FFI)
+	{"sort-interface", builtinSortInterface},
+	{"sort-list", builtinSortWithInterface},
+	{"sorted-p", builtinSortIsSortedWith},
 	// HTTP adapters
 	{"http-request", builtinHttpRequest},
 	{"http-do", builtinHttpDo},
