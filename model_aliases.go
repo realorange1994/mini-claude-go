@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -301,12 +302,48 @@ func handleModelCommand(agent *AgentLoop, args []string) {
 	subcmd := strings.ToLower(args[0])
 	switch subcmd {
 	case "list", "ls", "aliases":
-		fmt.Println("Available model aliases:")
-		fmt.Printf("  sonnet  → %s\n", getDefaultSonnetModel())
-		fmt.Printf("  opus    → %s\n", getDefaultOpusModel())
-		fmt.Printf("  haiku   → %s\n", getDefaultHaikuModel())
-		fmt.Println("Also supported: full model IDs (e.g., claude-sonnet-4-20250514)")
-		fmt.Println("MiniMax: M2.7, M2.5, M2.1")
+		fmt.Println("Available models:")
+		fmt.Println("  Aliases:")
+		fmt.Printf("    sonnet  → %s\n", getDefaultSonnetModel())
+		fmt.Printf("    opus    → %s\n", getDefaultOpusModel())
+		fmt.Printf("    haiku   → %s\n", getDefaultHaikuModel())
+
+		// Group by family from DefaultModelCapabilities
+		type fam struct {
+			name  string
+			model string
+			ctx   int64
+		}
+		families := []fam{}
+		for modelID, caps := range DefaultModelCapabilities {
+			var label string
+			switch {
+			case strings.Contains(modelID, "opus"):
+				label = "Opus"
+			case strings.Contains(modelID, "sonnet"):
+				label = "Sonnet"
+			case strings.Contains(modelID, "haiku"):
+				label = "Haiku"
+			default:
+				label = "Other"
+			}
+			families = append(families, fam{label, modelID, caps.ContextWindow})
+		}
+		sort.Slice(families, func(i, j int) bool {
+			if families[i].name != families[j].name {
+				return families[i].name < families[j].name
+			}
+			return families[i].model > families[j].model
+		})
+
+		currentFamily := ""
+		for _, f := range families {
+			if f.name != currentFamily {
+				fmt.Printf("  %s:\n", f.name)
+				currentFamily = f.name
+			}
+			fmt.Printf("    %s  (%s tokens)\n", f.model, formatTokenCount(f.ctx))
+		}
 		return
 	default:
 		// Try to switch to the specified model

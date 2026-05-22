@@ -7,6 +7,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/pmezard/go-difflib v1.0.0
 	golang.org/x/net v0.54.0
+	golang.org/x/sys v0.44.0
 	golang.org/x/text v0.37.0
 )
 

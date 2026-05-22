@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -80,6 +80,14 @@ func (*ExecTool) InputSchema() map[string]any {
 				"type":        "object",
 				"description": "Environment variables to set for the command. Keys are variable names, values are strings. Example: {\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}. Only safe variables are allowed (PATH, HOME, etc. are NOT settable via this param — use shell syntax like PATH=/usr/bin cmd instead).",
 				"additionalProperties": map[string]any{"type": "string"},
+			},
+			"max_memory_mb": map[string]any{
+				"type":        "integer",
+				"description": "Maximum memory in MB the command can use. 0 (default) means no limit. On Linux uses prlimit; on Windows uses Job Objects.",
+			},
+			"max_cpu_ms": map[string]any{
+				"type":        "integer",
+				"description": "Maximum CPU time in milliseconds the command can use. 0 (default) means no limit. On Linux uses prlimit; on Windows uses Job Objects.",
 			},
 		},
 		"required": []string{"command"},
@@ -399,6 +407,9 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		}
 	}
 
+	// Parse resource limits (memory, CPU)
+	rl := parseResourceLimits(params)
+
 	// Determine shell and flags.
 	// On Windows: prefer Git Bash (via git.exe path derivation), then PowerShell, then cmd.
 	// Git Bash requires POSIX paths for CWD, so we convert wd to POSIX format.
@@ -440,7 +451,10 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	// The timeout is handled at the select level below. On timeout, the
 	// process continues running in the background (registered via TimeoutCallback).
 	// On user interrupt (ctx.Done()), the process is killed.
-	cmd := exec.Command(shell, flag, cdPrefix+command)
+	// Apply resource limits: on Unix, wrap the command with prlimit
+	actualCommand := cdPrefix + command
+	actualCommand = wrapCommandForResourceLimits(actualCommand, rl)
+	cmd := exec.Command(shell, flag, actualCommand)
 	cmd.Dir = wd
 	cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
 
@@ -459,6 +473,16 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	// No-op on Windows.
 	setupProcessGroup(cmd)
 
+	// On Windows, create Job Object for resource limits before starting the process
+	var jobObj *JobObject
+	if runtime.GOOS == "windows" && (rl.MaxMemoryBytes > 0 || rl.MaxCPUMillis > 0) {
+		job, err := prepareResourceLimitsWindows(rl)
+		if err != nil {
+			return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+		}
+		jobObj = job
+	}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
@@ -470,6 +494,14 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 
 	if err := cmd.Start(); err != nil {
 		return ToolResult{Output: fmt.Sprintf("Error: %v", err), IsError: true}
+	}
+
+	// On Windows, assign the process to the Job Object for resource limits
+	if jobObj != nil {
+		defer closeResourceLimitsWindows(jobObj)
+		if err := assignResourceLimitsWindows(cmd, jobObj); err != nil {
+			return ToolResult{Output: fmt.Sprintf("Error: resource limit: %v", err), IsError: true}
+		}
 	}
 
 	// Read outputs concurrently with stall detection.

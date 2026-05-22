@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -569,14 +570,21 @@ func (d *CacheBreakDetector) DetectBreak(currentCacheReadTokens int64) bool {
 		return false
 	}
 
+	if !d.baselineSet || d.lastCacheReadTokens == 0 {
+		return false
+	}
+
+	// Always compute actual drop — both methods require it
+	drop := d.lastCacheReadTokens - currentCacheReadTokens
+
 	// Method 1: Category-based prediction
-	// If we've recorded changes with significant estimated impact,
-	// predict a break even before seeing the API response.
-	// The threshold is based on the baseline — if estimated impact > 10% of baseline,
-	// a break is likely.
-	if d.baselineSet && d.lastCacheReadTokens > 0 && d.estimatedImpact > 0 {
+	// If estimated impact > 10% of baseline AND actual drop > 0, detect break.
+	// The drop > 0 requirement prevents false positives when changes are tracked
+	// but the API's cache_read didn't actually change (e.g., cache miss was avoided
+	// due to other factors).
+	if d.estimatedImpact > 0 {
 		categoryThreshold := d.lastCacheReadTokens / 10 // 10% of baseline
-		if d.estimatedImpact > categoryThreshold {
+		if d.estimatedImpact > categoryThreshold && drop > 0 {
 			d.recordBreak()
 			return true
 		}
@@ -584,10 +592,6 @@ func (d *CacheBreakDetector) DetectBreak(currentCacheReadTokens int64) bool {
 
 	// Method 2: Token-based fallback
 	// A break is detected when cache_read dropped by more than 20% from baseline.
-	if !d.baselineSet || d.lastCacheReadTokens == 0 {
-		return false
-	}
-	drop := d.lastCacheReadTokens - currentCacheReadTokens
 	threshold := int64(float64(d.lastCacheReadTokens) * 0.20)
 	if drop > threshold {
 		d.recordBreak()
@@ -634,9 +638,20 @@ func (d *CacheBreakDetector) WriteDiagnosticFile(before, after int64, details st
 		return ""
 	}
 
+	d.mu.Lock()
+	pendingCopy := make(map[CacheChangeCategory]int, len(d.pendingChanges))
+	for k, v := range d.pendingChanges {
+		pendingCopy[k] = v
+	}
+	impact := d.estimatedImpact
+	d.mu.Unlock()
+
+	// Infer dimension from pendingChanges, not from the details string
+	dimension := inferDimensionFromChanges(pendingCopy, details)
+
 	brk := CacheBreak{
 		Timestamp:    time.Now(),
-		Dimension:    d.detectDimension(details),
+		Dimension:    dimension,
 		BeforeTokens: before,
 		AfterTokens:  after,
 		DropPercent:  pct,
@@ -660,14 +675,65 @@ func (d *CacheBreakDetector) WriteDiagnosticFile(before, after int64, details st
 	fmt.Fprintf(f, "Before:   %d tokens\n", brk.BeforeTokens)
 	fmt.Fprintf(f, "After:    %d tokens\n", brk.AfterTokens)
 	fmt.Fprintf(f, "Drop:     %d tokens (%.1f%%)\n", brk.BeforeTokens-brk.AfterTokens, brk.DropPercent)
+	fmt.Fprintf(f, "Estimated Impact: %d tokens\n", impact)
 	fmt.Fprintf(f, "\nDetails:\n%s\n", brk.Details)
+	if len(pendingCopy) > 0 {
+		fmt.Fprintf(f, "\nPending Changes:\n")
+		for cat, count := range pendingCopy {
+			fmt.Fprintf(f, "  %s: %d (weight: %d)\n", cat, count, cacheChangeWeight(cat))
+		}
+	} else {
+		fmt.Fprintf(f, "\nPending Changes: none recorded (break was not predicted by category tracking)\n")
+	}
 
 	return fpath
 }
 
-// detectDimension infers the likely cause of a cache break from the details string.
-// Matches upstream's dimension tracking in promptCacheBreakDetection.ts.
-func (d *CacheBreakDetector) detectDimension(details string) string {
+// inferDimensionFromChanges determines the likely dimension from pending changes
+// and the details string. Prioritizes category-based analysis over text matching.
+func inferDimensionFromChanges(changes map[CacheChangeCategory]int, details string) string {
+	// Check changes by impact weight (heaviest first)
+	type catImpact struct {
+		cat    CacheChangeCategory
+		weight int64
+	}
+	var impacts []catImpact
+	for cat, count := range changes {
+		impacts = append(impacts, catImpact{cat, cacheChangeWeight(cat) * int64(count)})
+	}
+	sort.Slice(impacts, func(i, j int) bool { return impacts[i].weight > impacts[j].weight })
+
+	if len(impacts) > 0 {
+		// Map heaviest change category to dimension
+		switch impacts[0].cat {
+		case CacheChangeCompaction:
+			return "compaction"
+		case CacheChangeSystemPrompt:
+			return "system"
+		case CacheChangeToolResult:
+			return "tool_result"
+		case CacheChangeToolUse:
+			return "tool_use"
+		case CacheChangeThinking:
+			return "thinking"
+		case CacheChangeEdit:
+			return "edit"
+		case CacheChangeNormalization:
+			return "normalization"
+		case CacheChangeAttachment:
+			return "attachment"
+		case CacheChangeImage:
+			return "image"
+		case CacheChangePDF:
+			return "pdf"
+		case CacheChangeUserMessage:
+			return "user_message"
+		default:
+			return "other"
+		}
+	}
+
+	// Fallback: text matching from details string
 	lower := strings.ToLower(details)
 	switch {
 	case strings.Contains(lower, "model"):
@@ -682,6 +748,8 @@ func (d *CacheBreakDetector) detectDimension(details string) string {
 		return "compaction"
 	case strings.Contains(lower, "evict") || strings.Contains(lower, "ttl"):
 		return "eviction"
+	case strings.Contains(lower, "normaliz"):
+		return "normalization"
 	default:
 		return "unknown"
 	}

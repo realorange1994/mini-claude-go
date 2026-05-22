@@ -31,14 +31,14 @@ type ModelCapabilitiesCache struct {
 
 // DefaultModelCapabilities provides known model capabilities as fallback
 // when the API is unavailable or a model is not in the API response.
+// Only latest models are kept here — older versions are removed.
 var DefaultModelCapabilities = map[string]ModelCapabilities{
-	"claude-sonnet-4-20250514":    {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
-	"claude-opus-4-20250514":      {ContextWindow: 1_000_000, MaxOutputTokens: 32000, MaxThinkingTokens: 16000, SupportsVision: true, SupportsThinking: true},
-	"claude-opus-4-5-20250610":    {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
-	"claude-haiku-4-5-20250610":   {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: true},
-	"claude-3-5-sonnet-20241022":  {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: true},
-	"claude-3-5-haiku-20241022":   {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: true},
-	"claude-sonnet-4-5-20250929":  {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-sonnet-4-6-20260125":    {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-opus-4-6-20260302":      {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-haiku-4-5-20250610":     {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: true},
+	"claude-sonnet-4-5-20250929":    {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-sonnet-4-20250514":      {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-opus-4-5-20250610":      {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
 }
 
 // NewModelCapabilitiesCache creates a new cache with the given directory.

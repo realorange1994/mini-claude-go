@@ -461,11 +461,14 @@ func isVirtualUserMessage(msg anthropic.MessageParam) bool {
 // P1-6b: Attachment Reordering
 // ============================================================================
 
-// ReorderContentForAPI sorts content blocks within each message to a canonical
-// order. For user messages: tool_results first (API requirement), then
-// image/document, then text. For assistant messages: text → image/document →
-// tool_use → tool_result. This matches upstream's normalizeContentFromAPI() and
-// prevents structural cache shape changes between turns.
+// ReorderContentForAPI sorts content blocks within user messages to a canonical
+// order: tool_results first (API requirement), then image/document, then text.
+//
+// IMPORTANT: We do NOT reorder assistant messages. The API returns assistant
+// messages in a specific block order (e.g., thinking → text → tool_use).
+// Reordering those blocks would change the structure of previously-cached
+// messages, breaking the Anthropic KV cache prefix. Only user messages are
+// reordered since we control their construction.
 func ReorderContentForAPI(messages []anthropic.MessageParam) []anthropic.MessageParam {
 	if len(messages) == 0 {
 		return messages
@@ -502,118 +505,45 @@ func ReorderContentForAPI(messages []anthropic.MessageParam) []anthropic.Message
 			newContent = append(newContent, others...)
 			result[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
 		} else {
-			// Assistant messages: canonical order text → image → tool_use → tool_result
-			var textBlocks, imageBlocks, toolUseBlocks, toolResultBlocks []anthropic.ContentBlockParamUnion
-			for _, block := range msg.Content {
-				switch {
-				case block.OfText != nil:
-					textBlocks = append(textBlocks, block)
-				case block.OfImage != nil || block.OfDocument != nil:
-					imageBlocks = append(imageBlocks, block)
-				case block.OfToolUse != nil:
-					toolUseBlocks = append(toolUseBlocks, block)
-				case block.OfToolResult != nil:
-					toolResultBlocks = append(toolResultBlocks, block)
-				default:
-					textBlocks = append(textBlocks, block)
-				}
-			}
-
-			// Quick check: was reorder needed?
-			needReorder := false
-			if len(textBlocks) > 0 && blockType(msg.Content[0]) != "text" {
-				needReorder = true
-			} else if len(textBlocks) == 0 && len(imageBlocks) > 0 && blockType(msg.Content[0]) != "image" && blockType(msg.Content[0]) != "document" {
-				needReorder = true
-			} else if len(textBlocks) == 0 && len(imageBlocks) == 0 && len(toolUseBlocks) > 0 && blockType(msg.Content[0]) != "tool_use" {
-				needReorder = true
-			}
-
-			if needReorder {
-				newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
-				newContent = append(newContent, textBlocks...)
-				newContent = append(newContent, imageBlocks...)
-				newContent = append(newContent, toolUseBlocks...)
-				newContent = append(newContent, toolResultBlocks...)
-				result[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
-			} else {
-				result[i] = msg
-			}
+			// Assistant messages: DO NOT reorder. The API returns them in a
+			// specific order that we must preserve for cache stability.
+			result[i] = msg
 		}
 	}
 	return result
-}
-
-// blockType returns the type name of a content block for ordering purposes.
-func blockType(block anthropic.ContentBlockParamUnion) string {
-	switch {
-	case block.OfText != nil:
-		return "text"
-	case block.OfImage != nil:
-		return "image"
-	case block.OfDocument != nil:
-		return "document"
-	case block.OfToolUse != nil:
-		return "tool_use"
-	case block.OfToolResult != nil:
-		return "tool_result"
-	default:
-		return "unknown"
-	}
 }
 
 // ReorderAttachmentsForAPI is an alias for ReorderContentForAPI for backward compatibility.
 // Deprecated: use ReorderContentForAPI instead.
 var ReorderAttachmentsForAPI = ReorderContentForAPI
 
-// smooshSystemReminders folds <system-reminder>-prefixed text blocks into
-// adjacent tool_result blocks' content. This reduces content block count
-// variation across turns for more stable prompt caching.
+// smooshSystemReminders is disabled for cache stability.
+// Folding <system-reminder> text blocks into tool_result content changes the content
+// block count of previously-cached messages, which breaks the Anthropic KV cache
+// prefix. Since NormalizeAPIMessages re-runs on all messages every turn, any fold
+// applied to a previously-sent message would change its structure from what the API
+// cached (2 blocks → 1 block), invalidating the entire cache prefix from that point.
 //
 // Upstream: messages.ts smooshSystemReminderSiblings() — gated by tengu_chair_sermon.
-// In the Go version, we apply it unconditionally since it's a pure optimization.
+// In the Go version, we skip this optimization entirely to preserve cache stability.
 func smooshSystemReminders(messages []anthropic.MessageParam) []anthropic.MessageParam {
-	for i, msg := range messages {
-		if msg.Role != anthropic.MessageParamRoleUser || len(msg.Content) <= 1 {
-			continue
-		}
-
-		changed := false
-		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
-
-		for _, block := range msg.Content {
-			if block.OfText != nil && strings.HasPrefix(block.OfText.Text, "<system-reminder>") {
-				// Try to fold into preceding tool_result content
-				if len(newContent) > 0 {
-					prev := newContent[len(newContent)-1]
-					if prev.OfToolResult != nil {
-						prev.OfToolResult.Content = append(prev.OfToolResult.Content,
-							anthropic.ToolResultBlockParamContentUnion{
-								OfText: &anthropic.TextBlockParam{Text: block.OfText.Text},
-							})
-						newContent[len(newContent)-1] = prev
-						changed = true
-						continue
-					}
-				}
-			}
-			newContent = append(newContent, block)
-		}
-
-		if changed {
-			messages[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
-		}
-	}
-	return messages
+	return messages // disabled — see comment above for rationale
 }
 
-// stripEmptyTextBlocks removes text blocks that are empty or whitespace-only
-// from all messages. This prevents unnecessary cache structure changes from
-// empty content blocks.
-// Upstream: normalizeContentFromAPI() strips empty text blocks during normalization.
+// stripEmptyTextBlocks removes empty text blocks from user messages only.
+// We do NOT strip from assistant messages because that would change the structure
+// of previously-cached assistant responses blocks, breaking the Anthropic KV
+// cache prefix. Since NormalizeAPIMessages re-runs on all messages every turn,
+// removing an empty block from a cached assistant message would change its
+// content block count from what the API cached, invalidating the cache prefix.
 func stripEmptyTextBlocks(messages []anthropic.MessageParam) []anthropic.MessageParam {
-	changed := false
 	for i, msg := range messages {
+		// Only process user messages — assistant messages are API-returned
+		// and must be kept verbatim for cache stability
+		if msg.Role != anthropic.MessageParamRoleUser {
+			continue
+		}
+		changed := false
 		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
 		for _, block := range msg.Content {
 			if block.OfText != nil && strings.TrimSpace(block.OfText.Text) == "" {
@@ -622,15 +552,8 @@ func stripEmptyTextBlocks(messages []anthropic.MessageParam) []anthropic.Message
 			}
 			newContent = append(newContent, block)
 		}
-		if changed && len(newContent) == 0 {
-			// If all blocks were empty text, keep one placeholder
-			newContent = append(newContent, anthropic.ContentBlockParamUnion{
-				OfText: &anthropic.TextBlockParam{Text: "[empty]"},
-			})
-		}
 		if changed {
 			messages[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
-			changed = false // reset for next message
 		}
 	}
 	return messages
@@ -883,8 +806,9 @@ func normalizeToolResultBlock(block anthropic.ContentBlockParamUnion) anthropic.
 
 	result := block
 	result.OfToolResult = &anthropic.ToolResultBlockParam{
-		ToolUseID: block.OfToolResult.ToolUseID,
-		IsError:   block.OfToolResult.IsError,
+		ToolUseID:    block.OfToolResult.ToolUseID,
+		IsError:      block.OfToolResult.IsError,
+		CacheControl: block.OfToolResult.CacheControl,
 	}
 
 	newContent := make([]anthropic.ToolResultBlockParamContentUnion, len(block.OfToolResult.Content))

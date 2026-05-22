@@ -1438,9 +1438,8 @@ func TestNormalizeAPIMessagesIdempotentRepeated(t *testing.T) {
 
 func TestSmooshSystemReminders(t *testing.T) {
 	t.Run("folds system-reminder into preceding tool_result", func(t *testing.T) {
-		// After ReorderContentForAPI, tool_results are hoisted to the front.
-		// So the order becomes: tool_result, system-reminder text
-		// smooshSystemReminders should fold the system-reminder into tool_result
+		// smooshSystemReminders is now disabled for cache stability, so
+		// messages are returned unchanged — no folding occurs.
 		msgs := []anthropic.MessageParam{
 			{
 				Role: anthropic.MessageParamRoleUser,
@@ -1459,18 +1458,14 @@ func TestSmooshSystemReminders(t *testing.T) {
 			t.Fatalf("expected 1 message, got %d", len(result))
 		}
 		content := result[0].Content
-		if len(content) != 1 {
-			t.Fatalf("expected 1 content block after smoosh, got %d", len(content))
+		if len(content) != 2 {
+			t.Fatalf("expected 2 content blocks (no smooshing), got %d", len(content))
 		}
 		if content[0].OfToolResult == nil {
-			t.Fatal("expected tool_result block")
+			t.Fatal("expected tool_result block first")
 		}
-		blocks := content[0].OfToolResult.Content
-		if len(blocks) != 2 {
-			t.Fatalf("expected 2 content blocks in tool_result, got %d", len(blocks))
-		}
-		if blocks[1].OfText == nil || blocks[1].OfText.Text != "<system-reminder>file changed</system-reminder>" {
-			t.Errorf("expected system-reminder text in tool_result, got %v", blocks[1])
+		if content[1].OfText == nil || content[1].OfText.Text != "<system-reminder>file changed</system-reminder>" {
+			t.Errorf("expected system-reminder text block second, got %v", content[1])
 		}
 	})
 
@@ -1526,6 +1521,8 @@ func TestBetaHeaderMemoizationNormalize(t *testing.T) {
 
 func TestReorderContentForAPIAssistantMessages(t *testing.T) {
 	t.Run("reorders assistant message with tool_use before text", func(t *testing.T) {
+		// ReorderContentForAPI no longer reorders assistant messages (only user messages),
+		// so assistant messages are preserved as-is.
 		msgs := []anthropic.MessageParam{
 			{
 				Role: anthropic.MessageParamRoleAssistant,
@@ -1541,12 +1538,12 @@ func TestReorderContentForAPIAssistantMessages(t *testing.T) {
 			t.Fatalf("expected 1 message, got %d", len(result))
 		}
 		content := result[0].Content
-		// Should be reordered: text first, then tool_use
-		if content[0].OfText == nil {
-			t.Error("expected text block first after reorder")
+		// Assistant messages are left unchanged: tool_use still first, text still second
+		if content[0].OfToolUse == nil {
+			t.Error("expected tool_use block first (assistant messages unchanged)")
 		}
-		if content[1].OfToolUse == nil {
-			t.Error("expected tool_use block second after reorder")
+		if content[1].OfText == nil {
+			t.Error("expected text block second (assistant messages unchanged)")
 		}
 	})
 
@@ -1603,9 +1600,12 @@ func TestStripEmptyTextBlocks(t *testing.T) {
 	})
 
 	t.Run("all empty text blocks keeps placeholder", func(t *testing.T) {
+		// stripEmptyTextBlocks now only processes user messages.
+		// For a user message with all-empty text blocks, they are all stripped
+		// resulting in 0 content blocks.
 		msgs := []anthropic.MessageParam{
 			{
-				Role: anthropic.MessageParamRoleAssistant,
+				Role: anthropic.MessageParamRoleUser,
 				Content: []anthropic.ContentBlockParamUnion{
 					{OfText: &anthropic.TextBlockParam{Text: ""}},
 					{OfText: &anthropic.TextBlockParam{Text: "   "}},
@@ -1617,11 +1617,8 @@ func TestStripEmptyTextBlocks(t *testing.T) {
 		if len(result) != 1 {
 			t.Fatalf("expected 1 message, got %d", len(result))
 		}
-		if len(result[0].Content) != 1 {
-			t.Errorf("expected 1 placeholder block, got %d", len(result[0].Content))
-		}
-		if result[0].Content[0].OfText.Text != "[empty]" {
-			t.Errorf("expected '[empty]' placeholder, got %q", result[0].Content[0].OfText.Text)
+		if len(result[0].Content) != 0 {
+			t.Errorf("expected 0 content blocks after stripping all-empty, got %d", len(result[0].Content))
 		}
 	})
 

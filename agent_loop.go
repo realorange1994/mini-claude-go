@@ -1316,6 +1316,8 @@ func (a *AgentLoop) Run(userMessage string) string {
 	}
 
 	a.context.AddUserMessage(userMessage)
+	// Track change for cache break detection
+	a.cacheBreakDetector.RecordChange(CacheChangeUserMessage, 1)
 	if a.transcript != nil {
 		_ = a.transcript.WriteUser(userMessage)
 	}
@@ -1498,6 +1500,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 						})
 					}
 					a.context.AddToolResults(toolResults)
+					a.cacheBreakDetector.RecordChange(CacheChangeToolResult, len(toolResults))
 				}
 				// Fallback: if streaming executor didn't produce results,
 				// the traditional synchronous execution path below will handle it
@@ -3156,6 +3159,7 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 	}
 
 	a.context.AddToolResults(toolResults)
+					a.cacheBreakDetector.RecordChange(CacheChangeToolResult, len(toolResults))
 }
 
 // truncateOutput limits tool output to maxToolChars.
