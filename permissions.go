@@ -219,8 +219,9 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 				// Fall through to allow / classifier evaluation
 			} else {
 				restoreStripped()
-				// Check if it requires user interaction (ask)
-				if vResult.Reason == "safetyCheck" || vResult.Reason == "rule" {
+				// In Ask mode, any path validation failure (including "other")
+				// should prompt the user for approval, not silently deny.
+				if vResult.Reason == "safetyCheck" || vResult.Reason == "rule" || vResult.Reason == "other" {
 					// Return as a safetyCheck ask — caller will prompt user
 					askResult := tools.PermissionResultAsk(vResult.Message, vResult.Reason)
 					askResult.MatchedRule = vResult.Reason
@@ -313,7 +314,9 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		return nil // user approved
 	}
 
-	// Layer 1.5: denied patterns check (hard denial)
+	// Layer 1.5: denied patterns check (hard denial) — must run before mode-based
+	// switch so Bypass mode doesn't skip it, and Ask mode doesn't prompt user
+	// only to deny afterwards.
 	if len(g.config.DeniedPatterns) > 0 {
 		var target string
 		switch tool.Name() {
@@ -379,9 +382,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 
 	case ModeAuto:
 		ret := g.checkAutoMode(tool, params, result)
-		if ret != nil {
-			restoreStripped()
-		}
+		restoreStripped()
 		return ret
 	}
 
@@ -399,9 +400,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		switch g.config.PermissionMode {
 		case ModeAuto:
 			ret := g.checkAutoMode(tool, params, result)
-			if ret != nil {
-				restoreStripped()
-			}
+			restoreStripped()
 			return ret
 		default:
 			// Already handled in switch above (Ask/Bypass/Plan).
@@ -536,8 +535,10 @@ func (g *PermissionGate) askUserWithWarning(toolName string, params map[string]a
 	switch toolName {
 	case "exec":
 		detail, _ = params["command"].(string)
-	case "write_file", "edit_file":
+	case "write_file", "edit_file", "multi_edit":
 		detail, _ = params["file_path"].(string)
+	case "fileops":
+		detail, _ = params["path"].(string)
 	}
 
 	prompt := fmt.Sprintf("\n[Permission] Allow '%s'", toolName)
