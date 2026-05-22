@@ -2437,7 +2437,14 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		executor.Start(toolCallDoneCh, &collect.ToolCalls)
 	}
 
-	stream := a.client.Messages.NewStreaming(ctx, params, a.thinkingClearOption())
+	// Build request options for streaming call.
+	// Must filter nil options — passing a nil option.RequestOption to the SDK
+	// causes a nil pointer dereference in requestconfig.Apply().
+	streamOpts := []option.RequestOption{option.WithJSONSet("stream", true)}
+	if thinkOpt := a.thinkingClearOption(); thinkOpt != nil {
+		streamOpts = append(streamOpts, thinkOpt)
+	}
+	stream := a.client.Messages.NewStreaming(ctx, params, streamOpts...)
 	if err := adapter.Process(stream, cancel); err != nil {
 		a.lastDeltasState = adapter.DeltasState() // record what was streamed before error
 		errMsg := err.Error()
