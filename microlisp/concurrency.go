@@ -30,25 +30,26 @@ func builtinConditionWait(args []*Value) (*Value, error) {
 	}
 	cid := int64(args[0].num)
 	lid := int64(args[1].num)
-	// Release the user lock, wait on condition, then reacquire
 	condMu.Lock()
 	cv, ok := condVars[cid]
 	condMu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("condition-wait: invalid condition")
 	}
-	// The condition variable uses its own internal mutex for signaling
-	cv.L.Lock()
-	// Signal that we're about to wait (release user lock)
 	lockMapMu.Lock()
 	userMu, ok2 := lockMutexMap[lid]
 	lockMapMu.Unlock()
 	if !ok2 {
 		return nil, fmt.Errorf("condition-wait: invalid lock")
 	}
-	userMu.Unlock() // Release the user lock
-	cv.Wait()       // Wait on condition
-	userMu.Lock()   // Reacquire the user lock
+	// Re-associate the condition variable with the user's lock so that
+	// cv.Wait() atomically releases userMu and waits. Without this,
+	// there is a gap between userMu.Unlock() and cv.Wait() where a
+	// condition-notify signal can be lost (classic lost-wakeup race).
+	cv.L = userMu
+	userMu.Lock()   // must hold L when calling Wait
+	cv.Wait()       // atomically releases userMu and waits; reacquires on wake
+	// userMu is held again after Wait returns
 	return vnil(), nil
 }
 

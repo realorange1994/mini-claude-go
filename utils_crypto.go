@@ -300,7 +300,9 @@ var verbs = []string{
 // randomInt generates a cryptographically random integer in the range [0, max).
 func randomInt(max int) int {
 	buf := make([]byte, 4)
-	_, _ = rand.Read(buf)
+	if _, err := rand.Read(buf); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed (broken CSPRNG): %v", err))
+	}
 	value := uint32(buf[0])<<24 | uint32(buf[1])<<16 | uint32(buf[2])<<8 | uint32(buf[3])
 	return int(value % uint32(max))
 }

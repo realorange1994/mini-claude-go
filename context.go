@@ -1217,6 +1217,12 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	redactedData := make([]string, len(c.pendingRedactedThinking))
 	copy(redactedData, c.pendingRedactedThinking)
 	c.pendingRedactedThinking = nil // consume; only used once
+
+	// Copy entries while holding the lock to avoid race conditions.
+	// BuildMessages can be called from background goroutines (e.g. trySMCompact)
+	// while other goroutines modify c.entries via AddMessage, AddToolResult, etc.
+	entriesCopy := make([]conversationEntry, len(c.entries))
+	copy(entriesCopy, c.entries)
 	c.mu.Unlock()
 
 	// Find the last compact boundary. Entries at or after this point are preserved;
@@ -1224,8 +1230,8 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	// actually reduce token usage — without this reset, old messages would still be
 	// included and compaction would be a no-op.
 	boundaryIdx := -1
-	for i := len(c.entries) - 1; i >= 0; i-- {
-		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+	for i := len(entriesCopy) - 1; i >= 0; i-- {
+		if _, ok := entriesCopy[i].content.(CompactBoundaryContent); ok {
 			boundaryIdx = i
 			break
 		}
@@ -1236,8 +1242,8 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 		startIdx = boundaryIdx
 	}
 
-	messages := make([]anthropic.MessageParam, 0, len(c.entries)-startIdx)
-	for _, entry := range c.entries[startIdx:] {
+	messages := make([]anthropic.MessageParam, 0, len(entriesCopy)-startIdx)
+	for _, entry := range entriesCopy[startIdx:] {
 		msg := anthropic.MessageParam{Role: anthropic.MessageParamRole(entry.role)}
 
 		switch v := entry.content.(type) {

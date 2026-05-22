@@ -357,26 +357,52 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	// (permission check, hooks, snapshots, tool execution, post-hooks),
 	// it must be recovered and returned as a tool error rather than crashing
 	// the entire process. This matches upstream's safety guarantee.
-	panicked := false
-	var panicValue any
+	//
+	// IMPORTANT: The panic handler MUST be inside the defer itself, because
+	// when recover() catches a panic, the function returns immediately after
+	// the deferred function completes — code after the panic point never runs.
+	// Previously, the "if panicked" block was outside the defer and was dead code,
+	// causing e.completed.Add(1) to be skipped on panic (WaitGroup hang).
+	var normalResult *toolExecResult // set on non-panic path
 	defer func() {
 		if r := recover(); r != nil {
-			panicked = true
-			panicValue = r
+			// Panic caught: record as error result and mark completed.
+			e.recordResult(toolExecResult{
+				index:     idx,
+				toolName:  tc.Name,
+				toolUseID: tc.ID,
+				isError:   true,
+				output:    fmt.Sprintf("Error: tool call panicked: %v", r),
+				duration:  time.Since(start),
+			})
+			e.mu.Lock()
+			for _, t := range e.tools {
+				if t.index == idx && t.status == toolExecuting {
+					t.status = toolCompleted
+					break
+				}
+			}
+			e.mu.Unlock()
+			e.completed.Add(1)
+			return
 		}
+		// Normal path: record the result that was set below.
+		if normalResult != nil {
+			e.recordResult(*normalResult)
+		}
+		e.completed.Add(1)
 	}()
 
 	// Check if cancelled by sibling error (pre-execution abort check)
 	if tracked.cancelled {
-		e.recordResult(toolExecResult{
+		normalResult = &toolExecResult{
 			index:     idx,
 			toolName:  tc.Name,
 			toolUseID: tc.ID,
 			isError:   true,
 			output:    e.createSyntheticErrorMessage(tc),
 			duration:  time.Since(start),
-		})
-		e.completed.Add(1)
+		}
 		return
 	}
 
@@ -395,15 +421,14 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	input := make(map[string]any)
 	if tc.Arguments != "" {
 		if err := json.Unmarshal([]byte(tc.Arguments), &input); err != nil {
-			e.recordResult(toolExecResult{
+			normalResult = &toolExecResult{
 				index:     idx,
 				toolName:  tc.Name,
 				toolUseID: tc.ID,
 				isError:   true,
 				output:    fmt.Sprintf("Error: failed to parse tool arguments: %v\nRaw arguments: %s", err, tc.Arguments),
 				duration:  time.Since(start),
-			})
-			e.completed.Add(1)
+			}
 			return
 		}
 	}
@@ -412,15 +437,14 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	if e.gate != nil {
 		denial := e.gate.Check(tool, input)
 		if denial != nil {
-			e.recordResult(toolExecResult{
+			normalResult = &toolExecResult{
 				index:     idx,
 				toolName:  tc.Name,
 				toolUseID: tc.ID,
 				isError:   true,
 				output:    denial.Output,
 				duration:  time.Since(start),
-			})
-			e.completed.Add(1)
+			}
 			return
 		}
 	}
@@ -430,15 +454,14 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	// Matching upstream's executePreToolHooks().
 	if e.hooks != nil {
 		if blockErr := e.executePreToolUseHooks(tc, input); blockErr != nil {
-			e.recordResult(toolExecResult{
+			normalResult = &toolExecResult{
 				index:     idx,
 				toolName:  tc.Name,
 				toolUseID: tc.ID,
 				isError:   true,
 				output:    fmt.Sprintf("Blocked by PreToolUse hook: %v", blockErr),
 				duration:  time.Since(start),
-			})
-			e.completed.Add(1)
+			}
 			return
 		}
 	}
@@ -541,43 +564,19 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	}
 	e.mu.Unlock()
 
-	// If a panic was caught anywhere in execute (permission check, hooks,
-	// snapshots, tool execution, post-hooks), record it as an error result.
-	if panicked {
-		e.recordResult(toolExecResult{
-			index:     idx,
-			toolName:  tc.Name,
-			toolUseID: tc.ID,
-			isError:   true,
-			output:    fmt.Sprintf("Error: tool call panicked: %v", panicValue),
-			duration:  time.Since(start),
-		})
-		// Mark as error but do NOT cancel siblings for non-Bash panics.
-		e.mu.Lock()
-		for _, t := range e.tools {
-			if t.index == idx && t.status == toolExecuting {
-				t.status = toolCompleted
-				break
-			}
-		}
-		e.mu.Unlock()
-	} else {
-		// CRITICAL: Only Bash errors cancel sibling tools.
-		// Matching upstream (StreamingToolExecutor.ts:368):
-		// "Only Bash errors cancel siblings. Bash commands often have implicit
-		// dependency chains (e.g. mkdir fails -> subsequent commands pointless).
-		// Read/WebFetch/etc are independent - one failure shouldn't nuke the rest."
-		if wasError && tc.Name == "exec" {
-			e.hasErrored.Store(true)
-			e.erroredToolDescription = e.getToolDescription(tc)
-			e.siblingCtxDone()
-			// Cancel queued unsafe tools. Safe tools are left queued and will
-			// be caught by the post-execution siblingCtx.Err() check.
-			e.cancelRemaining(idx)
-		}
+	// CRITICAL: Only Bash errors cancel sibling tools.
+	// Matching upstream (StreamingToolExecutor.ts:368):
+	// "Only Bash errors cancel siblings. Bash commands often have implicit
+	// dependency chains (e.g. mkdir fails -> subsequent commands pointless).
+	// Read/WebFetch/etc are independent - one failure shouldn't nuke the rest."
+	if wasError && tc.Name == "exec" {
+		e.hasErrored.Store(true)
+		e.erroredToolDescription = e.getToolDescription(tc)
+		e.siblingCtxDone()
+		// Cancel queued unsafe tools. Safe tools are left queued and will
+		// be caught by the post-execution siblingCtx.Err() check.
+		e.cancelRemaining(idx)
 	}
-
-	e.completed.Add(1)
 }
 
 // siblingCtxDone cancels the sibling abort context, cascading the error to all

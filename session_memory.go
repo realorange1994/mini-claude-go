@@ -121,6 +121,7 @@ type SessionMemory struct {
 	filePath   string
 	dirty      bool
 	stopCh     chan struct{}
+	stopOnce   sync.Once // guards against double-close of stopCh
 	wg         sync.WaitGroup
 	maxEntries int
 	onAdd      func() // optional callback invoked when a note is added
@@ -822,7 +823,9 @@ func (sm *SessionMemory) StartFlushLoop() {
 
 // Stop signals the background flush goroutine to stop and waits for the final flush to complete.
 func (sm *SessionMemory) Stop() {
-	close(sm.stopCh)
+	sm.stopOnce.Do(func() {
+		close(sm.stopCh)
+	})
 	sm.wg.Wait()
 }
 
