@@ -1429,3 +1429,258 @@ func TestNormalizeAPIMessagesIdempotentRepeated(t *testing.T) {
 		}
 	}
 }
+
+// ============================================================================
+// Phase 4-6 New Feature Tests
+// ============================================================================
+
+// ─── Phase 4: system-reminder smooshing ───────────────────────────────────────
+
+func TestSmooshSystemReminders(t *testing.T) {
+	t.Run("folds system-reminder into preceding tool_result", func(t *testing.T) {
+		// After ReorderContentForAPI, tool_results are hoisted to the front.
+		// So the order becomes: tool_result, system-reminder text
+		// smooshSystemReminders should fold the system-reminder into tool_result
+		msgs := []anthropic.MessageParam{
+			{
+				Role: anthropic.MessageParamRoleUser,
+				Content: []anthropic.ContentBlockParamUnion{
+					{OfToolResult: &anthropic.ToolResultBlockParam{
+						ToolUseID: "tool1",
+						Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "result"}}},
+					}},
+					{OfText: &anthropic.TextBlockParam{Text: "<system-reminder>file changed</system-reminder>"}},
+				},
+			},
+		}
+
+		result := smooshSystemReminders(msgs)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(result))
+		}
+		content := result[0].Content
+		if len(content) != 1 {
+			t.Fatalf("expected 1 content block after smoosh, got %d", len(content))
+		}
+		if content[0].OfToolResult == nil {
+			t.Fatal("expected tool_result block")
+		}
+		blocks := content[0].OfToolResult.Content
+		if len(blocks) != 2 {
+			t.Fatalf("expected 2 content blocks in tool_result, got %d", len(blocks))
+		}
+		if blocks[1].OfText == nil || blocks[1].OfText.Text != "<system-reminder>file changed</system-reminder>" {
+			t.Errorf("expected system-reminder text in tool_result, got %v", blocks[1])
+		}
+	})
+
+	t.Run("no adjacent tool_result keeps standalone", func(t *testing.T) {
+		msgs := []anthropic.MessageParam{
+			{
+				Role: anthropic.MessageParamRoleUser,
+				Content: []anthropic.ContentBlockParamUnion{
+					{OfText: &anthropic.TextBlockParam{Text: "<system-reminder>no tool_result</system-reminder>"}},
+				},
+			},
+		}
+
+		result := smooshSystemReminders(msgs)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(result))
+		}
+		// Single text block — no smoosh possible, but it should still be there
+		if result[0].Content[0].OfText == nil {
+			t.Error("expected text block to remain")
+		}
+	})
+}
+
+// ─── Phase 5: beta header memoization ─────────────────────────────────────────
+
+func TestBetaHeaderMemoizationNormalize(t *testing.T) {
+	ClearBetaHeaderCache()
+
+	// First call computes
+	betas1 := BuildBetaHeaders("test-memo-model")
+	// Second call returns cached copy
+	betas2 := BuildBetaHeaders("test-memo-model")
+
+	if len(betas1) != len(betas2) {
+		t.Errorf("cached result length mismatch: first=%d, second=%d", len(betas1), len(betas2))
+	}
+	for i := range betas1 {
+		if betas1[i] != betas2[i] {
+			t.Errorf("cached result mismatch at %d: first=%q, second=%q", i, betas1[i], betas2[i])
+		}
+	}
+
+	// Clear cache should force recomputation
+	ClearBetaHeaderCache()
+	betas3 := BuildBetaHeaders("different-memo-model")
+	if len(betas3) != len(betas1) {
+		t.Errorf("after cache clear, different model should still produce same length: got %d, expected %d", len(betas3), len(betas1))
+	}
+}
+
+// ─── Phase 6: assistant message content ordering ──────────────────────────────
+
+func TestReorderContentForAPIAssistantMessages(t *testing.T) {
+	t.Run("reorders assistant message with tool_use before text", func(t *testing.T) {
+		msgs := []anthropic.MessageParam{
+			{
+				Role: anthropic.MessageParamRoleAssistant,
+				Content: []anthropic.ContentBlockParamUnion{
+					{OfToolUse: &anthropic.ToolUseBlockParam{Name: "read_file", Input: json.RawMessage("{}")}},
+					{OfText: &anthropic.TextBlockParam{Text: "Let me read the file"}},
+				},
+			},
+		}
+
+		result := ReorderContentForAPI(msgs)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(result))
+		}
+		content := result[0].Content
+		// Should be reordered: text first, then tool_use
+		if content[0].OfText == nil {
+			t.Error("expected text block first after reorder")
+		}
+		if content[1].OfToolUse == nil {
+			t.Error("expected tool_use block second after reorder")
+		}
+	})
+
+	t.Run("already ordered assistant message unchanged", func(t *testing.T) {
+		msgs := []anthropic.MessageParam{
+			{
+				Role: anthropic.MessageParamRoleAssistant,
+				Content: []anthropic.ContentBlockParamUnion{
+					{OfText: &anthropic.TextBlockParam{Text: "thinking"}},
+					{OfToolUse: &anthropic.ToolUseBlockParam{Name: "read_file", Input: json.RawMessage("{}")}},
+				},
+			},
+		}
+
+		result := ReorderContentForAPI(msgs)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(result))
+		}
+		// Should remain: text first, then tool_use
+		if result[0].Content[0].OfText == nil {
+			t.Error("expected text block first")
+		}
+		if result[0].Content[1].OfToolUse == nil {
+			t.Error("expected tool_use block second")
+		}
+	})
+}
+
+// ─── Phase 6: empty text block stripping ──────────────────────────────────────
+
+func TestStripEmptyTextBlocks(t *testing.T) {
+	t.Run("strips empty text blocks", func(t *testing.T) {
+		msgs := []anthropic.MessageParam{
+			{
+				Role: anthropic.MessageParamRoleUser,
+				Content: []anthropic.ContentBlockParamUnion{
+					{OfText: &anthropic.TextBlockParam{Text: ""}},
+					{OfText: &anthropic.TextBlockParam{Text: "   "}},
+					{OfText: &anthropic.TextBlockParam{Text: "real content"}},
+				},
+			},
+		}
+
+		result := stripEmptyTextBlocks(msgs)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(result))
+		}
+		if len(result[0].Content) != 1 {
+			t.Errorf("expected 1 content block after stripping empty, got %d", len(result[0].Content))
+		}
+		if result[0].Content[0].OfText.Text != "real content" {
+			t.Errorf("expected 'real content', got %q", result[0].Content[0].OfText.Text)
+		}
+	})
+
+	t.Run("all empty text blocks keeps placeholder", func(t *testing.T) {
+		msgs := []anthropic.MessageParam{
+			{
+				Role: anthropic.MessageParamRoleAssistant,
+				Content: []anthropic.ContentBlockParamUnion{
+					{OfText: &anthropic.TextBlockParam{Text: ""}},
+					{OfText: &anthropic.TextBlockParam{Text: "   "}},
+				},
+			},
+		}
+
+		result := stripEmptyTextBlocks(msgs)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(result))
+		}
+		if len(result[0].Content) != 1 {
+			t.Errorf("expected 1 placeholder block, got %d", len(result[0].Content))
+		}
+		if result[0].Content[0].OfText.Text != "[empty]" {
+			t.Errorf("expected '[empty]' placeholder, got %q", result[0].Content[0].OfText.Text)
+		}
+	})
+
+	t.Run("no empty blocks unchanged", func(t *testing.T) {
+		msgs := []anthropic.MessageParam{
+			{
+				Role: anthropic.MessageParamRoleUser,
+				Content: []anthropic.ContentBlockParamUnion{
+					{OfText: &anthropic.TextBlockParam{Text: "hello"}},
+					{OfText: &anthropic.TextBlockParam{Text: "world"}},
+				},
+			},
+		}
+
+		result := stripEmptyTextBlocks(msgs)
+		if len(result[0].Content) != 2 {
+			t.Errorf("expected 2 content blocks unchanged, got %d", len(result[0].Content))
+		}
+	})
+}
+
+// ─── Phase 4-6: normalize idempotency ─────────────────────────────────────────
+
+func TestNormalizeIdempotentPhase456(t *testing.T) {
+	// Test that NormalizeAPIMessages is idempotent after Phase 4-6 changes
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool1",
+					Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "result"}}},
+				}},
+				{OfText: &anthropic.TextBlockParam{Text: "<system-reminder>file changed</system-reminder>"}},
+				{OfText: &anthropic.TextBlockParam{Text: "   "}},
+				{OfText: &anthropic.TextBlockParam{Text: "user text"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolUse: &anthropic.ToolUseBlockParam{Name: "read_file", Input: json.RawMessage("{}")}},
+				{OfText: &anthropic.TextBlockParam{Text: "reading file"}},
+				{OfText: &anthropic.TextBlockParam{Text: ""}},
+			},
+		},
+	}
+
+	first := NormalizeAPIMessages(msgs)
+	for i := 0; i < 10; i++ {
+		next := NormalizeAPIMessages(first)
+		if len(next) != len(first) {
+			t.Fatalf("NormalizeAPIMessages changed length on iteration %d", i)
+		}
+		// Check content block counts are stable
+		for j := range next {
+			if len(next[j].Content) != len(first[j].Content) {
+				t.Fatalf("NormalizeAPIMessages changed content block count on msg %d iteration %d", j, i)
+			}
+		}
+	}
+}
