@@ -71,19 +71,16 @@ func TestApplyPromptCachingLong(t *testing.T) {
 		return false
 	}
 
-	// With 2-breakpoint rolling cache strategy:
+	// With 1-breakpoint rolling cache strategy:
 	// - System message (index 0) gets a breakpoint
-	// - Last 2 non-system messages get breakpoints (indices 4 and 5)
+	// - Last non-system message gets breakpoint (index 5)
 	if !hasCC(result[0]) {
 		t.Error("system message (index 0) should have cache_control")
 	}
-	for i := 1; i < 4; i++ {
+	for i := 1; i < 5; i++ {
 		if hasCC(result[i]) {
 			t.Errorf("message at index %d should NOT have cache_control", i)
 		}
-	}
-	if !hasCC(result[4]) {
-		t.Error("second-to-last non-system message (index 4) should have cache_control")
 	}
 	if !hasCC(result[5]) {
 		t.Error("last message (index 5) should have cache_control")
@@ -260,8 +257,8 @@ func TestDeepCopyMessages(t *testing.T) {
 
 func TestCacheBreakpointConfigDefault(t *testing.T) {
 	cfg := DefaultCacheBreakpointConfig()
-	if cfg.MaxBreakpoints != 2 {
-		t.Errorf("expected MaxBreakpoints=2, got %d", cfg.MaxBreakpoints)
+	if cfg.MaxBreakpoints != 1 {
+		t.Errorf("expected MaxBreakpoints=1, got %d", cfg.MaxBreakpoints)
 	}
 	if cfg.SkipCacheWrite {
 		t.Error("expected SkipCacheWrite=false by default")
@@ -406,9 +403,9 @@ func TestApplyPromptCachingSkipsSystemInjected(t *testing.T) {
 		}
 	}
 
-	// Last 2 non-injected messages (indices 4 and 5) should have cache_control
-	if !hasCC(result[4]) {
-		t.Error("second-to-last non-injected message (index 4) should have cache_control")
+	// Last non-injected message (index 5) should have cache_control
+	if hasCC(result[4]) {
+		t.Error("second-to-last non-injected message (index 4) should NOT have cache_control with 1 breakpoint")
 	}
 	if !hasCC(result[5]) {
 		t.Error("last message (index 5) should have cache_control")
@@ -690,5 +687,223 @@ func TestApplyCacheMarkerToolResultArrayBlock(t *testing.T) {
 	}
 	if _, ok := lastBlock["cache_reference"]; ok {
 		t.Error("tool_result block should NOT have cache_reference (deprecated)")
+	}
+}
+
+// --- New cache optimization tests ---
+
+func TestBuildSystemBlocksPartitionsAtBoundary(t *testing.T) {
+	// System prompt with static/dynamic boundary
+	prompt := "static tool descriptions\n<!-- STATIC_PROMPT_END -->\ndynamic skills section"
+	blocks := buildSystemBlocks(prompt, "5m")
+
+	// Should produce 2 blocks: static + dynamic
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(blocks))
+	}
+
+	// Static block should have cache_control
+	if blocks[0].CacheControl.Type != "ephemeral" {
+		t.Errorf("static block cache_control type=%s, expected ephemeral", blocks[0].CacheControl.Type)
+	}
+
+	// Dynamic block should also have cache_control
+	if blocks[1].CacheControl.Type != "ephemeral" {
+		t.Errorf("dynamic block cache_control type=%s, expected ephemeral", blocks[1].CacheControl.Type)
+	}
+
+	// Verify content
+	if !strings.Contains(blocks[0].Text, "static tool descriptions") {
+		t.Error("static block should contain static content")
+	}
+	if !strings.Contains(blocks[1].Text, "dynamic skills section") {
+		t.Error("dynamic block should contain dynamic content")
+	}
+}
+
+func TestBuildSystemBlocksNoBoundary(t *testing.T) {
+	// System prompt without boundary — single block
+	prompt := "simple system prompt"
+	blocks := buildSystemBlocks(prompt, "5m")
+
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block for no-boundary prompt, got %d", len(blocks))
+	}
+	if blocks[0].CacheControl.Type != "ephemeral" {
+		t.Error("single block should still have cache_control")
+	}
+}
+
+func TestCacheBreakDetectorPostCompactionGuard(t *testing.T) {
+	d := &CacheBreakDetector{}
+	d.UpdateBaseline(10000)
+
+	// Mark post-compaction — next DetectBreak should return false
+	d.MarkPostCompaction()
+
+	// 50% drop would normally trigger, but post-compaction guard prevents it
+	if d.DetectBreak(5000) {
+		t.Error("post-compaction guard should suppress break detection")
+	}
+
+	// Second call should detect normally (guard was cleared)
+	if !d.DetectBreak(5000) {
+		t.Error("after guard cleared, should detect break")
+	}
+}
+
+func TestCacheBreakDetectorStabilityLatch(t *testing.T) {
+	d := &CacheBreakDetector{}
+	d.latchAfter = 3
+	d.UpdateBaseline(10000)
+
+	// First break
+	if !d.DetectBreak(5000) {
+		t.Error("first break should be detected")
+	}
+	if d.latched {
+		t.Error("should not be latched after 1 break (latchAfter=3)")
+	}
+
+	// Second break
+	d.UpdateBaseline(10000)
+	if !d.DetectBreak(5000) {
+		t.Error("second break should be detected")
+	}
+	if d.latched {
+		t.Error("should not be latched after 2 breaks (latchAfter=3)")
+	}
+
+	// Third break — triggers latch
+	d.UpdateBaseline(10000)
+	if !d.DetectBreak(5000) {
+		t.Error("third break should be detected")
+	}
+	if !d.latched {
+		t.Error("should be latched after 3 breaks (latchAfter=3)")
+	}
+
+	// Fourth call — should be suppressed by latch
+	d.UpdateBaseline(10000)
+	if d.DetectBreak(5000) {
+		t.Error("break detection should be suppressed after latch")
+	}
+}
+
+func TestCacheBreakDetectorLastBaseline(t *testing.T) {
+	d := &CacheBreakDetector{}
+
+	// Before baseline set
+	if d.LastBaseline() != 0 {
+		t.Error("baseline should be 0 before set")
+	}
+
+	d.UpdateBaseline(42000)
+	if d.LastBaseline() != 42000 {
+		t.Errorf("expected baseline=42000, got %d", d.LastBaseline())
+	}
+}
+
+func TestApplyPromptCachingOneBreakpoint(t *testing.T) {
+	// With 1 breakpoint: system + last message
+	messages := []map[string]any{
+		{"role": "system", "content": "system prompt"},
+		{"role": "user", "content": "msg1"},
+		{"role": "assistant", "content": "resp1"},
+		{"role": "user", "content": "msg2"},
+	}
+
+	result := ApplyPromptCaching(messages, "5m")
+
+	hasCC := func(msg map[string]any) bool {
+		if cc, ok := msg["cache_control"]; ok && cc != nil {
+			return true
+		}
+		if content, ok := msg["content"].([]map[string]any); ok && len(content) > 0 {
+			_, ok2 := content[len(content)-1]["cache_control"]
+			return ok2
+		}
+		return false
+	}
+
+	// System message gets breakpoint
+	if !hasCC(result[0]) {
+		t.Error("system message should have cache_control")
+	}
+	// Only last message gets breakpoint (1 breakpoint strategy)
+	for i := 1; i < 3; i++ {
+		if hasCC(result[i]) {
+			t.Errorf("message at index %d should NOT have cache_control", i)
+		}
+	}
+	if !hasCC(result[3]) {
+		t.Error("last message should have cache_control")
+	}
+}
+
+// TestUpstreamCacheStructureParity verifies our cache structure matches upstream's design:
+// 1. System prompt partitioned at static/dynamic boundary
+// 2. Static part gets separate cache_control (global-like, long-lived)
+// 3. Dynamic part gets separate cache_control (short-lived)
+// 4. Only 1 cache_control marker on messages (not 2)
+// 5. Compaction guard prevents false-positive break detection
+func TestUpstreamCacheStructureParity(t *testing.T) {
+	// Build a realistic system prompt with boundary
+	staticContent := "You are an AI assistant. Tools: read, write, exec."
+	dynamicContent := "Skills: git, python. Memory: working on main.go."
+	prompt := staticContent + "\n<!-- STATIC_PROMPT_END -->\n" + dynamicContent
+
+	blocks := buildSystemBlocks(prompt, "5m")
+
+	// Upstream: static and dynamic are separate blocks
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 system blocks (static+dynamic), got %d", len(blocks))
+	}
+
+	// Both blocks have cache_control (upstream: static gets global, dynamic gets ephemeral)
+	if blocks[0].CacheControl.Type != "ephemeral" {
+		t.Error("static block should have cache_control")
+	}
+	if blocks[1].CacheControl.Type != "ephemeral" {
+		t.Error("dynamic block should have cache_control")
+	}
+
+	// Static block contains tool descriptions, dynamic contains skills
+	if !strings.Contains(blocks[0].Text, "Tools:") {
+		t.Error("static block should contain tool descriptions")
+	}
+	if !strings.Contains(blocks[1].Text, "Skills:") {
+		t.Error("dynamic block should contain skills")
+	}
+
+	// Verify that changing dynamic content doesn't affect static block structure
+	staticOnly := staticContent + "\n<!-- STATIC_PROMPT_END -->\nchanged dynamic content"
+	blocksChanged := buildSystemBlocks(staticOnly, "5m")
+
+	// Static block content should be identical (only dynamic changed)
+	if blocks[0].Text != blocksChanged[0].Text {
+		t.Error("static block should not change when dynamic content changes")
+	}
+}
+
+// TestCompactionGuardMatchesUpstreamVerify that our compaction guard matches upstream's
+// notifyCompaction() behavior: after compaction, the next cache_read drop is expected.
+func TestCompactionGuardMatchesUpstream(t *testing.T) {
+	d := &CacheBreakDetector{}
+	d.UpdateBaseline(50000) // typical cache_read after a productive session
+
+	// Simulate compaction: reset baseline and set guard
+	d.ResetBaseline()
+	d.MarkPostCompaction()
+
+	// API returns much lower cache_read (compaction invalidated cache)
+	if d.DetectBreak(5000) {
+		t.Error("compaction should not trigger cache break on next call")
+	}
+
+	// After the guard is consumed, normal detection resumes
+	d.UpdateBaseline(5000) // new baseline after compaction
+	if !d.DetectBreak(1000) {
+		t.Error("normal detection should resume after guard")
 	}
 }

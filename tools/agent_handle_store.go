@@ -57,9 +57,11 @@ func (s *AgentHandleStore) Complete(name, result string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if h, ok := s.agents[name]; ok {
-		h.Status = "completed"
-		h.Result = result
-		close(h.Done)
+		if h.Status != "completed" && h.Status != "failed" {
+			h.Status = "completed"
+			h.Result = result
+			close(h.Done)
+		}
 	}
 }
 
@@ -68,9 +70,11 @@ func (s *AgentHandleStore) Fail(name, errMsg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if h, ok := s.agents[name]; ok {
-		h.Status = "failed"
-		h.Result = errMsg
-		close(h.Done)
+		if h.Status != "completed" && h.Status != "failed" {
+			h.Status = "failed"
+			h.Result = errMsg
+			close(h.Done)
+		}
 	}
 }
 

@@ -483,20 +483,6 @@ func overageSuffix(isOverage bool) string {
 	return ""
 }
 
-// recordTokenUsage accumulates API token usage into the agent's running totals.
-// Called after each API response to maintain accurate cumulative counts.
-func (a *AgentLoop) recordTokenUsage(inputTokens, outputTokens int64) {
-	if inputTokens > 0 {
-		a.totalInputTokens.Add(inputTokens)
-	}
-	if outputTokens > 0 {
-		a.totalOutputTokens.Add(outputTokens)
-	}
-	if a.costTracker != nil {
-		a.costTracker.AddUsage(a.config.Model, inputTokens, outputTokens)
-	}
-}
-
 // recordTokenUsageWithCache accumulates API token usage including cache tokens.
 func (a *AgentLoop) recordTokenUsageWithCache(inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int64) {
 	if inputTokens > 0 {
@@ -2107,14 +2093,6 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 	a.context.FixRoleAlternation()
 }
 
-// callWithRetryAndFallback calls the API with streaming, retries on transient
-// errors, and falls back to non-streaming if stream persists failing.
-// Uses a persistent CollectHandler across retries to track deltas state
-// (matching Hermes-agent retry strategy).
-func (a *AgentLoop) callWithRetryAndFallback() ([]map[string]any, []string, error) {
-	return a.callWithRetryAndFallbackStreaming(nil, nil)
-}
-
 // callWithRetryAndFallbackStreaming is like callWithRetryAndFallback but supports
 // pipelined tool execution during streaming. When toolCallDoneCh and executor
 // are non-nil, tool calls start executing as their content blocks complete,
@@ -2141,9 +2119,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System: []anthropic.TextBlockParam{
-			{Text: a.context.SystemPrompt()},
-		},
+		System:    buildSystemBlocks(a.context.SystemPrompt(), "5m"),
 	}
 	if len(toolParams) > 0 {
 		params.Tools = toolParams
@@ -2340,9 +2316,14 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 			int64(collect.Usage.CacheWriteTokens), int64(collect.Usage.CacheReadTokens))
 			// Anchor the token estimate to the actual API response to prevent drift
 			a.context.SetAPITokenAnchor(int64(collect.Usage.InputTokens))
+		// Per-turn cache stats for verification
+		a.out("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
+			collect.Usage.InputTokens, collect.Usage.CacheWriteTokens, collect.Usage.CacheReadTokens, a.totalCacheReadTokens.Load())
 		// Detect cache break: warn if cache reuse dropped significantly from previous call
 		if a.cacheBreakDetector.DetectBreak(int64(collect.Usage.CacheReadTokens)) {
-			a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
+			baseline := a.cacheBreakDetector.LastBaseline()
+			current := int64(collect.Usage.CacheReadTokens)
+			a.out("[cache-break] cache_read dropped: baseline=%d → current=%d (delta=%d)\n", baseline, current, baseline-current)
 		}
 		// Update cache break detector baseline with current cache read tokens
 		a.cacheBreakDetector.UpdateBaseline(int64(collect.Usage.CacheReadTokens))
@@ -2452,9 +2433,7 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System: []anthropic.TextBlockParam{
-			{Text: a.context.SystemPrompt()},
-		},
+		System:    buildSystemBlocks(a.context.SystemPrompt(), "5m"),
 	}
 	if len(toolParams) > 0 {
 		params.Tools = toolParams
@@ -2484,11 +2463,10 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System: []anthropic.TextBlockParam{
-			{Text: a.context.SystemPrompt()},
-		},
+		System:    buildSystemBlocks(a.context.SystemPrompt(), "5m"),
 	}
 	// NOTE: No tools set -- model can only return text
+	cacheMessageParams(&params) // rolling cache for grace call
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -2512,10 +2490,15 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
+					// Per-turn cache stats for verification
+					a.out("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
+						response.Usage.InputTokens, response.Usage.CacheCreationInputTokens, response.Usage.CacheReadInputTokens, a.totalCacheReadTokens.Load())
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
 			a.context.SetAPITokenAnchor(response.Usage.InputTokens)
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
-					a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
+					baseline := a.cacheBreakDetector.LastBaseline()
+					current := int64(response.Usage.CacheReadInputTokens)
+					a.out("[cache-break] cache_read dropped: baseline=%d → current=%d (delta=%d)\n", baseline, current, baseline-current)
 				}
 				// Update cache break detector baseline with current cache read tokens
 				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
@@ -2626,7 +2609,9 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
 			a.context.SetAPITokenAnchor(response.Usage.InputTokens)
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
-					a.out("[cache-break] Cache read tokens dropped significantly (previous baseline invalidated)\n")
+					baseline := a.cacheBreakDetector.LastBaseline()
+					current := int64(response.Usage.CacheReadInputTokens)
+					a.out("[cache-break] cache_read dropped: baseline=%d → current=%d (delta=%d)\n", baseline, current, baseline-current)
 				}
 				// Update cache break detector baseline with current cache read tokens
 				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
@@ -2963,12 +2948,6 @@ func (a *AgentLoop) truncateOutput(output string) string {
 		lastStart++
 	}
 	return output[:firstEnd] + "\n\n... [OUTPUT TRUNCATED] ...\n\n" + output[lastStart:]
-}
-
-// executeSingleTool runs one tool call with timing, truncation, and timeout.
-// Returns the ToolResultBlockParam and the output string.
-func (a *AgentLoop) executeSingleTool(call map[string]any) (anthropic.ToolResultBlockParam, string) {
-	return a.executeTool(call, true)
 }
 
 // executeSingleToolApproved runs one tool call with permission already checked.
@@ -3663,6 +3642,8 @@ func collectDiscoveredToolNames(ctx *ConversationContext) []string {
 func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary string) []string {
 	// Reset cache break detector baseline — compaction invalidates all cached prefixes.
 	a.cacheBreakDetector.ResetBaseline()
+	// Guard against false-positive break detection on next API call after compaction.
+	a.cacheBreakDetector.MarkPostCompaction()
 	// File content recovery — optional, skipped when PostCompactRecoverFiles is false.
 	// All other recovery steps (tools, agents, todo, session memory) always run.
 	var recoveredPaths []string
@@ -5461,27 +5442,6 @@ func sanitizeModelName(model string) string {
 		parts = parts[:len(parts)-1]
 	}
 	return strings.Join(parts, "-")
-}
-
-// SetGitNote attaches an attribution note to the most recent commit.
-// Uses git notes to store model attribution without modifying the commit.
-func (a *Attribution) SetGitNote() error {
-	if _, err := exec.LookPath("git"); err != nil {
-		return fmt.Errorf("git not available for attribution")
-	}
-
-	note := fmt.Sprintf("AI-attribution: model=%s", a.Model)
-
-	// Try to add git note (requires git to be initialized)
-	cmd := exec.Command("git", "notes", "add", "-m", note, "HEAD")
-	if err := cmd.Run(); err != nil {
-		// Notes ref may not exist yet, try append
-		cmd = exec.Command("git", "notes", "append", "-m", note, "HEAD")
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("git notes failed: %w", err)
-		}
-	}
-	return nil
 }
 
 // GetAttribution retrieves the attribution note for a commit.

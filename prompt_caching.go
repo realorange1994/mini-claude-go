@@ -23,12 +23,12 @@ type CacheBreakpointConfig struct {
 	SkipCacheWrite bool
 }
 
-// DefaultCacheBreakpointConfig returns the default config with 2 breakpoints
+// DefaultCacheBreakpointConfig returns the default config with 1 breakpoint
 // for the rolling cache strategy: Turn N's last message (still marked) becomes
-// Turn N+1's second-to-last → cache READ hit on the prefix.
+// Turn N+1's last message → cache READ hit on the prefix.
 func DefaultCacheBreakpointConfig() CacheBreakpointConfig {
 	return CacheBreakpointConfig{
-		MaxBreakpoints: 2,
+		MaxBreakpoints: 1,
 		SkipCacheWrite: false,
 	}
 }
@@ -407,6 +407,28 @@ func FormatBoundaryCachedSystemPrompt(text string, ttl string) []map[string]any 
 	return result
 }
 
+// buildSystemBlocks converts a system prompt into []anthropic.TextBlockParam
+// with cache_control markers. Uses the static/dynamic boundary for partitioned
+// caching: the static part gets its own cache_control marker so dynamic changes
+// (skills, memory, todo) don't invalidate static tool descriptions.
+func buildSystemBlocks(prompt string, ttl string) []anthropic.TextBlockParam {
+	blocks := FormatBoundaryCachedSystemPrompt(prompt, ttl)
+	result := make([]anthropic.TextBlockParam, 0, len(blocks))
+	for _, block := range blocks {
+		text, _ := block["text"].(string)
+		tb := anthropic.TextBlockParam{Text: text}
+		if cc, ok := block["cache_control"]; ok {
+			if cm, ok := cc.(map[string]any); ok {
+				if cm["type"] == "ephemeral" {
+					tb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+				}
+			}
+		}
+		result = append(result, tb)
+	}
+	return result
+}
+
 
 // ---------------------------------------------------------------------------
 // Cache Break Detection
@@ -471,6 +493,10 @@ type CacheBreakDetector struct {
 	baselineSet         bool
 	pendingChanges      map[CacheChangeCategory]int // changes recorded since last API call
 	estimatedImpact     int64                       // estimated token impact of pending changes
+	postCompactionReset bool                        // skip next DetectBreak — compaction just ran
+	breakCount          int                         // total breaks detected this session
+	latchAfter          int                         // after N breaks, stop detecting (default: 3)
+	latched             bool                        // detection disabled after latch triggered
 }
 
 // RecordChange records a change in a specific category. This should be called
@@ -512,12 +538,27 @@ func (d *CacheBreakDetector) UpdateBaseline(cacheReadTokens int64) {
 //
 // Method 1 matches upstream's approach of tracking specific change categories.
 // Method 2 is kept as a fallback for cases where changes aren't explicitly recorded.
+//
+// Session stability: if postCompactionReset is set, skips detection (compaction
+// legitimately reduces cache tokens). After breakCount >= latchAfter, detection
+// is disabled to prevent cascading false positives from mid-session changes.
 func (d *CacheBreakDetector) DetectBreak(currentCacheReadTokens int64) bool {
 	if d == nil {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	// Latch: after too many breaks, stop detecting to prevent cascading false positives
+	if d.latched {
+		return false
+	}
+
+	// Compaction guard: skip detection on the first call after compaction
+	if d.postCompactionReset {
+		d.postCompactionReset = false
+		return false
+	}
 
 	// Method 1: Category-based prediction
 	// If we've recorded changes with significant estimated impact,
@@ -527,6 +568,7 @@ func (d *CacheBreakDetector) DetectBreak(currentCacheReadTokens int64) bool {
 	if d.baselineSet && d.lastCacheReadTokens > 0 && d.estimatedImpact > 0 {
 		categoryThreshold := d.lastCacheReadTokens / 10 // 10% of baseline
 		if d.estimatedImpact > categoryThreshold {
+			d.recordBreak()
 			return true
 		}
 	}
@@ -538,7 +580,23 @@ func (d *CacheBreakDetector) DetectBreak(currentCacheReadTokens int64) bool {
 	}
 	drop := d.lastCacheReadTokens - currentCacheReadTokens
 	threshold := int64(float64(d.lastCacheReadTokens) * 0.20)
-	return drop > threshold
+	if drop > threshold {
+		d.recordBreak()
+		return true
+	}
+	return false
+}
+
+// recordBreak increments the break counter and enables the latch if threshold reached.
+// Must be called with d.mu held.
+func (d *CacheBreakDetector) recordBreak() {
+	if d.latchAfter <= 0 {
+		d.latchAfter = 3
+	}
+	d.breakCount++
+	if d.breakCount >= d.latchAfter {
+		d.latched = true
+	}
 }
 
 // ResetBaseline clears the baseline, e.g., after compaction invalidates all
@@ -553,6 +611,28 @@ func (d *CacheBreakDetector) ResetBaseline() {
 	d.lastCacheReadTokens = 0
 	d.pendingChanges = nil
 	d.estimatedImpact = 0
+}
+
+// MarkPostCompaction sets the post-compaction guard so the next DetectBreak
+// call returns false (compaction legitimately reduces cache tokens).
+func (d *CacheBreakDetector) MarkPostCompaction() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.postCompactionReset = true
+}
+
+// LastBaseline returns the last recorded cache_read_tokens baseline.
+// Read-only accessor, safe for logging.
+func (d *CacheBreakDetector) LastBaseline() int64 {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastCacheReadTokens
 }
 
 // ---------------------------------------------------------------------------

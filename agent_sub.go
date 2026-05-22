@@ -393,13 +393,20 @@ func (a *AgentLoop) SpawnSubAgent(
 	var bgTask *tools.AgentTask
 	var outputFilePath string
 	var outputFileHandle *os.File
+	var fileErr error
 	if a.agentTaskStore != nil {
 		bgTask = a.agentTaskStore.CreateWithID(taskID, description, subagentType, prompt, model)
 		bgTask.CancelFunc = asyncCancel
 		// Create a live output file that the parent agent can Read non-blockingly
 		outputFilePath = filepath.Join(".claude", "sub-agents", taskID+"_output.txt")
-		os.MkdirAll(filepath.Dir(outputFilePath), 0755)
-		outputFileHandle, _ = os.Create(outputFilePath)
+		if err := os.MkdirAll(filepath.Dir(outputFilePath), 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "[agent] failed to create output dir: %v\n", err)
+		}
+		outputFileHandle, fileErr = os.Create(outputFilePath)
+		if fileErr != nil {
+			fmt.Fprintf(os.Stderr, "[agent] failed to create output file %s: %v\n", outputFilePath, fileErr)
+			outputFileHandle = nil
+		}
 		bgTask.OutputFile = outputFilePath
 	}
 
@@ -852,12 +859,19 @@ func (a *AgentLoop) runChildAgentSync(
 	var bgTask *tools.AgentTask
 	var outputFilePath string
 	var outputFileHandle *os.File
+	var fileErr error
 	if a.agentTaskStore != nil {
 		bgTask = a.agentTaskStore.CreateWithID(taskID, description, subagentType, prompt, childCfg.Model)
 		bgTask.SetStatus(tools.TaskRunning)
 		outputFilePath = filepath.Join(".claude", "sub-agents", taskID+"_output.txt")
-		os.MkdirAll(filepath.Dir(outputFilePath), 0755)
-		outputFileHandle, _ = os.Create(outputFilePath)
+		if err := os.MkdirAll(filepath.Dir(outputFilePath), 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "[agent] failed to create output dir: %v\n", err)
+		}
+		outputFileHandle, fileErr = os.Create(outputFilePath)
+		if fileErr != nil {
+			fmt.Fprintf(os.Stderr, "[agent] failed to create output file %s: %v\n", outputFilePath, fileErr)
+			outputFileHandle = nil
+		}
 		bgTask.OutputFile = outputFilePath
 	}
 
