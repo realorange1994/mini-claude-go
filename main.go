@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"miniclaudecode-go/microlisp"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -426,7 +428,8 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
-				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/daemon" || cmd == "/errors" || cmd == "/feature" || cmd == "/settings" || cmd == "/telemetry"
+				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/daemon" || cmd == "/errors" || cmd == "/feature" || cmd == "/settings" || cmd == "/telemetry" ||
+				cmd == "/status" || cmd == "/model"
 
 			if !isKnownCmd {
 				// Not a recognized command -- treat as normal prompt
@@ -436,9 +439,46 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 					fmt.Println("Goodbye!")
 					return
 				case "/tools":
-					fmt.Println("\nAvailable tools:")
-					for _, t := range agent.registry.AllTools() {
-						fmt.Printf("  - %s: %s\n", t.Name(), t.Description())
+					allTools := agent.registry.AllTools()
+					builtinCount := 0
+					mcpCount := 0
+					for _, t := range allTools {
+						if strings.HasPrefix(t.Name(), "mcp_") {
+							mcpCount++
+						} else {
+							builtinCount++
+						}
+					}
+					fmt.Printf("\nTools (%d total: %d built-in, %d MCP):\n", len(allTools), builtinCount, mcpCount)
+
+					// Categorize built-in tools by name prefix
+					categories := map[string][]int{}
+					var mcpIndices []int
+					for i, t := range allTools {
+						if strings.HasPrefix(t.Name(), "mcp_") {
+							mcpIndices = append(mcpIndices, i)
+							continue
+						}
+						cat := categorizeTool(t.Name())
+						categories[cat] = append(categories[cat], i)
+					}
+
+					// Print categories in a consistent order
+					for _, cat := range []string{"file", "search", "exec", "git", "agent", "code", "system", "other"} {
+						if indices, ok := categories[cat]; ok && len(indices) > 0 {
+							fmt.Printf("\n  [%s]:\n", cat)
+							for _, idx := range indices {
+								t := allTools[idx]
+								fmt.Printf("    - %s: %s\n", t.Name(), t.Description())
+							}
+						}
+					}
+					if len(mcpIndices) > 0 {
+						fmt.Printf("\n  [mcp]:\n")
+						for _, idx := range mcpIndices {
+							t := allTools[idx]
+							fmt.Printf("    - %s: %s\n", t.Name(), t.Description())
+						}
 					}
 					continue
 				case "/mode":
@@ -457,25 +497,37 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 					}
 					continue
 				case "/help":
-					fmt.Println("Commands:")
-					fmt.Println("  /help           -- Show available commands")
-					fmt.Println("  /compact        -- Force context compaction")
-					fmt.Println("  /partialcompact -- Directional partial compaction (up_to|from, [pivot])")
-					fmt.Println("  /clear          -- Clear conversation history")
-					fmt.Println("  /mode           -- Switch permission mode (ask|auto|bypass|plan)")
-					fmt.Println("  /resume         -- Resume a previous session")
-					fmt.Println("  /tools          -- List available tools")
-					fmt.Println("  /quit           -- Exit")
-					fmt.Println("  /agents         -- Manage background agents")
-					fmt.Println("  /doctor         -- Run installation diagnostics")
-					fmt.Println("  /history        -- Show recent prompts")
-					fmt.Println("  /cleanup        -- Remove stale session files")
-					fmt.Println("  /branch         -- Create a conversation branch")
-					fmt.Println("  /daemon         -- Manage daemon mode (start/stop/status/submit)")
-					fmt.Println("  /errors         -- View error logs (recent/clear)")
-					fmt.Println("  /feature        -- Manage feature flags (list/enable/disable)")
-					fmt.Println("  /settings       -- View settings hierarchy (sources/get/set)")
-					fmt.Println("  /telemetry      -- View telemetry events (recent/enable/disable/clear)")
+					if len(parts) > 1 {
+						// Show detailed help for a specific command
+						showDetailedHelp(parts[1])
+					} else {
+						fmt.Println("Commands:")
+						fmt.Println("  Session:")
+						fmt.Println("    /compact        -- Force context compaction")
+						fmt.Println("    /partialcompact -- Directional partial compaction (up_to|from, [pivot])")
+						fmt.Println("    /clear          -- Clear conversation history")
+						fmt.Println("    /status         -- Show session status (tokens, cache, cost)")
+						fmt.Println("    /model          -- View/switch model")
+						fmt.Println("    /resume         -- Resume a previous session")
+						fmt.Println("    /branch         -- Create a conversation branch")
+						fmt.Println("  Development:")
+						fmt.Println("    /tools          -- List available tools (by category)")
+						fmt.Println("    /agents         -- Manage background agents")
+						fmt.Println("    /history        -- Show recent prompts")
+						fmt.Println("  Configuration:")
+						fmt.Println("    /mode           -- Switch permission mode (ask|auto|bypass|plan)")
+						fmt.Println("    /settings       -- View settings hierarchy (sources/get/set)")
+						fmt.Println("    /feature        -- Manage feature flags (list/enable/disable)")
+						fmt.Println("  Operations:")
+						fmt.Println("    /doctor         -- Run installation diagnostics")
+						fmt.Println("    /cleanup        -- Remove stale session files")
+						fmt.Println("    /daemon         -- Manage daemon mode (start/stop/status/submit)")
+						fmt.Println("    /errors         -- View error logs (recent/clear)")
+						fmt.Println("    /telemetry      -- View telemetry events (recent/enable/disable/clear)")
+						fmt.Println("  Other:")
+						fmt.Println("    /help [cmd]     -- Show this help (or detailed help for cmd)")
+						fmt.Println("    /quit           -- Exit")
+					}
 					continue
 				case "/compact":
 					agent.ForceCompact()
@@ -537,7 +589,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 					}
 					continue
 				case "/branch":
-					if err := handleBranch(agent); err != nil {
+					if err := handleBranch(agent, parts[1:]); err != nil {
 						fmt.Printf("Branch error: %v\n", err)
 					}
 					continue
@@ -555,6 +607,12 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 					continue
 				case "/telemetry":
 					handleTelemetry(parts[1:])
+					continue
+				case "/status":
+					handleStatus(agent)
+					continue
+				case "/model":
+					handleModelCommand(agent, parts[1:])
 					continue
 				}
 			}
@@ -657,11 +715,38 @@ func listTranscripts() {
 		return
 	}
 
+	dir := ".claude/transcripts"
+	now := time.Now()
+
 	fmt.Println("\nAvailable transcripts:")
 	for i, f := range files {
-		fmt.Printf("  %d. %s\n", i+1, f.name)
+		path := filepath.Join(dir, f.name)
+		info, err := os.Stat(path)
+		sizeStr := "?"
+		if err == nil {
+			sizeStr = formatFileSize(int(info.Size()))
+		}
+		ageStr := formatAge(f.mod, now)
+		fmt.Printf("  %d. %s  (%s, %s)\n", i+1, f.name, ageStr, sizeStr)
 	}
 	fmt.Println("\nUsage: /resume <number>, /resume <filename>, or /resume last")
+}
+
+// formatAge returns a human-readable age string.
+func formatAge(mod, now time.Time) string {
+	diff := now.Sub(mod)
+	switch {
+	case diff < time.Minute:
+		return "just now"
+	case diff < time.Hour:
+		return fmt.Sprintf("%dm ago", int(diff.Minutes()))
+	case diff < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(diff.Hours()))
+	case diff < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(diff.Hours()/24))
+	default:
+		return mod.Format("2006-01-02")
+	}
 }
 
 // transcriptEntry holds a transcript file's name and modification time.
@@ -871,10 +956,50 @@ func runDoctor(agent *AgentLoop) {
 	}
 
 	// Base URL
-	if agent.config.BaseURL != "" && agent.config.BaseURL != "https://api.anthropic.com" {
-		fmt.Printf("Base URL: %s (custom)\n", agent.config.BaseURL)
+	baseURL := agent.config.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+	if baseURL != "https://api.anthropic.com" {
+		fmt.Printf("Base URL: %s (custom)\n", baseURL)
 	} else {
 		fmt.Println("Base URL: default (api.anthropic.com)")
+	}
+
+	// API connectivity test
+	if agent.config.APIKey != "" {
+		fmt.Print("API Connectivity: ")
+		startTest := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		reqURL := baseURL + "/v1/messages"
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(`{"model":"claude-haiku-4-5-20250610","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+		if err != nil {
+			fmt.Printf("request error: %v\n", err)
+		} else {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("x-api-key", agent.config.APIKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+			client := &http.Client{Timeout: 10 * time.Second}
+			resp, err := client.Do(req)
+			latency := time.Since(startTest)
+			if err != nil {
+				fmt.Printf("connection error: %v (%s)\n", err, latency.Round(time.Millisecond))
+			} else {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode == 200 || resp.StatusCode == 400 {
+					// 200 = success, 400 = auth/API ok but bad request
+					fmt.Printf("OK (latency %s, HTTP %d)\n", latency.Round(time.Millisecond), resp.StatusCode)
+				} else {
+					errMsg := string(body)
+					if len(errMsg) > 80 {
+						errMsg = errMsg[:80] + "..."
+					}
+					fmt.Printf("HTTP %d (%s) — %s\n", resp.StatusCode, latency.Round(time.Millisecond), errMsg)
+				}
+			}
+		}
 	}
 
 	// Permission mode
@@ -1010,29 +1135,154 @@ func handleHistory(history *PromptHistory, args []string) {
 	}
 }
 
-// handleBranch creates a conversation branch at the current point.
-// The branch saves the current conversation state and starts a new branch
-// so the user can explore an alternative path without losing the original.
-func handleBranch(agent *AgentLoop) error {
-	// Save current transcript as a branch point
-	branchName := fmt.Sprintf("branch-%s", time.Now().Format("150405"))
+// handleBranch handles the /branch slash command.
+// Supports:
+//
+//	/branch             - Create a new branch from current transcript
+//	/branch list        - List all branches with timestamps
+//	/branch switch <name> - Switch to a branch (resume from that transcript)
+func handleBranch(agent *AgentLoop, args []string) error {
 	transcriptDir := filepath.Join(".claude", "branches")
 	os.MkdirAll(transcriptDir, 0o755)
 
-	branchFile := filepath.Join(transcriptDir, branchName+".jsonl")
-	// Copy current transcript to branch
-	srcFile := filepath.Join(".claude", "transcript.jsonl")
-	if _, err := os.Stat(srcFile); err == nil {
-		data, err := os.ReadFile(srcFile)
-		if err != nil {
-			return fmt.Errorf("failed to read transcript: %w", err)
+	if len(args) == 0 {
+		// Create a new branch (current behavior)
+		branchName := fmt.Sprintf("branch-%s", time.Now().Format("150405"))
+		branchFile := filepath.Join(transcriptDir, branchName+".jsonl")
+		srcFile := filepath.Join(".claude", "transcript.jsonl")
+		if _, err := os.Stat(srcFile); err == nil {
+			data, err := os.ReadFile(srcFile)
+			if err != nil {
+				return fmt.Errorf("failed to read transcript: %w", err)
+			}
+			if err := os.WriteFile(branchFile, data, 0o644); err != nil {
+				return fmt.Errorf("failed to write branch: %w", err)
+			}
+			fmt.Printf("Created branch: %s\n", branchName)
+		} else {
+			fmt.Println("No current transcript to branch from.")
 		}
-		if err := os.WriteFile(branchFile, data, 0o644); err != nil {
-			return fmt.Errorf("failed to write branch: %w", err)
-		}
-		fmt.Printf("Created branch: %s\n", branchName)
-	} else {
-		fmt.Println("No current transcript to branch from.")
+		return nil
 	}
-	return nil
+
+	subcmd := strings.ToLower(args[0])
+	switch subcmd {
+	case "list", "ls":
+		entries, err := os.ReadDir(transcriptDir)
+		if err != nil || len(entries) == 0 {
+			fmt.Println("No branches found.")
+			return nil
+		}
+		fmt.Println("\nBranches:")
+		now := time.Now()
+		for i, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+				info, err := e.Info()
+				if err != nil {
+					continue
+				}
+				name := strings.TrimSuffix(e.Name(), ".jsonl")
+				fmt.Printf("  %d. %s  (%s, %s)\n",
+					i+1, name, formatAge(info.ModTime(), now), formatFileSize(int(info.Size())))
+			}
+		}
+		return nil
+
+	case "switch", "sw", "checkout":
+		if len(args) < 2 {
+			fmt.Println("Usage: /branch switch <name>")
+			return nil
+		}
+		branchName := args[1]
+		if !strings.HasSuffix(branchName, ".jsonl") {
+			branchName += ".jsonl"
+		}
+		branchFile := filepath.Join(transcriptDir, branchName)
+		if _, err := os.Stat(branchFile); os.IsNotExist(err) {
+			// Try without .jsonl
+			branchName2 := strings.TrimSuffix(branchName, ".jsonl")
+			branchFile2 := filepath.Join(transcriptDir, branchName2+".jsonl")
+			if _, err := os.Stat(branchFile2); os.IsNotExist(err) {
+				return fmt.Errorf("branch not found: %s", args[1])
+			}
+			branchFile = branchFile2
+		}
+		// Resume from the branch transcript
+		newAgent, err := NewAgentLoopFromTranscript(agent.config, agent.registry, agent.useStream, branchFile, true)
+		if err != nil {
+			return fmt.Errorf("failed to switch branch: %w", err)
+		}
+		agent.Close()
+		*agent = *newAgent
+		fmt.Printf("Switched to branch: %s\n", strings.TrimSuffix(filepath.Base(branchFile), ".jsonl"))
+		return nil
+
+	default:
+		fmt.Printf("Unknown /branch subcommand: %s\n", subcmd)
+		fmt.Println("Usage: /branch [list|switch <name>]")
+		return nil
+	}
+}
+
+// categorizeTool assigns a built-in tool to a human-readable category based on its name.
+func categorizeTool(name string) string {
+	switch {
+	case strings.HasPrefix(name, "read") || strings.HasPrefix(name, "write") ||
+		strings.HasPrefix(name, "edit") || strings.HasPrefix(name, "list") ||
+		strings.HasPrefix(name, "file_"):
+		return "file"
+	case name == "grep" || name == "glob" || strings.HasPrefix(name, "search"):
+		return "search"
+	case name == "exec" || name == "bash" || name == "shell" || name == "run" ||
+		strings.HasPrefix(name, "kill_") || strings.HasPrefix(name, "process"):
+		return "exec"
+	case strings.HasPrefix(name, "git_") || name == "git":
+		return "git"
+	case strings.HasPrefix(name, "agent_") || strings.HasPrefix(name, "sub_"):
+		return "agent"
+	case strings.HasPrefix(name, "lisp_") || strings.HasPrefix(name, "format"):
+		return "code"
+	case name == "compact" || name == "clear" || strings.HasPrefix(name, "system"):
+		return "system"
+	default:
+		return "other"
+	}
+}
+
+// showDetailedHelp shows detailed help for a specific command.
+func showDetailedHelp(cmd string) {
+	cmd = strings.ToLower(cmd)
+	if !strings.HasPrefix(cmd, "/") {
+		cmd = "/" + cmd
+	}
+
+	details := map[string]string{
+		"/compact":        "Force context compaction. Summarizes conversation history to reduce token usage.\nUsage: /compact",
+		"/partialcompact": "Directional partial compaction. Keep recent or old messages and compact the rest.\nUsage: /partialcompact <up_to|from> [pivot_index]",
+		"/clear":          "Clear all conversation history. Files read cache is also cleared.\nUsage: /clear",
+		"/status":         "Show comprehensive session status: current model, permission mode,\nmessage count, token usage (input/output/cache), cache hit rate, cost tracking, and turn count.\nUsage: /status",
+		"/model":          "View and switch models.\nUsage: /model [list|sonnet|opus|haiku|<full_model_id>]",
+		"/resume":         "Resume a previous session from a transcript.\nUsage: /resume [list|<number>|<filename>|last]",
+		"/branch":         "Create a conversation branch at the current point.\nUsage: /branch [list|switch <name>]",
+		"/tools":          "List all available tools, grouped by category (file, search, exec, git, agent, code, MCP).\nUsage: /tools",
+		"/agents":         "Manage background agents.\nUsage: /agents [list|show <id>|stop <id>|help]",
+		"/history":        "Show recent prompts from the session history.\nUsage: /history [N|clear]",
+		"/mode":           "Switch permission mode.\nUsage: /mode [ask|auto|bypass|plan]",
+		"/settings":       "View and modify settings from multiple sources.\nUsage: /settings [sources|get <key>|set <key> <value>]",
+		"/feature":        "Manage feature flags.\nUsage: /feature [list|enable <name>|disable <name>]",
+		"/doctor":         "Run installation diagnostics: API key, base URL, tools (rg/python/node/git),\nMCP servers, skills, transcripts, CLAUDE.md files.\nUsage: /doctor",
+		"/cleanup":        "Remove stale session files older than cutoff days.\nUsage: /cleanup [days]",
+		"/daemon":         "Manage daemon mode for background processing.\nUsage: /daemon [start|stop|status|submit <prompt>]",
+		"/errors":         "View error logs.\nUsage: /errors [recent [N]|clear]",
+		"/telemetry":      "View telemetry events.\nUsage: /telemetry [recent [N]|enable|disable|clear]",
+		"/quit":           "Exit the interactive session.\nAliases: /exit, /q",
+		"/help":           "Show this help. Pass a command name for detailed help.\nUsage: /help [command]",
+	}
+
+	if detail, ok := details[cmd]; ok {
+		fmt.Println(detail)
+	} else {
+		fmt.Printf("No detailed help available for: %s\n", cmd)
+		fmt.Println("Try /help without arguments for the full command list.")
+	}
 }

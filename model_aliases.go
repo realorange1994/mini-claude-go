@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -281,3 +282,46 @@ func GetContextWindowForModel(model string) int64 {
 
 var defaultMu sync.RWMutex
 
+// handleModelCommand handles the /model slash command.
+// Supports: /model, /model list, /model <alias>, /model <full-id>
+func handleModelCommand(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		// Show current model
+		current := agent.config.Model
+		canonical := ExtractCanonicalModelName(current)
+		window := GetContextWindowForModel(current)
+		fmt.Printf("Current model: %s (%s)\n", current, canonical)
+		fmt.Printf("Context window: %s tokens\n", formatTokenCount(window))
+		fmt.Println("\nUsage: /model <alias> to switch models")
+		fmt.Println("Available aliases: sonnet, opus, haiku")
+		fmt.Println("Or use a full model ID (e.g., claude-sonnet-4-20250514, M2.7)")
+		return
+	}
+
+	subcmd := strings.ToLower(args[0])
+	switch subcmd {
+	case "list", "ls", "aliases":
+		fmt.Println("Available model aliases:")
+		fmt.Printf("  sonnet  → %s\n", getDefaultSonnetModel())
+		fmt.Printf("  opus    → %s\n", getDefaultOpusModel())
+		fmt.Printf("  haiku   → %s\n", getDefaultHaikuModel())
+		fmt.Println("Also supported: full model IDs (e.g., claude-sonnet-4-20250514)")
+		fmt.Println("MiniMax: M2.7, M2.5, M2.1")
+		return
+	default:
+		// Try to switch to the specified model
+		target := args[0]
+		resolved, wasAlias := ResolveModelAlias(target)
+		if wasAlias {
+			fmt.Printf("Switching model: %s → %s\n", target, resolved)
+		} else {
+			fmt.Printf("Switching model: %s\n", resolved)
+		}
+		agent.config.Model = resolved
+		// Update compactor's max tokens for the new model
+		window := GetContextWindowForModel(resolved)
+		agent.compactor.SetMaxTokens(int(window))
+		// Clear beta header cache since model changed
+		ClearBetaHeaderCache()
+	}
+}

@@ -1957,7 +1957,16 @@ func (a *AgentLoop) ForceCompact() {
 
 	// Try normal compaction first (may skip if not needed)
 	preTokens := a.context.EstimatedTokens()
+	preEntries := len(entries)
 	if a.context.CompactContext() {
+		postTokens := a.context.EstimatedTokens()
+		postEntries := len(a.context.Entries())
+		saved := preTokens - postTokens
+		a.out("[compact] Compacted: %d → %d entries, %s → %s tokens (saved %s)\n",
+			preEntries, postEntries,
+			formatTokenCount(int64(preTokens)), formatTokenCount(int64(postTokens)),
+			formatTokenCount(int64(saved)))
+
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 
 		// Build structured summary matching upstream's getCompactUserSummaryMessage format.
@@ -1982,10 +1991,17 @@ func (a *AgentLoop) ForceCompact() {
 
 	// Normal compaction skipped (not enough tokens) -- force truncation
 	before := len(entries)
+	beforeTokens := a.context.EstimatedTokens()
 	a.context.TruncateHistory()
 	after := len(a.context.Entries())
+	afterTokens := a.context.EstimatedTokens()
 	if after < before {
-		preTokens := a.context.EstimatedTokens()
+		preTokens := beforeTokens
+		saved := beforeTokens - afterTokens
+		a.out("[compact] Truncated: %d → %d entries, %s → %s tokens (saved %s)\n",
+			before, after,
+			formatTokenCount(int64(beforeTokens)), formatTokenCount(int64(afterTokens)),
+			formatTokenCount(int64(saved)))
 		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens)
 		summaryContent := a.buildCompactSummaryMessage(preTokens, preCompactMessages, preCompactToolCalls)
 		if preCompactInst != "" {
