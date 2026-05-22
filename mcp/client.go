@@ -381,7 +381,13 @@ func (c *Client) requestStdio(ctx context.Context, method string, params json.Ra
 	case <-ctx.Done():
 		// User interrupt: close stdin to unblock the reader goroutine.
 		c.stdin.Close()
-		<-done
+		select {
+		case <-done:
+			// Reader goroutine completed (stdin close propagated)
+		case <-time.After(5 * time.Second):
+			// On Windows, closing stdin doesn't always unblock stdout reads.
+			// The reader goroutine may be stuck, but we can't wait forever.
+		}
 		return nil, ctx.Err()
 	case <-done:
 		if readErr != nil {
@@ -497,19 +503,32 @@ func (c *Client) requestStdioWithTimeout(ctx context.Context, method string, par
 	case <-ctx.Done():
 		// User interrupt: close stdin to unblock reader goroutine.
 		c.stdin.Close()
-		<-done
+		select {
+		case <-done:
+			// Reader goroutine completed (stdin close propagated)
+		case <-time.After(5 * time.Second):
+			// On Windows, closing stdin doesn't always unblock stdout reads.
+		}
 		return ctx.Err()
 	case <-timer.C:
 		// Timeout: DON'T close stdin — the MCP connection stays alive.
 		// The MCP call continues running in the background. When it completes,
 		// the reader goroutine will send the response to resultCh.
+		// If the MCP server is hung, the reader goroutine blocks forever on
+		// ReadBytes. We add a 5-minute ceiling to limit the goroutine leak.
 		go func() {
-			<-done
-			if readErr == nil {
-				select {
-				case resultCh <- resp:
-				default:
+			select {
+			case <-done:
+				if readErr == nil {
+					select {
+					case resultCh <- resp:
+					default:
+					}
 				}
+			case <-time.After(5 * time.Minute):
+				// MCP server hung — reader goroutine is still blocked.
+				// Close stdin to force it to exit, breaking the connection.
+				c.stdin.Close()
 			}
 		}()
 		return context.DeadlineExceeded

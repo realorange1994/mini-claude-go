@@ -300,9 +300,15 @@ func (e *StreamingToolExecutor) waitForUnsafe(seq int32) {
 // For unsafe tools: runs synchronously on caller goroutine (exclusive).
 func (e *StreamingToolExecutor) startTool(t *TrackedTool) {
 	if t.isConcurrencySafe {
-		e.semaphore <- struct{}{} // acquire slot
+		// Capture the current semaphore channel so the defer always releases
+		// to the same channel that was acquired, even if SetMaxConcurrency
+		// replaces e.semaphore during execution.
+		e.mu.Lock()
+		sem := e.semaphore
+		e.mu.Unlock()
+		sem <- struct{}{} // acquire slot
 		go func() {
-			defer func() { <-e.semaphore }() // release slot
+			defer func() { <-sem }() // release slot on the captured channel
 			e.execute(t.index, t.tc, t.tool, t)
 			e.processQueue() // try to start more queued tools
 		}()
