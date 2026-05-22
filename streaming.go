@@ -189,18 +189,6 @@ func (h *CollectHandler) Handle(chunk StreamChunk) error {
 	return nil
 }
 
-// FullResponse returns the assembled text.
-// If no text blocks were received but thinking was, returns thinking as fallback
-// (some models return only thinking when no tools are needed).
-func (h *CollectHandler) FullResponse() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.Text != "" {
-		return h.Text
-	}
-	return h.Thinking
-}
-
 // IsToolUseAsText reports whether the model echoed tool syntax as plain text.
 // Thread-safe.
 func (h *CollectHandler) IsToolUseAsText() bool {
@@ -241,28 +229,6 @@ func (h *CollectHandler) RedactedThinkingData() []string {
 	return data
 }
 
-// HasPartialToolCall checks if the last tool call has no arguments yet
-// (stream cut off mid-tool-call).
-func (h *CollectHandler) HasPartialToolCall() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	n := len(h.ToolCalls)
-	if n == 0 {
-		return false
-	}
-	return h.ToolCalls[n-1].Arguments == ""
-}
-
-// ClearPartialToolCall removes the last incomplete tool call before retry
-// to avoid duplicating tool_call entries on reconnect.
-func (h *CollectHandler) ClearPartialToolCall() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if n := len(h.ToolCalls); n > 0 {
-		h.ToolCalls = h.ToolCalls[:n-1]
-	}
-}
-
 // ClearAll removes all accumulated state (text, tool calls, thinking).
 // Used before stream retries where the API will send a completely
 // new response -- old collected data would have mismatched IDs.
@@ -272,14 +238,6 @@ func (h *CollectHandler) ClearAll() {
 	h.Text = ""
 	h.ToolCalls = nil
 	h.Thinking = ""
-}
-
-// ClearText removes all pending text that was already streamed to the user.
-// Used when retry cannot recover text deltas (text-only case).
-func (h *CollectHandler) ClearText() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.Text = ""
 }
 
 // HasTruncatedToolArgs checks if any tool call has invalid JSON arguments,

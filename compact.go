@@ -1428,14 +1428,6 @@ func (c *Compactor) SetPostCompactTokens(tokens int) {
 	c.postCompactTokens = tokens
 }
 
-// SetCompressionLevel sets the progressive summarization level.
-// Higher levels produce shorter summaries.
-func (c *Compactor) SetCompressionLevel(level int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.compressionLevel = level
-}
-
 // CompressionLevel returns the current compression level.
 func (c *Compactor) CompressionLevel() int {
 	c.mu.Lock()
@@ -3126,17 +3118,6 @@ func (t *CachedMicrocompactTracker) RegisterCompactableToolUse(toolUseID string,
 // and registers only those whose names are in compactableToolNames.
 // Called before the API call to pre-populate the tracker with compactable
 // tool IDs from the current conversation context.
-func (t *CachedMicrocompactTracker) RegisterCompactableToolIDsFromMessages(messages []anthropic.MessageParam) {
-	ids := collectCompactableToolIds(messages)
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, id := range ids {
-		if !t.registeredTools[id] {
-			t.registeredTools[id] = true
-			t.toolOrder = append(t.toolOrder, id)
-		}
-	}
-}
 
 // MarkSentToAPI flags that cache_edits were included in the last API request.
 // This prevents issuing another cache_edits until the server has processed
@@ -3145,19 +3126,6 @@ func (t *CachedMicrocompactTracker) MarkSentToAPI() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.toolsSentToAPI = true
-}
-
-// HasPendingEdits returns true if there are deletions queued but not yet sent.
-func (t *CachedMicrocompactTracker) HasPendingEdits() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	var activeCount int
-	for _, id := range t.toolOrder {
-		if !t.deletedRefs[id] {
-			activeCount++
-		}
-	}
-	return activeCount > t.maxTools
 }
 
 // GetCacheEditsBlock returns a cache_edits block if the threshold is exceeded.

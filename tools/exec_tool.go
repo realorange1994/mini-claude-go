@@ -1728,12 +1728,6 @@ func stripSafeWrappers(cmd string) string {
 	return strings.Join(remaining, " ")
 }
 
-// IsReadOnly reports whether the given command is read-only (safe to auto-approve).
-func (et *ExecTool) IsReadOnly(params map[string]any) bool {
-	cmd, _ := params["command"].(string)
-	return IsReadOnlyCommand(cmd)
-}
-
 // CheckDestructiveWarning returns a warning message if the command is known to be
 // destructive, or empty string if not. This is informational only, not blocking.
 func CheckDestructiveWarning(cmd string) string {

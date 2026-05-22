@@ -97,27 +97,6 @@ func TestCollectHandlerError(t *testing.T) {
 	}
 }
 
-func TestCollectHandlerFullResponse(t *testing.T) {
-	h := NewCollectHandler()
-
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: "Hello"})
-
-	if h.FullResponse() != "Hello" {
-		t.Errorf("expected 'Hello', got %q", h.FullResponse())
-	}
-}
-
-func TestCollectHandlerFullResponseFallbackToThinking(t *testing.T) {
-	h := NewCollectHandler()
-
-	// Only thinking, no text
-	h.Handle(StreamChunk{Type: ChunkTypeThinking, Content: "Thinking..."})
-
-	if h.FullResponse() != "Thinking..." {
-		t.Errorf("expected thinking as fallback, got %q", h.FullResponse())
-	}
-}
-
 func TestCollectHandlerAsParsedResponse(t *testing.T) {
 	h := NewCollectHandler()
 
@@ -297,87 +276,6 @@ func TestCollectHandlerFinishReasonOverwrite(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// HasPartialToolCall tests
-// ---------------------------------------------------------------------------
-
-func TestCollectHandlerHasPartialToolCallEmpty(t *testing.T) {
-	h := NewCollectHandler()
-	if h.HasPartialToolCall() {
-		t.Error("expected false when no tool calls")
-	}
-}
-
-func TestCollectHandlerHasPartialToolCallWithArgs(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"command":"ls"}`})
-	if h.HasPartialToolCall() {
-		t.Error("expected false when last tool has args")
-	}
-}
-
-func TestCollectHandlerHasPartialToolCallNoArgs(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	if !h.HasPartialToolCall() {
-		t.Error("expected true when last tool has no args")
-	}
-}
-
-func TestCollectHandlerHasPartialToolCallMultipleLastEmpty(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "read_file"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"path":"a.txt"}`})
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t2", Name: "exec"})
-	// t2 has no args
-	if !h.HasPartialToolCall() {
-		t.Error("expected true when last of multiple tools has no args")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ClearPartialToolCall tests
-// ---------------------------------------------------------------------------
-
-func TestCollectHandlerClearPartialToolCallBasic(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	if !h.HasPartialToolCall() {
-		t.Fatal("expected partial before clear")
-	}
-	h.ClearPartialToolCall()
-	if h.HasPartialToolCall() {
-		t.Error("expected no partial after clear")
-	}
-	if len(h.ToolCalls) != 0 {
-		t.Errorf("expected 0 tool calls after clear, got %d", len(h.ToolCalls))
-	}
-}
-
-func TestCollectHandlerClearPartialToolCallWhenNone(t *testing.T) {
-	h := NewCollectHandler()
-	h.ClearPartialToolCall() // should not panic
-	if len(h.ToolCalls) != 0 {
-		t.Errorf("expected 0 tool calls, got %d", len(h.ToolCalls))
-	}
-}
-
-func TestCollectHandlerClearPartialToolCallPreservesEarlier(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "read_file"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"path":"a.txt"}`})
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t2", Name: "exec"})
-	// Only t2 is partial
-	h.ClearPartialToolCall()
-	if len(h.ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call after clearing partial, got %d", len(h.ToolCalls))
-	}
-	if h.ToolCalls[0].Name != "read_file" {
-		t.Errorf("expected read_file preserved, got %q", h.ToolCalls[0].Name)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // HasTruncatedToolArgs tests
 // ---------------------------------------------------------------------------
 
@@ -418,23 +316,6 @@ func TestCollectHandlerHasTruncatedToolArgsMultipleOneTruncated(t *testing.T) {
 		t.Error("expected true when one of multiple tools has truncated args")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// ClearText tests
-// ---------------------------------------------------------------------------
-
-func TestCollectHandlerClearText(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: "Hello World"})
-	if h.Text != "Hello World" {
-		t.Fatalf("expected text before clear, got %q", h.Text)
-	}
-	h.ClearText()
-	if h.Text != "" {
-		t.Errorf("expected empty text after clear, got %q", h.Text)
-	}
-}
-
 
 // ---------------------------------------------------------------------------
 // DeltasState tracking tests

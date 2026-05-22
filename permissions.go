@@ -559,27 +559,6 @@ func (g *PermissionGate) askUserWithWarning(toolName string, params map[string]a
 	return false
 }
 
-// RecordUserApproval records that the user explicitly approved a tool action
-// (typically via AskUserQuestion). This approval is valid for 2 minutes and
-// allows the matching tool call to bypass the auto classifier.
-func (g *PermissionGate) RecordUserApproval(toolName string, params map[string]any) {
-	compact := compactParams(toolName, params)
-	g.recentlyApproved = append(g.recentlyApproved, approvedAction{
-		toolName: toolName,
-		params:   compact,
-		expires:  time.Now().Add(2 * time.Minute),
-	})
-	// Trim old entries
-	now := time.Now()
-	valid := g.recentlyApproved[:0]
-	for _, a := range g.recentlyApproved {
-		if a.expires.After(now) {
-			valid = append(valid, a)
-		}
-	}
-	g.recentlyApproved = valid
-}
-
 // toolMatchesRecentApproval checks if the given tool call matches a recent
 // explicit user approval (from AskUserQuestion). If so, the classifier is bypassed.
 func (g *PermissionGate) toolMatchesRecentApproval(toolName string, params map[string]any) bool {

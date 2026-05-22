@@ -761,31 +761,6 @@ func (t *ToolStateTracker) GetActiveTask() string {
 	return t.activeTask
 }
 
-// FileWasRead returns true if the file has been read in the current epoch.
-func (t *ToolStateTracker) FileWasRead(path string) bool {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	abs, _ := filepath.Abs(path)
-	state, ok := t.readFiles[abs]
-	return ok && state.epoch == t.compactionEpoch
-}
-
-// FileUnmodified returns true if the file's mtime matches the recorded mtime.
-// Returns false if the file was never read or if it has been modified since read.
-func (t *ToolStateTracker) FileUnmodified(path string) bool {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	abs, _ := filepath.Abs(path)
-	state, ok := t.readFiles[abs]
-	if !ok {
-		return false // never read — treat as unmodified (no staleness check needed)
-	}
-	if info, err := os.Stat(abs); err == nil {
-		return info.ModTime().UnixMilli() == state.mtime
-	}
-	return true // can't stat — assume unmodified
-}
-
 // RecordSearch records a successful grep/glob search pattern at the current epoch.
 func (t *ToolStateTracker) RecordSearch(pattern string, hadResults bool) {
 	if !hadResults {
@@ -1120,13 +1095,6 @@ func (c *ConversationContext) LatestUserMessage() string {
 	return ""
 }
 
-// LastAssistantTime returns the timestamp of the last assistant message.
-func (c *ConversationContext) LastAssistantTime() time.Time {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.lastAssistantTime
-}
-
 // ShouldTimeBasedMicroCompact returns true when the time gap since the last
 // assistant message exceeds gapMinutes. A gapMinutes of 0 means always fire
 // (legacy count-based behavior for backward compatibility).
@@ -1174,19 +1142,7 @@ func (c *ConversationContext) SetContentReplacementState(state *ContentReplaceme
 	c.contentReplacementState = state
 }
 
-// GetContentReplacementState returns the state tracker, or nil if not configured.
-func (c *ConversationContext) GetContentReplacementState() *ContentReplacementState {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.contentReplacementState
-}
-
-// GetToolResultStore returns the tool result store, or nil if not configured.
-func (c *ConversationContext) GetToolResultStore() *ToolResultStore {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.toolResultStore
-}
+// SetToolResultStore configures the disk persistence store for tool results.
 
 // AddUserMessage appends a user text message.
 func (c *ConversationContext) AddUserMessage(content string) {
@@ -1727,20 +1683,6 @@ func (c *ConversationContext) AddSummary(content string) {
 	})
 }
 
-// AddCompressionInstruction injects an inline compression instruction as a
-// user message. The next API call will reuse the prompt cache (system prompt +
-// tools + prior messages are all cached). Only the instruction itself is new tokens.
-// This replaces the separate API call approach, saving the full system prompt +
-// tools re-tokenization cost.
-func (c *ConversationContext) AddCompressionInstruction(level int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries = append(c.entries, conversationEntry{
-		role:    "user",
-		content: CompressionInstructionContent{Level: level},
-	})
-}
-
 // CompressionLevel returns the current compression level (0 = never compressed).
 func (c *ConversationContext) CompressionLevel() int {
 	c.mu.RLock()
@@ -1765,83 +1707,6 @@ func (c *ConversationContext) AddAttachment(content string) {
 		role:    "user",
 		content: AttachmentContent(content),
 	})
-}
-
-// AddHistorySnip preserves the most recent conversation entries verbatim
-// after compaction. This ensures the latest context is not lost in the summary.
-// Entries are added as user-role text messages with a [history-snip] prefix.
-// skipPaths contains file paths recovered by PostCompactRecovery; ToolResultContent
-// entries referencing those paths are skipped to avoid duplication.
-func (c *ConversationContext) AddHistorySnip(count int, skipPaths []string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if count <= 0 {
-		count = 3
-	}
-
-	// Find the most recent CompactBoundaryContent
-	boundaryIdx := -1
-	for i := len(c.entries) - 1; i >= 0; i-- {
-		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
-			boundaryIdx = i
-			break
-		}
-	}
-	if boundaryIdx < 0 {
-		return
-	}
-
-	// Collect up to 'count' entries before the boundary
-	var snipEntries []conversationEntry
-	for i := boundaryIdx - 1; i >= 0 && len(snipEntries) < count; i-- {
-		entry := c.entries[i]
-		switch entry.content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent:
-			continue
-		default:
-			// Skip ToolResultContent entries that reference recovered file paths
-			if skipPaths != nil && len(skipPaths) > 0 {
-				if results, ok := entry.content.(ToolResultContent); ok {
-					skip := false
-					for _, r := range results {
-						for _, contentBlock := range r.Content {
-							if contentBlock.OfText != nil {
-								for _, path := range skipPaths {
-									if strings.Contains(contentBlock.OfText.Text, path) {
-										skip = true
-										break
-									}
-								}
-							}
-							if skip {
-								break
-							}
-						}
-						if skip {
-							break
-						}
-					}
-					if skip {
-						continue
-					}
-				}
-			}
-			snipEntries = append([]conversationEntry{entry}, snipEntries...)
-		}
-	}
-
-	// Append snip entries after the boundary as preserved messages
-	for _, entry := range snipEntries {
-		text := entryContentToText(entry.content)
-		if text == "" {
-			continue
-		}
-		c.entries = append(c.entries, conversationEntry{
-			role:    "user",
-			content: TextContent(fmt.Sprintf("[history-snip %s] %s", entry.role, text)),
-		})
-	}
 }
 
 // KeepRecentMessages preserves the most recent conversation entries verbatim
