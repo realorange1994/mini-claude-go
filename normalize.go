@@ -32,7 +32,7 @@ import (
 //  4. FilterEmptyMessages (cleans up empties)
 //  5. StripImagesFromErrorToolResults (strip images from error tool_results)
 //  6. ValidateImagesForAPI (remove invalid image blocks)
-//  7. ReorderAttachmentsForAPI (bubble attachments to message start)
+//  7. ReorderContentForAPI (bubble tool_results + attachments to message start)
 //  8. Existing normalizations (sort keys, whitespace)
 func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.MessageParam {
 	messages = StripVirtualMessages(messages)
@@ -41,7 +41,7 @@ func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.Message
 	messages = FilterEmptyMessages(messages)
 	messages = StripImagesFromErrorToolResults(messages)
 	messages, _ = ValidateImagesForAPI(messages)
-	messages = ReorderAttachmentsForAPI(messages)
+	messages = ReorderContentForAPI(messages)
 
 	// Existing normalizations (sort keys, whitespace)
 	result := make([]anthropic.MessageParam, len(messages))
@@ -459,11 +459,12 @@ func isVirtualUserMessage(msg anthropic.MessageParam) bool {
 // P1-6b: Attachment Reordering
 // ============================================================================
 
-// ReorderAttachmentsForAPI bubbles image/document blocks up to the beginning
-// of user messages. Upstream may place attachment blocks after text or
-// tool_result blocks, but the API expects them at the start. Attachments at
-// the end of messages can cause API issues.
-func ReorderAttachmentsForAPI(messages []anthropic.MessageParam) []anthropic.MessageParam {
+// ReorderContentForAPI bubbles tool_result blocks to the start of user message
+// content, followed by image/document blocks, then other blocks (text).
+// Upstream's hoistToolResults() does the same: tool_result must come first
+// to avoid "tool result must follow tool use" API errors, and keeping a stable
+// block order reduces cache content shape changes between turns.
+func ReorderContentForAPI(messages []anthropic.MessageParam) []anthropic.MessageParam {
 	if len(messages) == 0 {
 		return messages
 	}
@@ -475,22 +476,25 @@ func ReorderAttachmentsForAPI(messages []anthropic.MessageParam) []anthropic.Mes
 			continue
 		}
 
-		var attachments, others []anthropic.ContentBlockParamUnion
+		var toolResults, attachments, others []anthropic.ContentBlockParamUnion
 		for _, block := range msg.Content {
-			if block.OfImage != nil || block.OfDocument != nil {
+			if block.OfToolResult != nil {
+				toolResults = append(toolResults, block)
+			} else if block.OfImage != nil || block.OfDocument != nil {
 				attachments = append(attachments, block)
 			} else {
 				others = append(others, block)
 			}
 		}
 
-		if len(attachments) == 0 {
+		if len(toolResults) == 0 && len(attachments) == 0 {
 			result[i] = msg
 			continue
 		}
 
-		// Rebuild content: attachments first, then other blocks in original order
+		// Rebuild content: tool_results first, then attachments, then others
 		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+		newContent = append(newContent, toolResults...)
 		newContent = append(newContent, attachments...)
 		newContent = append(newContent, others...)
 		result[i] = anthropic.MessageParam{
@@ -500,6 +504,10 @@ func ReorderAttachmentsForAPI(messages []anthropic.MessageParam) []anthropic.Mes
 	}
 	return result
 }
+
+// ReorderAttachmentsForAPI is an alias for ReorderContentForAPI for backward compatibility.
+// Deprecated: use ReorderContentForAPI instead.
+var ReorderAttachmentsForAPI = ReorderContentForAPI
 
 // ============================================================================
 // P1-6c: Image Validation

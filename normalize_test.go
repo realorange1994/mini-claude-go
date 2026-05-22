@@ -544,12 +544,12 @@ func TestReorderAttachmentsDocumentAfterToolResult(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(result))
 	}
-	// Document should be first after reordering
-	if result[0].Content[0].OfDocument == nil {
-		t.Error("expected document block first after reorder")
+	// tool_result should be first after reordering (hoisted before attachments)
+	if result[0].Content[0].OfToolResult == nil {
+		t.Error("expected tool_result block first after reorder")
 	}
-	if result[0].Content[1].OfToolResult == nil {
-		t.Error("expected tool_result block second after reorder")
+	if result[0].Content[1].OfDocument == nil {
+		t.Error("expected document block second after reorder")
 	}
 }
 
