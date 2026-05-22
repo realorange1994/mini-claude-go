@@ -233,6 +233,11 @@ func builtinMakeThread(args []*Value) (*Value, error) {
 	threadChannelsMu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- threadResult{err: fmt.Errorf("panic in thread: %v", r)}
+			}
+		}()
 		threadEnv := copyGlobalEnv()
 		argList := listFromSlice(fnArgs)
 		result, err := Apply(fn, argList, threadEnv)

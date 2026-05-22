@@ -1,6 +1,9 @@
 package microlisp
 
 import (
+	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -286,5 +289,97 @@ func TestChannelSelectCancelChanIntegration(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("go:select should have been cancelled within 3s")
+	}
+}
+
+func TestSpawnAndJoinThread(t *testing.T) {
+	initReset()
+	// go:spawn returns a thread that can be joined
+	result, err := SafeEvalString(`
+		(let ((th (go:spawn (lambda () 42))))
+			(join-thread th))`)
+	if err != nil {
+		t.Fatalf("spawn+join: %v", err)
+	}
+	if result != "42" {
+		t.Fatalf("expected 42, got %s", result)
+	}
+}
+
+func TestMakeThreadAndJoin(t *testing.T) {
+	initReset()
+	result, err := SafeEvalString(`
+		(let ((th (make-thread (lambda () 99))))
+			(join-thread th))`)
+	if err != nil {
+		t.Fatalf("make-thread+join: %v", err)
+	}
+	if result != "99" {
+		t.Fatalf("expected 99, got %s", result)
+	}
+}
+
+func TestSpawnPanicRecovery(t *testing.T) {
+	initReset()
+	// Direct Go-level test: spawn a function that panics and verify join returns an error
+	tid := atomic.AddInt64(&nextThreadID, 1)
+	resultCh := make(chan threadResult, 1)
+	threadChannelsMu.Lock()
+	threadChannels[tid] = resultCh
+	threadChannelsMu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- threadResult{err: fmt.Errorf("panic in spawned thread: %v", r)}
+			}
+		}()
+		// This will panic
+		var p *int
+		*p = 42
+	}()
+
+	select {
+	case tr := <-resultCh:
+		if tr.err == nil {
+			t.Fatal("expected panic error, got nil")
+		}
+		if !strings.Contains(tr.err.Error(), "panic") {
+			t.Fatalf("expected panic error, got: %v", tr.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("join on panicked spawn hung forever")
+	}
+}
+
+func TestMakeThreadPanicRecovery(t *testing.T) {
+	initReset()
+	tid := atomic.AddInt64(&nextThreadID, 1)
+	resultCh := make(chan threadResult, 1)
+	threadChannelsMu.Lock()
+	threadChannels[tid] = resultCh
+	threadChannelsMu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- threadResult{err: fmt.Errorf("panic in thread: %v", r)}
+			}
+		}()
+		// This will panic
+		var p *int
+		*p = 42
+	}()
+
+	select {
+	case tr := <-resultCh:
+		if tr.err == nil {
+			t.Fatal("expected panic error, got nil")
+		}
+		if !strings.Contains(tr.err.Error(), "panic") {
+			t.Fatalf("expected panic error, got: %v", tr.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("join on panicked make-thread hung forever")
 	}
 }

@@ -485,13 +485,18 @@ func builtinGoSpawn(args []*Value) (*Value, error) {
 	threadChannelsMu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- threadResult{err: fmt.Errorf("panic in spawned thread: %v", r)}
+			}
+		}()
 		threadEnv := copyGlobalEnv()
 		argList := listFromSlice(fnArgs)
 		result, err := Apply(fn, argList, threadEnv)
 		resultCh <- threadResult{value: result, err: err}
 	}()
 
-	return vnum(float64(tid)), nil
+	return &Value{typ: VThread, num: float64(tid)}, nil
 }
 
 // interfaceToLisp converts a Go interface{} value back to a Lisp Value.
