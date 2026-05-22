@@ -43,6 +43,7 @@ func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.Message
 	messages, _ = ValidateImagesForAPI(messages)
 	messages = ReorderContentForAPI(messages)
 	messages = smooshSystemReminders(messages)
+	messages = stripEmptyTextBlocks(messages)
 
 	// Existing normalizations (sort keys, whitespace)
 	result := make([]anthropic.MessageParam, len(messages))
@@ -460,11 +461,11 @@ func isVirtualUserMessage(msg anthropic.MessageParam) bool {
 // P1-6b: Attachment Reordering
 // ============================================================================
 
-// ReorderContentForAPI bubbles tool_result blocks to the start of user message
-// content, followed by image/document blocks, then other blocks (text).
-// Upstream's hoistToolResults() does the same: tool_result must come first
-// to avoid "tool result must follow tool use" API errors, and keeping a stable
-// block order reduces cache content shape changes between turns.
+// ReorderContentForAPI sorts content blocks within each message to a canonical
+// order. For user messages: tool_results first (API requirement), then
+// image/document, then text. For assistant messages: text → image/document →
+// tool_use → tool_result. This matches upstream's normalizeContentFromAPI() and
+// prevents structural cache shape changes between turns.
 func ReorderContentForAPI(messages []anthropic.MessageParam) []anthropic.MessageParam {
 	if len(messages) == 0 {
 		return messages
@@ -472,38 +473,93 @@ func ReorderContentForAPI(messages []anthropic.MessageParam) []anthropic.Message
 
 	result := make([]anthropic.MessageParam, len(messages))
 	for i, msg := range messages {
-		if msg.Role != anthropic.MessageParamRoleUser || len(msg.Content) <= 1 {
+		if len(msg.Content) <= 1 {
 			result[i] = msg
 			continue
 		}
 
-		var toolResults, attachments, others []anthropic.ContentBlockParamUnion
-		for _, block := range msg.Content {
-			if block.OfToolResult != nil {
-				toolResults = append(toolResults, block)
-			} else if block.OfImage != nil || block.OfDocument != nil {
-				attachments = append(attachments, block)
-			} else {
-				others = append(others, block)
+		if msg.Role == anthropic.MessageParamRoleUser {
+			// User messages: tool_results first (API requirement), then attachments, then text
+			var toolResults, attachments, others []anthropic.ContentBlockParamUnion
+			for _, block := range msg.Content {
+				if block.OfToolResult != nil {
+					toolResults = append(toolResults, block)
+				} else if block.OfImage != nil || block.OfDocument != nil {
+					attachments = append(attachments, block)
+				} else {
+					others = append(others, block)
+				}
 			}
-		}
 
-		if len(toolResults) == 0 && len(attachments) == 0 {
-			result[i] = msg
-			continue
-		}
+			if len(toolResults) == 0 && len(attachments) == 0 {
+				result[i] = msg
+				continue
+			}
 
-		// Rebuild content: tool_results first, then attachments, then others
-		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
-		newContent = append(newContent, toolResults...)
-		newContent = append(newContent, attachments...)
-		newContent = append(newContent, others...)
-		result[i] = anthropic.MessageParam{
-			Role:    msg.Role,
-			Content: newContent,
+			newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+			newContent = append(newContent, toolResults...)
+			newContent = append(newContent, attachments...)
+			newContent = append(newContent, others...)
+			result[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
+		} else {
+			// Assistant messages: canonical order text → image → tool_use → tool_result
+			var textBlocks, imageBlocks, toolUseBlocks, toolResultBlocks []anthropic.ContentBlockParamUnion
+			for _, block := range msg.Content {
+				switch {
+				case block.OfText != nil:
+					textBlocks = append(textBlocks, block)
+				case block.OfImage != nil || block.OfDocument != nil:
+					imageBlocks = append(imageBlocks, block)
+				case block.OfToolUse != nil:
+					toolUseBlocks = append(toolUseBlocks, block)
+				case block.OfToolResult != nil:
+					toolResultBlocks = append(toolResultBlocks, block)
+				default:
+					textBlocks = append(textBlocks, block)
+				}
+			}
+
+			// Quick check: was reorder needed?
+			needReorder := false
+			if len(textBlocks) > 0 && blockType(msg.Content[0]) != "text" {
+				needReorder = true
+			} else if len(textBlocks) == 0 && len(imageBlocks) > 0 && blockType(msg.Content[0]) != "image" && blockType(msg.Content[0]) != "document" {
+				needReorder = true
+			} else if len(textBlocks) == 0 && len(imageBlocks) == 0 && len(toolUseBlocks) > 0 && blockType(msg.Content[0]) != "tool_use" {
+				needReorder = true
+			}
+
+			if needReorder {
+				newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+				newContent = append(newContent, textBlocks...)
+				newContent = append(newContent, imageBlocks...)
+				newContent = append(newContent, toolUseBlocks...)
+				newContent = append(newContent, toolResultBlocks...)
+				result[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
+			} else {
+				result[i] = msg
+			}
 		}
 	}
 	return result
+}
+
+// blockType returns the type name of a content block for ordering purposes.
+func blockType(block anthropic.ContentBlockParamUnion) string {
+	switch {
+	case block.OfText != nil:
+		return "text"
+	case block.OfImage != nil:
+		return "image"
+	case block.OfDocument != nil:
+		return "document"
+	case block.OfToolUse != nil:
+		return "tool_use"
+	case block.OfToolResult != nil:
+		return "tool_result"
+	default:
+		return "unknown"
+	}
 }
 
 // ReorderAttachmentsForAPI is an alias for ReorderContentForAPI for backward compatibility.
@@ -546,6 +602,35 @@ func smooshSystemReminders(messages []anthropic.MessageParam) []anthropic.Messag
 
 		if changed {
 			messages[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
+		}
+	}
+	return messages
+}
+
+// stripEmptyTextBlocks removes text blocks that are empty or whitespace-only
+// from all messages. This prevents unnecessary cache structure changes from
+// empty content blocks.
+// Upstream: normalizeContentFromAPI() strips empty text blocks during normalization.
+func stripEmptyTextBlocks(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	changed := false
+	for i, msg := range messages {
+		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+		for _, block := range msg.Content {
+			if block.OfText != nil && strings.TrimSpace(block.OfText.Text) == "" {
+				changed = true
+				continue
+			}
+			newContent = append(newContent, block)
+		}
+		if changed && len(newContent) == 0 {
+			// If all blocks were empty text, keep one placeholder
+			newContent = append(newContent, anthropic.ContentBlockParamUnion{
+				OfText: &anthropic.TextBlockParam{Text: "[empty]"},
+			})
+		}
+		if changed {
+			messages[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
+			changed = false // reset for next message
 		}
 	}
 	return messages

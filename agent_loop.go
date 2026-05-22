@@ -389,6 +389,7 @@ type AgentLoop struct {
 	lastAPIOutputTokens      atomic.Int64               // exact output tokens from the most recent API response
 	totalCacheCreationTokens atomic.Int64               // cumulative cache_creation_input_tokens
 	totalCacheReadTokens     atomic.Int64               // cumulative cache_read_input_tokens
+	totalCacheEditsDeletions atomic.Int64               // cumulative tool results deleted by cache_edits (proxy for cache_deleted_input_tokens)
 	costTracker              *CostTracker               // per-model USD cost tracking with session persistence
 	cacheBreakDetector       *CacheBreakDetector        // detects KV cache breaks between API calls
 	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
@@ -1162,6 +1163,7 @@ func (a *AgentLoop) fireStopHook(reason string, turnsUsed int, interrupted bool)
 		"last_api_input_tokens":        a.lastAPIInputTokens.Load(),
 		"total_cache_creation_tokens":  a.totalCacheCreationTokens.Load(),
 		"total_cache_read_tokens":      a.totalCacheReadTokens.Load(),
+		"total_cache_edits_deletions":  a.totalCacheEditsDeletions.Load(),
 		"remaining_token_budget":       a.RemainingTokenBudget(),
 	})
 }
@@ -4125,9 +4127,17 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 // deletes old tool results server-side while preserving the prompt cache.
 // Returns messages unchanged if no cache edits are pending.
 func (a *AgentLoop) injectCacheEdits(messages []anthropic.MessageParam) []anthropic.MessageParam {
-	cacheEdits := a.cachedMC.GetCacheEditsBlock()
+	cacheEdits, deletedCount := a.cachedMC.GetCacheEditsBlock()
 	if cacheEdits == nil {
 		return messages
+	}
+
+	// Track the number of tool results deleted by cache_edits.
+	// This is the closest proxy to upstream's cache_deleted_input_tokens,
+	// which the Go SDK doesn't expose.
+	if deletedCount > 0 {
+		a.totalCacheEditsDeletions.Add(int64(deletedCount))
+		a.out("[cache] cache_edits: deleted=%d total_deletions=%d\n", deletedCount, a.totalCacheEditsDeletions.Load())
 	}
 
 	// Serialize messages to JSON for manipulation

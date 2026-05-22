@@ -3132,14 +3132,15 @@ func (t *CachedMicrocompactTracker) MarkSentToAPI() {
 // Deletes all but the most recent `keepRecent` tool results.
 // Returns nil if fewer than maxTools compactable tools exist, or if tools
 // were already sent to the API this turn (prevents double-sending).
-func (t *CachedMicrocompactTracker) GetCacheEditsBlock() map[string]any {
+// The second return value is the number of tool results marked for deletion.
+func (t *CachedMicrocompactTracker) GetCacheEditsBlock() (map[string]any, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	// Skip if tools were already sent to API this turn — the server is
 	// processing the deletion and we shouldn't re-issue until it completes.
 	if t.toolsSentToAPI {
-		return nil
+		return nil, 0
 	}
 
 	var compactable []string
@@ -3150,12 +3151,12 @@ func (t *CachedMicrocompactTracker) GetCacheEditsBlock() map[string]any {
 	}
 
 	if len(compactable) <= t.maxTools {
-		return nil
+		return nil, 0
 	}
 
 	toDelete := compactable[:len(compactable)-t.keepRecent]
 	if len(toDelete) == 0 {
-		return nil
+		return nil, 0
 	}
 
 	var edits []map[string]any
@@ -3170,7 +3171,7 @@ func (t *CachedMicrocompactTracker) GetCacheEditsBlock() map[string]any {
 	return map[string]any{
 		"type":  "cache_edits",
 		"edits": edits,
-	}
+	}, len(toDelete)
 }
 
 // Reset clears all cache_edits state after a full compaction.
