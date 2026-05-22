@@ -407,6 +407,7 @@ type AgentLoop struct {
 	toolSchemaCacheHash      uint64                    // hash of tool names for cache invalidation
 	thinkingClearLatched     bool                      // once set (>1h idle), stays true for session — clears thinking via context_management
 	lastApiCompletionTime    time.Time                 // timestamp of last successful API call (for thinking latch)
+	announcedMCPServers      map[string]bool           // servers whose instructions have been announced this session (delta tracking)
 	errorReporter              *ErrorReporter            // captures error events for analysis
 	featureFlags               *FeatureFlagStore         // feature flag store
 	lastTransition          LoopTransitionReason       // reason for the most recent loop continue
@@ -2130,6 +2131,108 @@ func (a *AgentLoop) recordApiCompletion() {
 	a.lastApiCompletionTime = time.Now()
 }
 
+// buildMCPInstructionsDelta returns an announcement string for newly-connected
+// MCP servers whose instructions haven't yet been announced this session.
+// This is cache-friendly: only new servers produce new content, existing
+// server announcements persist in conversation history as attachments.
+func (a *AgentLoop) buildMCPInstructionsDelta() string {
+	mgr := a.config.MCPManager
+	if mgr == nil {
+		return ""
+	}
+	servers := mgr.ListServers()
+	if len(servers) == 0 {
+		return ""
+	}
+
+	// Build server → tools map from AllToolsWithServer
+	serverTools := make(map[string][]mcp.Tool)
+	for _, tws := range mgr.AllToolsWithServer() {
+		serverTools[tws.Server] = append(serverTools[tws.Server], tws.Tool)
+	}
+
+	// Detect newly-connected servers not yet announced
+	var newServers, removedServers []string
+	for _, srv := range servers {
+		if !a.announcedMCPServers[srv] {
+			newServers = append(newServers, srv)
+		}
+	}
+	// Detect previously-announced servers that are now disconnected
+	for srv := range a.announcedMCPServers {
+		if !sliceContains(servers, srv) {
+			removedServers = append(removedServers, srv)
+		}
+	}
+
+	if len(newServers) == 0 && len(removedServers) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	if len(newServers) > 0 {
+		sb.WriteString("MCP servers connected:\n\n")
+		for _, srv := range newServers {
+			a.announcedMCPServers[srv] = true
+			status := mgr.GetServerStatus(srv)
+			tools := serverTools[srv]
+			icon := "●"
+			if status != "connected" {
+				icon = "○"
+			}
+			sb.WriteString(fmt.Sprintf("%s %s [%s] (%d tools)\n", icon, srv, status, len(tools)))
+			for _, t := range tools {
+				desc := t.Description
+				if len(desc) > 80 {
+					desc = desc[:80] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("  - %s: %s\n", t.Name, desc))
+			}
+			if instr := mgr.GetServerInstructions(srv); instr != "" {
+				sb.WriteString(fmt.Sprintf("  Instructions: %s\n", instr))
+			}
+			sb.WriteString("\n")
+		}
+	}
+	if len(removedServers) > 0 {
+		sb.WriteString("MCP servers disconnected:\n\n")
+		for _, srv := range removedServers {
+			delete(a.announcedMCPServers, srv)
+			sb.WriteString(fmt.Sprintf("○ %s (no longer connected)\n", srv))
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// injectMCPInstructionsDelta appends an MCP server delta announcement as a
+// user message content block when there are newly-connected or disconnected servers.
+func (a *AgentLoop) injectMCPInstructionsDelta(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	delta := a.buildMCPInstructionsDelta()
+	if delta == "" {
+		return messages
+	}
+	// Append as a user message attachment. This persists in conversation history
+	// and is cache-friendly — only new servers produce new content blocks.
+	messages = append(messages, anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "<system-reminder>\n" + delta + "</system-reminder>"}},
+		},
+	})
+	return messages
+}
+
+// sliceContains checks if a string slice contains a given value.
+func sliceContains(slice []string, val string) bool {
+	for _, s := range slice {
+		if s == val {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, executor *StreamingToolExecutor) ([]map[string]any, []string, error) {
 	const maxStreamRetries = 9 // 1 attempt + 9 retries = 10 total
 
@@ -2144,6 +2247,11 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 	a.context.FixRoleAlternation()
 
 	messages := a.context.BuildMessages()
+
+	// Inject MCP instructions delta: announce newly-connected MCP servers.
+	// This is cache-friendly — only new servers produce new content blocks.
+	messages = a.injectMCPInstructionsDelta(messages)
+
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
 	// Inject cache_edits block if the cached microcompact tracker has deletions pending.
@@ -2464,6 +2572,9 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
 	messages := a.context.BuildMessages()
+
+	// Inject MCP instructions delta: announce newly-connected MCP servers.
+	messages = a.injectMCPInstructionsDelta(messages)
 
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
@@ -4118,6 +4229,10 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 	if isMainThread {
 		sweepFileContentCache()
 	}
+
+	// Reset MCP instructions delta tracking — after compaction, the post-compact
+	// announcement re-declares visible servers, so per-turn delta state must reset.
+	a.announcedMCPServers = make(map[string]bool)
 }
 
 // buildPostCompactToolsAnnouncement re-announces available tools after compaction.

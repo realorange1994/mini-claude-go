@@ -42,6 +42,7 @@ func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.Message
 	messages = StripImagesFromErrorToolResults(messages)
 	messages, _ = ValidateImagesForAPI(messages)
 	messages = ReorderContentForAPI(messages)
+	messages = smooshSystemReminders(messages)
 
 	// Existing normalizations (sort keys, whitespace)
 	result := make([]anthropic.MessageParam, len(messages))
@@ -508,6 +509,47 @@ func ReorderContentForAPI(messages []anthropic.MessageParam) []anthropic.Message
 // ReorderAttachmentsForAPI is an alias for ReorderContentForAPI for backward compatibility.
 // Deprecated: use ReorderContentForAPI instead.
 var ReorderAttachmentsForAPI = ReorderContentForAPI
+
+// smooshSystemReminders folds <system-reminder>-prefixed text blocks into
+// adjacent tool_result blocks' content. This reduces content block count
+// variation across turns for more stable prompt caching.
+//
+// Upstream: messages.ts smooshSystemReminderSiblings() — gated by tengu_chair_sermon.
+// In the Go version, we apply it unconditionally since it's a pure optimization.
+func smooshSystemReminders(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	for i, msg := range messages {
+		if msg.Role != anthropic.MessageParamRoleUser || len(msg.Content) <= 1 {
+			continue
+		}
+
+		changed := false
+		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+
+		for _, block := range msg.Content {
+			if block.OfText != nil && strings.HasPrefix(block.OfText.Text, "<system-reminder>") {
+				// Try to fold into preceding tool_result content
+				if len(newContent) > 0 {
+					prev := newContent[len(newContent)-1]
+					if prev.OfToolResult != nil {
+						prev.OfToolResult.Content = append(prev.OfToolResult.Content,
+							anthropic.ToolResultBlockParamContentUnion{
+								OfText: &anthropic.TextBlockParam{Text: block.OfText.Text},
+							})
+						newContent[len(newContent)-1] = prev
+						changed = true
+						continue
+					}
+				}
+			}
+			newContent = append(newContent, block)
+		}
+
+		if changed {
+			messages[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
+		}
+	}
+	return messages
+}
 
 // ============================================================================
 // P1-6c: Image Validation
