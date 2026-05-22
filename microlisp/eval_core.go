@@ -7,6 +7,7 @@ package microlisp
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -2943,6 +2944,98 @@ evalLoop:
 					}
 				}
 				return vstr(stream.stream.getStringOutput()), nil
+			case "GO:SELECT":
+				// (go:select op1 op2 ...) — special form: ops NOT evaluated, but channel/val inside ARE
+				if v.cdr == nil || isNil(v.cdr) {
+					return nil, fmt.Errorf("go:select: need at least one operation")
+				}
+				evalOps, e := evalSelectOps(v.cdr, env)
+				if e != nil {
+					return nil, fmt.Errorf("go:select: %v", e)
+				}
+				cases, e := makeSelectCases(evalOps)
+				if e != nil {
+					return nil, fmt.Errorf("go:select: %v", e)
+				}
+				chosen, value, ok, cancelled, err := runSelectWithCancel(cases)
+				if cancelled {
+					return nil, err
+				}
+				if !ok && cases[chosen].Dir == reflect.SelectRecv {
+					return listFromSlice([]*Value{vnum(float64(chosen)), vnil()}), nil
+				}
+				var result *Value
+				if cases[chosen].Dir == reflect.SelectRecv {
+					result = interfaceToLisp(value.Interface())
+				} else {
+					result = vnil()
+				}
+				return listFromSlice([]*Value{vnum(float64(chosen)), result}), nil
+			case "CHAN-SELECT-TIMEOUT":
+				// (chan-select-timeout timeout-ms op1 op2 ...) — special form
+				// timeout-ms IS evaluated, ops are NOT (but sub-expressions inside ops ARE)
+				if v.cdr == nil || v.cdr.typ != VPair {
+					return nil, fmt.Errorf("chan-select-timeout: needs timeout-ms and at least one operation")
+				}
+				// Evaluate timeout
+				timeoutVal, e := Eval(v.cdr.car, env)
+				if e != nil {
+					return nil, e
+				}
+				timeoutMs := timeoutVal.num
+				if timeoutMs <= 0 {
+					return nil, fmt.Errorf("chan-select-timeout: timeout must be positive")
+				}
+				// Evaluate channel/val sub-expressions in ops
+				evalOps, e := evalSelectOps(v.cdr.cdr, env)
+				if e != nil {
+					return nil, fmt.Errorf("chan-select-timeout: %v", e)
+				}
+				cases, e := makeSelectCases(evalOps)
+				if e != nil {
+					return nil, fmt.Errorf("chan-select-timeout: %v", e)
+				}
+				// Add timeout case
+				timeoutCh := make(chan time.Time, 1)
+				go func() {
+					time.Sleep(time.Duration(timeoutMs) * time.Millisecond)
+					select {
+					case timeoutCh <- time.Now():
+					default:
+					}
+				}()
+				cases = append(cases, reflect.SelectCase{
+					Dir:  reflect.SelectRecv,
+					Chan: reflect.ValueOf(timeoutCh),
+				})
+				timeoutIdx := len(cases) - 1
+				// Add cancel case if active
+				cancelIdx := -1
+				if limitsActive && activeLimits.CancelChan != nil {
+					cancelIdx = len(cases)
+					cases = append(cases, reflect.SelectCase{
+						Dir:  reflect.SelectRecv,
+						Chan: reflect.ValueOf(activeLimits.CancelChan),
+					})
+				}
+				defer func() { recover() }()
+				chosen, value, ok := reflect.Select(cases)
+				if chosen == cancelIdx {
+					return nil, fmt.Errorf("operation cancelled")
+				}
+				if chosen == timeoutIdx {
+					return listFromSlice([]*Value{vsym("timeout")}), nil
+				}
+				if !ok && cases[chosen].Dir == reflect.SelectRecv && chosen != timeoutIdx {
+					return listFromSlice([]*Value{vnum(float64(chosen)), vnil()}), nil
+				}
+				var result *Value
+				if cases[chosen].Dir == reflect.SelectRecv {
+					result = interfaceToLisp(value.Interface())
+				} else {
+					result = vnil()
+				}
+				return listFromSlice([]*Value{vnum(float64(chosen)), result}), nil
 			case "WITH-INPUT-FROM-STRING":
 				// (with-input-from-string (var string) body...)
 				if v.cdr == nil || v.cdr.typ != VPair {
