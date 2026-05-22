@@ -403,6 +403,8 @@ type AgentLoop struct {
 	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
 	timeoutHintInjected      bool                       // one-shot: timeout hint injected this session (openclacky pattern)
 	inlineCompressionMode    bool                       // set during inline cache-reusing compaction (openclacky pattern)
+	toolSchemaCache          map[string]anthropic.ToolUnionParam // tool name → cached schema (avoid re-serialize)
+	toolSchemaCacheHash      uint64                    // hash of tool names for cache invalidation
 	errorReporter              *ErrorReporter            // captures error events for analysis
 	featureFlags               *FeatureFlagStore         // feature flag store
 	lastTransition          LoopTransitionReason       // reason for the most recent loop continue
@@ -2761,8 +2763,30 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 }
 
 func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
-	toolParams := make([]anthropic.ToolUnionParam, 0, len(a.registry.AllTools()))
-	for _, t := range a.registry.AllTools() {
+	tools := a.registry.AllTools()
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name()
+	}
+	sort.Strings(names)
+	currentHash := fnvHash(strings.Join(names, ","))
+
+	// Return cached schemas if tool set hasn't changed
+	if a.toolSchemaCache != nil && a.toolSchemaCacheHash == currentHash {
+		result := make([]anthropic.ToolUnionParam, len(tools))
+		for i, t := range tools {
+			result[i] = a.toolSchemaCache[t.Name()]
+		}
+		// Apply cache_control to last tool (re-added each call)
+		if len(result) > 0 && result[len(result)-1].OfTool != nil {
+			result[len(result)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
+		return result
+	}
+
+	// Build fresh schemas
+	toolParams := make([]anthropic.ToolUnionParam, 0, len(tools))
+	for _, t := range tools {
 		schema := t.InputSchema()
 		toolParams = append(toolParams, anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{
@@ -2775,9 +2799,19 @@ func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
 			},
 		})
 	}
-	// Mark last tool definition for cache — same as openclacky's api_tools.last[:cache_control].
-	// This keeps the tool schema prefix in the cached KV, so subsequent turns
-	// hit cache_read instead of re-parsing all tool definitions.
+
+	// Cache schemas for next turn (without cache_control markers)
+	a.toolSchemaCache = make(map[string]anthropic.ToolUnionParam, len(tools))
+	a.toolSchemaCacheHash = currentHash
+	for _, param := range toolParams {
+		if param.OfTool != nil {
+			cached := param
+			cached.OfTool.CacheControl = anthropic.CacheControlEphemeralParam{} // don't cache the marker
+			a.toolSchemaCache[param.OfTool.Name] = cached
+		}
+	}
+
+	// Mark last tool definition for cache
 	if len(toolParams) > 0 && toolParams[len(toolParams)-1].OfTool != nil {
 		toolParams[len(toolParams)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
