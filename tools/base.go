@@ -466,18 +466,34 @@ func (r *Registry) Resolve(name string) (string, Tool) {
 	return name, nil
 }
 
-// AllTools returns all registered tools, sorted by name for deterministic ordering.
-// Deterministic tool order is important for prompt caching — the API caches
-// prefixes of the tool list, so a stable order maximizes cache hit rates.
+// AllTools returns all registered tools, partitioned for prompt caching.
+// Built-in tools come first (sorted alphabetically), then MCP-related tools
+// (sorted alphabetically). This separation ensures that MCP tool changes
+// don't shift built-in tools' positions in the serialized tool array,
+// preserving the ~11K-token cached prefix. Inspired by upstream's
+// toolPool.ts partitioned sorting: [...builtIn.sort(byName), ...mcp.sort(byName)].
 func (r *Registry) AllTools() []Tool {
-	out := make([]Tool, 0, len(r.tools))
+	var builtin, mcp []Tool
 	for _, t := range r.tools {
-		out = append(out, t)
+		if isMCPToolName(t.Name()) {
+			mcp = append(mcp, t)
+		} else {
+			builtin = append(builtin, t)
+		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Name() < out[j].Name()
-	})
+	sort.Slice(builtin, func(i, j int) bool { return builtin[i].Name() < builtin[j].Name() })
+	sort.Slice(mcp, func(i, j int) bool { return mcp[i].Name() < mcp[j].Name() })
+	out := make([]Tool, 0, len(r.tools))
+	out = append(out, builtin...)
+	out = append(out, mcp...)
 	return out
+}
+
+// isMCPToolName identifies MCP-related tools that should be sorted separately
+// from built-in tools. Partitioning prevents MCP tool changes from shifting
+// built-in tool positions, which would break the cached tool schema prefix.
+func isMCPToolName(name string) bool {
+	return strings.HasPrefix(name, "mcp_")
 }
 
 // MarkFileRead records that a file has been read by read_file, storing its current mtime.

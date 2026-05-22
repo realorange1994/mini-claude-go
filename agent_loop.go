@@ -405,6 +405,8 @@ type AgentLoop struct {
 	inlineCompressionMode    bool                       // set during inline cache-reusing compaction (openclacky pattern)
 	toolSchemaCache          map[string]anthropic.ToolUnionParam // tool name → cached schema (avoid re-serialize)
 	toolSchemaCacheHash      uint64                    // hash of tool names for cache invalidation
+	thinkingClearLatched     bool                      // once set (>1h idle), stays true for session — clears thinking via context_management
+	lastApiCompletionTime    time.Time                 // timestamp of last successful API call (for thinking latch)
 	errorReporter              *ErrorReporter            // captures error events for analysis
 	featureFlags               *FeatureFlagStore         // feature flag store
 	lastTransition          LoopTransitionReason       // reason for the most recent loop continue
@@ -2099,6 +2101,40 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 // pipelined tool execution during streaming. When toolCallDoneCh and executor
 // are non-nil, tool calls start executing as their content blocks complete,
 // overlapping with remaining stream processing.
+// checkThinkingClearLatch checks if the session has been idle for >1h and
+// latches the thinking clear flag. Once latched, all subsequent API calls
+// will send context_management edits to clear old thinking blocks, saving
+// ~4-8K tokens per thinking turn in the cached prefix.
+// Matching upstream's thinkingClearLatched latch (claude.ts:1497-1507).
+func (a *AgentLoop) checkThinkingClearLatch() {
+	if a.thinkingClearLatched {
+		return
+	}
+	if !a.lastApiCompletionTime.IsZero() && time.Since(a.lastApiCompletionTime) > time.Hour {
+		a.thinkingClearLatched = true
+		a.out("[cache] thinking clear latched (>1h idle) — clearing old thinking blocks\n")
+	}
+}
+
+// thinkingClearOption returns a request option that clears thinking blocks
+// via context_management edits, if the latch is active.
+func (a *AgentLoop) thinkingClearOption() option.RequestOption {
+	if !a.thinkingClearLatched {
+		return nil
+	}
+	return option.WithJSONSet("context_management", map[string]any{
+		"edits": []map[string]any{
+			{"type": "clear_thinking_20251015"},
+		},
+	})
+}
+
+// recordApiCompletion updates the last API completion timestamp for the
+// thinking clear latch idle-time detection.
+func (a *AgentLoop) recordApiCompletion() {
+	a.lastApiCompletionTime = time.Now()
+}
+
 func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, executor *StreamingToolExecutor) ([]map[string]any, []string, error) {
 	const maxStreamRetries = 9 // 1 attempt + 9 retries = 10 total
 
@@ -2106,6 +2142,8 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 	if !a.config.ReactiveCompactEnabled {
 		a.tryCompaction()
 	}
+	// Thinking clear latch: if session idle >1h, latch and clear old thinking
+	a.checkThinkingClearLatch()
 	// Validate and fix internal entries BEFORE building API messages.
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
@@ -2159,6 +2197,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 			// Success: reset consecutive 529 and stream failure counters
 			a.consecutive529Errors = 0
 			a.consecutiveStreamFailures = 0
+			a.recordApiCompletion()
 			return toolCalls, textParts, nil
 		}
 
@@ -2290,7 +2329,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		executor.Start(toolCallDoneCh, &collect.ToolCalls)
 	}
 
-	stream := a.client.Messages.NewStreaming(ctx, params)
+	stream := a.client.Messages.NewStreaming(ctx, params, a.thinkingClearOption())
 	if err := adapter.Process(stream, cancel); err != nil {
 		a.lastDeltasState = adapter.DeltasState() // record what was streamed before error
 		errMsg := err.Error()
@@ -2417,6 +2456,8 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	if !a.config.ReactiveCompactEnabled {
 		a.tryCompaction()
 	}
+	// Thinking clear latch: if session idle >1h, latch and clear old thinking
+	a.checkThinkingClearLatch()
 	// Inject current time as a system-injected user message.
 	// This replaces the time that was previously inside the system prompt.
 	// By injecting it here, the system prompt stays fully static and cacheable,
@@ -2482,12 +2523,17 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		}
 
 		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
-		response, err := a.client.Messages.New(ctx, params, option.WithJSONSet("stream", false))
+		opts := []option.RequestOption{option.WithJSONSet("stream", false)}
+		if thinkOpt := a.thinkingClearOption(); thinkOpt != nil {
+			opts = append(opts, thinkOpt)
+		}
+		response, err := a.client.Messages.New(ctx, params, opts...)
 		cancel()
 
 		if err == nil {
 			// Success: reset consecutive 529 counter
 			a.consecutive529Errors = 0
+			a.recordApiCompletion()
 			// Accumulate token usage from this non-streaming response
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
@@ -2598,12 +2644,17 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		}
 
 		ctx, cancel := a.interruptCtx(context.Background(), 600*time.Second)
-		response, err := a.client.Messages.New(ctx, params, option.WithJSONSet("stream", false))
+		opts := []option.RequestOption{option.WithJSONSet("stream", false)}
+		if thinkOpt := a.thinkingClearOption(); thinkOpt != nil {
+			opts = append(opts, thinkOpt)
+		}
+		response, err := a.client.Messages.New(ctx, params, opts...)
 		cancel()
 
 		if err == nil {
 			// Success: reset consecutive 529 counter
 			a.consecutive529Errors = 0
+			a.recordApiCompletion()
 			// Accumulate token usage from this non-streaming response
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
