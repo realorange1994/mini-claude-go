@@ -346,9 +346,9 @@ func mapsToMessageParam(msgs []map[string]any) []anthropic.MessageParam {
 
 // FormatCachedSystemPrompt wraps the system prompt text for Anthropic caching.
 func FormatCachedSystemPrompt(text string, ttl string) []map[string]any {
-	marker := map[string]any{"type": "ephemeral"}
+	marker := map[string]any{"type": "ephemeral", "scope": "global"}
 	if ttl == "1h" {
-		marker = map[string]any{"type": "ephemeral", "ttl": "1h"}
+		marker = map[string]any{"type": "ephemeral", "ttl": "1h", "scope": "global"}
 	}
 	return []map[string]any{
 		{
@@ -378,9 +378,9 @@ func FormatBoundaryCachedSystemPrompt(text string, ttl string) []map[string]any 
 	// Static content: use global cache scope for long-lived caching.
 	// The static part (tool descriptions, rules) rarely changes,
 	// so a global cache scope maximizes cache hit rates.
-	globalMarker := map[string]any{"type": "ephemeral"}
+	globalMarker := map[string]any{"type": "ephemeral", "scope": "global"}
 	if ttl == "1h" {
-		globalMarker = map[string]any{"type": "ephemeral", "ttl": "1h"}
+		globalMarker = map[string]any{"type": "ephemeral", "ttl": "1h", "scope": "global"}
 	}
 
 	// Dynamic content: use standard ephemeral cache (no extended TTL).
@@ -420,7 +420,14 @@ func buildSystemBlocks(prompt string, ttl string) []anthropic.TextBlockParam {
 		if cc, ok := block["cache_control"]; ok {
 			if cm, ok := cc.(map[string]any); ok {
 				if cm["type"] == "ephemeral" {
-					tb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+					if ttlVal, hasTTL := cm["ttl"]; hasTTL {
+						tb.CacheControl = anthropic.CacheControlEphemeralParam{
+							Type: "ephemeral",
+							TTL:  anthropic.CacheControlEphemeralTTL(ttlVal.(string)),
+						}
+					} else {
+						tb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+					}
 				}
 			}
 		}
