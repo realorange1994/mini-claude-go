@@ -169,7 +169,7 @@ func (mc *ModelCapabilitiesCache) RefreshFromAPI(apiKey, baseURL string) error {
 		return fmt.Errorf("model capabilities API returned %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
 		return fmt.Errorf("reading model capabilities response: %w", err)
 	}

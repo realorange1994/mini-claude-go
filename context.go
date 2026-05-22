@@ -192,8 +192,13 @@ func (s *ToolResultStore) Persist(toolUseID string, content string) *PersistedTo
 		}
 		// EEXIST: already persisted on a prior turn, fall through to generate preview
 	} else {
-		fd.Write([]byte(content))
-		fd.Close()
+		if _, writeErr := fd.Write([]byte(content)); writeErr != nil {
+			fd.Close()
+			return nil
+		}
+		if closeErr := fd.Close(); closeErr != nil {
+			return nil
+		}
 	}
 
 	preview, hasMore := generatePreview(content, PREVIEW_SIZE_BYTES)

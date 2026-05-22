@@ -92,14 +92,6 @@ func TestTeammateModesNoDuplicates(t *testing.T) {
 	}
 }
 
-func sliceContains(slice []string, val string) bool {
-	for _, s := range slice {
-		if s == val {
-			return true
-		}
-	}
-	return false
-}
 
 // -- Upstream Quality: Exact-value and ordering tests
 

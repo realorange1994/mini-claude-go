@@ -396,10 +396,10 @@ func expandFolderReference(ref ContextReference, cwd string) (block string, warn
 
 	// Check if folder is empty
 	if dir, err := os.Open(path); err == nil {
+		defer dir.Close()
 		if names, err := dir.Readdirnames(1); len(names) == 0 && err == nil {
 			return fmt.Sprintf("## @folder:%s (0 tokens)\n(empty directory - no files or subdirectories)", ref.Target), ""
 		}
-		dir.Close()
 	}
 
 	listing := buildFolderListing(path, cwd, 200, MaxFolderDepth)

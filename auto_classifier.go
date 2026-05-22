@@ -825,7 +825,7 @@ func (c *AutoModeClassifier) callStage1(ctx context.Context, userMsg, actionDesc
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  [auto-classifier] Stage 1 API error: %v\n", err)
-		return ClassifierResult{Unavailable: true}, fmt.Errorf("API error: %v", err)
+		return ClassifierResult{Unavailable: true}, fmt.Errorf("API error: %w", err)
 	}
 
 	if useToolChoice {

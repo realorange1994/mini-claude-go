@@ -533,7 +533,7 @@ func CallLLMWithTimeout(ctx context.Context, fn LLMSimpleCall, systemPrompt, use
 
 	select {
 	case <-ctx.Done():
-		return "", fmt.Errorf("LLM call cancelled: %v", ctx.Err())
+		return "", fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 	case <-time.After(timeout):
 		return "", fmt.Errorf("LLM call timed out after %v", timeout)
 	case r := <-resultCh:

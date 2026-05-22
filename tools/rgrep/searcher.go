@@ -60,7 +60,7 @@ func Search(cfg SearchConfig) SearchResult {
 
 	re, err := regexp.Compile(searchPattern)
 	if err != nil {
-		return SearchResult{Err: fmt.Errorf("invalid regex: %v", err)}
+		return SearchResult{Err: fmt.Errorf("invalid regex: %w", err)}
 	}
 
 	info, err := os.Stat(cfg.Path)
