@@ -157,18 +157,20 @@ func (ts *TaskStore) FailTask(agentID string, errText string) {
 // KillTask forcibly terminates a running task and marks it as killed.
 func (ts *TaskStore) KillTask(agentID string) {
 	ts.mu.Lock()
-	defer ts.mu.Unlock()
+	var cancel context.CancelFunc
 	if task, ok := ts.tasks[agentID]; ok {
 		if task.Process != nil {
 			_ = task.Process.Kill()
 		}
-		if task.CancelFunc != nil {
-			task.CancelFunc()
-		}
+		cancel = task.CancelFunc
 		task.Status = TaskStatusKilled
 		task.Error = "stopped by user"
 		task.EndTime = time.Now()
 		task.evictAfter = time.Now().Add(30 * time.Second)
+	}
+	ts.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 

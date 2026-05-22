@@ -342,15 +342,18 @@ func (ts *AgentTaskStore) Fail(id string, err error) {
 // Returns true if the task was found and killed, false otherwise.
 func (ts *AgentTaskStore) Kill(id string) bool {
 	ts.mu.Lock()
-	defer ts.mu.Unlock()
+	var cancel context.CancelFunc
 	if task, ok := ts.tasks[id]; ok {
-		if task.CancelFunc != nil {
-			task.CancelFunc()
-		}
+		cancel = task.CancelFunc
 		task.Status = TaskKilled
 		task.EndTime = time.Now()
+		ts.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		return true
 	}
+	ts.mu.Unlock()
 	return false
 }
 
