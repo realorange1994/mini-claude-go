@@ -644,6 +644,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		sonnetModel:       "claude-sonnet-4-20250514",
 		errorReporter:    NewErrorReporter(),
 		featureFlags:     NewFeatureFlagStore(),
+		announcedMCPServers: make(map[string]bool),
 		telemetry:       NewTelemetryManager(),
 	}
 	// Initialize model capabilities cache and wire it globally
@@ -848,6 +849,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		shellHooks:        LoadAllHooks(cfg.ProjectDir),
 		errorReporter:    NewErrorReporter(),
 		featureFlags:     NewFeatureFlagStore(),
+		announcedMCPServers: make(map[string]bool),
 		telemetry:       NewTelemetryManager(),
 	}
 	// Initialize model capabilities cache and wire it globally
