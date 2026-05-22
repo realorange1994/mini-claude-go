@@ -532,8 +532,8 @@ func TestCacheBreakDetectorCategoryBased(t *testing.T) {
 	// Record a compaction change — should trigger (impact > 10% of baseline)
 	d.RecordChange(CacheChangeCompaction, 1)
 	// Compaction weight = 50000, baseline = 100000, threshold = 10000
-	// 50000 > 10000, so should detect break
-	if !d.DetectBreak(100000) {
+	// 50000 > 10000, and cache_read must have actually dropped > 0
+	if !d.DetectBreak(90000) {
 		t.Error("compaction change should trigger category-based break detection")
 	}
 
@@ -542,8 +542,9 @@ func TestCacheBreakDetectorCategoryBased(t *testing.T) {
 	d.UpdateBaseline(50000)
 
 	// Multiple tool results — 5 * 5000 = 25000 > 5000 (10% of 50000)
+	// cache_read must have actually dropped > 0
 	d.RecordChange(CacheChangeToolResult, 5)
-	if !d.DetectBreak(50000) {
+	if !d.DetectBreak(40000) {
 		t.Error("5 tool result changes should trigger category-based break detection")
 	}
 }

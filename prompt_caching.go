@@ -310,11 +310,6 @@ func cacheMessageParams(params *anthropic.MessageNewParams) {
 
 	// Convert back to MessageParam
 	params.Messages = mapsToMessageParam(msgMaps)
-
-	// Add cache_control to system prompt
-	if len(params.System) > 0 {
-		params.System[0].CacheControl = anthropic.NewCacheControlEphemeralParam()
-	}
 }
 
 // messageParamToMaps converts SDK message params to map representation.
@@ -423,14 +418,20 @@ func buildSystemBlocks(prompt string, ttl string) []anthropic.TextBlockParam {
 		if cc, ok := block["cache_control"]; ok {
 			if cm, ok := cc.(map[string]any); ok {
 				if cm["type"] == "ephemeral" {
+					ccParam := anthropic.CacheControlEphemeralParam{Type: "ephemeral"}
 					if ttlVal, hasTTL := cm["ttl"]; hasTTL {
-						tb.CacheControl = anthropic.CacheControlEphemeralParam{
-							Type: "ephemeral",
-							TTL:  anthropic.CacheControlEphemeralTTL(ttlVal.(string)),
-						}
-					} else {
-						tb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+						ccParam.TTL = anthropic.CacheControlEphemeralTTL(ttlVal.(string))
 					}
+					// Preserve scope field via SetExtraFields — the SDK's
+					// CacheControlEphemeralParam doesn't have a Scope field,
+					// but paramObj.SetExtraFields injects it into the JSON
+					// output. This is critical for the static system prompt
+					// block which uses scope:"global" for cross-user cache
+					// sharing on the Anthropic API.
+					if scopeVal, hasScope := cm["scope"]; hasScope {
+						ccParam.SetExtraFields(map[string]any{"scope": scopeVal})
+					}
+					tb.CacheControl = ccParam
 				}
 			}
 		}

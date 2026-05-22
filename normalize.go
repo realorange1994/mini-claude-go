@@ -36,6 +36,7 @@ import (
 //  8. Existing normalizations (sort keys, whitespace)
 func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.MessageParam {
 	messages = StripVirtualMessages(messages)
+	messages = hoistToolResults(messages)
 	messages = EnforceRoleAlternation(messages)
 	messages = EnsureToolResultPairing(messages)
 	messages = FilterEmptyMessages(messages)
@@ -49,6 +50,62 @@ func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.Message
 	result := make([]anthropic.MessageParam, len(messages))
 	for i, msg := range messages {
 		result[i] = normalizeMessage(msg)
+	}
+	return result
+}
+
+// ============================================================================
+// P0-1b: Tool Result Hoisting
+// ============================================================================
+
+// hoistToolResults moves tool_result blocks to the front of each user message's
+// content array. This ensures a stable, deterministic ordering regardless of
+// how content blocks were originally appended. Without hoisting, the position
+// of tool_result blocks can vary between turns (e.g., when a system-reminder
+// text block is injected before tool_results), which changes the structure of
+// previously-cached messages and breaks the Anthropic KV cache prefix.
+//
+// Upstream: messages.ts hoistToolResults() — runs before all other normalization.
+func hoistToolResults(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	result := make([]anthropic.MessageParam, len(messages))
+	for i, msg := range messages {
+		if msg.Role != anthropic.MessageParamRoleUser || len(msg.Content) <= 1 {
+			result[i] = msg
+			continue
+		}
+
+		// Check if there are tool_result blocks that are not already at the front
+		hasToolResult := false
+		firstNonTool := -1
+		for j, block := range msg.Content {
+			if block.OfToolResult != nil {
+				hasToolResult = true
+			} else if firstNonTool == -1 && !hasToolResult {
+				// Non-tool block before any tool_result — need to reorder
+				firstNonTool = j
+			}
+		}
+
+		if !hasToolResult || firstNonTool == -1 {
+			// No tool_results, or tool_results are already at the front
+			result[i] = msg
+			continue
+		}
+
+		// Partition: tool_results first, then everything else (preserving relative order)
+		var toolResults, others []anthropic.ContentBlockParamUnion
+		for _, block := range msg.Content {
+			if block.OfToolResult != nil {
+				toolResults = append(toolResults, block)
+			} else {
+				others = append(others, block)
+			}
+		}
+
+		newContent := make([]anthropic.ContentBlockParamUnion, 0, len(msg.Content))
+		newContent = append(newContent, toolResults...)
+		newContent = append(newContent, others...)
+		result[i] = anthropic.MessageParam{Role: msg.Role, Content: newContent}
 	}
 	return result
 }
