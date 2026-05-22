@@ -3,11 +3,19 @@ package main
 import (
 	"os"
 	"strings"
+	"sync"
 )
 
 // ---------------------------------------------------------------------------
 // Beta headers — upstream: src/constants/betas.ts, src/utils/betas.ts
 // ---------------------------------------------------------------------------
+
+// Memoized beta header cache. Upstream: lodash-es/memoize on getAllModelBetas().
+// Cleared on model change, auth change, or compaction.
+var (
+	betaHeaderCache   map[string][]string // model → memoized beta headers
+	betaHeaderCacheMu sync.RWMutex
+)
 
 const (
 	// BetaHeaderPromptCaching enables prompt caching on the API.
@@ -45,8 +53,34 @@ const (
 )
 
 // BuildBetaHeaders constructs the beta headers list based on model and configuration.
-// Upstream: getBetaHeaders() in src/utils/betas.ts
+// Results are memoized per model string to ensure cache stability across API calls.
+// Upstream: getBetaHeaders() in src/utils/betas.ts, memoized via lodash-es/memoize.
 func BuildBetaHeaders(model string) []string {
+	betaHeaderCacheMu.RLock()
+	if cached, ok := betaHeaderCache[model]; ok {
+		betaHeaderCacheMu.RUnlock()
+		return append([]string(nil), cached...)
+	}
+	betaHeaderCacheMu.RUnlock()
+
+	betaHeaderCacheMu.Lock()
+	defer betaHeaderCacheMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if cached, ok := betaHeaderCache[model]; ok {
+		return append([]string(nil), cached...)
+	}
+
+	betas := buildBetaHeadersUncached(model)
+	if betaHeaderCache == nil {
+		betaHeaderCache = make(map[string][]string)
+	}
+	betaHeaderCache[model] = betas
+	return append([]string(nil), betas...)
+}
+
+// buildBetaHeadersUncached is the inner computation — same logic as current BuildBetaHeaders.
+func buildBetaHeadersUncached(model string) []string {
 	var betas []string
 
 	// Always include Claude Code identification
@@ -77,6 +111,14 @@ func BuildBetaHeaders(model string) []string {
 	}
 
 	return betas
+}
+
+// ClearBetaHeaderCache clears the memoized beta header cache.
+// Call on model change, auth change, or compaction.
+func ClearBetaHeaderCache() {
+	betaHeaderCacheMu.Lock()
+	defer betaHeaderCacheMu.Unlock()
+	betaHeaderCache = make(map[string][]string)
 }
 
 // FormatBetaHeader formats the beta headers as a comma-separated string

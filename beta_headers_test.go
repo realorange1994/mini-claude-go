@@ -42,7 +42,10 @@ func TestBuildBetaHeaders1mSuffix(t *testing.T) {
 func TestBuildBetaHeadersInterleavedThinkingEnvVar(t *testing.T) {
 	// Save original
 	orig := os.Getenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING")
-	defer os.Setenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING", orig)
+	defer func() {
+		os.Setenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING", orig)
+		ClearBetaHeaderCache()
+	}()
 
 	// Default: interleaved thinking included
 	betas := BuildBetaHeaders("claude-sonnet-4-20250514")
@@ -52,6 +55,7 @@ func TestBuildBetaHeadersInterleavedThinkingEnvVar(t *testing.T) {
 
 	// Set env var to disable
 	os.Setenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING", "1")
+	ClearBetaHeaderCache()
 	betas = BuildBetaHeaders("claude-sonnet-4-20250514")
 	if containsStr(betas, BetaHeaderInterleavedThinking) {
 		t.Error("BuildBetaHeaders should NOT include interleaved-thinking when env var is set")
@@ -60,7 +64,10 @@ func TestBuildBetaHeadersInterleavedThinkingEnvVar(t *testing.T) {
 
 func TestBuildBetaHeadersTokenCountingEnvVar(t *testing.T) {
 	orig := os.Getenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING")
-	defer os.Setenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING", orig)
+	defer func() {
+		os.Setenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING", orig)
+		ClearBetaHeaderCache()
+	}()
 
 	// Default: token counting included
 	betas := BuildBetaHeaders("claude-sonnet-4-20250514")
@@ -70,6 +77,7 @@ func TestBuildBetaHeadersTokenCountingEnvVar(t *testing.T) {
 
 	// Set env var to disable
 	os.Setenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING", "true")
+	ClearBetaHeaderCache()
 	betas = BuildBetaHeaders("claude-sonnet-4-20250514")
 	if containsStr(betas, BetaHeaderTokenCounting) {
 		t.Error("BuildBetaHeaders should NOT include token-counting when env var is set")
@@ -223,9 +231,11 @@ func TestBuildBetaHeadersCountInvariant(t *testing.T) {
 	defer func() {
 		os.Setenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING", origThinking)
 		os.Setenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING", origToken)
+		ClearBetaHeaderCache()
 	}()
 	os.Setenv("CLAUDE_CODE_DISABLE_INTERLEAVED_THINKING", "1")
 	os.Setenv("CLAUDE_CODE_DISABLE_TOKEN_COUNTING", "1")
+	ClearBetaHeaderCache()
 	betas = BuildBetaHeaders("claude-sonnet-4-20250514[1m]")
 	if len(betas) != 5 {
 		t.Errorf("expected 5 beta headers with [1m] + 2 disabled, got %d", len(betas))
@@ -290,5 +300,32 @@ func TestFormatBetaHeaderRoundtrip(t *testing.T) {
 		if parts[i] != betas[i] {
 			t.Errorf("roundtrip mismatch at %d: expected %q, got %q", i, betas[i], parts[i])
 		}
+	}
+}
+
+// ─── Upstream Quality: Beta header memoization ────────────────────────────────
+
+func TestBetaHeaderMemoization(t *testing.T) {
+	ClearBetaHeaderCache()
+
+	// First call computes
+	betas1 := BuildBetaHeaders("test-model")
+	// Second call returns cached copy (same content)
+	betas2 := BuildBetaHeaders("test-model")
+	if len(betas1) != len(betas2) {
+		t.Errorf("cached result length mismatch: first=%d, second=%d", len(betas1), len(betas2))
+	}
+	for i := range betas1 {
+		if betas1[i] != betas2[i] {
+			t.Errorf("cached result mismatch at %d: first=%q, second=%q", i, betas1[i], betas2[i])
+		}
+	}
+
+	// Clear cache should force recomputation
+	ClearBetaHeaderCache()
+	// Verify cache is empty (calling with different model works)
+	betas3 := BuildBetaHeaders("different-model")
+	if len(betas3) != len(betas1) {
+		t.Errorf("after cache clear, different model should still produce same length: got %d, expected %d", len(betas3), len(betas1))
 	}
 }

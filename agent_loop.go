@@ -407,8 +407,9 @@ type AgentLoop struct {
 	toolSchemaCacheHash      uint64                    // hash of tool names for cache invalidation
 	thinkingClearLatched     bool                      // once set (>1h idle), stays true for session — clears thinking via context_management
 	lastApiCompletionTime    time.Time                 // timestamp of last successful API call (for thinking latch)
-	announcedMCPServers      map[string]bool           // servers whose instructions have been announced this session (delta tracking)
-	errorReporter              *ErrorReporter            // captures error events for analysis
+	announcedMCPServers      map[string]bool   // servers whose instructions have been announced this session (delta tracking)
+	betaHeadersLatched       []string          // once set, stays same for session — prevents mid-session header churn
+	errorReporter              *ErrorReporter  // captures error events for analysis
 	featureFlags               *FeatureFlagStore         // feature flag store
 	lastTransition          LoopTransitionReason       // reason for the most recent loop continue
 	telemetry                  *TelemetryManager         // telemetry event tracking
@@ -2467,7 +2468,11 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		if a.cacheBreakDetector.DetectBreak(int64(collect.Usage.CacheReadTokens)) {
 			baseline := a.cacheBreakDetector.LastBaseline()
 			current := int64(collect.Usage.CacheReadTokens)
-			a.out("[cache-break] cache_read dropped: baseline=%d → current=%d (delta=%d)\n", baseline, current, baseline-current)
+			detail := fmt.Sprintf("cache_read dropped: baseline=%d → current=%d (delta=%d)", baseline, current, baseline-current)
+			a.out("[cache-break] %s\n", detail)
+			if fpath := a.cacheBreakDetector.WriteDiagnosticFile(baseline, current, detail); fpath != "" {
+				a.out("[cache-break] diagnostic written to: %s\n", fpath)
+			}
 		}
 		// Update cache break detector baseline with current cache read tokens
 		a.cacheBreakDetector.UpdateBaseline(int64(collect.Usage.CacheReadTokens))
@@ -2652,7 +2657,11 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
 					baseline := a.cacheBreakDetector.LastBaseline()
 					current := int64(response.Usage.CacheReadInputTokens)
-					a.out("[cache-break] cache_read dropped: baseline=%d → current=%d (delta=%d)\n", baseline, current, baseline-current)
+					detail := fmt.Sprintf("cache_read dropped: baseline=%d → current=%d (delta=%d)", baseline, current, baseline-current)
+					a.out("[cache-break] %s\n", detail)
+					if fpath := a.cacheBreakDetector.WriteDiagnosticFile(baseline, current, detail); fpath != "" {
+						a.out("[cache-break] diagnostic written to: %s\n", fpath)
+					}
 				}
 				// Update cache break detector baseline with current cache read tokens
 				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
@@ -2770,7 +2779,11 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
 					baseline := a.cacheBreakDetector.LastBaseline()
 					current := int64(response.Usage.CacheReadInputTokens)
-					a.out("[cache-break] cache_read dropped: baseline=%d → current=%d (delta=%d)\n", baseline, current, baseline-current)
+					detail := fmt.Sprintf("cache_read dropped: baseline=%d → current=%d (delta=%d)", baseline, current, baseline-current)
+					a.out("[cache-break] %s\n", detail)
+					if fpath := a.cacheBreakDetector.WriteDiagnosticFile(baseline, current, detail); fpath != "" {
+						a.out("[cache-break] diagnostic written to: %s\n", fpath)
+					}
 				}
 				// Update cache break detector baseline with current cache read tokens
 				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
@@ -4233,6 +4246,11 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 	// Reset MCP instructions delta tracking — after compaction, the post-compact
 	// announcement re-declares visible servers, so per-turn delta state must reset.
 	a.announcedMCPServers = make(map[string]bool)
+
+	// Reset beta header memoization and session latch — after compaction,
+	// recompute headers from current env vars and model configuration.
+	a.betaHeadersLatched = nil
+	ClearBetaHeaderCache()
 }
 
 // buildPostCompactToolsAnnouncement re-announces available tools after compaction.

@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -603,6 +605,85 @@ func (d *CacheBreakDetector) recordBreak() {
 	d.breakCount++
 	if d.breakCount >= d.latchAfter {
 		d.latched = true
+	}
+}
+
+// CacheBreak captures a detected cache break event for diagnostics.
+// Upstream: promptCacheBreakDetection.ts writes diff files on cache breaks.
+type CacheBreak struct {
+	Timestamp    time.Time
+	Dimension    string  // "model", "system", "tools", "betas", "compaction", "eviction", "unknown"
+	BeforeTokens int64   // baseline cache_read_tokens
+	AfterTokens  int64   // current cache_read_tokens
+	DropPercent  float64 // percentage drop
+	Details      string  // free-form context
+}
+
+// WriteDiagnosticFile writes a cache break diagnostic file to the temp directory
+// if the break is significant (>10% drop and >5000 absolute drop).
+// Upstream: writes diff files to temp on cache breaks with dimension analysis.
+func (d *CacheBreakDetector) WriteDiagnosticFile(before, after int64, details string) string {
+	drop := before - after
+	if before <= 0 {
+		return ""
+	}
+	pct := float64(drop) / float64(before) * 100
+
+	// Only write diagnostics for significant breaks
+	if pct < 10 || drop < 5000 {
+		return ""
+	}
+
+	brk := CacheBreak{
+		Timestamp:    time.Now(),
+		Dimension:    d.detectDimension(details),
+		BeforeTokens: before,
+		AfterTokens:  after,
+		DropPercent:  pct,
+		Details:      details,
+	}
+
+	dir := os.TempDir()
+	filename := fmt.Sprintf("cache_break_%s.txt", time.Now().Format("20060102_150405"))
+	fpath := filepath.Join(dir, filename)
+
+	f, err := os.Create(fpath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "Cache Break Diagnostic\n")
+	fmt.Fprintf(f, "======================\n\n")
+	fmt.Fprintf(f, "Timestamp: %s\n", brk.Timestamp.Format(time.RFC3339))
+	fmt.Fprintf(f, "Dimension: %s\n", brk.Dimension)
+	fmt.Fprintf(f, "Before:   %d tokens\n", brk.BeforeTokens)
+	fmt.Fprintf(f, "After:    %d tokens\n", brk.AfterTokens)
+	fmt.Fprintf(f, "Drop:     %d tokens (%.1f%%)\n", brk.BeforeTokens-brk.AfterTokens, brk.DropPercent)
+	fmt.Fprintf(f, "\nDetails:\n%s\n", brk.Details)
+
+	return fpath
+}
+
+// detectDimension infers the likely cause of a cache break from the details string.
+// Matches upstream's dimension tracking in promptCacheBreakDetection.ts.
+func (d *CacheBreakDetector) detectDimension(details string) string {
+	lower := strings.ToLower(details)
+	switch {
+	case strings.Contains(lower, "model"):
+		return "model"
+	case strings.Contains(lower, "system prompt") || strings.Contains(lower, "system_prompt"):
+		return "system"
+	case strings.Contains(lower, "tool"):
+		return "tools"
+	case strings.Contains(lower, "beta"):
+		return "betas"
+	case strings.Contains(lower, "compact"):
+		return "compaction"
+	case strings.Contains(lower, "evict") || strings.Contains(lower, "ttl"):
+		return "eviction"
+	default:
+		return "unknown"
 	}
 }
 
