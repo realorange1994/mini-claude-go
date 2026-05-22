@@ -52,26 +52,16 @@ func ensureLispToolsLoaded(ctx context.Context) error {
 	// Load in a goroutine so we can respect context cancellation.
 	// SafeEvalWithLimits acquires evalMu; if held by another caller, this
 	// would block indefinitely without the goroutine + select pattern.
-	// We set up a CancelChan so a long-running eval can be aborted.
+	// We use DefaultLimits() (30s deadline) — the context timeout provides
+	// user-visible cancellation while the 30s deadline prevents infinite hangs.
 	ch := make(chan error, 1)
-	cancelCh := microlisp.NewCancelChannel()
-
-	// Start a watcher that converts ctx cancellation into cancelCh signal.
-	go func() {
-		select {
-		case <-ctx.Done():
-			close(cancelCh)
-		case <-ch:
-		}
-	}()
-
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				ch <- fmt.Errorf("panic loading lispToolsLib: %v", r)
 			}
 		}()
-		_, err := microlisp.SafeEvalWithLimits(lispToolsLib, microlisp.ResourceLimits{CancelChan: cancelCh})
+		_, err := microlisp.SafeEvalWithLimits(lispToolsLib, microlisp.DefaultLimits())
 		ch <- err
 	}()
 

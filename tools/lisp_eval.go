@@ -326,7 +326,11 @@ func (t *LispEvalTool) ExecuteContext(ctx context.Context, params map[string]any
 		select {
 		case <-ctx.Done():
 			close(cancelChan)
-			return ToolResult{Output: fmt.Sprintf("Error: lisp_eval timed out evaluating expression"), IsError: true}
+			// Wait for the eval goroutine to actually finish. stepCheck()
+			// checks CancelChan every 1024 steps; we must wait for evalMu
+			// to be released, otherwise subsequent evals will deadlock.
+			<-ch
+			return ToolResult{Output: "Error: lisp_eval timed out evaluating expression", IsError: true}
 		case r := <-ch:
 			if r.err != nil {
 				return ToolResult{Output: fmt.Sprintf("Error: %v", r.err), IsError: true}
