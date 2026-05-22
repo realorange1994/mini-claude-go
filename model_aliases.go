@@ -281,23 +281,3 @@ func GetContextWindowForModel(model string) int64 {
 
 var defaultMu sync.RWMutex
 
-// SetDefaultOpusModel sets the default Opus model (for testing).
-func SetDefaultOpusModel(model string) {
-	defaultMu.Lock()
-	defer defaultMu.Unlock()
-	defaultOpusModel = model
-}
-
-// SetDefaultSonnetModel sets the default Sonnet model (for testing).
-func SetDefaultSonnetModel(model string) {
-	defaultMu.Lock()
-	defer defaultMu.Unlock()
-	defaultSonnetModel = model
-}
-
-// SetDefaultHaikuModel sets the default Haiku model (for testing).
-func SetDefaultHaikuModel(model string) {
-	defaultMu.Lock()
-	defer defaultMu.Unlock()
-	defaultHaikuModel = model
-}

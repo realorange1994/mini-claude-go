@@ -266,19 +266,3 @@ type EvalResourceStats struct {
 	LimitsHit  string // empty if no limit was hit, or description of which limit
 }
 
-// GetResourceStats returns stats from the current/last limited session.
-// Must be called while holding evalMu or after evaluation completes.
-func GetResourceStats() EvalResourceStats {
-	stats := EvalResourceStats{
-		StepsUsed: evalStepCount,
-	}
-	if !evalDeadline.IsZero() {
-		stats.TimeUsedMs = time.Since(evalDeadline.Add(-time.Duration(activeLimits.MaxTimeMs) * time.Millisecond)).Milliseconds()
-	}
-	if activeLimits.MaxMemoryKB > 0 {
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		stats.HeapUsedKB = int64(m.HeapAlloc / 1024)
-	}
-	return stats
-}

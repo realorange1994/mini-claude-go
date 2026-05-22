@@ -320,21 +320,6 @@ func NewContentReplacementState() *ContentReplacementState {
 	}
 }
 
-// CloneContentReplacementState creates a copy for cache-sharing forks.
-func CloneContentReplacementState(source *ContentReplacementState) *ContentReplacementState {
-	source.mu.RLock()
-	defer source.mu.RUnlock()
-	seenIds := make(map[string]bool, len(source.seenIds))
-	for k, v := range source.seenIds {
-		seenIds[k] = v
-	}
-	replacements := make(map[string]string, len(source.replacements))
-	for k, v := range source.replacements {
-		replacements[k] = v
-	}
-	return &ContentReplacementState{seenIds: seenIds, replacements: replacements}
-}
-
 // ContentReplacementRecord is a serializable record of one content-replacement
 // decision, matching upstream's ContentReplacementRecord type.
 type ContentReplacementRecord struct {

@@ -455,11 +455,6 @@ func (a *AgentLoop) trackStreamFailure() {
 	}
 }
 
-// LastTransition returns the reason for the most recent loop continue, for observability.
-func (a *AgentLoop) LastTransition() LoopTransitionReason {
-	return a.lastTransition
-}
-
 func (r LoopTransitionReason) String() string {
 	if r == "" {
 		return "normal"
@@ -5387,43 +5382,6 @@ func estimateMessageTokens(messages []anthropic.MessageParam) int {
 	}
 	return totalChars / 4
 }
-
-// CollectHandler.AsMessageContent reconstructs ContentBlockUnion slices from collected data.
-func (h *CollectHandler) AsMessageContent() []anthropic.ContentBlockUnion {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	var content []anthropic.ContentBlockUnion
-
-	// Use text if available, otherwise fall back to thinking (some models
-	// return only thinking blocks when no tools are needed).
-	textContent := h.Text
-	if textContent == "" {
-		textContent = h.Thinking
-	}
-	if textContent != "" {
-		content = append(content, anthropic.ContentBlockUnion{
-			Type: "text",
-			Text: textContent,
-		})
-	}
-	for _, tc := range h.ToolCalls {
-		var input json.RawMessage
-		if tc.Arguments != "" {
-			input = json.RawMessage(tc.Arguments)
-		} else {
-			input = json.RawMessage("{}")
-		}
-		content = append(content, anthropic.ContentBlockUnion{
-			Type:  "tool_use",
-			ID:    tc.ID,
-			Name:  tc.Name,
-			Input: input,
-		})
-	}
-	return content
-}
-
 
 // runSessionMemoryExtraction runs a forked agent to update session_memory.md.
 // It captures the parent's cache-safe params and uses a restricted canUseTool
