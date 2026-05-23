@@ -385,10 +385,8 @@ func addCacheReference(messages []map[string]any) {
 			lastCCIdx = i
 			continue
 		}
-		if content, ok := msg["content"].([]map[string]any); ok && len(content) > 0 {
-			if _, hasCC := content[len(content)-1]["cache_control"]; hasCC {
-				lastCCIdx = i
-			}
+		if _, hasCC := getLastBlockContent(msg["content"]); hasCC {
+			lastCCIdx = i
 		}
 	}
 	if lastCCIdx < 0 {
@@ -402,25 +400,55 @@ func addCacheReference(messages []map[string]any) {
 		if role != "user" {
 			continue
 		}
-		content, ok := msg["content"]
-		if !ok {
+		content := msg["content"]
+		if content == nil {
 			continue
 		}
-		blocks, ok := content.([]map[string]any)
-		if !ok {
-			continue
-		}
-		for j, block := range blocks {
-			if blockType, _ := block["type"].(string); blockType == "tool_result" {
-				if toolUseID, ok := block["tool_use_id"].(string); ok && toolUseID != "" {
-					// Add cache_reference without removing tool_use_id
-					block["cache_reference"] = toolUseID
-					blocks[j] = block
+
+		// Handle both []map[string]any and []any (from JSON round-trip)
+		switch blocks := content.(type) {
+		case []map[string]any:
+			for j, block := range blocks {
+				if blockType, _ := block["type"].(string); blockType == "tool_result" {
+					if toolUseID, ok := block["tool_use_id"].(string); ok && toolUseID != "" {
+						block["cache_reference"] = toolUseID
+						blocks[j] = block
+					}
 				}
 			}
+			msg["content"] = blocks
+		case []any:
+			for j, block := range blocks {
+				if bm, ok := block.(map[string]any); ok {
+					if blockType, _ := bm["type"].(string); blockType == "tool_result" {
+						if toolUseID, ok := bm["tool_use_id"].(string); ok && toolUseID != "" {
+							bm["cache_reference"] = toolUseID
+							blocks[j] = bm
+						}
+					}
+				}
+			}
+			msg["content"] = blocks
 		}
-		msg["content"] = blocks
 	}
+}
+
+// getLastBlockContent returns the last content block's cache_control status.
+// Handles both []map[string]any and []any content types.
+func getLastBlockContent(content any) (any, bool) {
+	switch blocks := content.(type) {
+	case []map[string]any:
+		if len(blocks) > 0 {
+			return blocks[len(blocks)-1], blocks[len(blocks)-1]["cache_control"] != nil
+		}
+	case []any:
+		if len(blocks) > 0 {
+			if bm, ok := blocks[len(blocks)-1].(map[string]any); ok {
+				return bm, bm["cache_control"] != nil
+			}
+		}
+	}
+	return nil, false
 }
 
 // messageParamToMaps converts SDK message params to map representation.
