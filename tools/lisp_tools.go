@@ -502,7 +502,7 @@ func paramInt(v any) (int, bool) {
 // -------- Eval helpers --------
 
 func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult {
-	limits := microlisp.DefaultLimits()
+	limits := microlisp.UnlimitedLimits()
 	// Wire context cancellation into CancelChan so stepCheck() aborts
 	// mid-evaluation when ctx.Done() fires, releasing evalMu promptly.
 	cancelChan := microlisp.NewCancelChannel()
@@ -553,7 +553,7 @@ func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult
 }
 
 func (t *LispToolsTool) evalVoid(ctx context.Context, expr string) ToolResult {
-	limits := microlisp.DefaultLimits()
+	limits := microlisp.UnlimitedLimits()
 	// Wire context cancellation into CancelChan so stepCheck() aborts
 	// mid-evaluation when ctx.Done() fires, releasing evalMu promptly.
 	cancelChan := microlisp.NewCancelChannel()
