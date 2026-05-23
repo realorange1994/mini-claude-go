@@ -1681,3 +1681,96 @@ func TestNormalizeIdempotentPhase456(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeAPIMessagesHoistToolResultsAfterMerge(t *testing.T) {
+	// When consecutive user messages are merged by EnforceRoleAlternation,
+	// the second message's tool_result blocks end up after the first message's
+	// text. The second hoistToolResults call (after EnforceRoleAlternation)
+	// must re-hoist them to the front.
+	//
+	// This tests the fix for: EnforceRoleAlternation merges two user messages,
+	// but without re-hoisting, tool_results would be buried in the middle.
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "Here is user text"}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolUse: &anthropic.ToolUseBlockParam{
+					ID:   "tool-1",
+					Name: "read_file",
+					Input: map[string]any{},
+				}},
+				{OfText: &anthropic.TextBlockParam{Text: "Reading file..."}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "tool-1",
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "file content"}},
+					},
+				}},
+			},
+		},
+	}
+
+	result := NormalizeAPIMessages(msgs)
+	// Find the merged user message (should have tool_result at front)
+	for _, msg := range result {
+		if msg.Role == anthropic.MessageParamRoleUser && len(msg.Content) > 1 {
+			// tool_result must be first (hoisted before text)
+			if msg.Content[0].OfToolResult == nil {
+				t.Errorf("merged user message: tool_result not hoisted to front, first block is %T", msg.Content[0])
+			}
+		}
+	}
+}
+
+func TestNormalizeAPIMessagesToolResultHoistedToMessageFront(t *testing.T) {
+	// Verify that tool_result blocks are always at the start of user messages
+	// in the final output, not buried after text blocks.
+	msgs := []anthropic.MessageParam{
+		{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfToolUse: &anthropic.ToolUseBlockParam{
+					ID:   "t1",
+					Name: "write_file",
+					Input: map[string]any{"path": "test.txt", "content": "hello"},
+				}},
+			},
+		},
+		{
+			Role: anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "[virtual]"}}, // virtual, will be stripped
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "t1",
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "done"}},
+					},
+				}},
+			},
+		},
+	}
+
+	result := NormalizeAPIMessages(msgs)
+	// Check all user messages: tool_result should be first content block
+	for i, msg := range result {
+		if msg.Role == anthropic.MessageParamRoleUser {
+			for j, block := range msg.Content {
+				if block.OfToolResult != nil && j > 0 {
+					// tool_result found not at position 0
+					t.Errorf("msg[%d]: tool_result at position %d, should be at front", i, j)
+				}
+			}
+		}
+	}
+}

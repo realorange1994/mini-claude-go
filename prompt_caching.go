@@ -250,22 +250,28 @@ func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg Cac
 		candidates = []int{len(result) - 1}
 	}
 
-	// Place cache_control on ALL non-injected messages for prefix stability.
-	// Anthropic's KV cache matches the request JSON byte-for-byte from the start.
-	// When cache_control markers shift between turns, the JSON structure changes,
-	// breaking the entire cached prefix.
-	// SkipCacheWrite: skip the last candidate to avoid writing cache on the newest
-	// message (reduces cache_write tokens on the current turn's new content).
-	limit := len(candidates)
+	// Place cache_control on exactly ONE message (the last non-injected),
+	// matching upstream Claude Code's single-marker strategy. Mycro's
+	// turn-to-turn eviction frees KV pages at any cached prefix position
+	// NOT in cache_store_int_token_boundaries. With multiple markers,
+	// each creates a separate cache segment — any segment evicted breaks
+	// the entire prefix. With one marker, there's a single contiguous
+	// cached prefix that's far more resilient to LRU eviction.
+	// SkipCacheWrite: shift marker to second-to-last (last shared-prefix
+	// point) so the write is a no-op merge on mycro.
+	markerIndex := len(candidates) - 1
 	if cfg.SkipCacheWrite && len(candidates) >= 2 {
-		limit = len(candidates) - 1
+		markerIndex = len(candidates) - 2
 	}
-	for i := 0; i < limit; i++ {
-		applyCacheMarker(result[candidates[i]], marker)
+	if markerIndex >= 0 {
+		applyCacheMarker(result[candidates[markerIndex]], marker)
 	}
 
-	// Also apply a breakpoint to the system prompt (first message if system role).
-	// The system prompt breakpoint is separate from the message breakpoints.
+	// Also place cache_control on the system prompt block (first message if
+	// system role). This is separate from the message-level marker — the
+	// system prompt is typically the largest static prefix, and caching it
+	// independently ensures it survives even when the conversation history
+	// is evicted.
 	if role, _ := result[0]["role"].(string); role == "system" {
 		applyCacheMarker(result[0], marker)
 	}
@@ -355,10 +361,66 @@ func cacheMessageParams(params *anthropic.MessageNewParams) {
 	// Convert messages to maps
 	msgMaps := messageParamToMaps(params.Messages)
 
-	msgMaps = ApplyPromptCaching(msgMaps, "5m")
+	msgMaps = ApplyPromptCaching(msgMaps, "1h")
+
+	// Add cache_reference to tool_result blocks that are within the cached prefix.
+	// This tells the Anthropic server "this tool_result is already cached" and
+	// maintains KV cache continuity across turns, matching upstream Claude Code's
+	// approach (claude.ts:3267-3294).
+	addCacheReference(msgMaps)
 
 	// Convert back to MessageParam
 	params.Messages = mapsToMessageParam(msgMaps)
+}
+
+// addCacheReference adds cache_reference to tool_result blocks that are strictly
+// before the cache_control marker. The API requires cache_reference to appear
+// "before or on" the last cache_control — we use strict "before" for stability.
+func addCacheReference(messages []map[string]any) {
+	// Find the last message containing a cache_control marker
+	lastCCIdx := -1
+	for i := range messages {
+		msg := messages[i]
+		if cc, ok := msg["cache_control"]; ok && cc != nil {
+			lastCCIdx = i
+			continue
+		}
+		if content, ok := msg["content"].([]map[string]any); ok && len(content) > 0 {
+			if _, hasCC := content[len(content)-1]["cache_control"]; hasCC {
+				lastCCIdx = i
+			}
+		}
+	}
+	if lastCCIdx < 0 {
+		return
+	}
+
+	// Add cache_reference to tool_result blocks before the marker
+	for i := 0; i < lastCCIdx; i++ {
+		msg := messages[i]
+		role, _ := msg["role"].(string)
+		if role != "user" {
+			continue
+		}
+		content, ok := msg["content"]
+		if !ok {
+			continue
+		}
+		blocks, ok := content.([]map[string]any)
+		if !ok {
+			continue
+		}
+		for j, block := range blocks {
+			if blockType, _ := block["type"].(string); blockType == "tool_result" {
+				if toolUseID, ok := block["tool_use_id"].(string); ok && toolUseID != "" {
+					// Add cache_reference without removing tool_use_id
+					block["cache_reference"] = toolUseID
+					blocks[j] = block
+				}
+			}
+		}
+		msg["content"] = blocks
+	}
 }
 
 // messageParamToMaps converts SDK message params to map representation.

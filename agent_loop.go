@@ -2286,7 +2286,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System:    buildSystemBlocks(a.context.SystemPrompt(), "5m"),
+		System:    buildSystemBlocks(a.context.SystemPrompt(), "1h"),
 	}
 	if len(toolParams) > 0 {
 		params.Tools = toolParams
@@ -2601,7 +2601,7 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	// This replaces the time that was previously inside the system prompt.
 	// By injecting it here, the system prompt stays fully static and cacheable,
 	// and the time message is skipped for cache breakpoint placement.
-	// a.context.InjectTimeContext() // disabled for cache debug
+	a.context.InjectTimeContext()
 	// Validate and fix internal entries BEFORE building API messages.
 	// Without this, consecutive user-role entries from compaction
 	// (Summary + Attachments + Snips) cause API error 2013.
@@ -2618,7 +2618,7 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System:    buildSystemBlocks(a.context.SystemPrompt(), "5m"),
+		System:    buildSystemBlocks(a.context.SystemPrompt(), "1h"),
 	}
 	if len(toolParams) > 0 {
 		params.Tools = toolParams
@@ -2639,7 +2639,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 
 	// Build messages WITHOUT tools, but still validate before sending.
 	// Skip compaction here (grace call should not trigger new compaction).
-	// a.context.InjectTimeContext() // disabled for cache debug
+	a.context.InjectTimeContext()
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
 	messages := a.context.BuildMessages()
@@ -2648,7 +2648,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System:    buildSystemBlocks(a.context.SystemPrompt(), "5m"),
+		System:    buildSystemBlocks(a.context.SystemPrompt(), "1h"),
 	}
 	// NOTE: No tools set -- model can only return text
 	cacheMessageParams(&params) // rolling cache for grace call

@@ -45,9 +45,8 @@ func TestApplyPromptCachingShort(t *testing.T) {
 }
 
 func TestApplyPromptCachingLong(t *testing.T) {
-	// All non-injected messages get cache_control for prefix stability.
-	// This ensures the JSON structure of previously-cached messages never
-	// changes between turns, maximizing cache_read hit rate.
+	// Single-marker strategy: system + last message get cache_control,
+	// all others don't. Matching upstream Claude Code's approach.
 	messages := []map[string]any{
 		{"role": "system", "content": "system prompt"},
 		{"role": "user", "content": "msg1"},
@@ -73,11 +72,17 @@ func TestApplyPromptCachingLong(t *testing.T) {
 		return false
 	}
 
-	// ALL messages should have cache_control for prefix stability
-	for i := 0; i < len(result); i++ {
-		if !hasCC(result[i]) {
-			t.Errorf("message at index %d should have cache_control (all-messages strategy)", i)
+	// System message (index 0) and last message (index 5) get cache_control
+	if !hasCC(result[0]) {
+		t.Error("system message (index 0) should have cache_control")
+	}
+	for i := 1; i < 5; i++ {
+		if hasCC(result[i]) {
+			t.Errorf("message at index %d should NOT have cache_control", i)
 		}
+	}
+	if !hasCC(result[5]) {
+		t.Error("last message (index 5) should have cache_control")
 	}
 }
 
@@ -268,9 +273,8 @@ func TestMaxCacheBreakpointsConstant(t *testing.T) {
 }
 
 func TestApplyPromptCachingWithConfigSkipCacheWrite(t *testing.T) {
-	// With the all-messages strategy and skipCacheWrite, all non-injected messages
-	// get cache_control EXCEPT the last one (to reduce cache_write on new content).
-	// System message always gets a breakpoint.
+	// With skipCacheWrite, marker shifts to second-to-last non-injected message.
+	// System message still gets its own cache_control.
 	messages := []map[string]any{
 		{"role": "system", "content": "system prompt"},
 		{"role": "user", "content": "msg1"},
@@ -300,13 +304,18 @@ func TestApplyPromptCachingWithConfigSkipCacheWrite(t *testing.T) {
 		return false
 	}
 
-	// All non-last messages should have cache_control (skipCacheWrite)
-	for i := 0; i < 5; i++ {
-		if !hasCC(result[i]) {
-			t.Errorf("message at index %d should have cache_control", i)
+	// System message (index 0) and second-to-last (index 4) get cache_control
+	if !hasCC(result[0]) {
+		t.Error("system message (index 0) should have cache_control")
+	}
+	for i := 1; i < 4; i++ {
+		if hasCC(result[i]) {
+			t.Errorf("message at index %d should NOT have cache_control", i)
 		}
 	}
-	// Last message should NOT have cache_control (skipCacheWrite)
+	if !hasCC(result[4]) {
+		t.Error("second-to-last message (index 4) should have cache_control with skipCacheWrite")
+	}
 	if hasCC(result[5]) {
 		t.Error("last message (index 5) should NOT have cache_control with skipCacheWrite=true")
 	}
@@ -351,7 +360,7 @@ func TestApplyPromptCachingWithConfigTwoMessagesSkipCacheWrite(t *testing.T) {
 
 func TestApplyPromptCachingSkipsSystemInjected(t *testing.T) {
 	// System-injected messages should be skipped for breakpoint placement.
-	// With the all-messages strategy, ALL non-injected messages get cache_control.
+	// Single-marker strategy: system + last non-injected get cache_control.
 	prefix := "<!-- system-injected -->"
 	messages := []map[string]any{
 		{"role": "system", "content": "system prompt"},
@@ -378,9 +387,21 @@ func TestApplyPromptCachingSkipsSystemInjected(t *testing.T) {
 		return false
 	}
 
+	// System message (index 0) and last non-injected (index 5) get cache_control
+	if !hasCC(result[0]) {
+		t.Error("system message (index 0) should have cache_control")
+	}
 	// The injected message (index 3) should NOT have cache_control
 	if hasCC(result[3]) {
 		t.Error("system-injected message (index 3) should NOT have cache_control")
+	}
+	// Middle messages should NOT have cache_control
+	if hasCC(result[1]) || hasCC(result[2]) || hasCC(result[4]) {
+		t.Error("middle messages should NOT have cache_control (single-marker strategy)")
+	}
+	// Last non-injected message should have cache_control
+	if !hasCC(result[5]) {
+		t.Error("last non-injected message (index 5) should have cache_control")
 	}
 
 	// The prefix should be stripped from the injected message
@@ -390,16 +411,6 @@ func TestApplyPromptCachingSkipsSystemInjected(t *testing.T) {
 			if strings.HasPrefix(text, prefix) {
 				t.Error("system-injected prefix should be stripped from message content")
 			}
-		}
-	}
-
-	// ALL non-injected messages should have cache_control (all-messages strategy)
-	for i := 0; i < len(result); i++ {
-		if i == 3 {
-			continue // injected, already tested
-		}
-		if !hasCC(result[i]) {
-			t.Errorf("non-injected message at index %d should have cache_control", i)
 		}
 	}
 }
@@ -798,7 +809,7 @@ func TestCacheBreakDetectorLastBaseline(t *testing.T) {
 }
 
 func TestApplyPromptCachingOneBreakpoint(t *testing.T) {
-	// "All messages" strategy: every non-injected message gets cache_control
+	// Single-marker strategy: system + last non-injected message get cache_control.
 	messages := []map[string]any{
 		{"role": "system", "content": "system prompt"},
 		{"role": "user", "content": "msg1"},
@@ -819,11 +830,18 @@ func TestApplyPromptCachingOneBreakpoint(t *testing.T) {
 		return false
 	}
 
-	// All messages should have cache_control (all-messages strategy for prefix stability)
-	for i := range result {
-		if !hasCC(result[i]) {
-			t.Errorf("message at index %d should have cache_control", i)
+	// System message and last message should have cache_control
+	if !hasCC(result[0]) {
+		t.Error("system message should have cache_control")
+	}
+	// Middle messages should NOT have cache_control
+	for i := 1; i < 3; i++ {
+		if hasCC(result[i]) {
+			t.Errorf("message at index %d should NOT have cache_control", i)
 		}
+	}
+	if !hasCC(result[3]) {
+		t.Error("last message should have cache_control")
 	}
 }
 

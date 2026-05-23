@@ -38,6 +38,12 @@ func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.Message
 	messages = StripVirtualMessages(messages)
 	messages = hoistToolResults(messages)
 	messages = EnforceRoleAlternation(messages)
+	// Re-hoist after EnforceRoleAlternation: merging two user messages can
+	// place the second message's tool_result blocks after the first message's
+	// text blocks, breaking the API's tool_result-first requirement.
+	// Upstream: mergeAdjacentUserMessages calls hoistToolResults on the
+	// merged content (messages.ts:2416-2418).
+	messages = hoistToolResults(messages)
 	messages = EnsureToolResultPairing(messages)
 	messages = FilterEmptyMessages(messages)
 	messages = StripImagesFromErrorToolResults(messages)
