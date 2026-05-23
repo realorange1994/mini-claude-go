@@ -133,7 +133,19 @@ func lispEnvToGoSlice(v *Value) []string {
 
 // executeCommand runs a command with the given parameters.
 func executeCommand(command string, cmdArgs []string, workingDir string, env []string, stdin string, timeout time.Duration, maxMemoryMB int64, maxCPUMS int64) (*Value, error) {
-	cmd := exec.Command(command, cmdArgs...)
+	// Apply resource limits via bash -c ulimit wrapper (child-only, no parent impact).
+	// This must happen BEFORE exec.Command so we use the wrapped command name/args.
+	cmdName := command
+	cmdArgsList := cmdArgs
+	if maxMemoryMB > 0 || maxCPUMS > 0 {
+		var err error
+		cmdName, cmdArgsList, err = wrapWithResourceLimits(command, cmdArgs, maxMemoryMB, maxCPUMS)
+		if err != nil {
+			return makeExecResult("", err.Error(), 1), nil
+		}
+	}
+
+	cmd := exec.Command(cmdName, cmdArgsList...)
 
 	if workingDir != "" {
 		cmd.Dir = workingDir
@@ -165,22 +177,8 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		cmd.Stderr = &stderrBuf
 	}
 
-	// Apply resource limits. wrapWithResourceLimits returns a restore
-	// function on platforms that support it (Unix setrlimit); nil otherwise.
-	// We call restore() immediately after Start() — the child already
-	// inherited the limits at fork time.
-	restoreLimits := wrapWithResourceLimits(cmd, maxMemoryMB, maxCPUMS)
-
 	if err := cmd.Start(); err != nil {
-		if restoreLimits != nil {
-			restoreLimits()
-		}
 		return makeExecResult("", err.Error(), 1), nil
-	}
-
-	// Restore parent's original rlimits now that the child has forked.
-	if restoreLimits != nil {
-		restoreLimits()
 	}
 
 	if runtime.GOOS == "windows" && (maxMemoryMB > 0 || maxCPUMS > 0) {

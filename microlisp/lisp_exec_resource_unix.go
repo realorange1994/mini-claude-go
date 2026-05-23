@@ -3,62 +3,94 @@
 package microlisp
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
-	"syscall"
+	"strings"
+	"sync"
 )
 
-// wrapWithResourceLimits temporarily sets RLIMIT_AS and RLIMIT_CPU on the
-// current process, then returns a restore function.
+// wrapWithResourceLimits returns a bash command wrapper that applies ulimit
+// settings to the child process only, without affecting the parent.
 //
-// Usage:
-//   restore := wrapWithResourceLimits(cmd, maxMem, maxCPU)
-//   if err := cmd.Start(); err != nil { ... }
-//   restore()  // child already inherited limits at fork
+// This replaces the old approach of temporarily setting rlimits on the parent
+// process, which could kill the parent if it exceeded the limits during the
+// fork/exec window.
 //
-// Why not a "modify cmd" approach? Go doesn't expose the fork/exec split
-// point, so the only way to pass rlimits to the child is to set them on
-// the parent before Start() (which forks). We restore immediately after.
-//
-// Race: between setrlimit and Start(), other goroutines forking children
-// would inherit our modified limits. This window is microseconds in
-// practice. For production isolation, use a dedicated spawner goroutine.
-func wrapWithResourceLimits(cmd *exec.Cmd, maxMemoryMB int64, maxCPUMS int64) func() {
-	if maxMemoryMB == 0 && maxCPUMS == 0 {
-		return nil
+// Returns ("bash", []string{"-c", wrapped}, nil) when limits are set,
+// or (command, args, nil) with no wrapper when limits are zero.
+func wrapWithResourceLimits(command string, args []string, maxMemoryMB int64, maxCPUMS int64) (cmdName string, cmdArgs []string, err error) {
+	if maxMemoryMB <= 0 && maxCPUMS <= 0 {
+		return command, args, nil
 	}
 
-	var oldMem syscall.Rlimit
-	err := syscall.Getrlimit(syscall.RLIMIT_AS, &oldMem)
-	if err != nil {
-		return nil
+	bashPath, bashErr := findBash()
+	if bashErr != nil {
+		// No bash available — skip resource limits rather than risk killing parent.
+		return command, args, nil
 	}
-	var oldCPU syscall.Rlimit
-	syscall.Getrlimit(syscall.RLIMIT_CPU, &oldCPU)
 
+	// Build ulimit prefix
+	var ulimitParts []string
 	if maxMemoryMB > 0 {
-		_ = syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{
-			Cur: uint64(maxMemoryMB) * 1024 * 1024,
-			Max: uint64(maxMemoryMB) * 1024 * 1024,
-		})
+		// ulimit -v: virtual memory limit in kilobytes
+		kb := maxMemoryMB * 1024
+		ulimitParts = append(ulimitParts, fmt.Sprintf("ulimit -v %d", kb))
 	}
 	if maxCPUMS > 0 {
+		// ulimit -t: CPU time limit in seconds (minimum 1)
 		sec := maxCPUMS / 1000
 		if sec == 0 {
 			sec = 1
 		}
-		_ = syscall.Setrlimit(syscall.RLIMIT_CPU, &syscall.Rlimit{
-			Cur: uint64(sec),
-			Max: uint64(sec),
-		})
+		ulimitParts = append(ulimitParts, fmt.Sprintf("ulimit -t %d", sec))
 	}
 
-	return func() {
-		_ = syscall.Setrlimit(syscall.RLIMIT_AS, &oldMem)
-		_ = syscall.Setrlimit(syscall.RLIMIT_CPU, &oldCPU)
+	// Escape command and arguments for shell
+	escapedCmd := escapeShellArg(command)
+	escapedArgs := make([]string, len(args))
+	for i, a := range args {
+		escapedArgs[i] = escapeShellArg(a)
 	}
+
+	// Build the wrapped command:
+	// ulimit ... ; exec -- original-command 'arg1' 'arg2' ...
+	// 'exec' replaces the bash process with the target, so ulimit limits
+	// are inherited by the child directly.
+	inner := strings.Join(ulimitParts, "; ") + "; exec -- " + escapedCmd
+	if len(escapedArgs) > 0 {
+		inner += " " + strings.Join(escapedArgs, " ")
+	}
+
+	return bashPath, []string{"-c", inner}, nil
 }
 
-// setupWindowsJobObject is a no-op on Unix.
-func setupWindowsJobObject(cmd *exec.Cmd, maxMemoryMB int64, maxCPUMS int64) error {
-	return nil
+// escapeShellArg escapes a string for safe inclusion in a single-quoted shell argument.
+// ' becomes '\'' (end quote, escaped quote, start quote).
+func escapeShellArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+var (
+	bashPathOnce sync.Once
+	bashPathVal  string
+	bashPathErr  error
+)
+
+func findBash() (string, error) {
+	bashPathOnce.Do(func() {
+		bashPathVal, bashPathErr = exec.LookPath("bash")
+		if bashPathErr != nil {
+			// Try common locations
+			for _, p := range []string{"/bin/bash", "/usr/bin/bash"} {
+				if _, err := os.Stat(p); err == nil {
+					bashPathVal = p
+					bashPathErr = nil
+					return
+				}
+			}
+			bashPathErr = fmt.Errorf("bash not found")
+		}
+	})
+	return bashPathVal, bashPathErr
 }
