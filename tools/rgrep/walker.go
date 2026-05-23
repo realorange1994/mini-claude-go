@@ -31,6 +31,7 @@ var defaultIgnoredDirs = map[string]bool{
 	"target":        true,
 	".gradle":       true,
 	".dart_tool":    true,
+	".cache":        true,
 	"dist":          true,
 	"build":         true,
 	"out":           true,

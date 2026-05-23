@@ -340,7 +340,7 @@ func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, ca
 	}
 
 	// Exclude common large/cache directories to match rgrep's defaultIgnoredDirs
-	cacheDirs := []string{".claude", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".coverage", "htmlcov", ".cargo", ".rustup", "target", ".gradle", ".dart_tool", "dist", "build", "out"}
+	cacheDirs := []string{".claude", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".coverage", "htmlcov", ".cargo", ".rustup", "target", ".gradle", ".dart_tool", ".cache", "dist", "build", "out"}
 	for _, dir := range cacheDirs {
 		args = append(args, "--glob", "!"+dir)
 	}
