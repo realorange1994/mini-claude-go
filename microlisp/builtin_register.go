@@ -355,6 +355,25 @@ var builtins = []builtinDef{
 	{"go:set-field", builtinGoSetField},
 	{"go:type-of", builtinGoTypeOf},
 	{"go:call", builtinGoCall},
+	// Go recovery and nil/zero predicates
+	{"go:is-nil", builtinGoIsNil},
+	{"go:is-zero", builtinGoIsZero},
+	// Go type assertion and interface checking
+	{"go:assert-type", builtinGoAssertType},
+	{"go:implements", builtinGoImplements},
+	// Go reflection/introspection
+	{"go:fields-of", builtinGoFieldsOf},
+	{"go:methods-of", builtinGoMethodsOf},
+	{"go:kind-of", builtinGoKindOf},
+	{"go:elem-of", builtinGoElemOf},
+	{"go:len-of", builtinGoLenOf},
+	{"go:cap-of", builtinGoCapOf},
+	// Go type conversion
+	{"go:convert", builtinGoConvert},
+	{"go:uintptr", builtinGoUintptr},
+	{"go:type-parse", builtinGoTypeParse},
+	// Go function value access
+	{"go:func-of", builtinGoFuncOf},
 	// I/O adapters (take *Value — can't go through reflect FFI)
 	{"reader-read-all", builtinReaderReadAll},
 	{"io-copy-to-string", builtinIoCopyToString},

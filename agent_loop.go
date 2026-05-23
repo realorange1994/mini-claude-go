@@ -2391,6 +2391,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 				messages = NormalizeAPIMessages(messages)
 				messages = a.injectCacheEdits(messages)
 				params.Messages = messages
+				cacheMessageParams(&params) // re-apply cache_control on rebuilt messages
 			}
 
 			// Smart retry decision based on what was already delivered
@@ -2600,7 +2601,7 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	// This replaces the time that was previously inside the system prompt.
 	// By injecting it here, the system prompt stays fully static and cacheable,
 	// and the time message is skipped for cache breakpoint placement.
-	a.context.InjectTimeContext()
+	// a.context.InjectTimeContext() // disabled for cache debug
 	// Validate and fix internal entries BEFORE building API messages.
 	// Without this, consecutive user-role entries from compaction
 	// (Summary + Attachments + Snips) cause API error 2013.
@@ -2638,7 +2639,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 
 	// Build messages WITHOUT tools, but still validate before sending.
 	// Skip compaction here (grace call should not trigger new compaction).
-	a.context.InjectTimeContext()
+	// a.context.InjectTimeContext() // disabled for cache debug
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
 	messages := a.context.BuildMessages()

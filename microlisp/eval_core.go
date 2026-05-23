@@ -3036,6 +3036,114 @@ evalLoop:
 					result = vnil()
 				}
 				return listFromSlice([]*Value{vnum(float64(chosen)), result}), nil
+			case "GO:RECOVER":
+				// (go:recover form...) — special form: evaluate forms and capture any panic.
+				// Returns (:panic msg) on panic, or the normal result of the last form.
+				// As a special form, arguments are NOT pre-evaluated.
+				if v.cdr == nil || isNil(v.cdr) {
+					return nil, fmt.Errorf("go:recover: need at least one form")
+				}
+				forms := v.cdr
+				type recoverResult struct {
+					val *Value
+					err error
+				}
+				doneCh := make(chan recoverResult, 1)
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							msg := fmt.Sprintf("%v", r)
+							doneCh <- recoverResult{val: listFromSlice([]*Value{vsym("panic"), vstr(msg)})}
+						}
+					}()
+					threadEnv := copyGlobalEnv()
+					var result *Value
+					var err error
+					for p := forms; p.typ == VPair && !isNil(p); p = p.cdr {
+						result, err = Eval(p.car, threadEnv)
+						if err != nil {
+							doneCh <- recoverResult{err: err}
+							return
+						}
+					}
+					doneCh <- recoverResult{val: result}
+				}()
+				r := <-doneCh
+				if r.err != nil {
+					return nil, r.err
+				}
+				return r.val, nil
+			case "GO:WITH-DEFER":
+				// (go:with-defer (var init-form "Close") body...)
+				// Like (let ((var init-form)) body...) but calls the method named
+				// in the third element on var when body exits (even on error/panic).
+				// This is Go's defer f.Close() pattern.
+				if v.cdr == nil || v.cdr.typ != VPair {
+					return nil, fmt.Errorf("go:with-defer: malformed form")
+				}
+				binding := v.cdr.car
+				if binding.typ != VPair || isNil(binding) {
+					return nil, fmt.Errorf("go:with-defer: need (var init close-method) binding")
+				}
+				varName := binding.car
+				if varName.typ != VSym {
+					return nil, fmt.Errorf("go:with-defer: var must be a symbol")
+				}
+				restBinding := binding.cdr
+				if isNil(restBinding) || restBinding.typ != VPair {
+					return nil, fmt.Errorf("go:with-defer: need init form in binding")
+				}
+				// Evaluate init form
+				initVal, e := Eval(restBinding.car, env)
+				if e != nil {
+					return nil, fmt.Errorf("go:with-defer: init eval: %v", e)
+				}
+				// Get close method name (optional, defaults to "Close")
+				closeMethod := "Close"
+				if !isNil(restBinding.cdr) && restBinding.cdr.typ == VPair && !isNil(restBinding.cdr.car) {
+					closeMethodVal := restBinding.cdr.car
+					if closeMethodVal.typ == VStr {
+						closeMethod = closeMethodVal.str
+					} else if closeMethodVal.typ == VSym {
+						closeMethod = closeMethodVal.str
+					}
+				}
+				body := v.cdr.cdr
+				newEnv := env.Extend(varName.str, initVal)
+				var result *Value
+				var evalErr error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							evalErr = fmt.Errorf("panic in go:with-defer body: %v", r)
+						}
+						// Call cleanup method regardless of how body exits
+						if initVal.typ == VGoVal {
+							var rv reflect.Value
+							if initVal.goValReflect.IsValid() {
+								rv = initVal.goValReflect
+							} else {
+								rv = reflect.ValueOf(initVal.goVal)
+							}
+							if rv.IsValid() {
+								method := rv.MethodByName(closeMethod)
+								if method.IsValid() {
+									method.Call(nil)
+								}
+							}
+						}
+					}()
+					for p := body; p.typ == VPair && !isNil(p); p = p.cdr {
+						result, evalErr = Eval(p.car, newEnv)
+						if evalErr != nil {
+							return
+						}
+					}
+				}()
+				if evalErr != nil {
+					return nil, evalErr
+				}
+				return result, nil
 			case "WITH-INPUT-FROM-STRING":
 				// (with-input-from-string (var string) body...)
 				if v.cdr == nil || v.cdr.typ != VPair {

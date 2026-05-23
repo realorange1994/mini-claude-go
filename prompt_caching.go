@@ -26,12 +26,13 @@ type CacheBreakpointConfig struct {
 	SkipCacheWrite bool
 }
 
-// DefaultCacheBreakpointConfig returns the default config with 1 breakpoint
-// for the rolling cache strategy: Turn N's last message (still marked) becomes
-// Turn N+1's last message → cache READ hit on the prefix.
+// DefaultCacheBreakpointConfig returns the default config with 2 breakpoints
+// for the rolling cache strategy: Turn N marks messages[-2] and messages[-1];
+// Turn N+1, messages[-1] from Turn N becomes messages[-2] (still marked)
+// → cache READ hit on the prefix.
 func DefaultCacheBreakpointConfig() CacheBreakpointConfig {
 	return CacheBreakpointConfig{
-		MaxBreakpoints: 1,
+		MaxBreakpoints: 2,
 		SkipCacheWrite: false,
 	}
 }
@@ -95,6 +96,28 @@ func stripSystemInjected(msg map[string]any) {
 		if m, ok := arr[0].(map[string]any); ok {
 			if text, ok := m["text"].(string); ok {
 				m["text"] = strings.TrimPrefix(text, SystemInjectedPrefix)
+			}
+		}
+	}
+}
+
+// normalizeContentToArray converts string content to array format
+// [{"type":"text","text":"..."}] so that applyCacheMarker never needs
+// to mutate the content structure. This prevents the string↔array flip
+// that breaks the KV cache prefix when breakpoints shift between turns.
+func normalizeContentToArray(msg map[string]any) {
+	content, ok := msg["content"]
+	if !ok {
+		return
+	}
+
+	switch v := content.(type) {
+	case string:
+		if v == "" {
+			msg["content"] = []map[string]any{}
+		} else {
+			msg["content"] = []map[string]any{
+				{"type": "text", "text": v},
 			}
 		}
 	}
@@ -174,6 +197,16 @@ func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg Cac
 		maxBP = MaxCacheBreakpoints
 	}
 
+	// Identify system-injected messages BEFORE stripping their prefix.
+	// isSystemInjected relies on the prefix being present, so we must
+	// collect injected indices before stripSystemInjected removes them.
+	injectedIndices := make(map[int]bool)
+	for i := range result {
+		if isSystemInjected(result[i]) {
+			injectedIndices[i] = true
+		}
+	}
+
 	// Strip system-injected prefixes from all messages (they're internal markers,
 	// not for the API). Do this before placing breakpoints so the API never sees them.
 	for i := range result {
@@ -190,12 +223,24 @@ func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg Cac
 		hoistToolResultCache(result[i])
 	}
 
-	// Collect candidate indices for breakpoint placement, skipping system-injected
-	// messages. Injected content (session memory, file recovery) changes between
-	// turns, so placing breakpoints there would cause cache misses.
+	// Normalize all string content to array format BEFORE placing breakpoints.
+	// This is critical for cache prefix stability: applyCacheMarker converts
+	// string content to array format when adding cache_control, but when the
+	// breakpoint moves away from a message on the next turn, the content
+	// reverts to string format. This format flip (string ↔ array) changes
+	// the JSON structure of previously-cached messages, breaking the KV cache
+	// prefix. By normalizing upfront, all messages always have array content,
+	// so adding/removing cache_control never changes the content structure.
+	for i := range result {
+		normalizeContentToArray(result[i])
+	}
+
+	// Collect candidate indices for breakpoint placement, using pre-collected
+	// injected indices (must use pre-collected set since stripSystemInjected
+	// already removed the prefixes).
 	candidates := make([]int, 0, len(result))
 	for i := range result {
-		if !isSystemInjected(result[i]) {
+		if !injectedIndices[i] {
 			candidates = append(candidates, i)
 		}
 	}
@@ -205,19 +250,18 @@ func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg Cac
 		candidates = []int{len(result) - 1}
 	}
 
-	// Determine starting position for skipCacheWrite mode.
-	startOffset := 0
+	// Place cache_control on ALL non-injected messages for prefix stability.
+	// Anthropic's KV cache matches the request JSON byte-for-byte from the start.
+	// When cache_control markers shift between turns, the JSON structure changes,
+	// breaking the entire cached prefix.
+	// SkipCacheWrite: skip the last candidate to avoid writing cache on the newest
+	// message (reduces cache_write tokens on the current turn's new content).
+	limit := len(candidates)
 	if cfg.SkipCacheWrite && len(candidates) >= 2 {
-		startOffset = 1 // skip the last candidate, use second-to-last as first breakpoint
+		limit = len(candidates) - 1
 	}
-
-	// Place breakpoints on the last N non-injected candidates (up to maxBP).
-	// Rolling cache: Turn N's last message (marked) becomes Turn N+1's second-to-last
-	// → cache READ hit on the prefix.
-	breakpointsPlaced := 0
-	for i := len(candidates) - 1 - startOffset; i >= 0 && breakpointsPlaced < maxBP; i-- {
+	for i := 0; i < limit; i++ {
 		applyCacheMarker(result[candidates[i]], marker)
-		breakpointsPlaced++
 	}
 
 	// Also apply a breakpoint to the system prompt (first message if system role).
@@ -275,13 +319,18 @@ func applyCacheMarker(msg map[string]any, marker map[string]any) {
 	// on whether this message is the current cache breakpoint. Shape
 	// mutation destroys cache_read hit rate because the cached prefix
 	// changes every turn. Inspired by openclacky's cache_control hoisting.
-	if arr, ok := content.([]any); ok && len(arr) > 0 {
-		last := arr[len(arr)-1]
-		if m, ok := last.(map[string]any); ok {
-			// Hoist: if this is a tool_result, ensure cache_control is on
-			// the tool_result block itself. For non-tool_result blocks,
-			// place directly on the block.
-			m["cache_control"] = marker
+	// Handle both []any (from JSON round-trip) and []map[string]any (from
+	// normalizeContentToArray).
+	switch arr := content.(type) {
+	case []any:
+		if len(arr) > 0 {
+			if m, ok := arr[len(arr)-1].(map[string]any); ok {
+				m["cache_control"] = marker
+			}
+		}
+	case []map[string]any:
+		if len(arr) > 0 {
+			arr[len(arr)-1]["cache_control"] = marker
 		}
 	}
 }
