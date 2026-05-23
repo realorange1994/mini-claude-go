@@ -966,7 +966,13 @@ func runDoctor(agent *AgentLoop) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		reqURL := baseURL + "/v1/messages"
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(`{"model":"claude-haiku-4-5-20250610","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+		// Use the current configured model for the connectivity test
+		testModel := agent.config.Model
+		if testModel == "" {
+			testModel = getDefaultHaikuModel()
+		}
+		body := fmt.Sprintf(`{"model":"%s","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`, testModel)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(body))
 		if err != nil {
 			fmt.Printf("request error: %v\n", err)
 		} else {
@@ -984,6 +990,14 @@ func runDoctor(agent *AgentLoop) {
 				if resp.StatusCode == 200 || resp.StatusCode == 400 {
 					// 200 = success, 400 = auth/API ok but bad request
 					fmt.Printf("OK (latency %s, HTTP %d)\n", latency.Round(time.Millisecond), resp.StatusCode)
+				} else if resp.StatusCode == 503 {
+					// 503 often means the proxy doesn't support the requested model
+					errMsg := string(body)
+					if len(errMsg) > 80 {
+						errMsg = errMsg[:80] + "..."
+					}
+					fmt.Printf("HTTP %d (%s) — %s\n", resp.StatusCode, latency.Round(time.Millisecond), errMsg)
+					fmt.Printf("  Hint: model %q may not be available on this proxy. Try /model sonnet or a full model ID.\n", testModel)
 				} else {
 					errMsg := string(body)
 					if len(errMsg) > 80 {
