@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"miniclaudecode-go/tools"
 )
 
 func main() {
@@ -31,19 +33,6 @@ func main() {
 	projectDir := flag.String("dir", "", "Project directory (change working directory before starting)")
 	resumeFile := flag.String("resume", "", "Resume from a transcript file path or 'last' for most recent")
 	flag.Parse()
-
-	// Check CLAUDE_CODE_PREFER_NON_STREAMING env var (overrides --stream flag)
-	if v := os.Getenv("CLAUDE_CODE_PREFER_NON_STREAMING"); v != "" && v != "0" && v != "false" {
-		*stream = false
-	}
-
-	// Parse CLAUDE_CODE_EFFORT_LEVEL and apply model/budget overrides
-	if v := os.Getenv("CLAUDE_CODE_EFFORT_LEVEL"); v == "fast" {
-		// Fast mode: override to a lighter model if not explicitly set
-		if *model == "" {
-			*model = "claude-sonnet-4-20250514"
-		}
-	}
 
 	// Change working directory if --dir is specified
 	// Normalize the path: filepath.FromSlash converts forward slashes to backslashes
@@ -107,7 +96,29 @@ func main() {
 	}
 	cfg.PermissionMode = PermissionMode(*mode)
 	cfg.MaxTurns = *maxTurns
+		// Apply config-derived runtime settings (config file > env > defaults)
+	if cfg.PreferNonStreaming {
+		*stream = false
+	}
+	if cfg.EffortLevel == "fast" {
+		if *model == "" {
+			*model = "claude-sonnet-4-20250514"
+		}
+	}
 
+	// Apply config-derived default model settings (settings.json > env > hard-coded defaults)
+	SetDefaultModels(&cfg)
+
+	// Wire session ID to streaming_executor package
+	if cfg.SessionID != "" {
+		packageSessionID = cfg.SessionID
+	}
+
+	// Wire git bash path to hooks + exec_tool packages
+	if cfg.GitBashPath != "" {
+		packageGitBashPath = cfg.GitBashPath
+		tools.SetGitBashPath(cfg.GitBashPath)
+	}
 	// Resolve model alias (e.g. "sonnet" → "claude-sonnet-4-20250514")
 	if cfg.Model != "" {
 		if resolved, ok := ResolveModelAlias(cfg.Model); ok {
@@ -213,10 +224,10 @@ func main() {
 	}
 
 	// Interactive REPL
-	runInteractive(agent, history, sessionID)
+	runInteractive(agent, history, sessionID, cfg)
 }
 
-func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) {
+func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, cfg Config) {
 	defer agent.Close()
 
 	// On Windows, ensure console input mode has ENABLE_PROCESSED_INPUT and
@@ -245,9 +256,9 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string) 
 	stdoutIsTerm := stdoutIsTerminal()
 
 	// Idle timeout: exit gracefully after inactivity.
-	// Controlled by CLAUDE_CODE_EXIT_AFTER_STOP_DELAY env var.
+	// Controlled via config file (runtime.exit_after_stop_delay) or CLAUDE_CODE_EXIT_AFTER_STOP_DELAY env var.
 	// Accepts duration strings like "5m", "30s", or milliseconds as plain number.
-	idleDelay := parseIdleTimeoutEnv()
+	idleDelay := cfg.ExitAfterStopDelay
 	idleTimerCh := make(chan struct{}, 1)
 	startIdleTimer := func() {
 		if idleDelay <= 0 {
@@ -918,24 +929,6 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// parseIdleTimeoutEnv reads CLAUDE_CODE_EXIT_AFTER_STOP_DELAY env var.
-// Accepts: duration string ("5m", "30s") or milliseconds as plain number.
-// Returns 0 if unset or invalid (meaning idle timeout is disabled).
-func parseIdleTimeoutEnv() time.Duration {
-	val := os.Getenv("CLAUDE_CODE_EXIT_AFTER_STOP_DELAY")
-	if val == "" {
-		return 0
-	}
-	// Try as Go duration first (e.g. "5m", "30s")
-	if d, err := time.ParseDuration(val); err == nil {
-		return d
-	}
-	// Try as milliseconds (plain number, matching upstream)
-	if ms, err := strconv.ParseInt(val, 10, 64); err == nil && ms > 0 {
-		return time.Duration(ms) * time.Millisecond
-	}
-	return 0
-}
 
 // runDoctor runs installation diagnostics.
 func runDoctor(agent *AgentLoop) {

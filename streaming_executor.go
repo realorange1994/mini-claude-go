@@ -13,6 +13,10 @@ import (
 	"miniclaudecode-go/tools"
 )
 
+// packageSessionID is set from main after config loading.
+// Used by getSessionID() as a config-derived source (above env fallback).
+var packageSessionID string
+
 // StreamingToolExecutor executes tool calls as they complete during streaming,
 // overlapping tool execution with ongoing stream processing.
 //
@@ -813,7 +817,9 @@ func (e *StreamingToolExecutor) executePostToolUseHooks(tc ToolCallInfo, input m
 // getSessionID returns the current session ID for hook context.
 // Falls back to a process-level ID if session tracking is not available.
 func getSessionID() string {
-	// Try to get from the global session tracker if available
+	if packageSessionID != "" {
+		return packageSessionID
+	}
 	if sid := os.Getenv("CLAUDE_SESSION_ID"); sid != "" {
 		return sid
 	}

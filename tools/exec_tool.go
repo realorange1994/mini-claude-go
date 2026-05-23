@@ -15,6 +15,16 @@ import (
 	"time"
 )
 
+// SetGitBashPath sets a config-derived Git Bash path.
+// Called from main after config loading.
+// Takes priority over env vars in findGitBashForWindows.
+var configGitBashPath string
+
+// SetGitBashPath sets a config-derived Git Bash path.
+func SetGitBashPath(path string) {
+	configGitBashPath = path
+}
+
 // BashBgTaskCallback is called when a command should run in the background.
 // Returns (taskID, outputFilePath, errorText).
 type BashBgTaskCallback func(command, workingDir string) (taskID, outputFilePath, errText string)
@@ -2090,7 +2100,16 @@ var gitBashCache struct {
 //  4. Empty string (not found)
 func findGitBashForWindows() string {
 	gitBashCache.once.Do(func() {
-		// 1. Check CLAUDE_CODE_GIT_BASH_PATH env var
+		// 1. Check config-derived path (from settings.json)
+		if configGitBashPath != "" {
+			if _, err := os.Stat(configGitBashPath); err == nil {
+				gitBashCache.path = configGitBashPath
+				gitBashCache.ok = true
+				return
+			}
+		}
+
+		// 2. Check CLAUDE_CODE_GIT_BASH_PATH env var (backward compat)
 		if envPath := os.Getenv("CLAUDE_CODE_GIT_BASH_PATH"); envPath != "" {
 			if _, err := os.Stat(envPath); err == nil {
 				gitBashCache.path = envPath

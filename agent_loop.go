@@ -512,7 +512,7 @@ func (a *AgentLoop) recordTokenUsageWithCache(inputTokens, outputTokens, cacheWr
 func (a *AgentLoop) RemainingTokenBudget() int {
 	var contextWindow int
 	if a.modelCapabilities != nil {
-		contextWindow = int(a.modelCapabilities.GetContextWindow(a.config.Model))
+		contextWindow = int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
 	} else {
 		contextWindow = modelContextWindow(a.config.Model)
 	}
@@ -645,13 +645,13 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		errorReporter:    NewErrorReporter(),
 		featureFlags:     NewFeatureFlagStore(),
 		announcedMCPServers: make(map[string]bool),
-		telemetry:       NewTelemetryManager(),
+		telemetry:       NewTelemetryManager(cfg.TelemetryDisabled),
 	}
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
 	SetGlobalModelCapabilities(agent.modelCapabilities)
 	// Update compactor's max tokens based on model context window
-	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model)
+	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model, cfg.MaxContextTokens)
 	agent.compactor.SetMaxTokens(int(contextWindow))
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
@@ -850,13 +850,13 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		errorReporter:    NewErrorReporter(),
 		featureFlags:     NewFeatureFlagStore(),
 		announcedMCPServers: make(map[string]bool),
-		telemetry:       NewTelemetryManager(),
+		telemetry:       NewTelemetryManager(cfg.TelemetryDisabled),
 	}
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
 	SetGlobalModelCapabilities(agent.modelCapabilities)
 	// Update compactor's max tokens based on model context window
-	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model)
+	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model, cfg.MaxContextTokens)
 	agent.compactor.SetMaxTokens(int(contextWindow))
 
 	// Restore skill state from transcript entries so skillTracker reflects
@@ -1298,7 +1298,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 	var contextWindow int
 	if a.modelCapabilities != nil {
-		contextWindow = int(a.modelCapabilities.GetContextWindow(a.config.Model))
+		contextWindow = int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
 	} else {
 		contextWindow = modelContextWindow(a.config.Model)
 	}

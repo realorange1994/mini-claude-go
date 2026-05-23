@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+// packageGitBashPath is set from main after config loading.
+// Used by detectGitBashForHook() and exec_tool.go as a config-derived source
+// (above env fallback).
+var packageGitBashPath string
+
 // ─── Hook event constants ─────────────────────────────────────────────────────
 
 // HookEvent represents the type of hook event being triggered.
@@ -790,7 +795,14 @@ func buildHookEnv(extra map[string]string) []string {
 // detectGitBashForHook finds the Git Bash executable on Windows.
 // Uses the same path derivation logic as exec_tool.go's findGitBashForWindows().
 func detectGitBashForHook() string {
-	// 1. Check CLAUDE_CODE_GIT_BASH_PATH env var
+	// 1. Check config-derived path (from settings.json)
+	if packageGitBashPath != "" {
+		if _, err := os.Stat(packageGitBashPath); err == nil {
+			return packageGitBashPath
+		}
+	}
+
+	// 2. Check CLAUDE_CODE_GIT_BASH_PATH env var (backward compat)
 	if envPath := os.Getenv("CLAUDE_CODE_GIT_BASH_PATH"); envPath != "" {
 		if _, err := os.Stat(envPath); err == nil {
 			return envPath

@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"miniclaudecode-go/mcp"
 	"miniclaudecode-go/permissions"
@@ -128,6 +130,17 @@ type Config struct {
 	// EffortLevel controls model selection for effort-based routing.
 	// Values: "" (default), "fast" (use cheaper/faster model), "high" (use premium model with thinking)
 	EffortLevel string
+	// Runtime behavior settings from config file (takes priority over env vars)
+	PreferNonStreaming     bool
+	TelemetryDisabled      bool
+	ExitAfterStopDelay     time.Duration
+	SessionID              string
+	DefaultOpusModel       string
+	DefaultSonnetModel     string
+	DefaultHaikuModel      string
+	MaxContextTokens       int64
+	MaxOutputTokensOverride int64
+	GitBashPath            string
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -161,6 +174,29 @@ type ClaudeSettings struct {
 		Servers map[string]MCPServerConfig `json:"servers"`
 	} `json:"mcp"`
 	Permissions permissions.PermissionsConfig `json:"permissions"`
+	// Runtime behavior settings
+	Runtime struct {
+		EffortLevel        string `json:"effort_level"`
+		PreferNonStreaming *bool  `json:"prefer_non_streaming"`
+		ExitAfterStopDelay string `json:"exit_after_stop_delay"`
+		TelemetryDisabled  *bool  `json:"telemetry_disabled"`
+		SessionID          string `json:"session_id"`
+	} `json:"runtime"`
+	// Default model overrides (empty = use hard-coded defaults)
+	Models struct {
+		DefaultOpusModel   string `json:"default_opus_model"`
+		DefaultSonnetModel string `json:"default_sonnet_model"`
+		DefaultHaikuModel  string `json:"default_haiku_model"`
+	} `json:"models"`
+	// Token limits (0 = use model's natural limit)
+	Tokens struct {
+		MaxContextTokens int64 `json:"max_context_tokens"`
+		MaxOutputTokens  int64 `json:"max_output_tokens"`
+	} `json:"tokens"`
+	// Tool-specific settings
+	Tools struct {
+		GitBashPath string `json:"git_bash_path"`
+	} `json:"tools"`
 }
 
 // homeClaudeDir returns the path to ~/.claude, or empty string if undetermined.
@@ -195,6 +231,8 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 			for name, srv := range s.MCP.Servers {
 				mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
 			}
+			// Apply new runtime/model/token/tool settings
+			cfg.applySettings(s)
 		} else {
 			fmt.Fprintf(os.Stderr, "[WARN] Failed to parse settings.json: %v\n", err)
 		}
@@ -222,6 +260,8 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 						mcpMgr.Register(name, srv.Command, srv.Args, srv.Env)
 					}
 				}
+				// Apply home settings for any still-empty runtime fields
+				cfg.applySettingsFallback(s)
 			} else {
 				fmt.Fprintf(os.Stderr, "[WARN] Failed to parse home settings.json: %v\n", err)
 			}
@@ -305,6 +345,9 @@ func LoadConfigFromFile(projectDir string) (cfg Config, found bool) {
 	cfg.SkillTracker = skills.NewSkillTracker()
 	cfg.cachedPrompt = NewCachedSystemPrompt()
 
+	// Env var fallback (lowest priority, below config file, above defaults)
+	cfg.applyEnvFallback()
+
 	// Return found if any config was loaded
 	if cfg.APIKey != "" || cfg.Model != "" || len(mcpMgr.ListServers()) > 0 {
 		// Resolve model alias (e.g. "sonnet" → "claude-sonnet-4-20250514")
@@ -368,8 +411,156 @@ func DefaultConfig() Config {
 		MaxOutputTokens:         16384,
 		EscalatedMaxOutputTokens: 64000,
 		Hooks:                  NewHookManager(),
+		// Runtime defaults (convention over configuration)
+		DefaultOpusModel:    "claude-opus-4-5-20250610",
+		DefaultSonnetModel:  "claude-sonnet-4-20250514",
+		DefaultHaikuModel:   "claude-haiku-4-5-20250610",
 	}
 }
+
+// applySettings transfers settings from a ClaudeSettings struct to Config.
+// Used for project-level config — always overwrites.
+func (cfg *Config) applySettings(s ClaudeSettings) {
+	if s.Runtime.EffortLevel != "" {
+		cfg.EffortLevel = s.Runtime.EffortLevel
+	}
+	if s.Runtime.PreferNonStreaming != nil {
+		cfg.PreferNonStreaming = *s.Runtime.PreferNonStreaming
+	}
+	if s.Runtime.ExitAfterStopDelay != "" {
+		if d, err := time.ParseDuration(s.Runtime.ExitAfterStopDelay); err == nil {
+			cfg.ExitAfterStopDelay = d
+		}
+	}
+	if s.Runtime.TelemetryDisabled != nil {
+		cfg.TelemetryDisabled = *s.Runtime.TelemetryDisabled
+	}
+	if s.Runtime.SessionID != "" {
+		cfg.SessionID = s.Runtime.SessionID
+	}
+	if s.Models.DefaultOpusModel != "" {
+		cfg.DefaultOpusModel = s.Models.DefaultOpusModel
+	}
+	if s.Models.DefaultSonnetModel != "" {
+		cfg.DefaultSonnetModel = s.Models.DefaultSonnetModel
+	}
+	if s.Models.DefaultHaikuModel != "" {
+		cfg.DefaultHaikuModel = s.Models.DefaultHaikuModel
+	}
+	if s.Tokens.MaxContextTokens > 0 {
+		cfg.MaxContextTokens = s.Tokens.MaxContextTokens
+	}
+	if s.Tokens.MaxOutputTokens > 0 {
+		cfg.MaxOutputTokensOverride = s.Tokens.MaxOutputTokens
+	}
+	if s.Tools.GitBashPath != "" {
+		cfg.GitBashPath = s.Tools.GitBashPath
+	}
+}
+
+// applySettingsFallback transfers settings from a ClaudeSettings struct to Config
+// only if the corresponding field is still empty. Used for home-level config fallback.
+func (cfg *Config) applySettingsFallback(s ClaudeSettings) {
+	if cfg.EffortLevel == "" && s.Runtime.EffortLevel != "" {
+		cfg.EffortLevel = s.Runtime.EffortLevel
+	}
+	if cfg.SessionID == "" && s.Runtime.SessionID != "" {
+		cfg.SessionID = s.Runtime.SessionID
+	}
+	if cfg.DefaultOpusModel == "" && s.Models.DefaultOpusModel != "" {
+		cfg.DefaultOpusModel = s.Models.DefaultOpusModel
+	}
+	if cfg.DefaultSonnetModel == "" && s.Models.DefaultSonnetModel != "" {
+		cfg.DefaultSonnetModel = s.Models.DefaultSonnetModel
+	}
+	if cfg.DefaultHaikuModel == "" && s.Models.DefaultHaikuModel != "" {
+		cfg.DefaultHaikuModel = s.Models.DefaultHaikuModel
+	}
+	if cfg.GitBashPath == "" && s.Tools.GitBashPath != "" {
+		cfg.GitBashPath = s.Tools.GitBashPath
+	}
+	if cfg.MaxContextTokens == 0 && s.Tokens.MaxContextTokens > 0 {
+		cfg.MaxContextTokens = s.Tokens.MaxContextTokens
+	}
+	if cfg.MaxOutputTokensOverride == 0 && s.Tokens.MaxOutputTokens > 0 {
+		cfg.MaxOutputTokensOverride = s.Tokens.MaxOutputTokens
+	}
+}
+
+// applyEnvFallback reads CLAUDE_CODE_* env vars as a last-resort fallback
+// (below config file settings, above hard-coded defaults).
+func (cfg *Config) applyEnvFallback() {
+	// Runtime behavior (category 3)
+	if cfg.EffortLevel == "" {
+		if v := os.Getenv("CLAUDE_CODE_EFFORT_LEVEL"); v == "fast" {
+			cfg.EffortLevel = "fast"
+		}
+	}
+	if !cfg.PreferNonStreaming {
+		if v := os.Getenv("CLAUDE_CODE_PREFER_NON_STREAMING"); v != "" && v != "0" && v != "false" {
+			cfg.PreferNonStreaming = true
+		}
+	}
+	if cfg.ExitAfterStopDelay == 0 {
+		if v := os.Getenv("CLAUDE_CODE_EXIT_AFTER_STOP_DELAY"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				cfg.ExitAfterStopDelay = d
+			} else {
+				if ms, err := strconv.ParseInt(v, 10, 64); err == nil && ms > 0 {
+					cfg.ExitAfterStopDelay = time.Duration(ms) * time.Millisecond
+				}
+			}
+		}
+	}
+	if !cfg.TelemetryDisabled {
+		if v := os.Getenv("CLAUDE_CODE_TELEMETRY_DISABLED"); v == "1" || v == "true" {
+			cfg.TelemetryDisabled = true
+		}
+	}
+	if cfg.SessionID == "" {
+		if sid := os.Getenv("CLAUDE_SESSION_ID"); sid != "" {
+			cfg.SessionID = sid
+		}
+	}
+	// Model defaults (category 4)
+	if cfg.DefaultOpusModel == "" {
+		if m := os.Getenv("CLAUDE_DEFAULT_OPUS_MODEL"); m != "" {
+			cfg.DefaultOpusModel = m
+		}
+	}
+	if cfg.DefaultSonnetModel == "" {
+		if m := os.Getenv("CLAUDE_DEFAULT_SONNET_MODEL"); m != "" {
+			cfg.DefaultSonnetModel = m
+		}
+	}
+	if cfg.DefaultHaikuModel == "" {
+		if m := os.Getenv("CLAUDE_DEFAULT_HAIKU_MODEL"); m != "" {
+			cfg.DefaultHaikuModel = m
+		}
+	}
+	// Token limits (category 4)
+	if cfg.MaxContextTokens == 0 {
+		if v := os.Getenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS"); v != "" {
+			if val, err := strconv.ParseInt(v, 10, 64); err == nil && val > 0 {
+				cfg.MaxContextTokens = val
+			}
+		}
+	}
+	if cfg.MaxOutputTokensOverride == 0 {
+		if v := os.Getenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS"); v != "" {
+			if val, err := strconv.ParseInt(v, 10, 64); err == nil && val > 0 {
+				cfg.MaxOutputTokensOverride = val
+			}
+		}
+	}
+	// Tool-specific (category 5)
+	if cfg.GitBashPath == "" {
+		if p := os.Getenv("CLAUDE_CODE_GIT_BASH_PATH"); p != "" {
+			cfg.GitBashPath = p
+		}
+	}
+}
+
 
 // DefaultRegistry creates and populates a registry with all built-in tools.
 func DefaultRegistry() *tools.Registry {

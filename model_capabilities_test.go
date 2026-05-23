@@ -37,7 +37,7 @@ func TestGetContextWindow(t *testing.T) {
 		{"claude-3-5-haiku-20241022", 200_000},
 	}
 	for _, tc := range tests {
-		got := mc.GetContextWindow(tc.model)
+		got := mc.GetContextWindow(tc.model, 0)
 		if got != tc.want {
 			t.Errorf("GetContextWindow(%s) = %d, want %d", tc.model, got, tc.want)
 		}
@@ -48,7 +48,7 @@ func TestGetContextWindowUnknown(t *testing.T) {
 	mc := NewModelCapabilitiesCacheDefault()
 
 	// Unknown models should return 200K default
-	got := mc.GetContextWindow("claude-unknown-12345")
+	got := mc.GetContextWindow("claude-unknown-12345", 0)
 	if got != 200_000 {
 		t.Errorf("GetContextWindow(unknown) = %d, want 200000", got)
 	}
@@ -66,46 +66,32 @@ func TestGetMaxOutputTokens(t *testing.T) {
 		{"claude-3-5-sonnet-20241022", 8192},
 	}
 	for _, tc := range tests {
-		got := mc.GetMaxOutputTokens(tc.model)
+		got := mc.GetMaxOutputTokens(tc.model, 0)
 		if got != tc.want {
 			t.Errorf("GetMaxOutputTokens(%s) = %d, want %d", tc.model, got, tc.want)
 		}
 	}
 }
 
-func TestEnvOverride(t *testing.T) {
+func TestConfigOverride(t *testing.T) {
 	mc := NewModelCapabilitiesCacheDefault()
 
-	// Set env override
-	os.Setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "500000")
-	defer os.Unsetenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
-
-	got := mc.GetContextWindow("claude-sonnet-4-20250514")
+	// Test config override for context window
+	got := mc.GetContextWindow("claude-sonnet-4-20250514", 500000)
 	if got != 500_000 {
-		t.Errorf("GetContextWindow with env override = %d, want 500000", got)
+		t.Errorf("GetContextWindow with config override = %d, want 500000", got)
 	}
 
-	// Invalid env value should fall back to model defaults
-	os.Setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "not-a-number")
-	got = mc.GetContextWindow("claude-sonnet-4-20250514")
-	if got != 1_000_000 {
-		t.Errorf("GetContextWindow with invalid env override = %d, want 1000000", got)
+	// Test config override for max output tokens
+	got2 := mc.GetMaxOutputTokens("claude-sonnet-4-20250514", 32000)
+	if got2 != 32000 {
+		t.Errorf("GetMaxOutputTokens with config override = %d, want 32000", got2)
 	}
 
-	// Negative env value should fall back
-	os.Setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "-100")
-	got = mc.GetContextWindow("claude-sonnet-4-20250514")
-	if got != 1_000_000 {
-		t.Errorf("GetContextWindow with negative env override = %d, want 1000000", got)
-	}
-
-	// Test max output tokens override
-	os.Setenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "32000")
-	defer os.Unsetenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
-
-	got = mc.GetMaxOutputTokens("claude-sonnet-4-20250514")
-	if got != 32000 {
-		t.Errorf("GetMaxOutputTokens with env override = %d, want 32000", got)
+	// Zero override should fall back to model defaults
+	got3 := mc.GetContextWindow("claude-sonnet-4-20250514", 0)
+	if got3 != 1_000_000 {
+		t.Errorf("GetContextWindow without override = %d, want 1000000", got3)
 	}
 }
 
@@ -142,12 +128,12 @@ func TestSaveLoadDisk(t *testing.T) {
 	}
 
 	// Verify the custom model was loaded
-	got := mc2.GetContextWindow("claude-test-model")
+	got := mc2.GetContextWindow("claude-test-model", 0)
 	if got != 300_000 {
 		t.Errorf("loaded context window = %d, want 300000", got)
 	}
 
-	got = mc2.GetMaxOutputTokens("claude-test-model")
+	got = mc2.GetMaxOutputTokens("claude-test-model", 0)
 	if got != 16000 {
 		t.Errorf("loaded max output tokens = %d, want 16000", got)
 	}
@@ -194,14 +180,14 @@ func TestPartialModelMatch(t *testing.T) {
 
 	// A model like "claude-sonnet-4-20250310" that isn't in defaults
 	// but matches a known prefix should get a reasonable default
-	got := mc.GetContextWindow("claude-sonnet-4-20250310")
+	got := mc.GetContextWindow("claude-sonnet-4-20250310", 0)
 	// It won't match the exact defaults but should return something reasonable
 	if got < 200_000 {
 		t.Errorf("GetContextWindow for known prefix model = %d, want >= 200000", got)
 	}
 
 	// Fully unknown model (not matching any prefix)
-	got = mc.GetContextWindow("some-random-model")
+	got = mc.GetContextWindow("some-random-model", 0)
 	if got != 200_000 {
 		t.Errorf("GetContextWindow for unknown model = %d, want 200000", got)
 	}
@@ -225,7 +211,7 @@ func TestModelPrefixKnownFamilies(t *testing.T) {
 	mc := NewModelCapabilitiesCacheDefault()
 	for _, family := range families {
 		model := family + "-20990101" // future date to ensure it's not a built-in
-		got := mc.GetContextWindow(model)
+		got := mc.GetContextWindow(model, 0)
 		if got <= 0 {
 			t.Errorf("GetContextWindow(%q) = %d, want > 0", model, got)
 		}
@@ -238,13 +224,13 @@ func TestModelPrefixExactVsFamily(t *testing.T) {
 	mc := NewModelCapabilitiesCacheDefault()
 
 	// Exact: claude-sonnet-4-20250514 has 1M context window
-	exact := mc.GetContextWindow("claude-sonnet-4-20250514")
+	exact := mc.GetContextWindow("claude-sonnet-4-20250514", 0)
 	if exact != 1_000_000 {
 		t.Errorf("exact sonnet match: got %d, want 1000000", exact)
 	}
 
 	// Prefix match: a variant not in defaults should get family fallback
-	variant := mc.GetContextWindow("claude-sonnet-4-20990101")
+	variant := mc.GetContextWindow("claude-sonnet-4-20990101", 0)
 	if variant != 200_000 {
 		t.Errorf("variant sonnet match: got %d, want 200000", variant)
 	}
@@ -256,9 +242,9 @@ func TestModelContextWindowOrdering(t *testing.T) {
 	// than older generation models (3-5-haiku).
 	mc := NewModelCapabilitiesCacheDefault()
 
-	opus := mc.GetMaxOutputTokens("claude-opus-4-5-20250610")
-	sonnet := mc.GetMaxOutputTokens("claude-sonnet-4-20250514")
-	haiku := mc.GetMaxOutputTokens("claude-3-5-haiku-20241022")
+	opus := mc.GetMaxOutputTokens("claude-opus-4-5-20250610", 0)
+	sonnet := mc.GetMaxOutputTokens("claude-sonnet-4-20250514", 0)
+	haiku := mc.GetMaxOutputTokens("claude-3-5-haiku-20241022", 0)
 
 	// Newer generation models exceed older haiku's 8K limit
 	if sonnet <= haiku {
@@ -291,7 +277,7 @@ func TestModelCapabilitiesAllDefaultsHaveRequiredFields(t *testing.T) {
 func TestModelCapabilitiesCacheFreshInstance(t *testing.T) {
 	// A fresh cache instance should not have any custom entries
 	mc := NewModelCapabilitiesCache(t.TempDir())
-	got := mc.GetContextWindow("claude-test-not-present")
+	got := mc.GetContextWindow("claude-test-not-present", 0)
 	if got != 200_000 {
 		t.Errorf("fresh cache for unknown model = %d, want 200000", got)
 	}
@@ -349,7 +335,7 @@ func TestModelCapabilitiesCacheStaleCache(t *testing.T) {
 	}
 
 	// Stale cache should NOT be loaded, so test-model should get 200K fallback
-	got := mc2.GetContextWindow("test-model")
+	got := mc2.GetContextWindow("test-model", 0)
 	if got != 200_000 {
 		t.Errorf("stale cache should not load: got %d, want 200000", got)
 	}
@@ -361,7 +347,7 @@ func TestGetContextWindowEnvOverrideZero(t *testing.T) {
 	defer os.Unsetenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
 
 	// Zero should fall back (not a valid positive override)
-	got := mc.GetContextWindow("claude-sonnet-4-20250514")
+	got := mc.GetContextWindow("claude-sonnet-4-20250514", 0)
 	if got != 1_000_000 {
 		t.Errorf("zero env override: got %d, want 1000000", got)
 	}
@@ -372,7 +358,7 @@ func TestGetMaxOutputTokensEnvOverrideZero(t *testing.T) {
 	os.Setenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "0")
 	defer os.Unsetenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
 
-	got := mc.GetMaxOutputTokens("claude-sonnet-4-20250514")
+	got := mc.GetMaxOutputTokens("claude-sonnet-4-20250514", 0)
 	if got != 64000 {
 		t.Errorf("zero env override: got %d, want 64000", got)
 	}

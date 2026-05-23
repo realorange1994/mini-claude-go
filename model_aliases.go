@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -156,23 +155,26 @@ var legacyModelRemap = map[string]string{
 // Default model getters — upstream: getDefaultOpusModel(), etc. in model.ts
 // ---------------------------------------------------------------------------
 
-// These can be overridden by environment variables.
+// These can be overridden via settings.json (models.*) or env vars (CLAUDE_DEFAULT_*_MODEL).
 var (
 	defaultOpusModel   = "claude-opus-4-5-20250610"
 	defaultSonnetModel = "claude-sonnet-4-20250514"
 	defaultHaikuModel  = "claude-haiku-4-5-20250610"
 )
 
-func init() {
-	// Allow env overrides at startup (matches upstream's env pattern)
-	if m := os.Getenv("CLAUDE_DEFAULT_OPUS_MODEL"); m != "" {
-		defaultOpusModel = m
+// SetDefaultModels applies config-derived model defaults (from settings.json > env > hard-coded).
+// Called from main after config is fully loaded.
+func SetDefaultModels(cfg *Config) {
+	defaultMu.Lock()
+	defer defaultMu.Unlock()
+	if cfg.DefaultOpusModel != "" {
+		defaultOpusModel = cfg.DefaultOpusModel
 	}
-	if m := os.Getenv("CLAUDE_DEFAULT_SONNET_MODEL"); m != "" {
-		defaultSonnetModel = m
+	if cfg.DefaultSonnetModel != "" {
+		defaultSonnetModel = cfg.DefaultSonnetModel
 	}
-	if m := os.Getenv("CLAUDE_DEFAULT_HAIKU_MODEL"); m != "" {
-		defaultHaikuModel = m
+	if cfg.DefaultHaikuModel != "" {
+		defaultHaikuModel = cfg.DefaultHaikuModel
 	}
 }
 

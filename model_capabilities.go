@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -120,13 +119,11 @@ func (mc *ModelCapabilitiesCache) GetModelCapabilities(model string) ModelCapabi
 }
 
 // GetContextWindow returns the context window for the given model.
-// Respects CLAUDE_CODE_MAX_CONTEXT_TOKENS env override.
-func (mc *ModelCapabilitiesCache) GetContextWindow(model string) int64 {
-	// Environment variable override
-	if override := os.Getenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS"); override != "" {
-		if val, err := strconv.ParseInt(override, 10, 64); err == nil && val > 0 {
-			return val
-		}
+// If override > 0, uses the override value instead of the model's natural limit.
+func (mc *ModelCapabilitiesCache) GetContextWindow(model string, override int64) int64 {
+	// Config/env override takes priority
+	if override > 0 {
+		return override
 	}
 
 	caps := mc.GetModelCapabilities(model)
@@ -134,13 +131,11 @@ func (mc *ModelCapabilitiesCache) GetContextWindow(model string) int64 {
 }
 
 // GetMaxOutputTokens returns the max output tokens for the given model.
-// Respects CLAUDE_CODE_MAX_OUTPUT_TOKENS env override.
-func (mc *ModelCapabilitiesCache) GetMaxOutputTokens(model string) int64 {
-	// Environment variable override
-	if override := os.Getenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS"); override != "" {
-		if val, err := strconv.ParseInt(override, 10, 64); err == nil && val > 0 {
-			return val
-		}
+// If override > 0, uses the override value instead of the model's natural limit.
+func (mc *ModelCapabilitiesCache) GetMaxOutputTokens(model string, override int64) int64 {
+	// Config/env override takes priority
+	if override > 0 {
+		return override
 	}
 
 	caps := mc.GetModelCapabilities(model)

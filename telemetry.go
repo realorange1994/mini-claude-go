@@ -30,12 +30,17 @@ type TelemetryManager struct {
 }
 
 // NewTelemetryManager creates a telemetry manager.
-func NewTelemetryManager() *TelemetryManager {
+// disabled=true prevents all telemetry recording.
+// Env var CLAUDE_CODE_TELEMETRY_DISABLED is a fallback for backward compatibility.
+func NewTelemetryManager(disabled bool) *TelemetryManager {
 	dir := filepath.Join(".claude", "telemetry")
 	os.MkdirAll(dir, 0o755)
 
-	enabled := true
-	if v := os.Getenv("CLAUDE_CODE_TELEMETRY_DISABLED"); v == "1" || v == "true" {
+	enabled := !disabled
+	// Additional env var fallback (for backward compatibility)
+	if !enabled {
+		// already disabled by caller
+	} else if v := os.Getenv("CLAUDE_CODE_TELEMETRY_DISABLED"); v == "1" || v == "true" {
 		enabled = false
 	}
 
@@ -167,7 +172,7 @@ func (t *TelemetryManager) SetEnabled(enabled bool) {
 
 // handleTelemetry handles the /telemetry slash command.
 func handleTelemetry(args []string) {
-	tm := NewTelemetryManager()
+	tm := NewTelemetryManager(false)
 	tm.LoadFromFile()
 
 	if len(args) == 0 {

@@ -1241,7 +1241,7 @@ func NewContextWindowTracker(model string, threshold float64, buffer int) *Conte
 func modelContextWindow(model string) int {
 	// Priority 0: Global model capabilities cache (set by agent loop)
 	if globalModelCaps != nil {
-		if ctx := globalModelCaps.GetContextWindow(model); ctx > 0 {
+		if ctx := globalModelCaps.GetContextWindow(model, 0); ctx > 0 {
 			return int(ctx)
 		}
 	}
