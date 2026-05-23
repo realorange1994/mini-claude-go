@@ -117,10 +117,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		cmd.Env = append(os.Environ(), env...)
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-	cmd.Stdin = nil
+	cmd.Stdin = nil // Disconnect stdin — interactive commands will stall
 
 	cmd.SysProcAttr = setupExecProcessGroupAttr()
 
@@ -146,17 +143,52 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		_ = setupWindowsJobObject(cmd, maxMemoryMB, maxCPUMS)
 	}
 
+	// Read stdout and stderr concurrently with stall detection.
+	// When stdin is nil and a command waits for input (e.g. sudo password),
+	// output stalls. We detect this and kill the process early.
+	stdoutPipe, _ := cmd.StdoutPipe()
+	stderrPipe, _ := cmd.StderrPipe()
+
+	type pipeResult struct {
+		data string
+	}
+	outCh := make(chan pipeResult, 1)
+	errCh := make(chan pipeResult, 1)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+
+	go func() {
+		io.Copy(&stdoutBuf, stdoutPipe)
+		outCh <- pipeResult{stdoutBuf.String()}
+	}()
+	go func() {
+		io.Copy(&stderrBuf, stderrPipe)
+		errCh <- pipeResult{stderrBuf.String()}
+	}()
+
+	// Stall detection: if the process produces no output after 15 seconds
+	// and is still running, it's likely waiting for interactive input.
+	stallTimer := time.NewTimer(15 * time.Second)
+	defer stallTimer.Stop()
+
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
 	}()
 
+	// Collect output so far when we need to return early
+	collectOutput := func() (string, string) {
+		// Give pipe readers a moment to finish after kill
+		time.Sleep(50 * time.Millisecond)
+		stdout := stdoutBuf.String()
+		stderr := stderrBuf.String()
+		return stdout, stderr
+	}
+
 	select {
-	case <-time.After(timeout):
-		killExecProcessTree(cmd)
-		<-done
-		return makeExecResult(stdoutBuf.String(), stderrBuf.String()+"\n[exec timeout: command killed after "+timeout.String()+"]", 137), nil
 	case err := <-done:
+		// Process completed normally
+		stallTimer.Stop()
 		exitCode := 0
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
@@ -165,7 +197,45 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 				exitCode = 1
 			}
 		}
-		return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
+		stdout, stderr := collectOutput()
+		return makeExecResult(stdout, stderr, exitCode), nil
+
+	case <-stallTimer.C:
+		// 15s with no completion — check if process has produced any output.
+		// If it's running with no output at all, likely waiting for input.
+		if stdoutBuf.Len() == 0 && stderrBuf.Len() == 0 {
+			killExecProcessTree(cmd)
+			<-done
+			stdout, stderr := collectOutput()
+			return makeExecResult(stdout, stderr+"\n[exec stall: command produced no output for 15s — likely waiting for interactive input. Stdin is disconnected. Try non-interactive flags: -y, --yes, --force, or pipe input via exec-with-input.]", 1), nil
+		}
+		// Some output was produced — reset stall timer and wait for timeout
+		stallTimer.Reset(timeout)
+		select {
+		case err := <-done:
+			stallTimer.Stop()
+			exitCode := 0
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					exitCode = 1
+				}
+			}
+			stdout, stderr := collectOutput()
+			return makeExecResult(stdout, stderr, exitCode), nil
+		case <-stallTimer.C:
+			killExecProcessTree(cmd)
+			<-done
+			stdout, stderr := collectOutput()
+			return makeExecResult(stdout, stderr+"\n[exec timeout: command killed after "+timeout.String()+"]", 137), nil
+		}
+
+	case <-time.After(timeout):
+		killExecProcessTree(cmd)
+		<-done
+		stdout, stderr := collectOutput()
+		return makeExecResult(stdout, stderr+"\n[exec timeout: command killed after "+timeout.String()+"]", 137), nil
 	}
 }
 

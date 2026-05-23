@@ -324,8 +324,11 @@ func (t *LispExecTool) executeExec(ctx context.Context, params map[string]any) T
 		exprBuilder.WriteString(")")
 	}
 
-	// Add working-dir
+	// Add working-dir (translate POSIX paths on Windows)
 	if wd, ok := params["working_dir"].(string); ok && wd != "" {
+		if runtime.GOOS == "windows" {
+			wd = PosixToWindowsPath(wd)
+		}
 		exprBuilder.WriteString(fmt.Sprintf(" :working-dir %s", lispQuote(wd)))
 	}
 
