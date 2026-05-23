@@ -102,7 +102,7 @@ func main() {
 	}
 	if cfg.EffortLevel == "fast" {
 		if *model == "" {
-			*model = "claude-sonnet-4-20250514"
+			*model = getDefaultSonnetModel()
 		}
 	}
 

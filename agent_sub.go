@@ -575,13 +575,13 @@ func resolveModelAlias(modelInput string, parentModel string) string {
 		switch alias {
 		case "sonnet":
 			envKey = "ANTHROPIC_DEFAULT_SONNET_MODEL"
-			fallback = "claude-sonnet-4-20250514"
+			fallback = getDefaultSonnetModel()
 		case "opus":
 			envKey = "ANTHROPIC_DEFAULT_OPUS_MODEL"
-			fallback = "claude-opus-4-20250514"
+			fallback = getDefaultOpusModel()
 		case "haiku":
 			envKey = "ANTHROPIC_DEFAULT_HAIKU_MODEL"
-			fallback = "claude-haiku-4-20250514"
+			fallback = getDefaultHaikuModel()
 		}
 		if resolved := os.Getenv(envKey); resolved != "" {
 			return resolved

@@ -640,7 +640,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		extractionState:     NewExtractionState(),
 		hooks:               cfg.Hooks,
 		shellHooks:          LoadAllHooks(cfg.ProjectDir),
-		sonnetModel:         "claude-sonnet-4-20250514",
+		sonnetModel:         getDefaultSonnetModel(),
 		errorReporter:       NewErrorReporter(),
 		featureFlags:        NewFeatureFlagStore(),
 		announcedMCPServers: make(map[string]bool),
