@@ -655,7 +655,7 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 			}(outputFile)
 			return ToolResult{
 				Output: fmt.Sprintf(
-					"Command timed out after %dms and is continuing in the background.\n"+
+					"Command timed out after %dms. Process continues in background.\n"+
 						"Task ID: %s\nOutput file: %s\n"+
 						"Use the task_output tool to check results when ready.",
 					timeoutMs, taskID, outputFile),
@@ -665,9 +665,10 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		// Fallback: no callback — return timeout info (process continues)
 		return ToolResult{
 			Output: fmt.Sprintf(
-				"Error: command timed out after %dms and is continuing in the background.\nIncrease timeout or use run_in_background=true for long-running commands.",
+				"Command timed out after %dms. Process continues in background.\n"+
+					"Increase timeout or use run_in_background=true for long-running commands.",
 				timeoutMs),
-			IsError: true,
+			IsError: false,
 		}
 	case <-ctx.Done():
 		// Context cancelled: user interrupt (Ctrl+C). Kill the process.
@@ -678,9 +679,9 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		<-errCh
 		return ToolResult{Output: "Interrupted by user", IsError: true}
 	case stall := <-stallCh:
-		// Stall detected: the process is waiting for input but stdin is disconnected.
-		// Instead of killing, move the process to background so it can continue
-		// running (e.g., if the user provides input via another mechanism).
+		// Stall detected: output stopped growing and the tail matches a known
+		// interactive prompt pattern. The process may be waiting for input.
+		// Move to background so the agent can decide next steps.
 		if cmd.Process == nil {
 			return ToolResult{Output: "Error: command process is nil, cannot background.", IsError: true}
 		}
@@ -690,7 +691,7 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 			if errText != "" {
 				return ToolResult{
 					Output: fmt.Sprintf(
-						"Interactive prompt detected (pattern: %s). Failed to move to background: %s",
+						"Command may be waiting for input (pattern: %s). Failed to register as background task: %s",
 						stall.matchedPattern, errText),
 					IsError: true,
 				}
@@ -738,27 +739,23 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 			}(outputFile)
 			return ToolResult{
 				Output: fmt.Sprintf(
-					"Command moved to background \u2014 interactive prompt detected (PID %d).\n"+
-						"Detected pattern: %s\n\n"+
-						"Suggestions:\n"+
-						"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)\n"+
-						"  - For sudo: use 'echo password | sudo -S cmd' instead\n"+
-						"  - For SSH: use StrictHostKeyChecking=no\n\n"+
+					"Command may be waiting for input (PID %d).\n"+
+						"Matched pattern: %s\n\n"+
+						"If the command needs input, provide it via a non-interactive approach.\n"+
+						"You can also continue to wait or end the background task.\n\n"+
 						"Task ID: %s\nOutput file: %s\n"+
 						"Use the task_output tool to check results when ready.",
 					pid, stall.matchedPattern, taskID, outputFile),
 				IsError: false,
 			}
 		}
-		// Fallback: no callback \u2014 return stall info (process continues in background)
+		// Fallback: no callback — return stall info (process continues in background)
 		return ToolResult{
 			Output: fmt.Sprintf(
-				"Command moved to background \u2014 interactive prompt detected (PID %d).\n"+
-					"Detected pattern: %s\n\n"+
-					"Suggestions:\n"+
-					"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)\n"+
-					"  - For sudo: use 'echo password | sudo -S cmd' instead\n"+
-					"  - For SSH: use StrictHostKeyChecking=no",
+				"Command may be waiting for input (PID %d).\n"+
+					"Matched pattern: %s\n\n"+
+					"If the command needs input, provide it via a non-interactive approach.\n"+
+					"You can also continue to wait or end the background task.",
 				pid, stall.matchedPattern),
 			IsError: false,
 		}

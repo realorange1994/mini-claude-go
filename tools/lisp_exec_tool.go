@@ -494,14 +494,17 @@ func formatExecResult(lispResult string) ToolResult {
 
 	var output strings.Builder
 
-	// Background mode: command moved to background instead of killed
+	// Background mode: command still running in background
 	if background != "" && background != "0" {
-		output.WriteString("[Command moved to background]\n")
+		output.WriteString("[Command still running in background]\n")
 		if stallReason != "" {
 			output.WriteString(stallReason)
-			output.WriteString("\n\n")
+			output.WriteString("\n")
 		}
 		if stdout != "" {
+			if output.Len() > 0 {
+				output.WriteString("\n")
+			}
 			output.WriteString(stdout)
 		}
 		if stderr != "" {

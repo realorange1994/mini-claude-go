@@ -316,13 +316,14 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 			// Stall period with no completion — check if process has produced any output.
 			pid := cmd.Process.Pid
 			if stdoutBuf.Len() == 0 && stderrBuf.Len() == 0 {
-				// No output at all — likely waiting for interactive input.
-				// Move to background instead of killing. The done goroutine
-				// will reap the zombie when the process eventually exits.
+				// No output at all after stall period. The process may be waiting for
+				// input, or it may still be processing (e.g., compilation). Return
+				// early with status info so the agent can decide next steps.
 				reason := fmt.Sprintf(
-					"Command produced no output for %s — likely waiting for interactive input. "+
-						"Process moved to background (PID %d). "+
-						"Try non-interactive flags: -y, --yes, --force, or pipe input via exec-with-input.",
+					"Command has been running for %s with no output yet. "+
+						"It may still be processing or waiting for input. "+
+						"Process continues in background (PID %d). "+
+						"If it needs stdin, use exec-with-input or non-interactive flags (-y, --yes, --force).",
 					stallTimeout, pid)
 				return makeBgResult("", "", pid, reason), nil
 			}
@@ -349,24 +350,24 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 				}
 				return makeResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
 			case <-stallTimer.C:
-				// Timeout with some output — move to background
+				// Timeout with some output — process may still be running
 				stdout := stdoutBuf.String()
 				stderr := stderrBuf.String()
 				reason := fmt.Sprintf(
-					"Command timed out after %s but produced output — moved to background (PID %d). "+
-						"It may still be running.",
+					"Command timed out after %s. Process continues in background (PID %d). "+
+						"Use exec-kill to stop it, or wait for it to finish.",
 					timeout, pid)
 				return makeBgResult(stdout, stderr, pid, reason), nil
 			}
 
 		case <-time.After(timeout):
-			// Hard timeout — move to background instead of killing
+			// Hard timeout — process may still be running
 			pid := cmd.Process.Pid
 			stdout := stdoutBuf.String()
 			stderr := stderrBuf.String()
 			reason := fmt.Sprintf(
-				"Command timed out after %s — moved to background (PID %d). "+
-					"It may still be running.",
+				"Command timed out after %s. Process continues in background (PID %d). "+
+					"Use exec-kill to stop it, or wait for it to finish.",
 				timeout, pid)
 			return makeBgResult(stdout, stderr, pid, reason), nil
 		}
