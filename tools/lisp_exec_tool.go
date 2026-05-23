@@ -138,9 +138,10 @@ type LispExecTool struct{}
 func (*LispExecTool) Name() string { return "lisp_exec" }
 
 func (*LispExecTool) Description() string {
-	return "Execute commands without shell dependency (pure Go via os/exec). " +
+	return "Execute SYSTEM COMMANDS / PROGRAMS (like bash, go, python, npm) — " +
+		"NOT Lisp evaluation. This tool runs external programs via os/exec, " +
+		"NOT a Lisp interpreter. Use this to run command-line tools, not to evaluate code. " +
 		"Safer than exec: no shell injection, no shell syntax parsing. " +
-		"Use for running programs directly (go test, node, python, etc.). " +
 		"Returns structured plist with :stdout, :stderr, :exit-code. " +
 		"Supports resource limits (memory, CPU), timeouts, and environment variables. " +
 		"For shell features (pipes, redirects, glob expansion), use exec instead."
@@ -149,10 +150,13 @@ func (*LispExecTool) Description() string {
 func (*LispExecTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
+		"description": "Runs external system programs via os/exec. NOT a Lisp evaluator. " +
+			"Do NOT use this to evaluate Lisp code — use lisp_eval for that.",
 		"properties": map[string]any{
 			"command": map[string]any{
 				"type":        "string",
-				"description": "Command to execute (program name or path). Required for exec and which operations.",
+				"description": "System program to execute (e.g. go, ls, python, npm). " +
+					"This is a program PATH lookup, NOT Lisp code evaluation.",
 			},
 			"args": map[string]any{
 				"type":        "array",
