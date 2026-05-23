@@ -266,21 +266,17 @@ Supported references:
 
 ## Configuration
 
-Configuration priority: **CLI flags > environment variables > `.claude/settings.json` > `~/.claude/settings.json`**
+miniClaudeCode-go follows a **convention over configuration** philosophy: sensible defaults are hard-coded, and you only need to configure what differs from those defaults.
 
-### Environment Variables
+### Priority Order
 
-```bash
-export ANTHROPIC_API_KEY="your-api-key"
-# or
-export ANTHROPIC_AUTH_TOKEN="your-api-key"
-export ANTHROPIC_BASE_URL="https://api.anthropic.com"
-export ANTHROPIC_MODEL="claude-sonnet-4-20250514"
-```
+**CLI flags > `.claude/settings.json` (project) > `~/.claude/settings.json` (home) > environment variables > hard-coded defaults**
+
+Project-level settings override home-level settings. Environment variables are retained as a fallback for backward compatibility but are never preferred over explicit configuration.
 
 ### Settings File
 
-Configuration is stored in `.claude/settings.json` (project-level) or `~/.claude/settings.json` (home directory):
+Configuration is stored in `.claude/settings.json` (project-level, overrides home) or `~/.claude/settings.json` (home directory, used as fallback):
 
 ```json
 {
@@ -288,8 +284,88 @@ Configuration is stored in `.claude/settings.json` (project-level) or `~/.claude
     "ANTHROPIC_AUTH_TOKEN": "your-api-key",
     "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
     "ANTHROPIC_MODEL": "claude-sonnet-4-20250514"
+  },
+  "runtime": {
+    "effort_level": "fast",
+    "prefer_non_streaming": false,
+    "exit_after_stop_delay": "5m",
+    "telemetry_disabled": false
+  },
+  "models": {
+    "default_opus_model": "claude-opus-4-5-20250610",
+    "default_sonnet_model": "claude-sonnet-4-20250514",
+    "default_haiku_model": "claude-haiku-4-5-20250610"
+  },
+  "tokens": {
+    "max_context_tokens": 1000000,
+    "max_output_tokens": 64000
+  },
+  "tools": {
+    "git_bash_path": "C:\\Program Files\\Git\\bin\\bash.exe"
   }
 }
+```
+
+### Runtime Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `runtime.effort_level` | string | `""` | Set to `"fast"` to use a cheaper/faster model |
+| `runtime.prefer_non_streaming` | bool | `false` | Force non-streaming API mode |
+| `runtime.exit_after_stop_delay` | string | `""` | Idle timeout before auto-exit (e.g. `"5m"`, `"30s"`) |
+| `runtime.telemetry_disabled` | bool | `false` | Disable telemetry collection |
+
+### Model Defaults
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `models.default_opus_model` | `claude-opus-4-5-20250610` | Model resolved by the `opus` alias |
+| `models.default_sonnet_model` | `claude-sonnet-4-20250514` | Model resolved by the `sonnet` alias |
+| `models.default_haiku_model` | `claude-haiku-4-5-20250610` | Model resolved by the `haiku` alias |
+
+### Token Limits
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `tokens.max_context_tokens` | int | `0` (use model default) | Override context window size for all models |
+| `tokens.max_output_tokens` | int | `0` (use model default) | Override max output tokens for all models |
+
+When set to `0`, the model's natural limits from the built-in capability table are used. Non-zero values override those limits globally.
+
+### Tool Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `tools.git_bash_path` | string | `""` (auto-detect) | Path to Git Bash on Windows (e.g. `C:\Program Files\Git\bin\bash.exe`) |
+
+### Environment Variables (Fallback)
+
+Environment variables are supported for backward compatibility but are **not preferred** over settings file values. They are only used when the corresponding settings file field is empty or not set:
+
+```bash
+# Authentication (category 1/2 — still env-first)
+export ANTHROPIC_API_KEY="your-api-key"
+export ANTHROPIC_AUTH_TOKEN="your-api-key"
+export ANTHROPIC_BASE_URL="https://api.anthropic.com"
+export ANTHROPIC_MODEL="claude-sonnet-4-20250514"
+
+# Runtime (category 3 — settings.json preferred)
+export CLAUDE_CODE_PREFER_NON_STREAMING=1
+export CLAUDE_CODE_EFFORT_LEVEL=fast
+export CLAUDE_CODE_EXIT_AFTER_STOP_DELAY=5m
+export CLAUDE_CODE_TELEMETRY_DISABLED=1
+
+# Model aliases (category 4 — settings.json preferred)
+export CLAUDE_DEFAULT_OPUS_MODEL=claude-opus-4-5-20250610
+export CLAUDE_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
+export CLAUDE_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20250610
+
+# Token limits (category 4 — settings.json preferred)
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
+
+# Tool-specific (category 5 — settings.json preferred)
+export CLAUDE_CODE_GIT_BASH_PATH="C:\Program Files\Git\bin\bash.exe"
 ```
 
 ### MCP Configuration
