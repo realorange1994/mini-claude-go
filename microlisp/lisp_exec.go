@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -132,7 +133,35 @@ func lispEnvToGoSlice(v *Value) []string {
 
 // executeCommand runs a command with the given parameters.
 func executeCommand(command string, cmdArgs []string, workingDir string, env []string, stdin string, timeout time.Duration, maxMemoryMB int64, maxCPUMS int64) (*Value, error) {
-	cmd := exec.Command(command, cmdArgs...)
+	// Detect shell builtins or shell syntax and auto-wrap with bash -c.
+	// This handles cases like "cd /home/work", "export FOO=bar", "source script", etc.
+	cmdName := command
+	cmdArgsList := cmdArgs
+
+	if needShellWrap(command) || containsShellSyntax(cmdArgs) {
+		cmdName, cmdArgsList = wrapShellBuiltin(command, cmdArgs)
+	}
+
+	// Special case: "cd /some/path" alone → change working dir for this exec call.
+	// Since each exec is stateless, cd alone only affects this invocation.
+	// The workingDir is used to set cmd.Dir so the child starts in that directory.
+	if command == "cd" && len(cmdArgs) >= 1 && !containsShellSyntax(cmdArgs) {
+		targetDir := cmdArgs[0]
+		if workingDir == "" {
+			workingDir = targetDir
+		} else {
+			if !filepath.IsAbs(targetDir) {
+				workingDir = filepath.Join(workingDir, targetDir)
+			} else {
+				workingDir = targetDir
+			}
+		}
+		// cd with no further commands: just run pwd to verify the path is accessible
+		cmdName = "bash"
+		cmdArgsList = []string{"-c", "cd " + targetDir + " && pwd"}
+	}
+
+	cmd := exec.Command(cmdName, cmdArgsList...)
 
 	if workingDir != "" {
 		cmd.Dir = workingDir
@@ -695,4 +724,53 @@ func builtinExecPipeKill(args []*Value) (*Value, error) {
 	killExecProcessTree(pipe.cmd)
 
 	return globalEnv.bindings["#t"], nil
+}
+
+// ─── shell builtin auto-detection ────────────────────────────────────────────
+
+// shellBuiltins is a set of common POSIX shell builtins that are not
+// standalone executables. If the command matches one of these, we
+// auto-wrap it with "bash -c '...'" so it can execute.
+var shellBuiltins = map[string]bool{
+	"cd": true, "export": true, "source": true, "alias": true,
+	"unalias": true, "set": true, "unset": true, "readonly": true,
+	"local": true, "declare": true, "typeset": true, "eval": true,
+	"exec": true, "ulimit": true, "umask": true,
+	"trap": true, "return": true, "exit": true, "shift": true,
+	"break": true, "continue": true, "wait": true, "jobs": true,
+	"fg": true, "bg": true, "disown": true, "history": true,
+	"shopt": true, "bind": true, "builtin": true, "command": true,
+	"enable": true, "help": true, "let": true, "logout": true,
+	"mapfile": true, "readarray": true, "read": true, "type": true,
+	"hash": true, "true": true, "false": true, "test": true,
+	"times": true,
+}
+
+// needShellWrap checks if a command is likely to be a shell builtin.
+func needShellWrap(cmd string) bool {
+	return shellBuiltins[strings.ToLower(cmd)]
+}
+
+// containsShellSyntax checks if any argument contains shell syntax
+// that requires a shell to interpret (pipes, redirects, &&, ||, etc.).
+func containsShellSyntax(args []string) bool {
+	shellChars := []string{"|", ">", "<", "&&", "||", ";", "$(", "`", ">>", ">&", "2>", "1>", "<<<"}
+	for _, a := range args {
+		for _, s := range shellChars {
+			if strings.Contains(a, s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wrapShellBuiltin wraps a command and its arguments into a bash -c invocation.
+// Returns ("bash", []string{"-c", "cmd arg1 arg2 ..."}).
+func wrapShellBuiltin(command string, args []string) (string, []string) {
+	shellCmd := command
+	for _, a := range args {
+		shellCmd += " " + a
+	}
+	return "bash", []string{"-c", shellCmd}
 }
