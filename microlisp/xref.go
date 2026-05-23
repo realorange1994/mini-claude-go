@@ -21,15 +21,15 @@ import (
 
 // XRefEntry describes one reference from a caller to a callee.
 type XRefEntry struct {
-	Caller    string // function that contains the reference
-	Callee    string // function being referenced
-	File      string // source file containing the reference
-	Line      int    // 1-based line number
-	Kind      string // "builtin", "stdlib", "special", "helper"
-	Snippet   string // the source line text (trimmed)
+	Caller  string // function that contains the reference
+	Callee  string // function being referenced
+	File    string // source file containing the reference
+	Line    int    // 1-based line number
+	Kind    string // "builtin", "stdlib", "special", "helper"
+	Snippet string // the source line text (trimmed)
 }
 
-var xrefIndex []XRefEntry // flat list of all references
+var xrefIndex []XRefEntry         // flat list of all references
 var xrefByCallee map[string][]int // callee name -> indices into xrefIndex
 var xrefByCaller map[string][]int // caller name -> indices into xrefIndex
 var xrefBuilt bool

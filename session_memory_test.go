@@ -500,7 +500,7 @@ func TestIsSessionMemoryTemplateOnly(t *testing.T) {
 	if !IsSessionMemoryTemplateOnly(defaultSessionMemoryTemplate) {
 		t.Error("default template should be recognized as template-only")
 	}
-	if IsSessionMemoryTemplateOnly(defaultSessionMemoryTemplate+"\n- Some content") {
+	if IsSessionMemoryTemplateOnly(defaultSessionMemoryTemplate + "\n- Some content") {
 		t.Error("template with content should not be recognized as template-only")
 	}
 	if !IsSessionMemoryTemplateOnly(strings.TrimSpace(defaultSessionMemoryTemplate)) {

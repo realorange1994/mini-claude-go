@@ -31,15 +31,15 @@ type TodoListState interface {
 // TodoList holds the agent's structured task list.
 // It is updated by TodoWriteTool and its content is injected into the system prompt.
 type TodoList struct {
-	mu                    sync.RWMutex
-	Items                 []TodoItem
-	turnsSinceLastWrite   int
-	turnsSinceLastRemind  int
-	reminderMessageShown  bool
+	mu                   sync.RWMutex
+	Items                []TodoItem
+	turnsSinceLastWrite  int
+	turnsSinceLastRemind int
+	reminderMessageShown bool
 }
 
 const (
-	todoReminderTurnsSinceWrite  = 10
+	todoReminderTurnsSinceWrite       = 10
 	todoReminderTurnsBetweenReminders = 10
 )
 
@@ -227,7 +227,9 @@ func (t *TodoWriteTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *TodoWriteTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *TodoWriteTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *TodoWriteTool) Execute(params map[string]any) ToolResult {
 	todosRaw, ok := params["todos"].([]any)

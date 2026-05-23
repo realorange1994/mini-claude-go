@@ -11,15 +11,15 @@ import (
 
 func makeHookSummary(hookLabel string, hookCount int, preventedContinuation bool, totalDurationMs int) *HookSummary {
 	return &HookSummary{
-		Type:                 "system",
-		Subtype:              "stop_hook_summary",
-		HookLabel:            hookLabel,
-		HookCount:            hookCount,
-		HookInfos:            []any{},
-		HookErrors:           []any{},
+		Type:                  "system",
+		Subtype:               "stop_hook_summary",
+		HookLabel:             hookLabel,
+		HookCount:             hookCount,
+		HookInfos:             []any{},
+		HookErrors:            []any{},
 		PreventedContinuation: preventedContinuation,
-		HasOutput:            false,
-		TotalDurationMs:      totalDurationMs,
+		HasOutput:             false,
+		TotalDurationMs:       totalDurationMs,
 	}
 }
 

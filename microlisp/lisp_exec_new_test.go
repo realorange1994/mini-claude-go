@@ -118,10 +118,10 @@ func TestWrapShellBuiltin(t *testing.T) {
 
 func TestExtractCwdFromStdout(t *testing.T) {
 	tests := []struct {
-		name       string
-		stdout     string
-		wantClean  string
-		wantCwd    string
+		name      string
+		stdout    string
+		wantClean string
+		wantCwd   string
 	}{
 		{"no sentinel", "hello world", "hello world", ""},
 		{"sentinel at end", "output\n__SHELL_CWD__:/tmp\n", "output", "/tmp"},

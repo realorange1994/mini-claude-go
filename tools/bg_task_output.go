@@ -99,16 +99,16 @@ func (cb *CircularBuffer) Len() int {
 
 // BgTaskProgress is a snapshot of a background task's progress.
 type BgTaskProgress struct {
-	TotalLines     int64
-	TotalBytes     int64
-	LastActivity   time.Time
-	IsComplete     bool
-	ExitCode       int32  // -1 means not yet exited
-	Last5Lines     string // last 5 lines for quick preview
-	Last100Lines   string // last 100 lines for recent output
-	Description    string // current activity description from agent
-	TokenCount     int    // total token usage from agent
-	ToolUseCount   int    // number of tool calls made
+	TotalLines   int64
+	TotalBytes   int64
+	LastActivity time.Time
+	IsComplete   bool
+	ExitCode     int32  // -1 means not yet exited
+	Last5Lines   string // last 5 lines for quick preview
+	Last100Lines string // last 100 lines for recent output
+	Description  string // current activity description from agent
+	TokenCount   int    // total token usage from agent
+	ToolUseCount int    // number of tool calls made
 }
 
 // BgTaskOutput manages output for background tasks (exec, agent).
@@ -124,25 +124,25 @@ type BgTaskProgress struct {
 //   - Progress polling via file tail reading for file-mode tasks
 //   - Thread-safe concurrent writes
 type BgTaskOutput struct {
-	mu          sync.Mutex
-	taskID      string
-	outputPath  string       // file path for output
-	stdoutFile  *os.File     // non-nil in file mode
-	stderrFile  *os.File     // non-nil in file mode
+	mu         sync.Mutex
+	taskID     string
+	outputPath string   // file path for output
+	stdoutFile *os.File // non-nil in file mode
+	stderrFile *os.File // non-nil in file mode
 
 	// Pipe mode buffers
-	memoryBuffer  *CircularBuffer  // recent lines (pipe mode only)
-	memoryBytes   int64            // total bytes in memory mode
-	spillFile     *os.File         // file for overflow (pipe mode)
-	spillPath     string
+	memoryBuffer *CircularBuffer // recent lines (pipe mode only)
+	memoryBytes  int64           // total bytes in memory mode
+	spillFile    *os.File        // file for overflow (pipe mode)
+	spillPath    string
 
 	// Progress tracking (atomic-safe fields)
-	totalLines    int64     // atomic: total newline count
-	totalBytes    int64     // atomic: total bytes written
-	lastActivityMs int64    // atomic: unix millis of last write
-	description   string    // current activity description
-	isComplete    int32     // atomic: 1 = task finished
-	exitCode      int32     // atomic: process exit code (-1 = not exited)
+	totalLines     int64  // atomic: total newline count
+	totalBytes     int64  // atomic: total bytes written
+	lastActivityMs int64  // atomic: unix millis of last write
+	description    string // current activity description
+	isComplete     int32  // atomic: 1 = task finished
+	exitCode       int32  // atomic: process exit code (-1 = not exited)
 
 	// Tool usage stats
 	tokenCount   int
@@ -171,9 +171,9 @@ func NewBgTaskOutput(config BgTaskOutputConfig) *BgTaskOutput {
 	}
 
 	b := &BgTaskOutput{
-		taskID:     config.TaskID,
-		fileMode:   config.FileMode,
-		exitCode:   -1,
+		taskID:   config.TaskID,
+		fileMode: config.FileMode,
+		exitCode: -1,
 	}
 
 	if config.FileMode {

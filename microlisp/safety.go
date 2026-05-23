@@ -265,4 +265,3 @@ type EvalResourceStats struct {
 	HeapUsedKB int64
 	LimitsHit  string // empty if no limit was hit, or description of which limit
 }
-

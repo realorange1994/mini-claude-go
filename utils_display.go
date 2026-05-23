@@ -8,15 +8,15 @@ import "strconv"
 
 // HookSummary represents a system stop hook summary message.
 type HookSummary struct {
-	Type                 string
-	Subtype              string
-	HookLabel            string
-	HookCount            int
-	HookInfos            []any
-	HookErrors           []any
+	Type                  string
+	Subtype               string
+	HookLabel             string
+	HookCount             int
+	HookInfos             []any
+	HookErrors            []any
 	PreventedContinuation bool
-	HasOutput            bool
-	TotalDurationMs      int
+	HasOutput             bool
+	TotalDurationMs       int
 }
 
 // IsLabeledHookSummary returns true if the message is a labeled hook summary.
@@ -90,13 +90,13 @@ func CollapseHookSummaries(messages []any) []any {
 
 // ToolUseGroup represents a grouping of consecutive tool uses.
 type ToolUseGroup struct {
-	ID           string
-	Name         string
-	Input        string
-	Output       string
-	Status       string
-	IsGrouped    bool
-	ToolUses     []ToolUseEntry
+	ID        string
+	Name      string
+	Input     string
+	Output    string
+	Status    string
+	IsGrouped bool
+	ToolUses  []ToolUseEntry
 }
 
 // ToolUseEntry represents a single tool use invocation.

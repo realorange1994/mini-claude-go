@@ -47,8 +47,8 @@ func (*LispEvalTool) InputSchema() map[string]any {
 				"description": "Lisp expression to evaluate (e.g. (+ 1 2), (car '(1 2 3))). This is Lisp CODE, NOT a shell command. For system commands, use lisp_exec. For source/xref operations: use a PLAIN function name only (e.g. \"car\"). For help/skill: use a topic name like \"arithmetic\" or \"ffi\".",
 			},
 			"operation": map[string]any{
-				"type": "string",
-				"enum": []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list", "xref", "xref-list", "skill", "define"},
+				"type":        "string",
+				"enum":        []string{"eval", "reset", "help", "examples", "eval_file", "lint", "source", "source-list", "xref", "xref-list", "skill", "define"},
 				"description": `Action: eval (default, evaluate expression), reset (clear state), help (topic docs), examples (code samples), skill (usage guide — expression="ffi"/"ops"/"xref" or empty for full), define (function signature — params, return types, usage), source (view function source — expression=plain name), source-list (browse indexed functions), xref (call graph — expression=plain name), xref-list (browse all xrefs), eval_file (run .lisp file), lint (check syntax)`,
 			},
 			"file": map[string]any{
@@ -60,14 +60,14 @@ func (*LispEvalTool) InputSchema() map[string]any {
 				"enum":        []string{"default", "strict", "unlimited"},
 				"description": "Resource limit profile for safety: 'default' (1M steps, 30s, 256MB heap) for normal use; 'strict' (100K steps, 10s, 64MB heap) for untrusted code; 'unlimited' disables all limits (REPL mode only). Defaults to 'default'.",
 			},
-				"offset": map[string]any{
-					"type":        "integer",
-					"description": "Zero-based line offset for source code display, or entry offset for source-list pagination (default: 0).",
-				},
-				"limit": map[string]any{
-					"type":        "integer",
-					"description": "Max lines to return for source code display, or max entries for source-list (default: 50).",
-				},
+			"offset": map[string]any{
+				"type":        "integer",
+				"description": "Zero-based line offset for source code display, or entry offset for source-list pagination (default: 0).",
+			},
+			"limit": map[string]any{
+				"type":        "integer",
+				"description": "Max lines to return for source code display, or max entries for source-list (default: 50).",
+			},
 		},
 		"required": []string{},
 	}

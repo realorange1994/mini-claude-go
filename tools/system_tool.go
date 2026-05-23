@@ -13,7 +13,7 @@ import (
 // SystemTool provides system information and monitoring.
 type SystemTool struct{}
 
-func (*SystemTool) Name() string    { return "system" }
+func (*SystemTool) Name() string { return "system" }
 func (*SystemTool) Description() string {
 	return "Get system information. Supports info (full system overview), uname, df (disk), free (memory), top (processes), uptime, who, w, hostname, and arch. On Windows, uses PowerShell cmdlets."
 }
@@ -40,7 +40,9 @@ func (*SystemTool) InputSchema() map[string]any {
 	}
 }
 
-func (*SystemTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*SystemTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (*SystemTool) Execute(params map[string]any) ToolResult {
 	return systemExecute(context.Background(), params)
@@ -146,11 +148,11 @@ func systemUname(params map[string]any) ToolResult {
 			args = strings.Fields(flags)
 		}
 		if len(args) == 0 || (len(args) == 1 && args[0] == "-a") {
-				out, err := runPowershellCombined(
-				"$h = $env:COMPUTERNAME; "+
-					"$os = (Get-CimInstance Win32_OperatingSystem).Caption -replace 'Microsoft ', ''; "+
-					"$v = (Get-CimInstance Win32_OperatingSystem).Version; "+
-					"$arch = (Get-CimInstance Win32_Processor)[0].Name; "+
+			out, err := runPowershellCombined(
+				"$h = $env:COMPUTERNAME; " +
+					"$os = (Get-CimInstance Win32_OperatingSystem).Caption -replace 'Microsoft ', ''; " +
+					"$v = (Get-CimInstance Win32_OperatingSystem).Version; " +
+					"$arch = (Get-CimInstance Win32_Processor)[0].Name; " +
 					"Write-Output \"Windows $h $os $v $arch\"")
 			if err != nil {
 				return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, string(out)), IsError: true}

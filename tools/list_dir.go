@@ -12,7 +12,7 @@ import (
 // ListDirTool lists directory contents with optional recursion.
 type ListDirTool struct{}
 
-func (*ListDirTool) Name() string        { return "list_dir" }
+func (*ListDirTool) Name() string { return "list_dir" }
 func (*ListDirTool) Description() string {
 	return "List directory contents with file details. " +
 		"ALWAYS use list_dir to explore directories. Prefer over exec('ls') or exec('dir'). " +
@@ -46,7 +46,9 @@ func (*ListDirTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ListDirTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*ListDirTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *ListDirTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
 	select {
@@ -190,33 +192,33 @@ func listDirRecursive(root string, maxEntries int, showHidden bool) ([]string, i
 
 func isIgnoredDir(name string) bool {
 	ignored := map[string]bool{
-		".git":         true,
-		".svn":         true,
-		".hg":          true,
-		".bzr":         true,
-		".jj":          true,
-		".sl":          true,
-		".claude":      true,
-		"node_modules": true,
-		"__pycache__":  true,
-		".venv":        true,
-		"venv":         true,
-		".tox":         true,
-		".mypy_cache":  true,
-		".pytest_cache":true,
-		".ruff_cache":  true,
-		".coverage":    true,
-		"htmlcov":      true,
-		".cargo":       true,
-		".rustup":      true,
-		"target":       true,
-		".gradle":      true,
-		".dart_tool":   true,
-		".cache":       true,
-		"dist":         true,
-		"build":        true,
-		"out":          true,
-		".DS_Store":    true,
+		".git":          true,
+		".svn":          true,
+		".hg":           true,
+		".bzr":          true,
+		".jj":           true,
+		".sl":           true,
+		".claude":       true,
+		"node_modules":  true,
+		"__pycache__":   true,
+		".venv":         true,
+		"venv":          true,
+		".tox":          true,
+		".mypy_cache":   true,
+		".pytest_cache": true,
+		".ruff_cache":   true,
+		".coverage":     true,
+		"htmlcov":       true,
+		".cargo":        true,
+		".rustup":       true,
+		"target":        true,
+		".gradle":       true,
+		".dart_tool":    true,
+		".cache":        true,
+		"dist":          true,
+		"build":         true,
+		"out":           true,
+		".DS_Store":     true,
 	}
 	return ignored[name]
 }

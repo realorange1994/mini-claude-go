@@ -92,7 +92,6 @@ func TestTeammateModesNoDuplicates(t *testing.T) {
 	}
 }
 
-
 // -- Upstream Quality: Exact-value and ordering tests
 
 func TestEditorModesExactLength(t *testing.T) {

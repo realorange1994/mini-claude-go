@@ -197,7 +197,6 @@ func TestStripTagNoTag(t *testing.T) {
 	}
 }
 
-
 // ─── maxBodySize constant ───────────────────────────────────────────────────
 
 func TestMaxBodySize(t *testing.T) {

@@ -12,8 +12,10 @@ import (
 // ProcessTool provides process management (list, kill, pkill, pgrep, top, pstree).
 type ProcessTool struct{}
 
-func (*ProcessTool) Name() string        { return "process" }
-func (*ProcessTool) Description() string { return "Process management and monitoring. Supports list (ps), kill, pkill, pgrep, top, and pstree operations. On Windows, uses PowerShell cmdlets." }
+func (*ProcessTool) Name() string { return "process" }
+func (*ProcessTool) Description() string {
+	return "Process management and monitoring. Supports list (ps), kill, pkill, pgrep, top, and pstree operations. On Windows, uses PowerShell cmdlets."
+}
 
 func (*ProcessTool) InputSchema() map[string]any {
 	return map[string]any{
@@ -69,7 +71,9 @@ func (*ProcessTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ProcessTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*ProcessTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (*ProcessTool) Execute(params map[string]any) ToolResult {
 	operation, _ := params["operation"].(string)

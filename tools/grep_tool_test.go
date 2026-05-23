@@ -235,8 +235,8 @@ func TestGrepToolPermissions(t *testing.T) {
 func TestGrepInvalidOutputMode(t *testing.T) {
 	tool := &GrepTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":      "hello",
-		"output_mode":  "invalid_mode",
+		"pattern":     "hello",
+		"output_mode": "invalid_mode",
 	})
 	if !result.IsError {
 		t.Error("expected error for invalid output_mode")
@@ -250,9 +250,9 @@ func TestGrepValidOutputModes(t *testing.T) {
 	for _, mode := range []string{"content", "files_with_matches", "count"} {
 		tool := &GrepTool{}
 		result := tool.Execute(map[string]any{
-			"pattern":      "nonexistent_xyz",
-			"output_mode":  mode,
-			"path":         t.TempDir(),
+			"pattern":     "nonexistent_xyz",
+			"output_mode": mode,
+			"path":        t.TempDir(),
 		})
 		if result.IsError {
 			t.Errorf("valid mode '%s' should not error, got: %s", mode, result.Output)
@@ -371,8 +371,8 @@ func TestContextParsingBDominatesC(t *testing.T) {
 func TestContextParsingAliasParams(t *testing.T) {
 	// context_before/context_after should work as aliases for -B/-A
 	params := map[string]any{
-		"context_before":  float64(1),
-		"context_after":   float64(4),
+		"context_before": float64(1),
+		"context_after":  float64(4),
 	}
 	ctxBefore := parseIntParam(params, "-B")
 	if ctxBefore == 0 {
@@ -559,13 +559,13 @@ func TestGrepOffsetSkipsMatchGroupsNotLines(t *testing.T) {
 
 	tool := &GrepTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":      "MATCH",
-		"path":         dir,
-		"output_mode":  "content",
-		"-B":           float64(1),
-		"-A":           float64(1),
-		"head_limit":   float64(0), // unlimited
-		"offset":       float64(1), // skip first match group
+		"pattern":     "MATCH",
+		"path":        dir,
+		"output_mode": "content",
+		"-B":          float64(1),
+		"-A":          float64(1),
+		"head_limit":  float64(0), // unlimited
+		"offset":      float64(1), // skip first match group
 	})
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Output)
@@ -587,13 +587,13 @@ func TestGrepHeadLimitMatchGroupsNotLines(t *testing.T) {
 
 	tool := &GrepTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":      "MATCH",
-		"path":         dir,
-		"output_mode":  "content",
-		"-B":           float64(1),
-		"-A":           float64(1),
-		"head_limit":   float64(1), // only first match
-		"offset":       float64(0),
+		"pattern":     "MATCH",
+		"path":        dir,
+		"output_mode": "content",
+		"-B":          float64(1),
+		"-A":          float64(1),
+		"head_limit":  float64(1), // only first match
+		"offset":      float64(0),
 	})
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Output)
@@ -621,13 +621,13 @@ func TestGrepOffsetPlusHeadLimitCombined(t *testing.T) {
 
 	tool := &GrepTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":      "MATCH",
-		"path":         dir,
-		"output_mode":  "content",
-		"-B":           float64(1),
-		"-A":           float64(0),
-		"head_limit":   float64(2),
-		"offset":       float64(1),
+		"pattern":     "MATCH",
+		"path":        dir,
+		"output_mode": "content",
+		"-B":          float64(1),
+		"-A":          float64(0),
+		"head_limit":  float64(2),
+		"offset":      float64(1),
 	})
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Output)
@@ -656,13 +656,13 @@ func TestGrepBeforeContextNotSkippedByOffset(t *testing.T) {
 
 	tool := &GrepTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":      "MATCH",
-		"path":         dir,
-		"output_mode":  "content",
-		"-B":           float64(1),
-		"-A":           float64(1),
-		"head_limit":   float64(0),
-		"offset":       float64(1),
+		"pattern":     "MATCH",
+		"path":        dir,
+		"output_mode": "content",
+		"-B":          float64(1),
+		"-A":          float64(1),
+		"head_limit":  float64(0),
+		"offset":      float64(1),
 	})
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Output)

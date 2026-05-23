@@ -111,12 +111,12 @@ func Search(cfg SearchConfig) SearchResult {
 // searcher holds reusable buffers across multiple file searches,
 // eliminating per-file allocations like ripgrep's SearchWorker pattern.
 type searcher struct {
-	re          *regexp.Regexp
-	cfg         SearchConfig
-	multiline   bool
-	scannerBuf  []byte // reusable scanner buffer (64KB)
-	binCheckBuf []byte // reusable binary check buffer (8KB)
-	readBuf     []byte // reusable read buffer for multiline (32KB)
+	re            *regexp.Regexp
+	cfg           SearchConfig
+	multiline     bool
+	scannerBuf    []byte // reusable scanner buffer (64KB)
+	binCheckBuf   []byte // reusable binary check buffer (8KB)
+	readBuf       []byte // reusable read buffer for multiline (32KB)
 	literalPrefix []byte // fast-scan literal prefix extracted from regex
 }
 
@@ -636,7 +636,7 @@ func (s *searcher) searchFileContentMultiline(f *os.File, relPath string, st *se
 // byte offset after each \n. This enables O(log n) line-number lookup.
 func buildNewlineIndex(data []byte) []int {
 	// Pre-allocate: average line is ~80 bytes, so estimate len(data)/80 lines
-	estimated := len(data) / 40 + 2
+	estimated := len(data)/40 + 2
 	offsets := make([]int, 0, estimated)
 	offsets = append(offsets, 0) // line 1 starts at offset 0
 	for i, b := range data {
@@ -730,4 +730,3 @@ func makeRelative(root string, entry WalkEntry) string {
 func filepathToSlash(p string) string {
 	return strings.ReplaceAll(p, "\\", "/")
 }
-

@@ -14,9 +14,9 @@ var ruleSources = []string{
 	"localSettings",   // .claude/settings.local.json
 	"flagSettings",    // feature flag overrides
 	"policySettings",  // managed/enterprise policy
-	"cliArg",         // CLI --allowed-tools/--disallowed-tools
-	"command",        // command-specific
-	"session",        // session-specific
+	"cliArg",          // CLI --allowed-tools/--disallowed-tools
+	"command",         // command-specific
+	"session",         // session-specific
 }
 
 // RuleStore stores permission rules by source and behavior.

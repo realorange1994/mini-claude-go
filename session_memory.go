@@ -50,30 +50,30 @@ _Step by step, what was attempted and done? Very terse summary for each step._
 	// Token budget constants — reduced from 20000/60000 to improve cache hit rates.
 	// For a coding agent, most sections (Learnings, Key Results, Worklog) are
 	// redundant with git/file state. Keeping Current State and Errors is sufficient.
-	maxTokensPerSection           = 2500
-	maxTotalSessionMemoryTokens   = 10000
+	maxTokensPerSection         = 2500
+	maxTotalSessionMemoryTokens = 10000
 
 	// Entry expiration: state entries expire after 7 days,
 	// other categories expire after 30 days.
-	entryExpirationState     = 7 * 24 * time.Hour
-	entryExpirationOther      = 30 * 24 * time.Hour
+	entryExpirationState = 7 * 24 * time.Hour
+	entryExpirationOther = 30 * 24 * time.Hour
 
 	// Max entries per category (to prevent unbounded growth)
-	maxStateEntries     = 20
-	maxDecisionEntries  = 30
+	maxStateEntries      = 20
+	maxDecisionEntries   = 30
 	maxPreferenceEntries = 20
-	maxReferenceEntries = 50
-	maxTestEntries      = 20
+	maxReferenceEntries  = 50
+	maxTestEntries       = 20
 )
 
 // ─── MemoryEntry ─────────────────────────────────────────────────────────────
 
 // MemoryEntry represents a single memory note.
 type MemoryEntry struct {
-	Category   string    // "preference" | "decision" | "state" | "reference" | "test"
-	Content    string    // the actual note text
-	Timestamp  time.Time // when it was created
-	Source     string    // "user" | "assistant" | "auto" | "disk"
+	Category  string    // "preference" | "decision" | "state" | "reference" | "test"
+	Content   string    // the actual note text
+	Timestamp time.Time // when it was created
+	Source    string    // "user" | "assistant" | "auto" | "disk"
 }
 
 // maxEntriesForCategory returns the max entries limit for a given category.
@@ -683,9 +683,9 @@ func (sm *SessionMemory) parseMarkdownEntries(data string) []MemoryEntry {
 			}
 			entries = append(entries, MemoryEntry{
 				Category:  currentCategory,
-				Content:  content,
+				Content:   content,
 				Timestamp: lastTimestamp,
-				Source:   "disk",
+				Source:    "disk",
 			})
 		}
 	}
@@ -910,9 +910,9 @@ func createMemoryFileCanUseTool(memoryPath string) CanUseToolFn {
 //   - toolCallsBetweenUpdates: 3 (minimum tool calls between updates)
 
 const (
-	minimumMessageTokensToInit  = 20000
-	minimumTokensBetweenUpdate  = 10000
-	toolCallsBetweenUpdates     = 3
+	minimumMessageTokensToInit = 20000
+	minimumTokensBetweenUpdate = 10000
+	toolCallsBetweenUpdates    = 3
 )
 
 // ExtractionState tracks when the next extraction should happen.

@@ -875,8 +875,8 @@ type SearchMode int
 
 const (
 	SearchAdded   SearchMode = iota // lines that were added
-	SearchRemoved                    // lines that were removed
-	SearchChanged                    // lines that were added or removed
+	SearchRemoved                   // lines that were removed
+	SearchChanged                   // lines that were added or removed
 )
 
 // HistorySearchResult represents a search match in a specific version.

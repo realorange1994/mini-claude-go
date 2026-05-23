@@ -1334,7 +1334,7 @@ func TestNormalizeWhitespaceUnicodePreservation(t *testing.T) {
 	}{
 		{"CJK characters preserved", "你好\n\n\n世界", "你好\n\n世界"},
 		{"emoji preserved", "Hello 🌍\n\n\nWorld  ", "Hello 🌍\n\nWorld"},
-		{"accented chars preserved", "café\n\n\trésumé  ", "café\n\n\trésumé"}, // leading tab on line preserved, trailing space trimmed
+		{"accented chars preserved", "café\n\n\trésumé  ", "café\n\n\trésumé"},                  // leading tab on line preserved, trailing space trimmed
 		{"unicode whitespace not trimmed (only space/tab)", "hello\xc2\xa0\n", "hello\xc2\xa0"}, // non-breaking space not trimmed
 		{"BOM preserved (not stripped by normalizeWhitespace)", "\uFEFFhello\n\nworld", "\uFEFFhello\n\nworld"},
 	}
@@ -1701,8 +1701,8 @@ func TestNormalizeAPIMessagesHoistToolResultsAfterMerge(t *testing.T) {
 			Role: anthropic.MessageParamRoleAssistant,
 			Content: []anthropic.ContentBlockParamUnion{
 				{OfToolUse: &anthropic.ToolUseBlockParam{
-					ID:   "tool-1",
-					Name: "read_file",
+					ID:    "tool-1",
+					Name:  "read_file",
 					Input: map[string]any{},
 				}},
 				{OfText: &anthropic.TextBlockParam{Text: "Reading file..."}},
@@ -1741,8 +1741,8 @@ func TestNormalizeAPIMessagesToolResultHoistedToMessageFront(t *testing.T) {
 			Role: anthropic.MessageParamRoleAssistant,
 			Content: []anthropic.ContentBlockParamUnion{
 				{OfToolUse: &anthropic.ToolUseBlockParam{
-					ID:   "t1",
-					Name: "write_file",
+					ID:    "t1",
+					Name:  "write_file",
 					Input: map[string]any{"path": "test.txt", "content": "hello"},
 				}},
 			},

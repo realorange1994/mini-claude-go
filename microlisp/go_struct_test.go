@@ -30,15 +30,15 @@ func TestParseGoTypeBuiltins(t *testing.T) {
 
 func TestParseGoTypePointer(t *testing.T) {
 	cases := []struct {
-		spec    string
-		kind    reflect.Kind
-		elem    reflect.Kind
+		spec string
+		kind reflect.Kind
+		elem reflect.Kind
 	}{
 		{"*int", reflect.Ptr, reflect.Int},
 		{"*string", reflect.Ptr, reflect.String},
 		{"*bool", reflect.Ptr, reflect.Bool},
 		{"*float64", reflect.Ptr, reflect.Float64},
-		{"**int", reflect.Ptr, reflect.Ptr},    // nested pointer
+		{"**int", reflect.Ptr, reflect.Ptr}, // nested pointer
 	}
 	for _, c := range cases {
 		typ, err := parseGoType(c.spec)
@@ -92,7 +92,7 @@ func TestParseGoTypeMap(t *testing.T) {
 		{"map[int]string", reflect.Int, reflect.String},
 		{"map[int]bool", reflect.Int, reflect.Bool},
 		{"map[string]*int", reflect.String, reflect.Ptr}, // pointer value
-		{"map[int][]string", reflect.Int, reflect.Slice},  // slice value
+		{"map[int][]string", reflect.Int, reflect.Slice}, // slice value
 	}
 	for _, c := range cases {
 		typ, err := parseGoType(c.spec)

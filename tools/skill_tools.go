@@ -12,8 +12,10 @@ type ReadSkillTool struct {
 	Loader *skills.Loader
 }
 
-func (*ReadSkillTool) Name() string        { return "read_skill" }
-func (*ReadSkillTool) Description() string { return "Read a skill's SKILL.md file. Use list_skills first to discover available skills." }
+func (*ReadSkillTool) Name() string { return "read_skill" }
+func (*ReadSkillTool) Description() string {
+	return "Read a skill's SKILL.md file. Use list_skills first to discover available skills."
+}
 
 func (*ReadSkillTool) InputSchema() map[string]any {
 	return map[string]any{
@@ -28,7 +30,9 @@ func (*ReadSkillTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ReadSkillTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*ReadSkillTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *ReadSkillTool) Execute(params map[string]any) ToolResult {
 	if t.Loader == nil {
@@ -53,8 +57,10 @@ type ListSkillsTool struct {
 	Loader *skills.Loader
 }
 
-func (*ListSkillsTool) Name() string        { return "list_skills" }
-func (*ListSkillsTool) Description() string { return "List available skills. Shows name, description, and availability status." }
+func (*ListSkillsTool) Name() string { return "list_skills" }
+func (*ListSkillsTool) Description() string {
+	return "List available skills. Shows name, description, and availability status."
+}
 
 func (*ListSkillsTool) InputSchema() map[string]any {
 	return map[string]any{
@@ -64,7 +70,9 @@ func (*ListSkillsTool) InputSchema() map[string]any {
 	}
 }
 
-func (*ListSkillsTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*ListSkillsTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *ListSkillsTool) Execute(params map[string]any) ToolResult {
 	if t.Loader == nil {
@@ -131,7 +139,9 @@ func (*SearchSkillsTool) InputSchema() map[string]any {
 	}
 }
 
-func (*SearchSkillsTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*SearchSkillsTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *SearchSkillsTool) Execute(params map[string]any) ToolResult {
 	if t.Loader == nil {

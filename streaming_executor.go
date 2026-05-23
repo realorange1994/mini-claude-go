@@ -27,14 +27,14 @@ var packageSessionID string
 //   - Non-Bash errors are returned normally without affecting siblings
 //   - Synthetic error messages for cancelled tools include description
 type StreamingToolExecutor struct {
-	registry   *tools.Registry
-	gate       *PermissionGate
-	hooks      HookConfig // shell command hooks loaded from settings
-	snapshots  *SnapshotHistory // file version history for auto-snapshots
+	registry  *tools.Registry
+	gate      *PermissionGate
+	hooks     HookConfig       // shell command hooks loaded from settings
+	snapshots *SnapshotHistory // file version history for auto-snapshots
 
 	// Tool queue
-	tools     []*TrackedTool
-	toolsSeq  int32 // tracks number of tools added, for Wait() counting
+	tools      []*TrackedTool
+	toolsSeq   int32 // tracks number of tools added, for Wait() counting
 	processing atomic.Bool
 	mu         sync.Mutex
 
@@ -62,9 +62,9 @@ type StreamingToolExecutor struct {
 type toolStatus string
 
 const (
-	toolQueued     toolStatus = "queued"
-	toolExecuting  toolStatus = "executing"
-	toolCompleted  toolStatus = "completed"
+	toolQueued    toolStatus = "queued"
+	toolExecuting toolStatus = "executing"
+	toolCompleted toolStatus = "completed"
 )
 
 type toolExecResult struct {
@@ -79,13 +79,13 @@ type toolExecResult struct {
 // TrackedTool tracks a tool through its execution lifecycle,
 // matching upstream's TrackedTool design.
 type TrackedTool struct {
-	tc               ToolCallInfo
-	tool             tools.Tool
-	status           toolStatus
+	tc                ToolCallInfo
+	tool              tools.Tool
+	status            toolStatus
 	isConcurrencySafe bool
-	index            int
-	execDoneCh       chan struct{} // signaled when unsafe tool execution completes
-	cancelled        bool           // marked when cancelled by sibling error
+	index             int
+	execDoneCh        chan struct{} // signaled when unsafe tool execution completes
+	cancelled         bool          // marked when cancelled by sibling error
 }
 
 // NewStreamingToolExecutor creates a new executor.
@@ -261,11 +261,11 @@ func (e *StreamingToolExecutor) dispatch(idx int, toolCalls *[]ToolCallInfo) {
 	}
 
 	tracked := &TrackedTool{
-		tc:               tc,
-		tool:             tool,
-		status:           toolQueued,
+		tc:                tc,
+		tool:              tool,
+		status:            toolQueued,
 		isConcurrencySafe: e.isConcurrencySafe(tc.Name, tc.Arguments),
-		index:            idx,
+		index:             idx,
 	}
 	e.tools = append(e.tools, tracked)
 	e.toolsSeq++

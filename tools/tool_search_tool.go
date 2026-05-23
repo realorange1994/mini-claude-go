@@ -27,7 +27,7 @@ Returns tool names, descriptions, and input schemas for matched tools.`
 
 func (t *ToolSearchTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"query"},
 		"properties": map[string]any{
 			"query": map[string]any{
@@ -42,7 +42,9 @@ func (t *ToolSearchTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *ToolSearchTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *ToolSearchTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *ToolSearchTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
 	select {

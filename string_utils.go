@@ -106,10 +106,10 @@ func normalizeFullWidthSpace(s string) string {
 // when a size limit is exceeded. Prevents crashes from large outputs.
 // Ported from upstream stringUtils.ts EndTruncatingAccumulator.
 type EndTruncatingAccumulator struct {
-	maxSize          int
-	content          strings.Builder
-	isTruncated      bool
-	totalBytesRecv   int
+	maxSize        int
+	content        strings.Builder
+	isTruncated    bool
+	totalBytesRecv int
 }
 
 // NewEndTruncatingAccumulator creates a new accumulator with the given max size.

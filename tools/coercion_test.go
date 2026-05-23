@@ -468,11 +468,11 @@ func TestCoerceArgumentsTrimBeforeParsing(t *testing.T) {
 	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"count":   map[string]any{"type": "integer"},
-			"ratio":   map[string]any{"type": "number"},
-			"flag":    map[string]any{"type": "boolean"},
-			"items":   map[string]any{"type": "array"},
-			"config":  map[string]any{"type": "object"},
+			"count":  map[string]any{"type": "integer"},
+			"ratio":  map[string]any{"type": "number"},
+			"flag":   map[string]any{"type": "boolean"},
+			"items":  map[string]any{"type": "array"},
+			"config": map[string]any{"type": "object"},
 		},
 	}
 

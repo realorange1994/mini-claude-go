@@ -190,12 +190,12 @@ func detectUTF16BEWithoutBOM(data []byte) bool {
 }
 
 // DetectCharset detects the charset of file content using multiple strategies:
-// 1. BOM detection (UTF-16 LE/BE, UTF-8 BOM)
-// 2. Heuristic UTF-16 LE/BE detection (null-byte patterns)
-// 3. UTF-8 validity check
-// 4. East Asian encoding detection (GBK, Big5, Shift-JIS, EUC-KR, EUC-JP)
-//    via decode-and-score analysis
-// 5. charset.DetermineEncoding (byte-pattern analysis from golang.org/x/net/html/charset)
+//  1. BOM detection (UTF-16 LE/BE, UTF-8 BOM)
+//  2. Heuristic UTF-16 LE/BE detection (null-byte patterns)
+//  3. UTF-8 validity check
+//  4. East Asian encoding detection (GBK, Big5, Shift-JIS, EUC-KR, EUC-JP)
+//     via decode-and-score analysis
+//  5. charset.DetermineEncoding (byte-pattern analysis from golang.org/x/net/html/charset)
 //
 // Returns the detected encoding name (lowercase, e.g. "gbk", "utf-8", "shift_jis")
 // and whether the detection is considered certain.
@@ -679,8 +679,8 @@ func encodeUTF16BE(s string) []byte {
 	out[0] = 0xFE // BOM high byte
 	out[1] = 0xFF // BOM low byte
 	for i, v := range u16s {
-		out[2+2*i] = byte(v >> 8)   // high byte
-		out[2+2*i+1] = byte(v)      // low byte
+		out[2+2*i] = byte(v >> 8) // high byte
+		out[2+2*i+1] = byte(v)    // low byte
 	}
 	return out
 }

@@ -277,7 +277,6 @@ func stripTag(html, tag string) string {
 	return html
 }
 
-
 func extractHTMLTitle(html string) string {
 	if idx := strings.Index(strings.ToLower(html), "<title"); idx != -1 {
 		start := strings.Index(html[idx:], ">")

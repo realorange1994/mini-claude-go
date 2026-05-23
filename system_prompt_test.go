@@ -163,11 +163,11 @@ func TestFnvHashDifferentInputs(t *testing.T) {
 		"hello",
 		"world",
 		"hello world",
-		"Hello",        // case difference
-		"hello ",       // trailing space
-		"hello\n",      // trailing newline
-		"",             // empty string
-		"こんにちは",     // unicode
+		"Hello",   // case difference
+		"hello ",  // trailing space
+		"hello\n", // trailing newline
+		"",        // empty string
+		"こんにちは",   // unicode
 		"a very long string that tests the hash function with more characters to ensure good distribution",
 	}
 
@@ -197,7 +197,7 @@ func TestFnvHashKnownValues(t *testing.T) {
 		input string
 		want  uint64
 	}{
-		{"", 14695981039346656037},  // offset base
+		{"", 14695981039346656037}, // offset base
 		{"a", 12638187200555641996},
 	}
 	for _, tt := range tests {

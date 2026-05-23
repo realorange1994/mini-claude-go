@@ -34,16 +34,16 @@ type MockAnthropicServer struct {
 
 // TurnMetrics records cache token stats for a single API call.
 type TurnMetrics struct {
-	TurnNumber          int
-	InputTokens         int64
-	OutputTokens        int64
-	CacheCreationTokens int64
-	CacheReadTokens     int64
-	CacheHitRate        float64
-	SystemBlocks        int
-	HasScopeGlobal      bool
+	TurnNumber             int
+	InputTokens            int64
+	OutputTokens           int64
+	CacheCreationTokens    int64
+	CacheReadTokens        int64
+	CacheHitRate           float64
+	SystemBlocks           int
+	HasScopeGlobal         bool
 	HasCacheControlOnTools bool
-	MessageCount        int
+	MessageCount           int
 }
 
 // MockRequest stores the raw request body for verification.
@@ -183,7 +183,7 @@ func (ms *MockAnthropicServer) writeJSONResponse(w http.ResponseWriter, metrics 
 		"content": []map[string]any{
 			{"type": "text", "text": ms.respText},
 		},
-		"model":      "claude-sonnet-4-20250514",
+		"model":       "claude-sonnet-4-20250514",
 		"stop_reason": "end_turn",
 		"usage": map[string]any{
 			"input_tokens":                metrics.InputTokens,
@@ -226,7 +226,7 @@ func (ms *MockAnthropicServer) writeSSEResponse(w http.ResponseWriter, metrics T
 		"type": "content_block_stop", "index": 0,
 	})
 	writeSSE(w, "message_delta", map[string]any{
-		"type": "message_delta",
+		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": "end_turn"},
 		"usage": map[string]any{
 			"output_tokens":               metrics.OutputTokens,
@@ -485,7 +485,7 @@ func TestCacheHitRateNormalizationStability(t *testing.T) {
 			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("Read the file")},
 		},
 		{
-			Role:    anthropic.MessageParamRoleAssistant,
+			Role: anthropic.MessageParamRoleAssistant,
 			Content: []anthropic.ContentBlockParamUnion{
 				anthropic.NewTextBlock("I'll read it."),
 				{
@@ -498,7 +498,7 @@ func TestCacheHitRateNormalizationStability(t *testing.T) {
 			},
 		},
 		{
-			Role:    anthropic.MessageParamRoleUser,
+			Role: anthropic.MessageParamRoleUser,
 			Content: []anthropic.ContentBlockParamUnion{
 				{
 					OfToolResult: &anthropic.ToolResultBlockParam{
@@ -524,7 +524,7 @@ func TestCacheHitRateNormalizationStability(t *testing.T) {
 
 	// Prefix stability: add new content, previous messages unchanged
 	extended := append(second, anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleAssistant,
+		Role: anthropic.MessageParamRoleAssistant,
 		Content: []anthropic.ContentBlockParamUnion{
 			anthropic.NewTextBlock("I'll edit it."),
 			{

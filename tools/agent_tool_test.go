@@ -86,8 +86,8 @@ func TestAgentToolExecuteValid(t *testing.T) {
 		},
 	}
 	result := tool.Execute(map[string]any{
-		"prompt":       "Find all bugs",
-		"description":  "Bug finder",
+		"prompt":        "Find all bugs",
+		"description":   "Bug finder",
 		"subagent_type": "general-purpose",
 	})
 	if result.IsError {

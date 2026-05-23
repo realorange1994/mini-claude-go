@@ -34,14 +34,14 @@ const (
 
 // ClassifyResult is the output of classifyError with recovery hints.
 type ClassifyResult struct {
-	Class       ErrorClass
-	Retryable   bool
-	Compress    bool  // should_compress: compress context before retry
-	RotateKey   bool  // should_rotate_credential: try a different API key
-	Fallback    bool  // should_fallback: switch to a different provider/model
-	Message     string
-	RetryAfter  time.Duration // for rate limits with Retry-After header
-	StatusCode  int
+	Class      ErrorClass
+	Retryable  bool
+	Compress   bool // should_compress: compress context before retry
+	RotateKey  bool // should_rotate_credential: try a different API key
+	Fallback   bool // should_fallback: switch to a different provider/model
+	Message    string
+	RetryAfter time.Duration // for rate limits with Retry-After header
+	StatusCode int
 }
 
 func (c ErrorClass) String() string {

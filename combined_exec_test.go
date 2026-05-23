@@ -19,9 +19,9 @@ func TestCombinedExecCommands(t *testing.T) {
 		{"git status && git log", false},
 		{`find . -name "*.go" | xargs wc -l`, true},
 		{"cat main.go | grep func", true},
-		{"echo test > /dev/null", true},        // writing to /dev/null is harmless
-		{"echo hello 2>&1", true},              // stderr-to-stdout redirect is safe
-		{"echo hacked > /etc/passwd", false},   // redirect to /etc is dangerous
+		{"echo test > /dev/null", true},      // writing to /dev/null is harmless
+		{"echo hello 2>&1", true},            // stderr-to-stdout redirect is safe
+		{"echo hacked > /etc/passwd", false}, // redirect to /etc is dangerous
 		{`ls || echo "no files"`, true},
 	}
 

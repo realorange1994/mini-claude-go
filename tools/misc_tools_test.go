@@ -199,8 +199,8 @@ func TestExitPlanModeToolExecuteNotInPlan(t *testing.T) {
 func TestExitPlanModeToolExecuteApproved(t *testing.T) {
 	var setMode string
 	tool := &ExitPlanModeTool{
-		GetMode: func() string { return "plan" },
-		SetMode: func(m string) { setMode = m },
+		GetMode:        func() string { return "plan" },
+		SetMode:        func(m string) { setMode = m },
 		GetPrePlanMode: func() string { return "auto" },
 	}
 	result := tool.Execute(map[string]any{"approved": true, "summary": "Implement feature"})
@@ -232,8 +232,8 @@ func TestExitPlanModeToolExecuteNotApproved(t *testing.T) {
 func TestExitPlanModeToolExecuteDefaultPrePlan(t *testing.T) {
 	var setMode string
 	tool := &ExitPlanModeTool{
-		GetMode: func() string { return "plan" },
-		SetMode: func(m string) { setMode = m },
+		GetMode:        func() string { return "plan" },
+		SetMode:        func(m string) { setMode = m },
 		GetPrePlanMode: func() string { return "" },
 	}
 	result := tool.Execute(map[string]any{"approved": true})

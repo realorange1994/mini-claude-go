@@ -1168,7 +1168,7 @@ func TestStripSafeWrappersOperatorBoundary(t *testing.T) {
 		{"timeout 10 | cat", "timeout 10 | cat"},
 		{"nice -n 10 && echo done", "nice -n 10 && echo done"},
 		{"sudo rm -f /tmp/x; ls", "rm -f /tmp/x; ls"}, // sudo IS a wrapper for rm
-		{"env FOO=bar cmd", "cmd"}, // env with VAR=val still works
+		{"env FOO=bar cmd", "cmd"},                    // env with VAR=val still works
 	}
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {

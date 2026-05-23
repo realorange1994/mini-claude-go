@@ -11,10 +11,10 @@ import (
 // Returns cached values while refreshing in parallel when stale.
 // Ported from upstream memoize.ts memoizeWithTTL.
 type MemoizedWithTTL struct {
-	fn      func(args ...interface{}) interface{}
-	cache   map[string]*ttlCacheEntry
-	mu      sync.RWMutex
-	ttl     time.Duration
+	fn    func(args ...interface{}) interface{}
+	cache map[string]*ttlCacheEntry
+	mu    sync.RWMutex
+	ttl   time.Duration
 }
 
 type ttlCacheEntry struct {
@@ -176,9 +176,9 @@ func (c *lruCache) has(key string) bool {
 
 // MemoizedWithLRU is a memoized function with an LRU eviction policy.
 type MemoizedWithLRU struct {
-	fn       func(args ...interface{}) interface{}
-	keyFn    func(args ...interface{}) string
-	cache    *lruCache
+	fn    func(args ...interface{}) interface{}
+	keyFn func(args ...interface{}) string
+	cache *lruCache
 }
 
 // MemoizeWithLRU creates a new LRU-memoized function.
@@ -189,9 +189,9 @@ func MemoizeWithLRU(
 	maxSize int,
 ) *MemoizedWithLRU {
 	return &MemoizedWithLRU{
-		fn:     fn,
-		keyFn:  keyFn,
-		cache:  newLRUCache(maxSize),
+		fn:    fn,
+		keyFn: keyFn,
+		cache: newLRUCache(maxSize),
 	}
 }
 

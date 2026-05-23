@@ -27,12 +27,12 @@ type ClassifierResult struct {
 // allowed or blocked in auto mode. Modeled after Claude Code's upstream
 // yolo-classifier (auto_mode_system_prompt.txt).
 type AutoModeClassifier struct {
-	client    anthropic.Client
-	model     string
-	cache     map[string]cacheEntry
-	mu        sync.RWMutex
-	enabled   bool
-	claudeMd  string // project CLAUDE.md content for user intent context
+	client   anthropic.Client
+	model    string
+	cache    map[string]cacheEntry
+	mu       sync.RWMutex
+	enabled  bool
+	claudeMd string // project CLAUDE.md content for user intent context
 
 	// toolChoiceUnsupported tracks whether the upstream API rejected
 	// tool_choice=required/object (e.g. thinking mode on Coze proxy).
@@ -88,32 +88,32 @@ const cacheTTL = 5 * time.Minute
 // management tools that cannot cause destructive side effects.
 // Note: "git", "exec", "process" are handled separately with operation-level granularity.
 var AUTO_MODE_SAFE_TOOLS = map[string]bool{
-	"read_file":        true,
-	"glob":             true,
-	"grep":             true,
-	"list_dir":         true,
-	"tool_search":      true,
-	"brief":            true,
-	"runtime_info":     true,
-	"memory_add":       true,
-	"memory_search":    true,
-	"task_create":      true,
-	"task_list":        true,
-	"task_get":         true,
-	"task_update":      true,
-	"task_output":      true,
-	"task_stop":        true,
-	"list_mcp_tools":   true,
-	"list_skills":      true,
-	"search_skills":    true,
-	"read_skill":       true,
+	"read_file":         true,
+	"glob":              true,
+	"grep":              true,
+	"list_dir":          true,
+	"tool_search":       true,
+	"brief":             true,
+	"runtime_info":      true,
+	"memory_add":        true,
+	"memory_search":     true,
+	"task_create":       true,
+	"task_list":         true,
+	"task_get":          true,
+	"task_update":       true,
+	"task_output":       true,
+	"task_stop":         true,
+	"list_mcp_tools":    true,
+	"list_skills":       true,
+	"search_skills":     true,
+	"read_skill":        true,
 	"mcp_server_status": true,
 	// System info (all read-only)
 	"system": true,
 	// Web (all read-only)
-	"web_search":          true,
-	"web_search_scraper":  true,
-	"web_fetch":           true,
+	"web_search":         true,
+	"web_search_scraper": true,
+	"web_fetch":          true,
 	// File history (read-only + non-destructive metadata)
 	"file_history":          true,
 	"file_history_read":     true,
@@ -1117,9 +1117,9 @@ func parseFromText(text string) *ClassifierResult {
 		rest := text[idx:]
 		if colon := strings.Index(rest, ":"); colon >= 0 {
 			afterColon := rest[colon+1:]
-			if quoteStart := strings.Index(afterColon, `"`) ; quoteStart >= 0 {
+			if quoteStart := strings.Index(afterColon, `"`); quoteStart >= 0 {
 				afterQuoteStart := afterColon[quoteStart+1:]
-				if quoteEnd := strings.Index(afterQuoteStart, `"`) ; quoteEnd >= 0 {
+				if quoteEnd := strings.Index(afterQuoteStart, `"`); quoteEnd >= 0 {
 					reason = afterQuoteStart[:quoteEnd]
 				}
 			}
@@ -1282,7 +1282,6 @@ func formatActionForClassifier(toolName string, input map[string]any) string {
 	}
 	return fmt.Sprintf("Tool: %s\nParams: %s", toolName, strings.Join(parts, ", "))
 }
-
 
 // cacheKey generates a cache key from the tool name and input.
 func (c *AutoModeClassifier) cacheKey(toolName string, input map[string]any) string {

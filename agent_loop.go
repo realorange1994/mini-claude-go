@@ -36,17 +36,17 @@ import (
 type LoopTransitionReason string
 
 const (
-	TransitionModelFallback    LoopTransitionReason = "model_fallback"        // 529 overload triggered model switch
-	TransitionModelConfused    LoopTransitionReason = "model_confused"        // malformed response, retry with hint
-	TransitionToolPairing      LoopTransitionReason = "tool_pairing_error"    // 2013 error, repaired context
-	TransitionTruncatedArgs    LoopTransitionReason = "truncated_arguments"   // tool args cut off, retry with hint
-	TransitionStreamStalled    LoopTransitionReason = "stream_stalled"       // safety timeout, truncation recovery
-	TransitionContextOverflow  LoopTransitionReason = "context_overflow"     // precise token-gap reactive compact
-	TransitionContextExceeded  LoopTransitionReason = "context_exceeded"     // context length error, aggressive compact
-	TransitionEmptyResponse    LoopTransitionReason = "empty_response"       // thinking-only, nudge for output
-	TransitionMaxTokens        LoopTransitionReason = "max_tokens_escalation" // max_tokens hit, escalate and retry
-	TransitionRefusal          LoopTransitionReason = "content_refusal"      // content policy violation
-	TransitionNone             LoopTransitionReason = ""                     // normal turn (no special transition)
+	TransitionModelFallback   LoopTransitionReason = "model_fallback"        // 529 overload triggered model switch
+	TransitionModelConfused   LoopTransitionReason = "model_confused"        // malformed response, retry with hint
+	TransitionToolPairing     LoopTransitionReason = "tool_pairing_error"    // 2013 error, repaired context
+	TransitionTruncatedArgs   LoopTransitionReason = "truncated_arguments"   // tool args cut off, retry with hint
+	TransitionStreamStalled   LoopTransitionReason = "stream_stalled"        // safety timeout, truncation recovery
+	TransitionContextOverflow LoopTransitionReason = "context_overflow"      // precise token-gap reactive compact
+	TransitionContextExceeded LoopTransitionReason = "context_exceeded"      // context length error, aggressive compact
+	TransitionEmptyResponse   LoopTransitionReason = "empty_response"        // thinking-only, nudge for output
+	TransitionMaxTokens       LoopTransitionReason = "max_tokens_escalation" // max_tokens hit, escalate and retry
+	TransitionRefusal         LoopTransitionReason = "content_refusal"       // content policy violation
+	TransitionNone            LoopTransitionReason = ""                      // normal turn (no special transition)
 )
 
 // IterationBudget manages the turn budget for the agent loop.
@@ -350,70 +350,70 @@ func (a *AgentLoop) InjectNotifications(notifications []string) {
 
 // AgentLoop drives the core agentic loop.
 type AgentLoop struct {
-	config                   Config
-	registry                 *tools.Registry
-	gate                     *PermissionGate
-	context                  *ConversationContext
-	client                   anthropic.Client
-	snapshots                *SnapshotHistory
-	transcript               *transcript.Writer
-	skillTracker             *skills.SkillTracker
-	compactor                *Compactor
-	useStream                bool
-	maxToolChars             int // max chars per tool result (default 8000, matching openclacky's 4000-byte terminal budget)
-	toolTimeoutMs            int // per-tool execution timeout in ms (default 600000 = 10min)
-	maxTurns                 int // hard cap on turns (default from config.MaxTurns)
-	budget                   *IterationBudget
-	interrupted              atomic.Bool                // set by Ctrl+C handler to stop the loop
-	lastDeltasState          DeltasState                // tracks what was streamed in last attempt
-	rateLimitState           RateLimitState             // rate limit headers from API responses
-	prevTurnTokens           int                        // tracks token count from previous turn for reactive compact
-	activeSubAgents          sync.WaitGroup             // tracks running sub-agents (Wait blocks until all complete)
-	taskStore                *TaskStore                 // tracks all sub-agent tasks (bash + sub-agents)
-	agentTaskStore           *tools.AgentTaskStore      // tracks background agent tasks (with output capture)
-	currentMaxTokens         atomic.Int64               // effective max_tokens for API calls (escates on max_tokens hit)
-	notificationChan         chan string                // buffered channel for async task notifications
-	evictionDone             chan struct{}              // signals the eviction ticker goroutine to stop
-	agentNameRegistry        map[string]string          // maps short agent names to task IDs
-	agentHandleStore         *tools.AgentHandleStore    // named agent handle store for routing
-	cancelCtx                context.Context            // cancellable context for async sub-agents
-	cancelFunc               context.CancelFunc         // cancel function for async sub-agents
-	workTaskStore            *WorkTaskStore             // tracks LLM work items (TODO list)
-	agentOutput              io.Writer                  // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
-	drainPendingMessagesFunc func() []string            // called at turn boundaries to drain pending messages from parent task store
-	toolStateTracker         *ToolStateTracker          // tracks tool state for injection into system prompt
-	todoList                 *tools.TodoList            // structured task list for TodoWrite tool
-	totalInputTokens         atomic.Int64               // cumulative input tokens across all turns
-	totalOutputTokens        atomic.Int64               // cumulative output tokens across all turns
-	lastAPIInputTokens       atomic.Int64               // exact input tokens from the most recent API response
-	lastAPIOutputTokens      atomic.Int64               // exact output tokens from the most recent API response
-	totalCacheCreationTokens atomic.Int64               // cumulative cache_creation_input_tokens
-	totalCacheReadTokens     atomic.Int64               // cumulative cache_read_input_tokens
-	totalCacheEditsDeletions atomic.Int64               // cumulative tool results deleted by cache_edits (proxy for cache_deleted_input_tokens)
-	costTracker              *CostTracker               // per-model USD cost tracking with session persistence
-	cacheBreakDetector       *CacheBreakDetector        // detects KV cache breaks between API calls
-	cachedMC                 *CachedMicrocompactTracker // cache_edits tracking
-	extractionState          *ExtractionState           // session memory extraction threshold tracking
-	sonnetModel              string                    // fallback model for 529 overload (defaults to claude-sonnet-4-20250514)
-	hooks                    *HookManager              // compact pre/post hook handlers
-	shellHooks               HookConfig                // shell command hooks from settings.json
-	consecutiveContextErrors int                       // tracks consecutive context overflow errors for reactive compact
-	consecutive2013Errors   int                       // tracks consecutive 2013 tool pairing errors
-	consecutive529Errors     int                       // tracks consecutive 529 overloaded errors for model fallback
-	modelCapabilities        *ModelCapabilitiesCache   // per-model context window and capability lookup
-	consecutiveStreamFailures int                        // tracks consecutive streaming failures for non-streaming fallback
-	timeoutHintInjected      bool                       // one-shot: timeout hint injected this session (openclacky pattern)
-	inlineCompressionMode    bool                       // set during inline cache-reusing compaction (openclacky pattern)
-	toolSchemaCache          map[string]anthropic.ToolUnionParam // tool name → cached schema (avoid re-serialize)
-	toolSchemaCacheHash      uint64                    // hash of tool names for cache invalidation
-	thinkingClearLatched     bool                      // once set (>1h idle), stays true for session — clears thinking via context_management
-	lastApiCompletionTime    time.Time                 // timestamp of last successful API call (for thinking latch)
-	announcedMCPServers      map[string]bool   // servers whose instructions have been announced this session (delta tracking)
-	betaHeadersLatched       []string          // once set, stays same for session — prevents mid-session header churn
-	errorReporter              *ErrorReporter  // captures error events for analysis
-	featureFlags               *FeatureFlagStore         // feature flag store
-	lastTransition          LoopTransitionReason       // reason for the most recent loop continue
-	telemetry                  *TelemetryManager         // telemetry event tracking
+	config                    Config
+	registry                  *tools.Registry
+	gate                      *PermissionGate
+	context                   *ConversationContext
+	client                    anthropic.Client
+	snapshots                 *SnapshotHistory
+	transcript                *transcript.Writer
+	skillTracker              *skills.SkillTracker
+	compactor                 *Compactor
+	useStream                 bool
+	maxToolChars              int // max chars per tool result (default 8000, matching openclacky's 4000-byte terminal budget)
+	toolTimeoutMs             int // per-tool execution timeout in ms (default 600000 = 10min)
+	maxTurns                  int // hard cap on turns (default from config.MaxTurns)
+	budget                    *IterationBudget
+	interrupted               atomic.Bool                         // set by Ctrl+C handler to stop the loop
+	lastDeltasState           DeltasState                         // tracks what was streamed in last attempt
+	rateLimitState            RateLimitState                      // rate limit headers from API responses
+	prevTurnTokens            int                                 // tracks token count from previous turn for reactive compact
+	activeSubAgents           sync.WaitGroup                      // tracks running sub-agents (Wait blocks until all complete)
+	taskStore                 *TaskStore                          // tracks all sub-agent tasks (bash + sub-agents)
+	agentTaskStore            *tools.AgentTaskStore               // tracks background agent tasks (with output capture)
+	currentMaxTokens          atomic.Int64                        // effective max_tokens for API calls (escates on max_tokens hit)
+	notificationChan          chan string                         // buffered channel for async task notifications
+	evictionDone              chan struct{}                       // signals the eviction ticker goroutine to stop
+	agentNameRegistry         map[string]string                   // maps short agent names to task IDs
+	agentHandleStore          *tools.AgentHandleStore             // named agent handle store for routing
+	cancelCtx                 context.Context                     // cancellable context for async sub-agents
+	cancelFunc                context.CancelFunc                  // cancel function for async sub-agents
+	workTaskStore             *WorkTaskStore                      // tracks LLM work items (TODO list)
+	agentOutput               io.Writer                           // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
+	drainPendingMessagesFunc  func() []string                     // called at turn boundaries to drain pending messages from parent task store
+	toolStateTracker          *ToolStateTracker                   // tracks tool state for injection into system prompt
+	todoList                  *tools.TodoList                     // structured task list for TodoWrite tool
+	totalInputTokens          atomic.Int64                        // cumulative input tokens across all turns
+	totalOutputTokens         atomic.Int64                        // cumulative output tokens across all turns
+	lastAPIInputTokens        atomic.Int64                        // exact input tokens from the most recent API response
+	lastAPIOutputTokens       atomic.Int64                        // exact output tokens from the most recent API response
+	totalCacheCreationTokens  atomic.Int64                        // cumulative cache_creation_input_tokens
+	totalCacheReadTokens      atomic.Int64                        // cumulative cache_read_input_tokens
+	totalCacheEditsDeletions  atomic.Int64                        // cumulative tool results deleted by cache_edits (proxy for cache_deleted_input_tokens)
+	costTracker               *CostTracker                        // per-model USD cost tracking with session persistence
+	cacheBreakDetector        *CacheBreakDetector                 // detects KV cache breaks between API calls
+	cachedMC                  *CachedMicrocompactTracker          // cache_edits tracking
+	extractionState           *ExtractionState                    // session memory extraction threshold tracking
+	sonnetModel               string                              // fallback model for 529 overload (defaults to claude-sonnet-4-20250514)
+	hooks                     *HookManager                        // compact pre/post hook handlers
+	shellHooks                HookConfig                          // shell command hooks from settings.json
+	consecutiveContextErrors  int                                 // tracks consecutive context overflow errors for reactive compact
+	consecutive2013Errors     int                                 // tracks consecutive 2013 tool pairing errors
+	consecutive529Errors      int                                 // tracks consecutive 529 overloaded errors for model fallback
+	modelCapabilities         *ModelCapabilitiesCache             // per-model context window and capability lookup
+	consecutiveStreamFailures int                                 // tracks consecutive streaming failures for non-streaming fallback
+	timeoutHintInjected       bool                                // one-shot: timeout hint injected this session (openclacky pattern)
+	inlineCompressionMode     bool                                // set during inline cache-reusing compaction (openclacky pattern)
+	toolSchemaCache           map[string]anthropic.ToolUnionParam // tool name → cached schema (avoid re-serialize)
+	toolSchemaCacheHash       uint64                              // hash of tool names for cache invalidation
+	thinkingClearLatched      bool                                // once set (>1h idle), stays true for session — clears thinking via context_management
+	lastApiCompletionTime     time.Time                           // timestamp of last successful API call (for thinking latch)
+	announcedMCPServers       map[string]bool                     // servers whose instructions have been announced this session (delta tracking)
+	betaHeadersLatched        []string                            // once set, stays same for session — prevents mid-session header churn
+	errorReporter             *ErrorReporter                      // captures error events for analysis
+	featureFlags              *FeatureFlagStore                   // feature flag store
+	lastTransition            LoopTransitionReason                // reason for the most recent loop continue
+	telemetry                 *TelemetryManager                   // telemetry event tracking
 }
 
 // handle529Error processes a 529 Overloaded error. It increments the consecutive
@@ -432,7 +432,6 @@ func (a *AgentLoop) handle529Error() bool {
 	}
 	return true
 }
-
 
 // handleRefusal checks if stopReason is "refusal" (content policy filter) and
 // returns an error message if so. Matching upstream's getErrorMessageIfRefusal()
@@ -611,41 +610,41 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	}
 
 	agent := &AgentLoop{
-		config:            cfg,
-		registry:          registry,
-		gate:              nil, // set below to point to agent.config
-		context:           ctx,
-		client:            client,
-		snapshots:         cfg.FileHistory,
-		transcript:        tw,
-		skillTracker:      cfg.SkillTracker,
-		compactor:         NewCompactor(),
-		useStream:         useStream,
-		maxToolChars:      8000,
-		toolTimeoutMs:     600000, // 10 minutes
-		maxTurns:          maxTurns,
-		budget:            NewIterationBudget(maxTurns),
-		taskStore:         NewTaskStore(),
-		agentTaskStore:    tools.NewAgentTaskStore(),
-		notificationChan:  make(chan string, 64),
-		evictionDone:      make(chan struct{}),
-		agentNameRegistry: make(map[string]string),
-		agentHandleStore: tools.NewAgentHandleStore(),
-		workTaskStore:     NewWorkTaskStore(),
-		agentOutput:       os.Stderr,
-		toolStateTracker:  NewToolStateTracker(),
-		todoList:          tools.NewTodoList(),
-		cachedMC:          NewCachedMicrocompactTracker(),
-		costTracker:       NewCostTracker(),
-		cacheBreakDetector: &CacheBreakDetector{},
-		extractionState:   NewExtractionState(),
-		hooks:             cfg.Hooks,
-		shellHooks:        LoadAllHooks(cfg.ProjectDir),
-		sonnetModel:       "claude-sonnet-4-20250514",
-		errorReporter:    NewErrorReporter(),
-		featureFlags:     NewFeatureFlagStore(),
+		config:              cfg,
+		registry:            registry,
+		gate:                nil, // set below to point to agent.config
+		context:             ctx,
+		client:              client,
+		snapshots:           cfg.FileHistory,
+		transcript:          tw,
+		skillTracker:        cfg.SkillTracker,
+		compactor:           NewCompactor(),
+		useStream:           useStream,
+		maxToolChars:        8000,
+		toolTimeoutMs:       600000, // 10 minutes
+		maxTurns:            maxTurns,
+		budget:              NewIterationBudget(maxTurns),
+		taskStore:           NewTaskStore(),
+		agentTaskStore:      tools.NewAgentTaskStore(),
+		notificationChan:    make(chan string, 64),
+		evictionDone:        make(chan struct{}),
+		agentNameRegistry:   make(map[string]string),
+		agentHandleStore:    tools.NewAgentHandleStore(),
+		workTaskStore:       NewWorkTaskStore(),
+		agentOutput:         os.Stderr,
+		toolStateTracker:    NewToolStateTracker(),
+		todoList:            tools.NewTodoList(),
+		cachedMC:            NewCachedMicrocompactTracker(),
+		costTracker:         NewCostTracker(),
+		cacheBreakDetector:  &CacheBreakDetector{},
+		extractionState:     NewExtractionState(),
+		hooks:               cfg.Hooks,
+		shellHooks:          LoadAllHooks(cfg.ProjectDir),
+		sonnetModel:         "claude-sonnet-4-20250514",
+		errorReporter:       NewErrorReporter(),
+		featureFlags:        NewFeatureFlagStore(),
 		announcedMCPServers: make(map[string]bool),
-		telemetry:       NewTelemetryManager(cfg.TelemetryDisabled),
+		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 	}
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
@@ -817,40 +816,40 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	}
 
 	agent := &AgentLoop{
-		config:            cfg,
-		registry:          registry,
-		gate:              gate,
-		context:           convCtx,
-		client:            client,
-		snapshots:         cfg.FileHistory,
-		transcript:        tw,
-		skillTracker:      cfg.SkillTracker,
-		compactor:         NewCompactor(),
-		useStream:         useStream,
-		maxToolChars:      8000,
-		toolTimeoutMs:     600000, // 10 minutes
-		maxTurns:          maxTurns,
-		budget:            NewIterationBudget(maxTurns),
-		taskStore:         NewTaskStore(),
-		agentTaskStore:    tools.NewAgentTaskStore(),
-		notificationChan:  make(chan string, 64),
-		evictionDone:      make(chan struct{}),
-		agentNameRegistry: make(map[string]string),
-		agentHandleStore: tools.NewAgentHandleStore(),
-		workTaskStore:     NewWorkTaskStore(),
-		agentOutput:       os.Stderr,
-		toolStateTracker:  NewToolStateTracker(),
-		todoList:          tools.NewTodoList(),
-		cachedMC:          NewCachedMicrocompactTracker(),
-		costTracker:       NewCostTracker(),
-		cacheBreakDetector: &CacheBreakDetector{},
-		extractionState:   NewExtractionState(),
-		hooks:             cfg.Hooks,
-		shellHooks:        LoadAllHooks(cfg.ProjectDir),
-		errorReporter:    NewErrorReporter(),
-		featureFlags:     NewFeatureFlagStore(),
+		config:              cfg,
+		registry:            registry,
+		gate:                gate,
+		context:             convCtx,
+		client:              client,
+		snapshots:           cfg.FileHistory,
+		transcript:          tw,
+		skillTracker:        cfg.SkillTracker,
+		compactor:           NewCompactor(),
+		useStream:           useStream,
+		maxToolChars:        8000,
+		toolTimeoutMs:       600000, // 10 minutes
+		maxTurns:            maxTurns,
+		budget:              NewIterationBudget(maxTurns),
+		taskStore:           NewTaskStore(),
+		agentTaskStore:      tools.NewAgentTaskStore(),
+		notificationChan:    make(chan string, 64),
+		evictionDone:        make(chan struct{}),
+		agentNameRegistry:   make(map[string]string),
+		agentHandleStore:    tools.NewAgentHandleStore(),
+		workTaskStore:       NewWorkTaskStore(),
+		agentOutput:         os.Stderr,
+		toolStateTracker:    NewToolStateTracker(),
+		todoList:            tools.NewTodoList(),
+		cachedMC:            NewCachedMicrocompactTracker(),
+		costTracker:         NewCostTracker(),
+		cacheBreakDetector:  &CacheBreakDetector{},
+		extractionState:     NewExtractionState(),
+		hooks:               cfg.Hooks,
+		shellHooks:          LoadAllHooks(cfg.ProjectDir),
+		errorReporter:       NewErrorReporter(),
+		featureFlags:        NewFeatureFlagStore(),
 		announcedMCPServers: make(map[string]bool),
-		telemetry:       NewTelemetryManager(cfg.TelemetryDisabled),
+		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 	}
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
@@ -1156,17 +1155,17 @@ func (a *AgentLoop) fireStopHook(reason string, turnsUsed int, interrupted bool)
 		return
 	}
 	a.hooks.ExecuteGenericHooksQuiet(HookStop, map[string]interface{}{
-		"reason":                       reason,
-		"model":                        a.config.Model,
-		"turns":                        turnsUsed,
-		"interrupted":                  interrupted,
-		"total_input_tokens":           a.totalInputTokens.Load(),
-		"total_output_tokens":          a.totalOutputTokens.Load(),
-		"last_api_input_tokens":        a.lastAPIInputTokens.Load(),
-		"total_cache_creation_tokens":  a.totalCacheCreationTokens.Load(),
-		"total_cache_read_tokens":      a.totalCacheReadTokens.Load(),
-		"total_cache_edits_deletions":  a.totalCacheEditsDeletions.Load(),
-		"remaining_token_budget":       a.RemainingTokenBudget(),
+		"reason":                      reason,
+		"model":                       a.config.Model,
+		"turns":                       turnsUsed,
+		"interrupted":                 interrupted,
+		"total_input_tokens":          a.totalInputTokens.Load(),
+		"total_output_tokens":         a.totalOutputTokens.Load(),
+		"last_api_input_tokens":       a.lastAPIInputTokens.Load(),
+		"total_cache_creation_tokens": a.totalCacheCreationTokens.Load(),
+		"total_cache_read_tokens":     a.totalCacheReadTokens.Load(),
+		"total_cache_edits_deletions": a.totalCacheEditsDeletions.Load(),
+		"remaining_token_budget":      a.RemainingTokenBudget(),
 	})
 }
 
@@ -1454,13 +1453,13 @@ func (a *AgentLoop) Run(userMessage string) string {
 		// Hook: PreAPICall — before each API call
 		if a.hooks != nil {
 			a.hooks.ExecuteGenericHooksQuiet(HookPreAPICall, map[string]interface{}{
-				"model": a.config.Model,
+				"model":  a.config.Model,
 				"stream": a.useStream,
 			})
 		}
 
 		// Streaming vs non-streaming decision
-		streamingExecDone := false // set true when streaming executor handled tool calls
+		streamingExecDone := false       // set true when streaming executor handled tool calls
 		toolCallsAddedToContext := false // tracks if AddAssistantToolCalls was already called
 		if a.useStream {
 			// Create streaming tool executor for pipelined tool execution.
@@ -1549,13 +1548,13 @@ func (a *AgentLoop) Run(userMessage string) string {
 				return finalText
 			}
 			// Model confusion -- echoed tool syntax as text; recover by retrying
-				// Model fallback triggered: continue with new model
-				var fbErr *FallbackTriggeredError
-				if errors.As(err, &fbErr) {
-					a.out("\n[Fallback] %v -- continuing with %s\n", fbErr, fbErr.FallbackModel)
-					a.lastTransition = TransitionModelFallback
-					continue
-				}
+			// Model fallback triggered: continue with new model
+			var fbErr *FallbackTriggeredError
+			if errors.As(err, &fbErr) {
+				a.out("\n[Fallback] %v -- continuing with %s\n", fbErr, fbErr.FallbackModel)
+				a.lastTransition = TransitionModelFallback
+				continue
+			}
 			if strings.Contains(errMsg, "model confused") {
 				a.out("\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
@@ -1741,9 +1740,9 @@ func (a *AgentLoop) Run(userMessage string) string {
 		// Hook: PreAssistantMessage — before adding assistant tool calls to context
 		if a.hooks != nil {
 			a.hooks.ExecuteGenericHooksQuiet(HookPreAssistantMessage, map[string]interface{}{
-				"has_tools":   true,
-				"tool_count":  len(toolCalls),
-				"text_len":    len(textParts),
+				"has_tools":  true,
+				"tool_count": len(toolCalls),
+				"text_len":   len(textParts),
 			})
 		}
 
@@ -1774,8 +1773,8 @@ func (a *AgentLoop) Run(userMessage string) string {
 		}
 
 		if !streamingExecDone {
-				a.executeToolCallsConcurrent(toolCalls)
-			}
+			a.executeToolCallsConcurrent(toolCalls)
+		}
 
 		// Increment extraction tracking for tool calls used this turn
 		if a.extractionState != nil && len(toolCalls) > 0 {
@@ -2490,8 +2489,8 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		a.recordTokenUsageWithCache(
 			int64(collect.Usage.InputTokens), int64(collect.Usage.OutputTokens),
 			int64(collect.Usage.CacheWriteTokens), int64(collect.Usage.CacheReadTokens))
-			// Anchor the token estimate to the actual API response to prevent drift
-			a.context.SetAPITokenAnchor(int64(collect.Usage.InputTokens))
+		// Anchor the token estimate to the actual API response to prevent drift
+		a.context.SetAPITokenAnchor(int64(collect.Usage.InputTokens))
 		// Per-turn cache stats for verification
 		a.out("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
 			collect.Usage.InputTokens, collect.Usage.CacheWriteTokens, collect.Usage.CacheReadTokens, a.totalCacheReadTokens.Load())
@@ -2516,8 +2515,18 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 			apiErr = fmt.Errorf("stream ended without receiving any events")
 		}
 		a.telemetry.RecordAPICall(params.Model, true, time.Since(streamStart).Milliseconds(),
-			func() int64 { if collect.Usage != nil { return int64(collect.Usage.InputTokens) }; return 0 }(),
-			func() int64 { if collect.Usage != nil { return int64(collect.Usage.OutputTokens) }; return 0 }(),
+			func() int64 {
+				if collect.Usage != nil {
+					return int64(collect.Usage.InputTokens)
+				}
+				return 0
+			}(),
+			func() int64 {
+				if collect.Usage != nil {
+					return int64(collect.Usage.OutputTokens)
+				}
+				return 0
+			}(),
 			apiErr)
 	}
 
@@ -2527,7 +2536,6 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	if len(collect.ToolCalls) == 0 && collect.Text == "" && collect.Thinking == "" && collect.finishReason == "" {
 		return nil, nil, fmt.Errorf("stream ended without receiving any events")
 	}
-
 
 	// Check for content policy refusal (stop_reason: "refusal").
 	// Matching upstream's getErrorMessageIfRefusal() in errors.ts:1187.
@@ -2680,11 +2688,11 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 			if response.Usage.InputTokens > 0 || response.Usage.OutputTokens > 0 {
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
-					// Per-turn cache stats for verification
-					a.out("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
-						response.Usage.InputTokens, response.Usage.CacheCreationInputTokens, response.Usage.CacheReadInputTokens, a.totalCacheReadTokens.Load())
+				// Per-turn cache stats for verification
+				a.out("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
+					response.Usage.InputTokens, response.Usage.CacheCreationInputTokens, response.Usage.CacheReadInputTokens, a.totalCacheReadTokens.Load())
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
-			a.context.SetAPITokenAnchor(response.Usage.InputTokens)
+				a.context.SetAPITokenAnchor(response.Usage.InputTokens)
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
 					baseline := a.cacheBreakDetector.LastBaseline()
 					current := int64(response.Usage.CacheReadInputTokens)
@@ -2806,7 +2814,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
-			a.context.SetAPITokenAnchor(response.Usage.InputTokens)
+				a.context.SetAPITokenAnchor(response.Usage.InputTokens)
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
 					baseline := a.cacheBreakDetector.LastBaseline()
 					current := int64(response.Usage.CacheReadInputTokens)
@@ -3160,7 +3168,7 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 	}
 
 	a.context.AddToolResults(toolResults)
-					a.cacheBreakDetector.RecordChange(CacheChangeToolResult, len(toolResults))
+	a.cacheBreakDetector.RecordChange(CacheChangeToolResult, len(toolResults))
 }
 
 // truncateOutput limits tool output to maxToolChars.
@@ -3226,9 +3234,9 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	// Hook: PreToolUse — before tool execution (matches upstream's PreToolUse hook)
 	if a.hooks != nil {
 		a.hooks.ExecuteGenericHooksQuiet(HookPreToolUse, map[string]interface{}{
-			"tool_name":  toolName,
+			"tool_name":   toolName,
 			"tool_use_id": toolUseID,
-			"input":      input,
+			"input":       input,
 		})
 	}
 
@@ -5121,7 +5129,7 @@ func (a *AgentLoop) tryCompaction() {
 	var preCompactInst string
 	if a.hooks != nil {
 		hookInput := PreCompactInput{
-			Trigger:          HookTriggerAuto,
+			Trigger:            HookTriggerAuto,
 			CustomInstructions: "",
 		}
 		if hookResult, err := a.hooks.ExecutePreCompactHooks(hookInput); err == nil {

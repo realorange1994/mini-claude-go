@@ -221,10 +221,10 @@ func TestDetectContentType(t *testing.T) {
 		text string
 		want string
 	}{
-		{"", "natural"},            // empty → natural (no code indicators)
-		{"   ", "natural"},         // whitespace → natural
+		{"", "natural"},              // empty → natural (no code indicators)
+		{"   ", "natural"},           // whitespace → natural
 		{`{"key": "value"}`, "json"}, // starts with {
-		{`[1, 2, 3]`, "json"},      // starts with [
+		{`[1, 2, 3]`, "json"},        // starts with [
 		{"func main() {}", "code"},
 		{"type Foo struct {}", "code"},
 		{"class Foo:", "code"},
@@ -445,7 +445,7 @@ func TestFormatToolArgs(t *testing.T) {
 			name:     "read_file path",
 			toolName: "read_file",
 			input:    map[string]any{"file_path": "main.go"}, // extractFilePath now calls expandPath
-			want:     "", // path expanded by expandPath, platform-dependent
+			want:     "",                                     // path expanded by expandPath, platform-dependent
 		},
 		{
 			name:     "exec command",
@@ -752,11 +752,11 @@ func TestToolResultPreview(t *testing.T) {
 
 func TestCleanExecOutput(t *testing.T) {
 	tests := []struct {
-		input  string
-		want   string
+		input string
+		want  string
 	}{
-		{"plain output", "plain output"},               // no headers
-		{"trailing newline\n", "trailing newline"},     // trims trailing newline
+		{"plain output", "plain output"},           // no headers
+		{"trailing newline\n", "trailing newline"}, // trims trailing newline
 	}
 	for _, tc := range tests {
 		got := cleanExecOutput(tc.input)
@@ -775,11 +775,11 @@ func TestCleanExecOutput(t *testing.T) {
 
 func TestLimitStr(t *testing.T) {
 	tests := []struct {
-		s   string
-		max int
+		s    string
+		max  int
 		want string
 	}{
-		{"hello", 10, "hello"},             // no truncation
+		{"hello", 10, "hello"},            // no truncation
 		{"hello world", 8, "hello wo..."}, // truncate to 8 + "..."
 		{"", 5, ""},
 	}
@@ -802,8 +802,8 @@ func TestExtractFilePath(t *testing.T) {
 		want  string
 	}{
 		{map[string]any{"file_path": "main.go"}, filepath.Join(getCwd(), "main.go")}, // relative path expanded
-		{map[string]any{"path": "main.go"}, ""}, // only "file_path" key works
-		{map[string]any{"file_path": 123}, ""},  // non-string
+		{map[string]any{"path": "main.go"}, ""},                                      // only "file_path" key works
+		{map[string]any{"file_path": 123}, ""},                                       // non-string
 		{map[string]any{}, ""},
 	}
 	for _, tc := range tests {
@@ -1054,7 +1054,7 @@ func TestIsAutoAllowlisted(t *testing.T) {
 		{"read_file", map[string]any{"file_path": "/tmp/test.go"}, true},
 		{"glob", map[string]any{"pattern": "*.go"}, true},
 		{"grep", map[string]any{"pattern": "TODO"}, true},
-		{"exec", map[string]any{"command": "ls"}, true},       // "ls" is a safe exec command
+		{"exec", map[string]any{"command": "ls"}, true},        // "ls" is a safe exec command
 		{"exec", map[string]any{"command": "rm -rf /"}, false}, // dangerous
 		{"write_file", map[string]any{"file_path": "/tmp/out.txt"}, false},
 		{"edit_file", map[string]any{"file_path": "/tmp/main.go"}, false},
@@ -1727,7 +1727,7 @@ func TestEstimateMessageTokensSmartToolUse(t *testing.T) {
 		Role: "assistant",
 		Content: []anthropic.ContentBlockParamUnion{
 			{OfToolUse: &anthropic.ToolUseBlockParam{
-				Name: "read_file",
+				Name:  "read_file",
 				Input: map[string]any{"file_path": "/tmp/foo.txt"},
 			}},
 		},
@@ -1765,8 +1765,7 @@ func TestEstimateMessageTokensSmartToolResult(t *testing.T) {
 func TestEstimateMessageTokens(t *testing.T) {
 	msgs := []anthropic.MessageParam{
 		{Role: "user", Content: []anthropic.ContentBlockParamUnion{
-			{OfText: &anthropic.TextBlockParam{Text: "hello world"},
-		}}},
+			{OfText: &anthropic.TextBlockParam{Text: "hello world"}}}},
 	}
 	tokens := estimateMessageTokens(msgs)
 	// Simple char-based: totalChars/4 = 11/4 = 2
@@ -2487,7 +2486,7 @@ func TestDiffLastTwoSnapshotsPathNormalization(t *testing.T) {
 
 	// Simulate what extractFilePath + expandPath does
 	expandedPath := expandPath(fp)
-	
+
 	// Take "before" snapshot with expanded path
 	if err := h.TakeSnapshotWithDesc(expandedPath, "before"); err != nil {
 		t.Fatalf("before snapshot failed: %v", err)

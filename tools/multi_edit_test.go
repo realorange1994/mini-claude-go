@@ -79,7 +79,7 @@ func TestMultiEditEmptyEdits(t *testing.T) {
 	tool := &MultiEditTool{}
 	result := tool.Execute(map[string]any{
 		"file_path": fp,
-		"edits": []any{},
+		"edits":     []any{},
 	})
 	if !result.IsError {
 		t.Error("expected error for empty edits array")

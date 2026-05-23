@@ -607,8 +607,8 @@ func TestEstimatedTokensWithNewTypes(t *testing.T) {
 	cfg := DefaultConfig()
 	ctx := NewConversationContext(cfg)
 
-	ctx.AddUserMessage("Hello World")       // 11 chars
-	ctx.AddSummary("Short summary")          // 13 chars
+	ctx.AddUserMessage("Hello World") // 11 chars
+	ctx.AddSummary("Short summary")   // 13 chars
 
 	tokens := ctx.EstimatedTokens()
 	// ~24 chars / 4 = ~6 tokens
@@ -778,8 +778,8 @@ func TestMicroCompactEntriesDefaultValues(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		toolCalls := []map[string]any{
 			{
-				"id":   fmt.Sprintf("tool_%d", i),
-				"name": "read_file",
+				"id":    fmt.Sprintf("tool_%d", i),
+				"name":  "read_file",
 				"input": map[string]any{"path": fmt.Sprintf("file_%d.go", i)},
 			},
 		}
@@ -802,7 +802,6 @@ func TestMicroCompactEntriesDefaultValues(t *testing.T) {
 		t.Errorf("expected 3 entries cleared (8-5), got %d", cleared)
 	}
 }
-
 
 func TestMicroCompactMinCharCount(t *testing.T) {
 	ctx := NewConversationContext(DefaultConfig())
@@ -868,7 +867,6 @@ func TestMicroCompactMinCharCount(t *testing.T) {
 		t.Error("small tool result was incorrectly cleared")
 	}
 }
-
 
 func TestAttachmentContentType(t *testing.T) {
 	cfg := DefaultConfig()

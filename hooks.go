@@ -34,14 +34,14 @@ const (
 	HookPostAPICall HookEvent = "post_api_call"
 
 	// Message lifecycle hooks
-	HookPreUserMessage     HookEvent = "pre_user_message"
-	HookPostUserMessage    HookEvent = "post_user_message"
+	HookPreUserMessage       HookEvent = "pre_user_message"
+	HookPostUserMessage      HookEvent = "post_user_message"
 	HookPreAssistantMessage  HookEvent = "pre_assistant_message"
 	HookPostAssistantMessage HookEvent = "post_assistant_message"
 
 	// Error and abort hooks
-	HookOnError  HookEvent = "on_error"
-	HookOnAbort  HookEvent = "on_abort"
+	HookOnError HookEvent = "on_error"
+	HookOnAbort HookEvent = "on_abort"
 
 	// Notification and lifecycle hooks
 	HookOnNotification HookEvent = "on_notification"
@@ -76,7 +76,7 @@ const DefaultHookTimeout = 30 * time.Second
 
 // PreCompactInput is passed to PreCompact hooks.
 type PreCompactInput struct {
-	Trigger          HookTrigger
+	Trigger            HookTrigger
 	CustomInstructions string // instructions already queued for the summarizer; hooks can append
 }
 
@@ -89,7 +89,7 @@ type PreCompactOutput struct {
 // PostCompactInput is passed to PostCompact hooks.
 type PostCompactInput struct {
 	Trigger        HookTrigger
-	CompactSummary string // the summary that replaced the compacted conversation
+	CompactSummary string   // the summary that replaced the compacted conversation
 	RecoveredFiles []string // files that were re-injected post-compaction
 }
 
@@ -218,7 +218,7 @@ type HookManager struct {
 	executor *HookExecutor
 
 	// Existing compact hooks (backward compatible)
-	preCompactHooks  []struct {
+	preCompactHooks []struct {
 		name    string
 		handler PreCompactHandler
 		timeout time.Duration
@@ -448,7 +448,7 @@ func (hm *HookManager) ExecuteGenericHooksQuiet(event HookEvent, metadata map[st
 // HookHandler is the callback signature for compact hooks.
 // Called synchronously with a timeout context.
 // ctx is cancelled if the hook exceeds its timeout.
-type PreCompactHandler  func(ctx context.Context, input PreCompactInput) (PreCompactOutput, error)
+type PreCompactHandler func(ctx context.Context, input PreCompactInput) (PreCompactOutput, error)
 type PostCompactHandler func(ctx context.Context, input PostCompactInput) (PostCompactOutput, error)
 
 // ─── Shell command hook configuration ─────────────────────────────────────────
@@ -456,13 +456,13 @@ type PostCompactHandler func(ctx context.Context, input PostCompactInput) (PostC
 // HookCommand represents a shell command hook loaded from settings.json.
 // Matching upstream's HookCommand type in settings/types.ts.
 type HookCommand struct {
-	Matcher  string                 `json:"matcher"`  // tool name or glob pattern (e.g., "Bash", "Write", "Edit")
-	Command  string                 `json:"command"`  // shell command to execute
-	Shell    string                 `json:"shell,omitempty"` // "bash" (default) or "powershell"
-	Timeout  int                    `json:"timeout,omitempty"` // timeout in seconds (default: 600)
-	Async    bool                   `json:"async,omitempty"`   // run in background
-	Type     string                 `json:"type,omitempty"`    // "command" (default)
-	When     map[string]interface{} `json:"when,omitempty"`    // conditional execution
+	Matcher string                 `json:"matcher"`           // tool name or glob pattern (e.g., "Bash", "Write", "Edit")
+	Command string                 `json:"command"`           // shell command to execute
+	Shell   string                 `json:"shell,omitempty"`   // "bash" (default) or "powershell"
+	Timeout int                    `json:"timeout,omitempty"` // timeout in seconds (default: 600)
+	Async   bool                   `json:"async,omitempty"`   // run in background
+	Type    string                 `json:"type,omitempty"`    // "command" (default)
+	When    map[string]interface{} `json:"when,omitempty"`    // conditional execution
 }
 
 // HookConfig represents the hooks section in settings.json.
@@ -473,12 +473,12 @@ type HookConfig map[string][]HookCommand
 // Matching upstream's HookJSONOutput schema.
 type HookShellResult struct {
 	// Common fields
-	Continue          bool   `json:"continue,omitempty"`
-	SuppressOutput    bool   `json:"suppressOutput,omitempty"`
-	StopReason        string `json:"stopReason,omitempty"`
-	Decision          string `json:"decision,omitempty"`           // "approve" or "block"
-	Reason            string `json:"reason,omitempty"`
-	SystemMessage     string `json:"systemMessage,omitempty"`
+	Continue       bool   `json:"continue,omitempty"`
+	SuppressOutput bool   `json:"suppressOutput,omitempty"`
+	StopReason     string `json:"stopReason,omitempty"`
+	Decision       string `json:"decision,omitempty"` // "approve" or "block"
+	Reason         string `json:"reason,omitempty"`
+	SystemMessage  string `json:"systemMessage,omitempty"`
 
 	// PreToolUse specific
 	HookSpecificOutput *json.RawMessage `json:"hookSpecificOutput,omitempty"`

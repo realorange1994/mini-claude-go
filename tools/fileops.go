@@ -12,8 +12,10 @@ import (
 // FileOpsTool provides file operations (mkdir, rm, mv, cp, chmod, ln).
 type FileOpsTool struct{}
 
-func (*FileOpsTool) Name() string        { return "fileops" }
-func (*FileOpsTool) Description() string { return "File and directory operations. Supports mkdir, rm, rmrf (recursive remove), mv, cp, cpdir (recursive copy), chmod, and ln (symbolic/hard links)." }
+func (*FileOpsTool) Name() string { return "fileops" }
+func (*FileOpsTool) Description() string {
+	return "File and directory operations. Supports mkdir, rm, rmrf (recursive remove), mv, cp, cpdir (recursive copy), chmod, and ln (symbolic/hard links)."
+}
 
 func (*FileOpsTool) InputSchema() map[string]any {
 	return map[string]any{

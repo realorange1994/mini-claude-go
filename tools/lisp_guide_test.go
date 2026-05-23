@@ -461,7 +461,7 @@ func TestBuildIndexIdempotent(t *testing.T) {
 	testdataFS, _ := fs.Sub(testFS, "lisp_guide_test_data/lisp")
 
 	tool := &LispGuideTool{
-		SourceFS: sourceFS,
+		SourceFS:   sourceFS,
 		TestDataFS: testdataFS,
 		LLMCall: func(ctx context.Context, systemPrompt, userPrompt string, maxTokens int) (string, error) {
 			return "mock answer", nil

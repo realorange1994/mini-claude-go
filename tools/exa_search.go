@@ -92,10 +92,10 @@ func (*ExaSearchTool) Execute(params map[string]any) ToolResult {
 	defer cancel()
 
 	result, err := callExaMCP(ctx, "web_search_exa", map[string]any{
-		"query":              query,
-		"type":               searchType,
-		"numResults":         numResults,
-		"livecrawl":          liveCrawl,
+		"query":                query,
+		"type":                 searchType,
+		"numResults":           numResults,
+		"livecrawl":            liveCrawl,
 		"contextMaxCharacters": 10000,
 	})
 	if err != nil {

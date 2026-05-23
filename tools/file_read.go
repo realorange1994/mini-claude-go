@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-const maxFileSize = 256 * 1024 // 256 KB, matching Claude Code official
-const defaultReadLines = 2000  // default max lines to return (matching upstream)
+const maxFileSize = 256 * 1024        // 256 KB, matching Claude Code official
+const defaultReadLines = 2000         // default max lines to return (matching upstream)
 const maxReadOutputBytes = 256 * 1024 // 256KB max output size (matching upstream)
 
 // FileUnchangedStub is the prefix of the "file unchanged" dedup stub returned by read_file
@@ -28,7 +28,7 @@ func NewFileReadTool(registry *Registry) *FileReadTool {
 	return &FileReadTool{registry: registry}
 }
 
-func (*FileReadTool) Name() string        { return "read_file" }
+func (*FileReadTool) Name() string { return "read_file" }
 func (*FileReadTool) Description() string {
 	return "Reads a file from the local filesystem. You can access any file directly by using this tool.\n\n" +
 		"Usage:\n" +

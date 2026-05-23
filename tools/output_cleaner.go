@@ -8,9 +8,9 @@ import (
 
 // Terminal escape sequence patterns (matching openclacky's OutputCleaner).
 var (
-	csiRegex     = regexp.MustCompile(`\x1b\[[\d;?]*[a-zA-Z@]`)  // ESC[...]letter — colors, cursor, SGR
-	oscRegex     = regexp.MustCompile(`\x1b\].*?(\a|\x1b\\)`)    // ESC]...BEL/ST — window title, etc.
-	simpleEscRegex = regexp.MustCompile(`\x1b[=>\(\)].?`)        // ESC= / ESC>) — keypad modes
+	csiRegex       = regexp.MustCompile(`\x1b\[[\d;?]*[a-zA-Z@]`) // ESC[...]letter — colors, cursor, SGR
+	oscRegex       = regexp.MustCompile(`\x1b\].*?(\a|\x1b\\)`)   // ESC]...BEL/ST — window title, etc.
+	simpleEscRegex = regexp.MustCompile(`\x1b[=>\(\)].?`)         // ESC= / ESC>) — keypad modes
 )
 
 // StripTerminalCodes cleans raw terminal/PTY output for LLM consumption.

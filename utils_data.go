@@ -230,4 +230,3 @@ func (h *PromptHistory) LoadRecent(n int) []PromptEntry {
 	}
 	return entries
 }
-

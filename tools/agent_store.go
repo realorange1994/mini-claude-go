@@ -48,22 +48,22 @@ type AgentTask struct {
 	ParentID        string
 	Notified        bool
 	TranscriptPath  string
-	OutputFile     string // path to live output file (written incrementally by taskOutputWriter)
+	OutputFile      string // path to live output file (written incrementally by taskOutputWriter)
 	ToolsUsed       int
 	DurationMs      int64
 	PendingMessages []string // queued by send_message, drained at turn boundaries
 
 	// Partial result extracted when killed (last assistant text before termination)
-	PartialResult   string
+	PartialResult string
 
 	// Tool usage statistics (matching upstream AgentToolResult format)
-	ReadCount       int
-	SearchCount     int
-	BashCount       int
-	EditFileCount   int
-	LinesAdded      int
-	LinesRemoved    int
-	TokenCount      int // total tokens used by agent
+	ReadCount     int
+	SearchCount   int
+	BashCount     int
+	EditFileCount int
+	LinesAdded    int
+	LinesRemoved  int
+	TokenCount    int // total tokens used by agent
 }
 
 // WriteOutput appends text to the task's output buffer, enforcing a size cap.

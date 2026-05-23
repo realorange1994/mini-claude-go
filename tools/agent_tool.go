@@ -77,7 +77,7 @@ When launching a background agent (mode="async"):
 
 func (t *AgentTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"description", "prompt"},
 		"properties": map[string]any{
 			"description": map[string]any{
@@ -154,7 +154,9 @@ func (t *AgentTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *AgentTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *AgentTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *AgentTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
 	// Check context early

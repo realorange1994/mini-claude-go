@@ -12,7 +12,7 @@ import (
 // Instead of computing dollar amounts (which vary by provider and pricing tier),
 // it tracks raw token counts — a more stable and universally meaningful metric.
 type CostTracker struct {
-	mu               sync.Mutex
+	mu                sync.Mutex
 	TotalInputTokens  int64
 	TotalOutputTokens int64
 	PerModel          map[string]*ModelUsage

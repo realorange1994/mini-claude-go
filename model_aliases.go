@@ -52,11 +52,11 @@ const (
 )
 
 var modelAliasFamily = map[string]modelFamily{
-	"opus":     familyOpus,
-	"sonnet":   familySonnet,
-	"haiku":    familyHaiku,
-	"best":     familyOpus, // best = current Opus
-	"fast":     familySonnet,
+	"opus":   familyOpus,
+	"sonnet": familySonnet,
+	"haiku":  familyHaiku,
+	"best":   familyOpus, // best = current Opus
+	"fast":   familySonnet,
 }
 
 // ResolveModelAlias resolves a user-specified model string to an actual model ID.
@@ -227,8 +227,8 @@ func ExtractCanonicalModelName(modelID string) string {
 
 	// Order matters: check more specific versions first
 	canonicalMappings := []struct {
-		pattern    string
-		canonical  string
+		pattern   string
+		canonical string
 	}{
 		{"claude-opus-4-7", "claude-opus-4-7"},
 		{"claude-opus-4-6", "claude-opus-4-6"},

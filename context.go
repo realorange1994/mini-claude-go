@@ -29,7 +29,7 @@ func generateUUID() string {
 
 const (
 	// PERSISTED_OUTPUT_TAG is the XML tag used to wrap persisted output messages.
-	PERSISTED_OUTPUT_TAG        = "<persisted-output>"
+	PERSISTED_OUTPUT_TAG         = "<persisted-output>"
 	PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
 	// PREVIEW_SIZE_BYTES is the preview size in bytes for the reference message.
 	PREVIEW_SIZE_BYTES = 2000
@@ -137,9 +137,9 @@ type PersistedToolResult struct {
 //   - 'wx' flag for atomic writes (skip if exists)
 //   - Preview truncated at newline boundary (2000 bytes)
 type ToolResultStore struct {
-	dir       string // session-specific tool results directory
+	dir        string // session-specific tool results directory
 	projectDir string
-	sessionID string
+	sessionID  string
 }
 
 // NewToolResultStore creates a store rooted at {projectDir}/{sessionId}/tool-results/.
@@ -328,7 +328,7 @@ func NewContentReplacementState() *ContentReplacementState {
 // ContentReplacementRecord is a serializable record of one content-replacement
 // decision, matching upstream's ContentReplacementRecord type.
 type ContentReplacementRecord struct {
-	Kind        string `json:"kind"`         // always "tool-result"
+	Kind        string `json:"kind"` // always "tool-result"
 	ToolUseID   string `json:"toolUseId"`
 	Replacement string `json:"replacement"` // exact string the model saw
 }
@@ -338,8 +338,8 @@ type toolResultCandidate struct {
 	toolUseID   string
 	content     string
 	size        int
-	entryIdx    int // index in the entries slice
-	blockIdx    int // index within the ToolResultContent
+	entryIdx    int    // index in the entries slice
+	blockIdx    int    // index within the ToolResultContent
 	replacement string // cached replacement string for mustReapply
 }
 
@@ -634,8 +634,8 @@ func (ToolResultContent) entryContent() {}
 
 // CompactBoundaryContent represents a compaction boundary marker.
 type CompactBoundaryContent struct {
-	Trigger           CompactTrigger
-	PreCompactTokens  int
+	Trigger          CompactTrigger
+	PreCompactTokens int
 	// UUID uniquely identifies this compact boundary. Used by the transcript,
 	// session storage, and QueryEngine to reference specific compaction events.
 	UUID string
@@ -700,25 +700,25 @@ type fileState struct {
 // are stale (compaction cleared them). Post-compact recovery marks re-injected
 // files as fresh by updating their epoch.
 type ToolStateTracker struct {
-	mu             sync.RWMutex
-	compactionEpoch int           // increments each time compaction runs; items with lower epoch are stale
-	readFiles      map[string]fileState // absolute path -> (epoch, mtimeMs) when read
-	searchQueries  map[string]int // pattern -> epoch when search was run
-	conclusions    []string       // key findings claimed by the agent
+	mu              sync.RWMutex
+	compactionEpoch int                  // increments each time compaction runs; items with lower epoch are stale
+	readFiles       map[string]fileState // absolute path -> (epoch, mtimeMs) when read
+	searchQueries   map[string]int       // pattern -> epoch when search was run
+	conclusions     []string             // key findings claimed by the agent
 	// activeTask tracks what the agent is currently working on, derived from
 	// the most recent user message and recent tool calls. This is injected
 	// into the system prompt each turn to prevent "task drift" — the LLM
 	// losing track of what it was doing and jumping back to old topics.
-	activeTask     string         // brief description of current work
+	activeTask string // brief description of current work
 }
 
 // NewToolStateTracker creates a tracker.
 func NewToolStateTracker() *ToolStateTracker {
 	return &ToolStateTracker{
 		compactionEpoch: 0,
-		readFiles:      make(map[string]fileState),
-		searchQueries:  make(map[string]int),
-		conclusions:    make([]string, 0),
+		readFiles:       make(map[string]fileState),
+		searchQueries:   make(map[string]int),
+		conclusions:     make([]string, 0),
 	}
 }
 
@@ -887,13 +887,13 @@ type conversationEntry struct {
 
 // ConversationContext manages the conversation message history and system prompt.
 type ConversationContext struct {
-	mu                     sync.RWMutex
-	config                 Config
-	entries                []conversationEntry
-	systemPrompt           string
-	lastSummarizedIndex    int    // index of last entry included in summary/compact (-1 = none)
-	compactedEntryCount    int    // entries already summarized by previous compaction (skip on next compact)
-	lastAssistantTime      time.Time // timestamp of last assistant message added; used for time-based microcompact
+	mu                  sync.RWMutex
+	config              Config
+	entries             []conversationEntry
+	systemPrompt        string
+	lastSummarizedIndex int       // index of last entry included in summary/compact (-1 = none)
+	compactedEntryCount int       // entries already summarized by previous compaction (skip on next compact)
+	lastAssistantTime   time.Time // timestamp of last assistant message added; used for time-based microcompact
 	// pendingRedactedThinking holds opaque data blobs from redacted_thinking blocks
 	// received in the most recent API response. These must be preserved and
 	// re-submitted in subsequent assistant messages for context continuity.
@@ -909,8 +909,8 @@ type ConversationContext struct {
 	// response, along with the entry count at that point. This enables hybrid
 	// token estimation: use the exact API count as anchor, then only estimate
 	// the delta for entries added since. Matching upstream's tokenCountWithEstimation().
-	apiTokenAnchor int64 // exact input_tokens from last API response
-	apiAnchorEntries int  // number of entries in context when anchor was recorded
+	apiTokenAnchor   int64 // exact input_tokens from last API response
+	apiAnchorEntries int   // number of entries in context when anchor was recorded
 	// compressionLevel tracks how many times the conversation has been compressed.
 	// Increments after each compaction, used for progressive summarization:
 	// Level 1 = full detail, Level 2 = concise, Level 3 = minimal, Level 4+ = ultra-minimal.
@@ -2058,18 +2058,18 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 		}
 
 		// Preserve error results — they contain important debugging info
-			hasError := false
-			for _, r := range results {
-				if r.IsError.Valid() && r.IsError.Value {
-					hasError = true
-					break
-				}
+		hasError := false
+		for _, r := range results {
+			if r.IsError.Valid() && r.IsError.Value {
+				hasError = true
+				break
 			}
-			if hasError {
-				continue
-			}
+		}
+		if hasError {
+			continue
+		}
 
-			// Check each block: is it already cleared? is it a compactable tool? is it large enough?
+		// Check each block: is it already cleared? is it a compactable tool? is it large enough?
 		allCleared := true
 		hasCompactable := false
 		for _, r := range results {
@@ -2436,8 +2436,8 @@ func (c *ConversationContext) ValidateToolPairing() {
 						if b.OfToolUse != nil && missingSet[b.OfToolUse.ID] {
 							synthResults = append(synthResults, anthropic.ToolResultBlockParam{
 								ToolUseID: b.OfToolUse.ID,
-								Content: []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: placeholder}}},
-								IsError: anthropic.Bool(true),
+								Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: placeholder}}},
+								IsError:   anthropic.Bool(true),
 							})
 							delete(missingSet, b.OfToolUse.ID)
 						}
@@ -2553,8 +2553,8 @@ const (
 
 // TurnInterruptionState holds the result of interruption detection.
 type TurnInterruptionState struct {
-	Kind        TurnInterruptionKind
-	PromptText  string  // the user prompt text if interrupted_prompt
+	Kind       TurnInterruptionKind
+	PromptText string // the user prompt text if interrupted_prompt
 }
 
 // DetectTurnInterruption analyzes the conversation entries to determine if the

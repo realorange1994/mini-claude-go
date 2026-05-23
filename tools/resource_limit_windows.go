@@ -79,20 +79,20 @@ func (j *JobObject) Close() error {
 
 func setJobMemoryLimit(job windows.Handle, maxBytes int64) error {
 	type ExtendedLimitInfo struct {
-		PerProcessUserTimeUlimit  windows.Filetime
-		PerJobUserTimeLimit       windows.Filetime
-		LimitFlags                uint32
-		MinimumWorkingSetSize     uintptr
-		MaximumWorkingSetSize     uintptr
-		ActiveProcessLimit        uint32
-		Affinity                  uintptr
-		PriorityClass             uint32
-		SchedulingClass           uint32
-		_                         uint32
-		ProcessMemoryLimit        uintptr
-		JobMemoryLimit            uintptr
-		PeakProcessMemoryUsed     uintptr
-		PeakJobMemoryUsed         uintptr
+		PerProcessUserTimeUlimit windows.Filetime
+		PerJobUserTimeLimit      windows.Filetime
+		LimitFlags               uint32
+		MinimumWorkingSetSize    uintptr
+		MaximumWorkingSetSize    uintptr
+		ActiveProcessLimit       uint32
+		Affinity                 uintptr
+		PriorityClass            uint32
+		SchedulingClass          uint32
+		_                        uint32
+		ProcessMemoryLimit       uintptr
+		JobMemoryLimit           uintptr
+		PeakProcessMemoryUsed    uintptr
+		PeakJobMemoryUsed        uintptr
 	}
 
 	const JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
@@ -115,15 +115,15 @@ func setJobMemoryLimit(job windows.Handle, maxBytes int64) error {
 
 func setJobCpuLimit(job windows.Handle, maxMillis int64) error {
 	type BasicLimitInfo struct {
-		PerProcessUserTimeUlimit  windows.Filetime
-		PerJobUserTimeLimit       windows.Filetime
-		LimitFlags                uint32
-		MinimumWorkingSetSize     uintptr
-		MaximumWorkingSetSize     uintptr
-		ActiveProcessLimit        uint32
-		Affinity                  uintptr
-		PriorityClass             uint32
-		SchedulingClass           uint32
+		PerProcessUserTimeUlimit windows.Filetime
+		PerJobUserTimeLimit      windows.Filetime
+		LimitFlags               uint32
+		MinimumWorkingSetSize    uintptr
+		MaximumWorkingSetSize    uintptr
+		ActiveProcessLimit       uint32
+		Affinity                 uintptr
+		PriorityClass            uint32
+		SchedulingClass          uint32
 	}
 
 	timeUnits := maxMillis * 10000

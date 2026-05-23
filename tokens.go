@@ -106,7 +106,7 @@ func getTokenUsage(msg Message) *UsageInfo {
 
 // Message represents a conversation message for token counting.
 type Message struct {
-	Type    string     // "assistant" or "user"
-	Model   string     // model name, "<synthetic>" for synthetic messages
-	Usage   *UsageInfo // token usage data (nil for user messages)
+	Type  string     // "assistant" or "user"
+	Model string     // model name, "<synthetic>" for synthetic messages
+	Usage *UsageInfo // token usage data (nil for user messages)
 }

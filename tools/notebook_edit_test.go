@@ -58,7 +58,7 @@ func TestNotebookEditRejectsNoPath(t *testing.T) {
 	tool := NewNotebookEditTool(r)
 
 	result := tool.Execute(map[string]any{
-		"cell_id":   "cell-0",
+		"cell_id":    "cell-0",
 		"new_source": "hello",
 	})
 	if !result.IsError {

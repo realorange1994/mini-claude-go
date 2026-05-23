@@ -782,7 +782,7 @@ func builtinOnePlus(args []*Value) (*Value, error) {
 	if v.typ == VBigInt {
 		return vbigint(new(big.Int).Add(v.bigInt, big.NewInt(1))), nil
 	}
-	return numOrFloat(toNum(args[0]) + 1, args), nil
+	return numOrFloat(toNum(args[0])+1, args), nil
 }
 
 func builtinOneMinus(args []*Value) (*Value, error) {
@@ -793,7 +793,7 @@ func builtinOneMinus(args []*Value) (*Value, error) {
 	if v.typ == VBigInt {
 		return vbigint(new(big.Int).Sub(v.bigInt, big.NewInt(1))), nil
 	}
-	return numOrFloat(toNum(args[0]) - 1, args), nil
+	return numOrFloat(toNum(args[0])-1, args), nil
 }
 
 // -------- incf / decf (implemented as special forms in eval) --------

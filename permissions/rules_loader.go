@@ -144,7 +144,7 @@ func LoadRulesFromAllSources(projectDir string) *RuleStore {
 
 	// Load from project directory (highest priority)
 	load(filepath.Join(projectDir, ".claude", "settings.local.json")) // localSettings
-	load(filepath.Join(projectDir, ".claude", "settings.json"))         // projectSettings
+	load(filepath.Join(projectDir, ".claude", "settings.json"))       // projectSettings
 
 	// Merge all stores (additive, later sources append)
 	if len(stores) == 0 {

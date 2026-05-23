@@ -76,10 +76,10 @@ type nbCell struct {
 }
 
 type nbDocument struct {
-	Cells       []nbCell `json:"cells"`
-	NbFormat    int      `json:"nbformat"`
-	NbFormatMinor int    `json:"nbformat_minor"`
-	Metadata    any      `json:"metadata,omitempty"`
+	Cells         []nbCell `json:"cells"`
+	NbFormat      int      `json:"nbformat"`
+	NbFormatMinor int      `json:"nbformat_minor"`
+	Metadata      any      `json:"metadata,omitempty"`
 }
 
 func (t *NotebookEditTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
@@ -119,13 +119,13 @@ func (t *NotebookEditTool) ExecuteContext(ctx context.Context, params map[string
 		if storedInfo, wasRead := t.registry.CheckFileRead(fp); wasRead && storedInfo.fromRead {
 			if info.ModTime().After(storedInfo.mtime) {
 				return ToolResult{
-					Output: fmt.Sprintf("Error: notebook was modified since you last read it at %s. Read it again with read_file to get the current content.", notebookPath),
+					Output:  fmt.Sprintf("Error: notebook was modified since you last read it at %s. Read it again with read_file to get the current content.", notebookPath),
 					IsError: true,
 				}
 			}
 		} else {
 			return ToolResult{
-				Output: fmt.Sprintf("Error: you must read the notebook with read_file before editing it. Run: read_file(path='%s')", notebookPath),
+				Output:  fmt.Sprintf("Error: you must read the notebook with read_file before editing it. Run: read_file(path='%s')", notebookPath),
 				IsError: true,
 			}
 		}

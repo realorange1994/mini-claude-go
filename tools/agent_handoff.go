@@ -18,15 +18,15 @@ type HandoffClassification struct {
 func ClassifyHandoff(output string) HandoffClassification {
 	// Secret pattern detection — common API key/token prefixes
 	secretPatterns := []string{
-		"sk-ant-api03-",        // Anthropic API key prefix
-		"sk-ant-tool03-",       // Anthropic tool key prefix
-		"sk-proj-",             // OpenAI project key
-		"AKIA",                 // AWS access key prefix
-		"ghp_",                 // GitHub personal access token
-		"gho_",                 // GitHub OAuth token
-		"ghs_",                 // GitHub server-to-server token
-		"xoxb-",                // Slack bot token
-		"xoxp-",                // Slack user token
+		"sk-ant-api03-",  // Anthropic API key prefix
+		"sk-ant-tool03-", // Anthropic tool key prefix
+		"sk-proj-",       // OpenAI project key
+		"AKIA",           // AWS access key prefix
+		"ghp_",           // GitHub personal access token
+		"gho_",           // GitHub OAuth token
+		"ghs_",           // GitHub server-to-server token
+		"xoxb-",          // Slack bot token
+		"xoxp-",          // Slack user token
 		"-----BEGIN PRIVATE KEY-----",
 		"-----BEGIN RSA PRIVATE KEY-----",
 	}

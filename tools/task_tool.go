@@ -46,7 +46,7 @@ func (t *TaskCreateTool) Description() string {
 
 func (t *TaskCreateTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"subject", "description"},
 		"properties": map[string]any{
 			"subject": map[string]any{
@@ -69,7 +69,9 @@ func (t *TaskCreateTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *TaskCreateTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *TaskCreateTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *TaskCreateTool) Execute(params map[string]any) ToolResult {
 	if t.CreateFunc == nil {
@@ -114,7 +116,9 @@ func (t *TaskListTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *TaskListTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *TaskListTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *TaskListTool) Execute(params map[string]any) ToolResult {
 	if t.ListFunc == nil {
@@ -178,7 +182,9 @@ func (t *TaskGetTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *TaskGetTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *TaskGetTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *TaskGetTool) Execute(params map[string]any) ToolResult {
 	if t.GetFunc == nil {
@@ -292,7 +298,9 @@ func (t *TaskUpdateTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *TaskUpdateTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *TaskUpdateTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *TaskUpdateTool) Execute(params map[string]any) ToolResult {
 	if t.UpdateFunc == nil {
@@ -385,7 +393,7 @@ func (t *TaskStopTool) Description() string {
 
 func (t *TaskStopTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"task_id"},
 		"properties": map[string]any{
 			"task_id": map[string]any{
@@ -396,7 +404,9 @@ func (t *TaskStopTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *TaskStopTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *TaskStopTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *TaskStopTool) Execute(params map[string]any) ToolResult {
 	if t.StopFunc == nil {

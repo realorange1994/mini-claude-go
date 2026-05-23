@@ -10,24 +10,24 @@ import (
 // These are applied when old_string fails to match — the LLM outputs sanitized
 // versions of XML-like tokens that need to be restored before matching.
 var DESANITIZATIONS = map[string]string{
-	"<fnr>":           "<function_results>",
-	"<n>":             "<name>",
-	"</n>":            "</name>",
-	"<o>":             "<output>",
-	"</o>":            "</output>",
-	"<e>":             "<error>",
-	"</e>":            "</error>",
-	"<s>":             "<system>",
-	"</s>":            "</system>",
-	"<r>":             "<result>",
-	"</r>":            "</result>",
-	"< META_START >":  "<META_START>",
-	"< META_END >":    "<META_END>",
-	"< EOT >":         "<EOT>",
-	"< META >":        "<META>",
-	"< SOS >":         "<SOS>",
-	"\n\nH:":          "\n\nHuman:",
-	"\n\nA:":            "\n\nAssistant:",
+	"<fnr>":          "<function_results>",
+	"<n>":            "<name>",
+	"</n>":           "</name>",
+	"<o>":            "<output>",
+	"</o>":           "</output>",
+	"<e>":            "<error>",
+	"</e>":           "</error>",
+	"<s>":            "<system>",
+	"</s>":           "</system>",
+	"<r>":            "<result>",
+	"</r>":           "</result>",
+	"< META_START >": "<META_START>",
+	"< META_END >":   "<META_END>",
+	"< EOT >":        "<EOT>",
+	"< META >":       "<META>",
+	"< SOS >":        "<SOS>",
+	"\n\nH:":         "\n\nHuman:",
+	"\n\nA:":         "\n\nAssistant:",
 }
 
 // MultiEditTool applies multiple search/replace edits atomically.
@@ -40,8 +40,10 @@ func NewMultiEditTool(registry *Registry) *MultiEditTool {
 	return &MultiEditTool{registry: registry}
 }
 
-func (*MultiEditTool) Name() string        { return "multi_edit" }
-func (*MultiEditTool) Description() string { return "Apply multiple search/replace edits to a file atomically. If any edit fails, all are rolled back. You must read the file first with read_file before editing. Accepts a list of {old_string, new_string} pairs." }
+func (*MultiEditTool) Name() string { return "multi_edit" }
+func (*MultiEditTool) Description() string {
+	return "Apply multiple search/replace edits to a file atomically. If any edit fails, all are rolled back. You must read the file first with read_file before editing. Accepts a list of {old_string, new_string} pairs."
+}
 
 func (*MultiEditTool) InputSchema() map[string]any {
 	return map[string]any{
@@ -187,7 +189,7 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 		for _, prevNew := range appliedNewStrings {
 			if oldTrimmed != "" && strings.Contains(prevNew, oldTrimmed) {
 				return ToolResult{
-					Output: fmt.Sprintf("Error: edit %d failed: old_string is a substring of a new_string from a previous edit", i+1),
+					Output:  fmt.Sprintf("Error: edit %d failed: old_string is a substring of a new_string from a previous edit", i+1),
 					IsError: true,
 				}
 			}
@@ -207,7 +209,7 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 		}
 		if idx < 0 {
 			return ToolResult{
-				Output: fmt.Sprintf("Error: edit %d failed: old_text not found: %q", i+1, truncate(e.old, 80)),
+				Output:  fmt.Sprintf("Error: edit %d failed: old_text not found: %q", i+1, truncate(e.old, 80)),
 				IsError: true,
 			}
 		}
@@ -218,7 +220,7 @@ func (m *MultiEditTool) Execute(params map[string]any) ToolResult {
 			cnt := countOccurrences(testContent, e.old)
 			if cnt > 1 {
 				return ToolResult{
-					Output: fmt.Sprintf("Error: edit %d failed: old_string has multiple matches; set replace_all to true to replace all, or provide more context to uniquely identify the location", i+1),
+					Output:  fmt.Sprintf("Error: edit %d failed: old_string has multiple matches; set replace_all to true to replace all, or provide more context to uniquely identify the location", i+1),
 					IsError: true,
 				}
 			}

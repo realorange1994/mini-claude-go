@@ -110,8 +110,8 @@ func registerStdlibFunctions() {
 			start := i + 1 // 1-based line in stdlibContent
 			end := findSexpEndFromLines(lines, i)
 			sourceIndex[name] = &SourceEntry{
-				Kind: "stdlib",
-				File: "stdlib.go",
+				Kind:  "stdlib",
+				File:  "stdlib.go",
 				Start: start,
 				End:   end,
 				Doc:   fmt.Sprintf("Stdlib function: %s", matches[1]),
@@ -730,9 +730,10 @@ func getFFISignature(name string) string {
 
 // resolveGoSrcPath resolves a relative Go stdlib source path (e.g. "math/sin.go")
 // to an absolute path by searching multiple candidate locations:
-//   1. runtime.GOROOT()/src/<relPath>  — standard Go install
-//   2. The compiled path from FuncForPC — toolchain in mod cache
-//   3. Common alternative locations
+//  1. runtime.GOROOT()/src/<relPath>  — standard Go install
+//  2. The compiled path from FuncForPC — toolchain in mod cache
+//  3. Common alternative locations
+//
 // Returns "" if the file cannot be found.
 func resolveGoSrcPath(relPath string) string {
 	goroot := filepath.ToSlash(runtime.GOROOT())
@@ -777,7 +778,7 @@ func resolveGoSrcPath(relPath string) string {
 
 	// Search each candidate directory
 	for _, srcDir := range candidates {
-	 fullPath := filepath.Join(filepath.FromSlash(srcDir), filepath.FromSlash(relPath))
+		fullPath := filepath.Join(filepath.FromSlash(srcDir), filepath.FromSlash(relPath))
 		if _, err := os.Stat(fullPath); err == nil {
 			return fullPath
 		}

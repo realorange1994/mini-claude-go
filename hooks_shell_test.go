@@ -65,12 +65,12 @@ func TestMatchHook(t *testing.T) {
 // TestHookShellResult_ParseStdout tests parsing of hook stdout.
 func TestHookShellResult_ParseStdout(t *testing.T) {
 	tests := []struct {
-		name            string
-		stdout          string
-		expectBlock     bool
-		expectAsk       bool
-		expectReason    string
-		expectContinue  bool
+		name           string
+		stdout         string
+		expectBlock    bool
+		expectAsk      bool
+		expectReason   string
+		expectContinue bool
 	}{
 		{
 			name:           "block decision",
@@ -80,9 +80,9 @@ func TestHookShellResult_ParseStdout(t *testing.T) {
 			expectContinue: true,
 		},
 		{
-			name:           "approve decision",
-			stdout:         `{"decision":"approve"}`,
-			expectBlock:    false,
+			name:        "approve decision",
+			stdout:      `{"decision":"approve"}`,
+			expectBlock: false,
 		},
 		{
 			name:           "PreToolUse deny",
@@ -92,9 +92,9 @@ func TestHookShellResult_ParseStdout(t *testing.T) {
 			expectContinue: true,
 		},
 		{
-			name:           "PreToolUse allow",
-			stdout:         `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}`,
-			expectBlock:    false,
+			name:        "PreToolUse allow",
+			stdout:      `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}`,
+			expectBlock: false,
 		},
 		{
 			name:           "PreToolUse ask",

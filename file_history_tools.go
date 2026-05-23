@@ -35,8 +35,8 @@ type FileHistoryTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryTool) Name() string       { return "file_history" }
-func (t *FileHistoryTool) Description() string  { return "List version history for a file or all files" }
+func (t *FileHistoryTool) Name() string        { return "file_history" }
+func (t *FileHistoryTool) Description() string { return "List version history for a file or all files" }
 func (t *FileHistoryTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -48,7 +48,9 @@ func (t *FileHistoryTool) InputSchema() map[string]any {
 		},
 	}
 }
-func (t *FileHistoryTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryTool) Execute(params map[string]any) tools.ToolResult {
 	if t.History == nil {
@@ -156,8 +158,10 @@ type FileHistoryReadTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryReadTool) Name() string       { return "file_history_read" }
-func (t *FileHistoryReadTool) Description() string  { return "Read content of a specific version from file history" }
+func (t *FileHistoryReadTool) Name() string { return "file_history_read" }
+func (t *FileHistoryReadTool) Description() string {
+	return "Read content of a specific version from file history"
+}
 func (t *FileHistoryReadTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -170,7 +174,9 @@ func (t *FileHistoryReadTool) InputSchema() map[string]any {
 		"required": []string{"path"},
 	}
 }
-func (t *FileHistoryReadTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryReadTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryReadTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -218,8 +224,10 @@ type FileHistoryGrepTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryGrepTool) Name() string       { return "file_history_grep" }
-func (t *FileHistoryGrepTool) Description() string  { return "Search within file history versions using regex" }
+func (t *FileHistoryGrepTool) Name() string { return "file_history_grep" }
+func (t *FileHistoryGrepTool) Description() string {
+	return "Search within file history versions using regex"
+}
 func (t *FileHistoryGrepTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -233,7 +241,9 @@ func (t *FileHistoryGrepTool) InputSchema() map[string]any {
 		"required": []string{"pattern"},
 	}
 }
-func (t *FileHistoryGrepTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryGrepTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryGrepTool) Execute(params map[string]any) tools.ToolResult {
 	pattern, ok := params["pattern"].(string)
@@ -338,8 +348,10 @@ type FileRestoreTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileRestoreTool) Name() string       { return "file_restore" }
-func (t *FileRestoreTool) Description() string  { return "Restore a file to its previous version (undo last change)" }
+func (t *FileRestoreTool) Name() string { return "file_restore" }
+func (t *FileRestoreTool) Description() string {
+	return "Restore a file to its previous version (undo last change)"
+}
 func (t *FileRestoreTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -349,7 +361,9 @@ func (t *FileRestoreTool) InputSchema() map[string]any {
 		"required": []string{"path"},
 	}
 }
-func (t *FileRestoreTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileRestoreTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileRestoreTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -374,8 +388,8 @@ type FileRewindTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileRewindTool) Name() string       { return "file_rewind" }
-func (t *FileRewindTool) Description() string  { return "Rewind a file N versions back" }
+func (t *FileRewindTool) Name() string        { return "file_rewind" }
+func (t *FileRewindTool) Description() string { return "Rewind a file N versions back" }
 func (t *FileRewindTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -386,7 +400,9 @@ func (t *FileRewindTool) InputSchema() map[string]any {
 		"required": []string{"path", "steps"},
 	}
 }
-func (t *FileRewindTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileRewindTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileRewindTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -420,23 +436,27 @@ type FileHistoryDiffTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryDiffTool) Name() string       { return "file_history_diff" }
-func (t *FileHistoryDiffTool) Description() string  { return "Show diff between two versions of a file. Supports unified diff, stat, name-only modes, and chain diff (from→to→to2)" }
+func (t *FileHistoryDiffTool) Name() string { return "file_history_diff" }
+func (t *FileHistoryDiffTool) Description() string {
+	return "Show diff between two versions of a file. Supports unified diff, stat, name-only modes, and chain diff (from→to→to2)"
+}
 func (t *FileHistoryDiffTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":     map[string]any{"type": "string", "description": "File path"},
-			"from":     map[string]any{"type": "string", "default": "last1", "description": "From version specifier (v3, current, last2, tag)"},
-			"to":       map[string]any{"type": "string", "default": "current", "description": "To version specifier"},
-			"to2":      map[string]any{"type": "string", "description": "Optional third version for chain diff (from→to→to2)"},
-			"mode":     map[string]any{"type": "string", "enum": []string{"unified", "stat", "name-only"}, "default": "unified", "description": "Diff output mode"},
-			"context":  map[string]any{"type": "integer", "minimum": 0, "default": 3, "description": "Context lines (unified mode only)"},
+			"path":    map[string]any{"type": "string", "description": "File path"},
+			"from":    map[string]any{"type": "string", "default": "last1", "description": "From version specifier (v3, current, last2, tag)"},
+			"to":      map[string]any{"type": "string", "default": "current", "description": "To version specifier"},
+			"to2":     map[string]any{"type": "string", "description": "Optional third version for chain diff (from→to→to2)"},
+			"mode":    map[string]any{"type": "string", "enum": []string{"unified", "stat", "name-only"}, "default": "unified", "description": "Diff output mode"},
+			"context": map[string]any{"type": "integer", "minimum": 0, "default": 3, "description": "Context lines (unified mode only)"},
 		},
 		"required": []string{"path"},
 	}
 }
-func (t *FileHistoryDiffTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryDiffTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryDiffTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -588,8 +608,10 @@ type FileHistorySummaryTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistorySummaryTool) Name() string       { return "file_history_summary" }
-func (t *FileHistorySummaryTool) Description() string  { return "Overview of all files with version history" }
+func (t *FileHistorySummaryTool) Name() string { return "file_history_summary" }
+func (t *FileHistorySummaryTool) Description() string {
+	return "Overview of all files with version history"
+}
 func (t *FileHistorySummaryTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -598,7 +620,9 @@ func (t *FileHistorySummaryTool) InputSchema() map[string]any {
 		},
 	}
 }
-func (t *FileHistorySummaryTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistorySummaryTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistorySummaryTool) Execute(params map[string]any) tools.ToolResult {
 	var since time.Time
@@ -652,8 +676,10 @@ type FileHistorySearchTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistorySearchTool) Name() string       { return "file_history_search" }
-func (t *FileHistorySearchTool) Description() string  { return "Find versions where text was added, removed, or changed" }
+func (t *FileHistorySearchTool) Name() string { return "file_history_search" }
+func (t *FileHistorySearchTool) Description() string {
+	return "Find versions where text was added, removed, or changed"
+}
 func (t *FileHistorySearchTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -666,7 +692,9 @@ func (t *FileHistorySearchTool) InputSchema() map[string]any {
 		"required": []string{"path", "query"},
 	}
 }
-func (t *FileHistorySearchTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistorySearchTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistorySearchTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -722,8 +750,10 @@ type FileHistoryTimelineTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryTimelineTool) Name() string       { return "file_history_timeline" }
-func (t *FileHistoryTimelineTool) Description() string  { return "Chronological cross-file change timeline" }
+func (t *FileHistoryTimelineTool) Name() string { return "file_history_timeline" }
+func (t *FileHistoryTimelineTool) Description() string {
+	return "Chronological cross-file change timeline"
+}
 func (t *FileHistoryTimelineTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -733,7 +763,9 @@ func (t *FileHistoryTimelineTool) InputSchema() map[string]any {
 		},
 	}
 }
-func (t *FileHistoryTimelineTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryTimelineTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryTimelineTool) Execute(params map[string]any) tools.ToolResult {
 	var since time.Time
@@ -771,8 +803,10 @@ type FileHistoryTagTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryTagTool) Name() string       { return "file_history_tag" }
-func (t *FileHistoryTagTool) Description() string  { return "Manage tags on file versions. Actions: add, list, delete, search" }
+func (t *FileHistoryTagTool) Name() string { return "file_history_tag" }
+func (t *FileHistoryTagTool) Description() string {
+	return "Manage tags on file versions. Actions: add, list, delete, search"
+}
 func (t *FileHistoryTagTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -785,7 +819,9 @@ func (t *FileHistoryTagTool) InputSchema() map[string]any {
 		"required": []string{},
 	}
 }
-func (t *FileHistoryTagTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryTagTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryTagTool) Execute(params map[string]any) tools.ToolResult {
 	actionVal, _ := params["action"].(string)
@@ -900,8 +936,10 @@ type FileHistoryAnnotateTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryAnnotateTool) Name() string       { return "file_history_annotate" }
-func (t *FileHistoryAnnotateTool) Description() string  { return "Add a user annotation/comment to a specific file version" }
+func (t *FileHistoryAnnotateTool) Name() string { return "file_history_annotate" }
+func (t *FileHistoryAnnotateTool) Description() string {
+	return "Add a user annotation/comment to a specific file version"
+}
 func (t *FileHistoryAnnotateTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -913,7 +951,9 @@ func (t *FileHistoryAnnotateTool) InputSchema() map[string]any {
 		"required": []string{"path", "version", "message"},
 	}
 }
-func (t *FileHistoryAnnotateTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryAnnotateTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryAnnotateTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -942,8 +982,10 @@ type FileHistoryCheckoutTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryCheckoutTool) Name() string       { return "file_history_checkout" }
-func (t *FileHistoryCheckoutTool) Description() string  { return "Restore a file to a specific version using flexible version specifiers" }
+func (t *FileHistoryCheckoutTool) Name() string { return "file_history_checkout" }
+func (t *FileHistoryCheckoutTool) Description() string {
+	return "Restore a file to a specific version using flexible version specifiers"
+}
 func (t *FileHistoryCheckoutTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -954,7 +996,9 @@ func (t *FileHistoryCheckoutTool) InputSchema() map[string]any {
 		"required": []string{"path"},
 	}
 }
-func (t *FileHistoryCheckoutTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryCheckoutTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryCheckoutTool) Execute(params map[string]any) tools.ToolResult {
 	pathVal, ok := params["path"].(string)
@@ -987,8 +1031,10 @@ type FileHistoryBatchTool struct {
 	History *SnapshotHistory
 }
 
-func (t *FileHistoryBatchTool) Name() string       { return "file_history_batch" }
-func (t *FileHistoryBatchTool) Description() string  { return "Batch operations on multiple files matching a glob pattern" }
+func (t *FileHistoryBatchTool) Name() string { return "file_history_batch" }
+func (t *FileHistoryBatchTool) Description() string {
+	return "Batch operations on multiple files matching a glob pattern"
+}
 func (t *FileHistoryBatchTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -999,7 +1045,9 @@ func (t *FileHistoryBatchTool) InputSchema() map[string]any {
 		"required": []string{"pattern"},
 	}
 }
-func (t *FileHistoryBatchTool) CheckPermissions(params map[string]any) tools.PermissionResult { return tools.PermissionResultPassthrough() }
+func (t *FileHistoryBatchTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return tools.PermissionResultPassthrough()
+}
 
 func (t *FileHistoryBatchTool) Execute(params map[string]any) tools.ToolResult {
 	pattern, ok := params["pattern"].(string)
@@ -1065,11 +1113,11 @@ func (t *FileHistoryBatchTool) Execute(params map[string]any) tools.ToolResult {
 				continue
 			}
 			diffStr := generateUnifiedDiff(fromSnap.Content, toSnap.Content, "previous", "current", 3)
-				if diffStr == "" {
-					sb.WriteString(fmt.Sprintf("  %s: no differences\n", filepath.Base(f)))
-				} else {
-					sb.WriteString(fmt.Sprintf("  %s:\n%s\n", filepath.Base(f), diffStr))
-				}
+			if diffStr == "" {
+				sb.WriteString(fmt.Sprintf("  %s: no differences\n", filepath.Base(f)))
+			} else {
+				sb.WriteString(fmt.Sprintf("  %s:\n%s\n", filepath.Base(f), diffStr))
+			}
 		}
 		return tools.ToolResult{Output: sb.String()}
 	default:

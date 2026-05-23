@@ -20,7 +20,7 @@ Always call this at the start of a task to align with best practices.`
 
 func (t *BriefTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"task"},
 		"properties": map[string]any{
 			"task": map[string]any{
@@ -31,7 +31,9 @@ func (t *BriefTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *BriefTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *BriefTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *BriefTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
 	select {

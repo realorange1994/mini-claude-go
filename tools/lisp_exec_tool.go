@@ -228,7 +228,7 @@ func (*LispExecTool) InputSchema() map[string]any {
 			"Do NOT use this to evaluate Lisp code — use lisp_eval for that.",
 		"properties": map[string]any{
 			"command": map[string]any{
-				"type":        "string",
+				"type": "string",
 				"description": "System program to execute (e.g. go, ls, python, npm). " +
 					"This is a program PATH lookup, NOT Lisp code evaluation.",
 			},
@@ -242,9 +242,9 @@ func (*LispExecTool) InputSchema() map[string]any {
 				"description": "Working directory for the command. Defaults to current directory.",
 			},
 			"env": map[string]any{
-				"type":        "object",
+				"type":                 "object",
 				"additionalProperties": map[string]any{"type": "string"},
-				"description": "Environment variables to set (merged with current env). Example: {\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}.",
+				"description":          "Environment variables to set (merged with current env). Example: {\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}.",
 			},
 			"timeout": map[string]any{
 				"type":        "integer",
@@ -484,7 +484,8 @@ func (t *LispExecTool) executeExec(ctx context.Context, params map[string]any) T
 
 // formatExecResult converts a Lisp plist result into a human-readable format.
 // Input: (:stdout "..." :stderr "..." :exit-code N) or
-//        (:stdout "..." :stderr "..." :exit-code -1 :background 1 :stall-reason "...")
+//
+//	(:stdout "..." :stderr "..." :exit-code -1 :background 1 :stall-reason "...")
 func formatExecResult(lispResult string) ToolResult {
 	stdout := extractPlistValue(lispResult, ":stdout")
 	stderr := extractPlistValue(lispResult, ":stderr")

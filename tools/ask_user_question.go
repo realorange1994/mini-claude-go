@@ -19,13 +19,13 @@ func (*AskUserQuestionTool) Description() string {
 
 func (*AskUserQuestionTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"questions"},
 		"properties": map[string]any{
 			"questions": map[string]any{
 				"type": "array",
 				"items": map[string]any{
-					"type": "object",
+					"type":     "object",
 					"required": []string{"question", "header", "options"},
 					"properties": map[string]any{
 						"question": map[string]any{
@@ -39,7 +39,7 @@ func (*AskUserQuestionTool) InputSchema() map[string]any {
 						"options": map[string]any{
 							"type": "array",
 							"items": map[string]any{
-								"type": "object",
+								"type":     "object",
 								"required": []string{"label", "description"},
 								"properties": map[string]any{
 									"label": map[string]any{

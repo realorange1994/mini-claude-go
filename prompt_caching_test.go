@@ -572,7 +572,7 @@ func TestCacheBreakDetectorCategoryResetOnUpdate(t *testing.T) {
 func TestCacheChangeWeights(t *testing.T) {
 	// Verify that category weights are reasonable
 	tests := []struct {
-		category CacheChangeCategory
+		category  CacheChangeCategory
 		minWeight int64
 	}{
 		{CacheChangeCompaction, 10000},

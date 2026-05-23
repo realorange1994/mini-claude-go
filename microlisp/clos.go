@@ -1112,9 +1112,9 @@ func reflectToLisp(v reflect.Value) *Value {
 	if v.IsValid() && v.Type() == reflect.TypeOf(time.Time{}) {
 		t := v.Interface().(time.Time)
 		return &Value{
-			typ:        VGoVal,
-			goVal:      t,
-			goValType:  reflect.TypeOf(time.Time{}),
+			typ:          VGoVal,
+			goVal:        t,
+			goValType:    reflect.TypeOf(time.Time{}),
 			goValReflect: v,
 		}
 	}

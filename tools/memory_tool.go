@@ -29,12 +29,14 @@ type MemoryAddTool struct {
 	OnAdd MemoryAddCallback
 }
 
-func (t *MemoryAddTool) Name() string        { return "memory_add" }
-func (t *MemoryAddTool) Description() string  { return "Save a note to session memory for later reference. Use categories: 'preference' (user preferences), 'decision' (key decisions), 'state' (project state), 'reference' (useful references)." }
+func (t *MemoryAddTool) Name() string { return "memory_add" }
+func (t *MemoryAddTool) Description() string {
+	return "Save a note to session memory for later reference. Use categories: 'preference' (user preferences), 'decision' (key decisions), 'state' (project state), 'reference' (useful references)."
+}
 
 func (t *MemoryAddTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"category", "content"},
 		"properties": map[string]any{
 			"category": map[string]any{
@@ -50,7 +52,9 @@ func (t *MemoryAddTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *MemoryAddTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *MemoryAddTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *MemoryAddTool) Execute(params map[string]any) ToolResult {
 	category, _ := params["category"].(string)
@@ -73,12 +77,14 @@ type MemorySearchTool struct {
 	OnSearch MemorySearchCallback
 }
 
-func (t *MemorySearchTool) Name() string        { return "memory_search" }
-func (t *MemorySearchTool) Description() string  { return "Search session memory for notes matching a query. Returns relevant memory entries." }
+func (t *MemorySearchTool) Name() string { return "memory_search" }
+func (t *MemorySearchTool) Description() string {
+	return "Search session memory for notes matching a query. Returns relevant memory entries."
+}
 
 func (t *MemorySearchTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"query"},
 		"properties": map[string]any{
 			"query": map[string]any{
@@ -89,7 +95,9 @@ func (t *MemorySearchTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *MemorySearchTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *MemorySearchTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *MemorySearchTool) Execute(params map[string]any) ToolResult {
 	query, _ := params["query"].(string)

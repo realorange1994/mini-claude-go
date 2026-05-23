@@ -53,8 +53,8 @@ func TestBuildCompactTranscriptToolCalls(t *testing.T) {
 	ctx.AddUserMessage("list files")
 	ctx.AddAssistantToolCalls([]map[string]any{
 		{
-			"id":   "tu_1",
-			"name": "exec",
+			"id":    "tu_1",
+			"name":  "exec",
 			"input": map[string]any{"command": "ls"},
 		},
 	})

@@ -38,10 +38,10 @@ func (l SettingsLevel) String() string {
 
 // SettingsFile represents a single settings file at a specific level.
 type SettingsFile struct {
-	Level    SettingsLevel      `json:"level"`
-	Path     string             `json:"path"`
-	Values   map[string]any     `json:"values"`
-	Loaded   bool               `json:"loaded"`
+	Level  SettingsLevel  `json:"level"`
+	Path   string         `json:"path"`
+	Values map[string]any `json:"values"`
+	Loaded bool           `json:"loaded"`
 }
 
 // MultiSourceSettings implements the 5-level settings hierarchy.

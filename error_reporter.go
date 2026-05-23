@@ -21,14 +21,14 @@ type ErrorReporter struct {
 
 // ErrorEvent represents a captured error event.
 type ErrorEvent struct {
-	Timestamp   string                 `json:"timestamp"`
-	Message     string                 `json:"message"`
-	Type        string                 `json:"type"`
-	Stack       string                 `json:"stack,omitempty"`
-	Context     map[string]interface{} `json:"context,omitempty"`
-	SessionID   string                 `json:"session_id,omitempty"`
-	Model       string                 `json:"model,omitempty"`
-	Severity    string                 `json:"severity"` // "error", "warning", "info"
+	Timestamp string                 `json:"timestamp"`
+	Message   string                 `json:"message"`
+	Type      string                 `json:"type"`
+	Stack     string                 `json:"stack,omitempty"`
+	Context   map[string]interface{} `json:"context,omitempty"`
+	SessionID string                 `json:"session_id,omitempty"`
+	Model     string                 `json:"model,omitempty"`
+	Severity  string                 `json:"severity"` // "error", "warning", "info"
 }
 
 // NewErrorReporter creates an error reporter that writes events to .claude/errors/

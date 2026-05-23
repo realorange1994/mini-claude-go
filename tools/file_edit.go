@@ -165,7 +165,7 @@ func (e *FileEditTool) ExecuteContext(ctx context.Context, params map[string]any
 	}
 	if count > 1 && !replaceAll {
 		return ToolResult{
-			Output: fmt.Sprintf("Warning: old_text appears %d times. Provide more context or set replace_all=true.", count),
+			Output:  fmt.Sprintf("Warning: old_text appears %d times. Provide more context or set replace_all=true.", count),
 			IsError: true,
 		}
 	}
@@ -256,10 +256,10 @@ func preserveQuoteStyle(content, oldStr, newStr, oldStrNorm string) string {
 
 // normalizeQuotes converts curly/smart quotes to straight ASCII quotes.
 func normalizeQuotes(s string) string {
-	s = strings.ReplaceAll(s, "\u201C", "\"")  // left double curly quote
-	s = strings.ReplaceAll(s, "\u201D", "\"")  // right double curly quote
-	s = strings.ReplaceAll(s, "\u2018", "'")   // left single curly quote
-	s = strings.ReplaceAll(s, "\u2019", "'")   // right single curly quote
+	s = strings.ReplaceAll(s, "\u201C", "\"") // left double curly quote
+	s = strings.ReplaceAll(s, "\u201D", "\"") // right double curly quote
+	s = strings.ReplaceAll(s, "\u2018", "'")  // left single curly quote
+	s = strings.ReplaceAll(s, "\u2019", "'")  // right single curly quote
 	return s
 }
 
@@ -345,4 +345,3 @@ func stripTrailingWhitespace(s string) string {
 	}
 	return strings.Join(lines, "\n")
 }
-

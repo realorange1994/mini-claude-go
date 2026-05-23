@@ -579,7 +579,6 @@ func buildSystemBlocks(prompt string, ttl string) []anthropic.TextBlockParam {
 	return result
 }
 
-
 // ---------------------------------------------------------------------------
 // Cache Break Detection
 // ---------------------------------------------------------------------------
@@ -589,18 +588,18 @@ func buildSystemBlocks(prompt string, ttl string) []anthropic.TextBlockParam {
 type CacheChangeCategory string
 
 const (
-	CacheChangeToolResult     CacheChangeCategory = "tool_result"
-	CacheChangeThinking       CacheChangeCategory = "thinking"
-	CacheChangeImage          CacheChangeCategory = "image"
-	CacheChangePDF            CacheChangeCategory = "pdf"
-	CacheChangeAttachment     CacheChangeCategory = "attachment"
-	CacheChangeSystemPrompt   CacheChangeCategory = "system_prompt"
-	CacheChangeCompaction     CacheChangeCategory = "compaction"
-	CacheChangeEdit           CacheChangeCategory = "edit"
-	CacheChangeUserMessage    CacheChangeCategory = "user_message"
-	CacheChangeToolUse        CacheChangeCategory = "tool_use"
-	CacheChangeNormalization  CacheChangeCategory = "normalization"
-	CacheChangeOther          CacheChangeCategory = "other"
+	CacheChangeToolResult    CacheChangeCategory = "tool_result"
+	CacheChangeThinking      CacheChangeCategory = "thinking"
+	CacheChangeImage         CacheChangeCategory = "image"
+	CacheChangePDF           CacheChangeCategory = "pdf"
+	CacheChangeAttachment    CacheChangeCategory = "attachment"
+	CacheChangeSystemPrompt  CacheChangeCategory = "system_prompt"
+	CacheChangeCompaction    CacheChangeCategory = "compaction"
+	CacheChangeEdit          CacheChangeCategory = "edit"
+	CacheChangeUserMessage   CacheChangeCategory = "user_message"
+	CacheChangeToolUse       CacheChangeCategory = "tool_use"
+	CacheChangeNormalization CacheChangeCategory = "normalization"
+	CacheChangeOther         CacheChangeCategory = "other"
 )
 
 // cacheChangeWeight returns the expected token impact weight for a change category.

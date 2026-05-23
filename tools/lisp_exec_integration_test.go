@@ -9,9 +9,9 @@ func TestLispExecToolArgs(t *testing.T) {
 	tool := &LispExecTool{}
 
 	tests := []struct {
-		name    string
-		params  map[string]any
-		want    string
+		name   string
+		params map[string]any
+		want   string
 	}{
 		// Bug 1 regression: args parameter not passed to command
 		{"seq 5", map[string]any{"command": "seq", "args": []any{5.0}}, "1"},

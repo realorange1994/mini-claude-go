@@ -136,12 +136,12 @@ type CompactionResult struct {
 
 // CompactionConfig holds all tunable parameters.
 type CompactionConfig struct {
-	MaxContextTokens  int     // Maximum context window in tokens
-	Threshold         float64 // Fraction of max context that triggers compaction (0.0-1.0)
-	KeepRounds        int     // Number of recent rounds to always keep
-	ArchiveDir        string  // Directory for archive files (empty = skip archiving)
-	ClearPlaceholder  string  // Placeholder for cleared content (empty = hard omit)
-	OmissionMarker    string  // Format string for boundary markers (empty = none)
+	MaxContextTokens int     // Maximum context window in tokens
+	Threshold        float64 // Fraction of max context that triggers compaction (0.0-1.0)
+	KeepRounds       int     // Number of recent rounds to always keep
+	ArchiveDir       string  // Directory for archive files (empty = skip archiving)
+	ClearPlaceholder string  // Placeholder for cleared content (empty = hard omit)
+	OmissionMarker   string  // Format string for boundary markers (empty = none)
 }
 
 // DefaultCompactionConfig returns sensible defaults.
@@ -160,12 +160,12 @@ func DefaultCompactionConfig() CompactionConfig {
 
 // apiRound represents one user+assistant exchange (may include tool calls).
 type apiRound struct {
-	indices    []int              // original message indices in this round
+	indices    []int // original message indices in this round
 	messages   []CompactionMessage
 	totalChars int
-	isToolCall bool               // true if this round contains tool_call/tool_result
-	toolPairID string             // tool_use_id for pairing tool_call with result
-	ToolName   string             // name of the tool used in this round (if any)
+	isToolCall bool   // true if this round contains tool_call/tool_result
+	toolPairID string // tool_use_id for pairing tool_call with result
+	ToolName   string // name of the tool used in this round (if any)
 }
 
 // groupMessagesByRound groups a flat message list into API rounds.
@@ -268,8 +268,9 @@ func extractToolResultID(msg CompactionMessage) string {
 // should be kept. It ensures tool_call/tool_result pairs are not split.
 //
 // Parameters:
-//   rounds: grouped API rounds
-//   keepN: number of recent rounds to always keep
+//
+//	rounds: grouped API rounds
+//	keepN: number of recent rounds to always keep
 //
 // Returns the round index where the "keep" region starts.
 func findSafeCompactionBoundary(rounds []apiRound, keepN int) int {
@@ -599,8 +600,8 @@ func SelectiveCompact(rounds []apiRound, compactableTools map[string]bool, place
 
 // SmartCompactResult holds the result of smart (turn-based) compaction.
 type SmartCompactResult struct {
-	Messages     []CompactionMessage
-	KeptTurns    int
+	Messages       []CompactionMessage
+	KeptTurns      int
 	CollapsedTurns int
 }
 
@@ -658,8 +659,8 @@ func SmartCompact(messages []CompactionMessage, keepFirst int, keepLast int) *Sm
 		result = append(result, systemMsgs...)
 		result = append(result, conversational...)
 		return &SmartCompactResult{
-			Messages:     result,
-			KeptTurns:    totalTurns,
+			Messages:       result,
+			KeptTurns:      totalTurns,
 			CollapsedTurns: 0,
 		}
 	}
@@ -692,8 +693,8 @@ func SmartCompact(messages []CompactionMessage, keepFirst int, keepLast int) *Sm
 	}
 
 	return &SmartCompactResult{
-		Messages:     result,
-		KeptTurns:    keepFirst + keepLast,
+		Messages:       result,
+		KeptTurns:      keepFirst + keepLast,
 		CollapsedTurns: collapsed,
 	}
 }
@@ -834,8 +835,8 @@ func defaultCompactableTools() map[string]bool {
 
 // messageRoundParam represents an API round built from MessageParam structs.
 type messageRoundParam struct {
-	role  string // "system", "user", or "assistant" (of first msg)
-	msgs  []anthropic.MessageParam
+	role string // "system", "user", or "assistant" (of first msg)
+	msgs []anthropic.MessageParam
 }
 
 // groupMessageParamsByRound groups []anthropic.MessageParam into API rounds.
@@ -1357,7 +1358,8 @@ func findLastCompactBoundaryIndex(messages []anthropic.MessageParam) int {
 // getMessagesAfterCompactBoundary returns messages from the last compact boundary
 // onward (including the boundary). If no boundary exists, returns all messages.
 // This mirrors upstream's getMessagesAfterCompactBoundary in messages.ts:
-//   https://github.com/anthropics/claude-code/blob/main/src/utils/messages.ts#L4722
+//
+//	https://github.com/anthropics/claude-code/blob/main/src/utils/messages.ts#L4722
 //
 // The boundary itself is a system message and should be stripped before the
 // compact API call (similar to upstream's normalizeMessagesForAPI stripping
@@ -1393,11 +1395,11 @@ type Compactor struct {
 	compactBuffer         int
 	llmCompactFailedCount int
 	maxLLMCompactFailures int
-	disabled              bool     // permanently disable LLM-driven auto-compact after too many failures; other compaction paths (SM-compact, PartialCompact, CompactContext fallback) remain available
-	lastSummary           string   // for iterative summary updates
+	disabled              bool      // permanently disable LLM-driven auto-compact after too many failures; other compaction paths (SM-compact, PartialCompact, CompactContext fallback) remain available
+	lastSummary           string    // for iterative summary updates
 	lastCompactSavings    []float64 // track savings ratio for anti-thrashing
-	postCompactTokens     int      // token count after last compaction, for cooldown
-	compressionLevel      int      // progressive summarization level (1=full, 2=concise, 3=minimal, 4+=ultra-minimal)
+	postCompactTokens     int       // token count after last compaction, for cooldown
+	compressionLevel      int       // progressive summarization level (1=full, 2=concise, 3=minimal, 4+=ultra-minimal)
 }
 
 // NewCompactor creates a new compactor with default settings.
@@ -2135,14 +2137,14 @@ const (
 
 // PartialCompactResult holds the outcome of a partial compaction operation.
 type PartialCompactResult struct {
-	Summary           string // generated summary of the compacted region
-	Direction         PartialCompactDirection
-	PivotIndex        int    // index where the split occurred
-	MessagesKept      int    // number of messages preserved
-	MessagesSummarized int  // number of messages that were summarized
-	TokensBefore      int
-	TokensAfter       int
-	TokensSaved       int
+	Summary            string // generated summary of the compacted region
+	Direction          PartialCompactDirection
+	PivotIndex         int // index where the split occurred
+	MessagesKept       int // number of messages preserved
+	MessagesSummarized int // number of messages that were summarized
+	TokensBefore       int
+	TokensAfter        int
+	TokensSaved        int
 }
 
 // PartialCompact performs directional partial compaction on conversation entries.
@@ -2240,13 +2242,13 @@ func (c *ConversationContext) PartialCompact(
 		content: CompactBoundaryContent{
 			Trigger:          CompactTriggerAuto,
 			PreCompactTokens: tokensBefore,
-				UUID:             generateUUID(),
+			UUID:             generateUUID(),
 		},
 	})
 
 	// Insert summary as user message
 	newEntries = append(newEntries, conversationEntry{
-		role:    "user",
+		role: "user",
 		content: SummaryContent(func() string {
 			s := fmt.Sprintf("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n[partial-compact: %s, %d tokens compressed]\n\n%s", direction, tokensBefore, summaryText)
 
@@ -2279,14 +2281,14 @@ func (c *ConversationContext) PartialCompact(
 		direction, len(summarizeEntries), len(keepEntries), tokensSaved)
 
 	return &PartialCompactResult{
-		Summary:           summaryText,
-		Direction:         direction,
-		PivotIndex:        pivotIndex,
-		MessagesKept:      len(keepEntries),
+		Summary:            summaryText,
+		Direction:          direction,
+		PivotIndex:         pivotIndex,
+		MessagesKept:       len(keepEntries),
 		MessagesSummarized: len(summarizeEntries),
-		TokensBefore:      tokensBefore,
-		TokensAfter:       tokensAfter,
-		TokensSaved:       tokensSaved,
+		TokensBefore:       tokensBefore,
+		TokensAfter:        tokensAfter,
+		TokensSaved:        tokensSaved,
 	}, nil
 }
 
@@ -2497,7 +2499,7 @@ func entriesToSummaryTextForMessagesParams(messages []anthropic.MessageParam) st
 	var events []narrativeEvent
 	var filesMentioned []string
 	var errorMessages []string
-	var editOps []string    // edit details
+	var editOps []string // edit details
 	toolCounts := make(map[string]int)
 	totalToolCalls := 0
 	totalToolResults := 0
@@ -2834,8 +2836,9 @@ func CheckReactiveCompact(currentTokens, previousTokens, threshold int) *Reactiv
 // aggressive truncation when the exact overflow count is unknown.
 //
 // Parameters:
-//   targetTokens - if > 0, compact to this specific token budget.
-//                  if == 0, compact aggressively (keep only recent 25% of context).
+//
+//	targetTokens - if > 0, compact to this specific token budget.
+//	               if == 0, compact aggressively (keep only recent 25% of context).
 func (a *AgentLoop) reactiveCompact(targetTokens int) error {
 	currentTokens := a.context.EstimatedTokens()
 

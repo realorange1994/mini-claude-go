@@ -32,7 +32,7 @@ func (t *TaskOutputTool) Description() string {
 
 func (t *TaskOutputTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"task_id"},
 		"properties": map[string]any{
 			"task_id": map[string]any{

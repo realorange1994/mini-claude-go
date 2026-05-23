@@ -768,10 +768,10 @@ func stripImagesFromToolResultContent(tr *anthropic.ToolResultBlockParam) *anthr
 		filtered = append(filtered, c)
 	}
 	return &anthropic.ToolResultBlockParam{
-		ToolUseID:  tr.ToolUseID,
-		IsError:    tr.IsError,
+		ToolUseID:    tr.ToolUseID,
+		IsError:      tr.IsError,
 		CacheControl: tr.CacheControl,
-		Content:    filtered,
+		Content:      filtered,
 	}
 }
 

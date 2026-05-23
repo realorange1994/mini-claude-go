@@ -362,8 +362,8 @@ func (a *AgentLoop) SpawnSubAgent(
 		// Hook: OnFork — when a session is forked with inherited context
 		if a.hooks != nil {
 			a.hooks.ExecuteGenericHooksQuiet(HookOnFork, map[string]interface{}{
-				"task_id":         description,
-				"parent_entries":  len(parentEntries),
+				"task_id":        description,
+				"parent_entries": len(parentEntries),
 			})
 		}
 	}
@@ -417,13 +417,12 @@ func (a *AgentLoop) SpawnSubAgent(
 		defer a.activeSubAgents.Done()
 		defer asyncCancel() // ensure context is released when done
 
-
 		if a.taskStore != nil {
 			a.taskStore.UpdateStatus(taskID, TaskStatusRunning)
 		}
 
 		if bgTask != nil {
-				bgTask.SetStatus(tools.TaskRunning)
+			bgTask.SetStatus(tools.TaskRunning)
 		}
 
 		childLoop, err := a.createChildAgentLoop(childCfg, childRegistry, agentType, parentSystemPrompt)
@@ -479,7 +478,6 @@ func (a *AgentLoop) SpawnSubAgent(
 			}
 		}
 
-
 		// Apply fork mode with cloned entries (filtered same as sync path)
 		if isForkMode && len(parentEntries) > 0 {
 			filtered := filterEntriesForFork(parentEntries)
@@ -506,7 +504,7 @@ func (a *AgentLoop) SpawnSubAgent(
 		// Capture final result into the task's output buffer
 		if bgTask != nil {
 			bgTask.WriteOutput(childResult)
-				bgTask.SetToolsInfo(int(childLoop.budget.consumed.Load()), time.Since(start).Milliseconds())
+			bgTask.SetToolsInfo(int(childLoop.budget.consumed.Load()), time.Since(start).Milliseconds())
 		}
 
 		turnsUsed := int(childLoop.budget.consumed.Load())
@@ -531,7 +529,7 @@ func (a *AgentLoop) SpawnSubAgent(
 			a.taskStore.CompleteTask(taskID, childResult, turnsUsed, dur)
 		}
 		if bgTask != nil {
-				bgTask.SetStatus(tools.TaskCompleted)
+			bgTask.SetStatus(tools.TaskCompleted)
 		}
 
 		// Update handle store if this agent was named
@@ -1001,7 +999,7 @@ func (a *AgentLoop) runChildAgentSync(
 // agentType: the type of sub-agent (affects system prompt construction)
 // parentSystemPrompt: for fork mode, the parent's rendered system prompt (used verbatim)
 func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry, agentType AgentType, parentSystemPrompt string) (*AgentLoop, error) {
-maxTurns := cfg.MaxTurns
+	maxTurns := cfg.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = math.MaxInt // no limit; sub-agents stop naturally when done
 	}
@@ -1019,25 +1017,25 @@ maxTurns := cfg.MaxTurns
 	childSysPrompt := buildSubAgentSystemPrompt(registry, cfg, agentType, parentSystemPrompt)
 
 	child := &AgentLoop{
-		config:       cfg,
-		registry:     registry,
-		gate:         NewPermissionGate(&cfg),
-		context:      ctx,
-		client:       a.client, // reuse parent's HTTP client
-		snapshots:    cfg.FileHistory,
-		transcript:   tw,
-		skillTracker: nil, // sub-agents don't track skills
-		compactor:    NewCompactor(),
-		useStream:    a.useStream,
-		maxToolChars: a.maxToolChars,
-		toolTimeoutMs: a.toolTimeoutMs,
-		maxTurns:     maxTurns,
-		budget:       NewIterationBudget(maxTurns),
-		taskStore:    NewTaskStore(), // track background bash tasks spawned by this sub-agent
-		agentOutput:  io.Discard,    // default: discard output; background agents override with taskOutputWriter
-			toolStateTracker: NewToolStateTracker(), // track tool state for sub-agent
-			todoList:         tools.NewTodoList(),   // sub-agents need their own todo list to avoid nil panic
-			cachedMC:         NewCachedMicrocompactTracker(), // cache_edits tracking for sub-agent
+		config:           cfg,
+		registry:         registry,
+		gate:             NewPermissionGate(&cfg),
+		context:          ctx,
+		client:           a.client, // reuse parent's HTTP client
+		snapshots:        cfg.FileHistory,
+		transcript:       tw,
+		skillTracker:     nil, // sub-agents don't track skills
+		compactor:        NewCompactor(),
+		useStream:        a.useStream,
+		maxToolChars:     a.maxToolChars,
+		toolTimeoutMs:    a.toolTimeoutMs,
+		maxTurns:         maxTurns,
+		budget:           NewIterationBudget(maxTurns),
+		taskStore:        NewTaskStore(),                 // track background bash tasks spawned by this sub-agent
+		agentOutput:      io.Discard,                     // default: discard output; background agents override with taskOutputWriter
+		toolStateTracker: NewToolStateTracker(),          // track tool state for sub-agent
+		todoList:         tools.NewTodoList(),            // sub-agents need their own todo list to avoid nil panic
+		cachedMC:         NewCachedMicrocompactTracker(), // cache_edits tracking for sub-agent
 	}
 	child.gate = NewPermissionGate(&child.config)
 
@@ -1689,4 +1687,3 @@ func extractPartialResult(output string, n int) string {
 	result := strings.Join(lines, "\n")
 	return "[partial result, agent was killed]\n" + result
 }
-

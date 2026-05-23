@@ -221,7 +221,6 @@ func parseBingResults(html string, maxResults int) []SearchResult {
 	// Bing structure: <li class="b_algo">...</li> - be flexible with attribute ordering
 	matches := reBingListItem.FindAllStringSubmatch(html, -1)
 
-
 	for _, match := range matches {
 		if len(results) >= maxResults {
 			break

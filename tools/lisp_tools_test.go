@@ -157,7 +157,7 @@ func TestLispToolsPermissionsMkdirPassthrough(t *testing.T) {
 	tool := &LispToolsTool{}
 	result := tool.CheckPermissions(map[string]any{
 		"operation": "mkdir",
-		"path": "/tmp/newdir",
+		"path":      "/tmp/newdir",
 	})
 	if result.Behavior != PermissionPassthrough {
 		t.Errorf("mkdir to safe path should passthrough, got %v", result.Behavior)
@@ -517,10 +517,10 @@ func TestLispToolsEdit(t *testing.T) {
 
 	// Replace all
 	result = tool.ExecuteContext(ctx, map[string]any{
-		"operation":  "edit",
-		"file_path":  testFile,
-		"old_string": "The quick brown fox",
-		"new_string": "The slow red fox",
+		"operation":   "edit",
+		"file_path":   testFile,
+		"old_string":  "The quick brown fox",
+		"new_string":  "The slow red fox",
 		"replace_all": true,
 	})
 	if result.IsError {
@@ -588,9 +588,9 @@ func TestLispToolsMultiEdit(t *testing.T) {
 	}
 
 	result := tool.ExecuteContext(ctx, map[string]any{
-		"operation":  "multi_edit",
-		"file_path":  testFile,
-		"edits":      edits,
+		"operation": "multi_edit",
+		"file_path": testFile,
+		"edits":     edits,
 	})
 	if result.IsError {
 		t.Fatalf("multi_edit failed: %s", result.Output)
@@ -666,8 +666,8 @@ func TestLispToolsMvAndCp(t *testing.T) {
 
 	// Copy
 	result := tool.ExecuteContext(ctx, map[string]any{
-		"operation": "cp",
-		"file_path": src,
+		"operation":   "cp",
+		"file_path":   src,
 		"destination": cp,
 	})
 	if result.IsError {
@@ -689,8 +689,8 @@ func TestLispToolsMvAndCp(t *testing.T) {
 
 	// Move (rename)
 	result = tool.ExecuteContext(ctx, map[string]any{
-		"operation": "mv",
-		"file_path": src,
+		"operation":   "mv",
+		"file_path":   src,
 		"destination": dst,
 	})
 	if result.IsError {
@@ -759,9 +759,9 @@ func TestLispToolsSearch(t *testing.T) {
 
 	// Search for "Hello" in all files
 	result := tool.ExecuteContext(ctx, map[string]any{
-		"operation": "search",
-		"pattern":   "Hello",
-		"path":      dir,
+		"operation":   "search",
+		"pattern":     "Hello",
+		"path":        dir,
 		"output_mode": "files_with_matches",
 	})
 	if result.IsError {
@@ -776,11 +776,11 @@ func TestLispToolsSearch(t *testing.T) {
 
 	// Search with glob filter
 	result = tool.ExecuteContext(ctx, map[string]any{
-		"operation": "search",
-		"pattern":   "Hello",
-		"path":      dir,
+		"operation":   "search",
+		"pattern":     "Hello",
+		"path":        dir,
 		"output_mode": "files_with_matches",
-		"glob":      "*.txt",
+		"glob":        "*.txt",
 	})
 	if result.IsError {
 		t.Fatalf("search with glob failed: %s", result.Output)
@@ -791,9 +791,9 @@ func TestLispToolsSearch(t *testing.T) {
 
 	// Search count
 	result = tool.ExecuteContext(ctx, map[string]any{
-		"operation": "search",
-		"pattern":   "Hello",
-		"path":      dir,
+		"operation":   "search",
+		"pattern":     "Hello",
+		"path":        dir,
 		"output_mode": "count",
 	})
 	if result.IsError {
@@ -816,9 +816,9 @@ func TestLispToolsSearchCaseInsensitive(t *testing.T) {
 
 	// Case sensitive - should find only lowercase "hello"
 	result := tool.ExecuteContext(ctx, map[string]any{
-		"operation": "search",
-		"pattern":   "hello",
-		"path":      dir,
+		"operation":   "search",
+		"pattern":     "hello",
+		"path":        dir,
 		"output_mode": "content",
 	})
 	if result.IsError {
@@ -827,10 +827,10 @@ func TestLispToolsSearchCaseInsensitive(t *testing.T) {
 
 	// Case insensitive - should find both
 	result = tool.ExecuteContext(ctx, map[string]any{
-		"operation": "search",
-		"pattern":   "hello",
-		"path":      dir,
-		"output_mode": "content",
+		"operation":        "search",
+		"pattern":          "hello",
+		"path":             dir,
+		"output_mode":      "content",
 		"case_insensitive": true,
 	})
 	if result.IsError {
@@ -902,9 +902,9 @@ func TestLispToolsGlobHeadLimit(t *testing.T) {
 	defer cancel()
 
 	result := tool.ExecuteContext(ctx, map[string]any{
-		"operation": "glob",
-		"pattern":   "*.txt",
-		"path":      dir,
+		"operation":  "glob",
+		"pattern":    "*.txt",
+		"path":       dir,
 		"head_limit": 3,
 	})
 	if result.IsError {
@@ -1073,8 +1073,8 @@ func TestLispToolsCpNonExistentSource(t *testing.T) {
 	defer cancel()
 
 	result := tool.ExecuteContext(ctx, map[string]any{
-		"operation": "cp",
-		"file_path": "/nonexistent/source.txt",
+		"operation":   "cp",
+		"file_path":   "/nonexistent/source.txt",
 		"destination": "/tmp/dest.txt",
 	})
 	if !result.IsError {
@@ -1151,8 +1151,8 @@ func TestLispToolsMvNonExistentSource(t *testing.T) {
 	defer cancel()
 
 	result := tool.ExecuteContext(ctx, map[string]any{
-		"operation": "mv",
-		"file_path": "/nonexistent/source.txt",
+		"operation":   "mv",
+		"file_path":   "/nonexistent/source.txt",
 		"destination": "/tmp/dest.txt",
 	})
 	if !result.IsError {

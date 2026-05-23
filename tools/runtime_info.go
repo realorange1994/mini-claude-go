@@ -10,8 +10,10 @@ import (
 // RuntimeInfoTool provides Go runtime and system diagnostics.
 type RuntimeInfoTool struct{}
 
-func (*RuntimeInfoTool) Name() string        { return "runtime_info" }
-func (*RuntimeInfoTool) Description() string { return "Show Go runtime and system information: version, OS, architecture, CPU count, working directory, and memory usage." }
+func (*RuntimeInfoTool) Name() string { return "runtime_info" }
+func (*RuntimeInfoTool) Description() string {
+	return "Show Go runtime and system information: version, OS, architecture, CPU count, working directory, and memory usage."
+}
 
 func (*RuntimeInfoTool) InputSchema() map[string]any {
 	return map[string]any{
@@ -21,7 +23,9 @@ func (*RuntimeInfoTool) InputSchema() map[string]any {
 	}
 }
 
-func (*RuntimeInfoTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*RuntimeInfoTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *RuntimeInfoTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
 	select {

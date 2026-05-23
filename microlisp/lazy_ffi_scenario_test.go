@@ -1070,6 +1070,7 @@ func TestLazy_ErrorsIs(t *testing.T) {
 	}
 	// May fail with argument error - that's OK, we just verify the name exists
 }
+
 // ===========================================================================
 // Scenario 25: Reflect (lazy-loaded)
 // ===========================================================================

@@ -281,10 +281,10 @@ func TestEscapeXMLIdempotent(t *testing.T) {
 	// on a second pass. This is a known limitation of simple ReplaceAll-based
 	// implementations. Test the actual behavior so we document it.
 	inputs := []string{
-		"hello world",           // no special chars: idempotent
-		"",                      // empty: idempotent
-		"a & b",                 // ampersand: NOT idempotent (&amp; -> &amp;amp;)
-		"<div>",                 // angle brackets: NOT idempotent
+		"hello world", // no special chars: idempotent
+		"",            // empty: idempotent
+		"a & b",       // ampersand: NOT idempotent (&amp; -> &amp;amp;)
+		"<div>",       // angle brackets: NOT idempotent
 	}
 
 	for _, in := range inputs {

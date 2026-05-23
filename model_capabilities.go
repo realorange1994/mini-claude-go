@@ -32,19 +32,19 @@ type ModelCapabilitiesCache struct {
 // when the API is unavailable or a model is not in the API response.
 // Only latest models are kept here — older versions are removed.
 var DefaultModelCapabilities = map[string]ModelCapabilities{
-	"claude-sonnet-4-6-20260125":    {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
-	"claude-opus-4-6-20260302":      {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
-	"claude-haiku-4-5-20250610":     {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: true},
-	"claude-sonnet-4-5-20250929":    {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
-	"claude-sonnet-4-20250514":      {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
-	"claude-opus-4-5-20250610":      {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
-	"claude-opus-4-20250514":        {ContextWindow: 1_000_000, MaxOutputTokens: 32000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-sonnet-4-6-20260125": {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-opus-4-6-20260302":   {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-haiku-4-5-20250610":  {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: true},
+	"claude-sonnet-4-5-20250929": {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-sonnet-4-20250514":   {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-opus-4-5-20250610":   {ContextWindow: 1_000_000, MaxOutputTokens: 64000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
+	"claude-opus-4-20250514":     {ContextWindow: 1_000_000, MaxOutputTokens: 32000, MaxThinkingTokens: 32000, SupportsVision: true, SupportsThinking: true},
 	// Legacy model IDs (kept for test compatibility and older API responses)
-	"claude-3-5-sonnet-20241022":    {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: false},
-	"claude-3-5-haiku-20241022":     {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: false},
-	"claude-3-opus-20240229":        {ContextWindow: 200_000, MaxOutputTokens: 4096, MaxThinkingTokens: 0, SupportsVision: true, SupportsThinking: false},
-	"claude-3-sonnet-20240229":      {ContextWindow: 200_000, MaxOutputTokens: 4096, MaxThinkingTokens: 0, SupportsVision: true, SupportsThinking: false},
-	"claude-3-haiku-20240307":       {ContextWindow: 200_000, MaxOutputTokens: 4096, MaxThinkingTokens: 0, SupportsVision: true, SupportsThinking: false},
+	"claude-3-5-sonnet-20241022": {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: false},
+	"claude-3-5-haiku-20241022":  {ContextWindow: 200_000, MaxOutputTokens: 8192, MaxThinkingTokens: 4096, SupportsVision: true, SupportsThinking: false},
+	"claude-3-opus-20240229":     {ContextWindow: 200_000, MaxOutputTokens: 4096, MaxThinkingTokens: 0, SupportsVision: true, SupportsThinking: false},
+	"claude-3-sonnet-20240229":   {ContextWindow: 200_000, MaxOutputTokens: 4096, MaxThinkingTokens: 0, SupportsVision: true, SupportsThinking: false},
+	"claude-3-haiku-20240307":    {ContextWindow: 200_000, MaxOutputTokens: 4096, MaxThinkingTokens: 0, SupportsVision: true, SupportsThinking: false},
 }
 
 // NewModelCapabilitiesCache creates a new cache with the given directory.
@@ -178,8 +178,8 @@ func (mc *ModelCapabilitiesCache) RefreshFromAPI(apiKey, baseURL string) error {
 
 	var apiResp struct {
 		Data []struct {
-			ID         string `json:"id"`
-			Created    int64  `json:"created"`
+			ID           string `json:"id"`
+			Created      int64  `json:"created"`
 			Capabilities struct {
 				ContextWindow int64 `json:"context_window"`
 			} `json:"capabilities"`

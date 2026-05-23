@@ -31,7 +31,9 @@ func (t *AgentListTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *AgentListTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *AgentListTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *AgentListTool) Execute(params map[string]any) ToolResult {
 	if t.Store == nil {
@@ -106,7 +108,9 @@ func (t *AgentGetTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *AgentGetTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *AgentGetTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *AgentGetTool) Execute(params map[string]any) ToolResult {
 	if t.Store == nil {
@@ -205,7 +209,9 @@ func (t *AgentKillTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *AgentKillTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *AgentKillTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *AgentKillTool) Execute(params map[string]any) ToolResult {
 	if t.Store == nil {

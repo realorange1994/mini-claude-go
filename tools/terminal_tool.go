@@ -12,7 +12,7 @@ import (
 // TerminalTool provides terminal/screen/tmux session management.
 type TerminalTool struct{}
 
-func (*TerminalTool) Name() string    { return "terminal" }
+func (*TerminalTool) Name() string { return "terminal" }
 func (*TerminalTool) Description() string {
 	if runtime.GOOS == "windows" {
 		return "Terminal session management: NOT AVAILABLE on Windows (requires tmux/screen, Unix-only)."

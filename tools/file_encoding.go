@@ -31,7 +31,7 @@ func (*FileEncodingTool) Description() string {
 		"from golang.org/x/net/html/charset.\n\n" +
 		"Usage:\n" +
 		"- detect: Only detect the encoding, returns encoding name and a preview.\n" +
-			"- For read/edit/multi_edit: auto-detects encoding if not specified.\n" +
+		"- For read/edit/multi_edit: auto-detects encoding if not specified.\n" +
 		"- For write: follows write_file convention — you MUST use file_encoding read first for existing files. New files default to UTF-8.\n" +
 		"- edit/multi_edit: follows edit_file/multi_edit convention — read-before-write validation.\n\n" +
 		"Common encoding names: gbk, gb18030, big5, shift_jis, euc_jp, euc_kr, " +
@@ -417,7 +417,7 @@ func (e *FileEncodingTool) edit(pathStr string, params map[string]any) ToolResul
 	}
 	if count > 1 && !replaceAll {
 		return ToolResult{
-			Output: fmt.Sprintf("Warning: old_text appears %d times. Provide more context or set replace_all=true.", count),
+			Output:  fmt.Sprintf("Warning: old_text appears %d times. Provide more context or set replace_all=true.", count),
 			IsError: true,
 		}
 	}
@@ -578,7 +578,7 @@ func (e *FileEncodingTool) multiEdit(pathStr string, params map[string]any) Tool
 		for _, prevNew := range appliedNewStrings {
 			if oldTrimmed != "" && strings.Contains(prevNew, oldTrimmed) {
 				return ToolResult{
-					Output: fmt.Sprintf("Error: edit %d failed: old_string is a substring of a new_string from a previous edit", i+1),
+					Output:  fmt.Sprintf("Error: edit %d failed: old_string is a substring of a new_string from a previous edit", i+1),
 					IsError: true,
 				}
 			}
@@ -598,7 +598,7 @@ func (e *FileEncodingTool) multiEdit(pathStr string, params map[string]any) Tool
 		}
 		if idx < 0 {
 			return ToolResult{
-				Output: fmt.Sprintf("Error: edit %d failed: old_text not found: %q", i+1, truncate(ev.old, 80)),
+				Output:  fmt.Sprintf("Error: edit %d failed: old_text not found: %q", i+1, truncate(ev.old, 80)),
 				IsError: true,
 			}
 		}
@@ -608,7 +608,7 @@ func (e *FileEncodingTool) multiEdit(pathStr string, params map[string]any) Tool
 			cnt := countOccurrences(content, ev.old)
 			if cnt > 1 {
 				return ToolResult{
-					Output: fmt.Sprintf("Error: edit %d failed: old_string has multiple matches; set replace_all to true or provide more context", i+1),
+					Output:  fmt.Sprintf("Error: edit %d failed: old_string has multiple matches; set replace_all to true or provide more context", i+1),
 					IsError: true,
 				}
 			}

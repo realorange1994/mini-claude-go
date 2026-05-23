@@ -10,7 +10,7 @@ import (
 func TestLispEvalDefineBuiltin(t *testing.T) {
 	tool := &LispEvalTool{}
 	result := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "define",
+		"operation":  "define",
 		"expression": "car",
 	})
 	if result.IsError {
@@ -27,7 +27,7 @@ func TestLispEvalDefineBuiltin(t *testing.T) {
 func TestLispEvalDefineFFI(t *testing.T) {
 	tool := &LispEvalTool{}
 	result := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "define",
+		"operation":  "define",
 		"expression": "math.Pow",
 	})
 	if result.IsError {
@@ -44,7 +44,7 @@ func TestLispEvalDefineFFI(t *testing.T) {
 func TestLispEvalDefineStdlib(t *testing.T) {
 	tool := &LispEvalTool{}
 	result := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "define",
+		"operation":  "define",
 		"expression": "filter",
 	})
 	if result.IsError {
@@ -62,7 +62,7 @@ func TestLispEvalDefineStdlib(t *testing.T) {
 func TestLispEvalDefineNotFound(t *testing.T) {
 	tool := &LispEvalTool{}
 	result := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "define",
+		"operation":  "define",
 		"expression": "nonexistent_function_xyz",
 	})
 	if result.IsError {
@@ -78,7 +78,7 @@ func TestLispEvalDefineNotFound(t *testing.T) {
 func TestLispEvalDefineEmptyExpression(t *testing.T) {
 	tool := &LispEvalTool{}
 	result := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "define",
+		"operation":  "define",
 		"expression": "",
 	})
 	if !result.IsError {
@@ -89,7 +89,7 @@ func TestLispEvalDefineEmptyExpression(t *testing.T) {
 func TestLispEvalDefineFFIVariadic(t *testing.T) {
 	tool := &LispEvalTool{}
 	result := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "define",
+		"operation":  "define",
 		"expression": "fmt.Sprintf",
 	})
 	if result.IsError {
@@ -103,7 +103,7 @@ func TestLispEvalDefineFFIVariadic(t *testing.T) {
 func TestLispEvalDefineSpecialForm(t *testing.T) {
 	tool := &LispEvalTool{}
 	result := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "define",
+		"operation":  "define",
 		"expression": "if",
 	})
 	if result.IsError {
@@ -135,7 +135,7 @@ func TestLispEvalFFIRoundtrip(t *testing.T) {
 
 	// Define a Go function via FFI
 	defResult := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "define",
+		"operation":  "define",
 		"expression": "time.ParseDuration",
 	})
 	if defResult.IsError {
@@ -144,7 +144,7 @@ func TestLispEvalFFIRoundtrip(t *testing.T) {
 
 	// Call FFI to import the function
 	importResult := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "eval",
+		"operation":  "eval",
 		"expression": `(go:import "time.ParseDuration")`,
 	})
 	if importResult.IsError {
@@ -153,7 +153,7 @@ func TestLispEvalFFIRoundtrip(t *testing.T) {
 
 	// Call FFI to parse a duration
 	parseResult := tool.ExecuteContext(context.Background(), map[string]any{
-		"operation": "eval",
+		"operation":  "eval",
 		"expression": `(define parse-duration (go:import "time.ParseDuration"))`,
 	})
 	if parseResult.IsError {

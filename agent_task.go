@@ -52,7 +52,7 @@ type TaskState struct {
 	Description     string
 	Model           string
 	SubagentType    string
-	TranscriptPath  string           // path to the sub-agent's transcript file
+	TranscriptPath  string // path to the sub-agent's transcript file
 	ToolsUsed       int
 	DurationMs      int64
 	StartTime       time.Time
@@ -365,7 +365,7 @@ func (a *AgentLoop) spawnBackgroundBashCommand(command, workingDir string) (stri
 		}
 		defer f.Close()
 
-	// Look up the task to set the Process reference
+		// Look up the task to set the Process reference
 		task := a.taskStore.GetTask(taskID)
 
 		cmd := exec.Command(shell, flag, command)

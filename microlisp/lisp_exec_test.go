@@ -195,9 +195,9 @@ func TestExecShortOutput(t *testing.T) {
 	ResetGlobalEnv()
 
 	tests := []struct {
-		name  string
-		expr  string
-		want  string
+		name string
+		expr string
+		want string
 	}{
 		{"echo single word", `(exec "echo" :args (list "hello"))`, "hello"},
 		{"echo empty", `(exec "echo")`, ""},
@@ -243,9 +243,9 @@ func TestExecPositionalArgs(t *testing.T) {
 	ResetGlobalEnv()
 
 	tests := []struct {
-		name  string
-		expr  string
-		want  string
+		name string
+		expr string
+		want string
 	}{
 		{"echo hello", `(exec "echo" "hello")`, "hello"},
 		{"echo two args", `(exec "echo" "hello" "world")`, "hello"},

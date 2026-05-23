@@ -15,8 +15,10 @@ type ListMCPTools struct {
 	Manager *mcp.Manager
 }
 
-func (*ListMCPTools) Name() string        { return "list_mcp_tools" }
-func (*ListMCPTools) Description() string { return "List available tools from MCP servers. Optionally filter by server name or pattern." }
+func (*ListMCPTools) Name() string { return "list_mcp_tools" }
+func (*ListMCPTools) Description() string {
+	return "List available tools from MCP servers. Optionally filter by server name or pattern."
+}
 
 func (*ListMCPTools) InputSchema() map[string]any {
 	return map[string]any{
@@ -35,7 +37,9 @@ func (*ListMCPTools) InputSchema() map[string]any {
 	}
 }
 
-func (*ListMCPTools) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*ListMCPTools) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *ListMCPTools) Execute(params map[string]any) ToolResult {
 	if t.Manager == nil {
@@ -106,8 +110,10 @@ type MCPToolCaller struct {
 	TimeoutCallback MCPTimeoutCallback
 }
 
-func (*MCPToolCaller) Name() string        { return "mcp_call_tool" }
-func (*MCPToolCaller) Description() string { return "Call a tool on an MCP server. Use list_mcp_tools first to discover available tools." }
+func (*MCPToolCaller) Name() string { return "mcp_call_tool" }
+func (*MCPToolCaller) Description() string {
+	return "Call a tool on an MCP server. Use list_mcp_tools first to discover available tools."
+}
 
 func (*MCPToolCaller) InputSchema() map[string]any {
 	return map[string]any{
@@ -138,7 +144,9 @@ func (*MCPToolCaller) InputSchema() map[string]any {
 	}
 }
 
-func (*MCPToolCaller) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*MCPToolCaller) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 type mcpCallResult struct {
 	text    string
@@ -305,7 +313,7 @@ func (t *MCPToolCaller) Execute(params map[string]any) ToolResult {
 			}
 		}
 		return ToolResult{
-			Output: fmt.Sprintf("Error: MCP call timed out after %dms. Use task_output later to check if it completed.", timeoutMs),
+			Output:  fmt.Sprintf("Error: MCP call timed out after %dms. Use task_output later to check if it completed.", timeoutMs),
 			IsError: true,
 		}
 	case r := <-resultCh:
@@ -334,7 +342,9 @@ func (*MCPServerStatus) InputSchema() map[string]any {
 	}
 }
 
-func (*MCPServerStatus) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*MCPServerStatus) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *MCPServerStatus) Execute(params map[string]any) ToolResult {
 	if t.Manager == nil {

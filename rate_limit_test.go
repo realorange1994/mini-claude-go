@@ -80,8 +80,8 @@ func TestRateLimitStateHasData(t *testing.T) {
 func TestRateLimitStateRetryDelay(t *testing.T) {
 	// No exhausted buckets -> 0 delay
 	s := &RateLimitState{
-		RequestsMin:  RateLimitBucket{Limit: 100, Remaining: 50, ResetSeconds: 60, CapturedAt: time.Now()},
-		CapturedAt:   time.Now(),
+		RequestsMin: RateLimitBucket{Limit: 100, Remaining: 50, ResetSeconds: 60, CapturedAt: time.Now()},
+		CapturedAt:  time.Now(),
 	}
 	if d := s.RetryDelay(); d != 0 {
 		t.Errorf("expected 0 delay when not exhausted, got %v", d)
@@ -89,8 +89,8 @@ func TestRateLimitStateRetryDelay(t *testing.T) {
 
 	// Exhausted requests/min bucket
 	s = &RateLimitState{
-		RequestsMin:  RateLimitBucket{Limit: 100, Remaining: 0, ResetSeconds: 30, CapturedAt: time.Now()},
-		CapturedAt:   time.Now(),
+		RequestsMin: RateLimitBucket{Limit: 100, Remaining: 0, ResetSeconds: 30, CapturedAt: time.Now()},
+		CapturedAt:  time.Now(),
 	}
 	d := s.RetryDelay()
 	if d == 0 {
@@ -104,7 +104,7 @@ func TestRateLimitStateRetryDelay(t *testing.T) {
 
 func TestRateLimitStateMostConstrainedBucket(t *testing.T) {
 	s := &RateLimitState{
-		RequestsMin:  RateLimitBucket{Limit: 100, Remaining: 10, CapturedAt: time.Now()},  // 90% used
+		RequestsMin:  RateLimitBucket{Limit: 100, Remaining: 10, CapturedAt: time.Now()},   // 90% used
 		RequestsHour: RateLimitBucket{Limit: 1000, Remaining: 500, CapturedAt: time.Now()}, // 50% used
 		TokensMin:    RateLimitBucket{Limit: 0},                                            // no data
 		CapturedAt:   time.Now(),
@@ -125,9 +125,9 @@ func TestRateLimitStateUpdate(t *testing.T) {
 	}
 
 	newState := &RateLimitState{
-		RequestsMin:  RateLimitBucket{Limit: 100, Remaining: 30},
-		TokensMin:    RateLimitBucket{Limit: 10000, Remaining: 5000},
-		CapturedAt:   time.Now(),
+		RequestsMin: RateLimitBucket{Limit: 100, Remaining: 30},
+		TokensMin:   RateLimitBucket{Limit: 10000, Remaining: 5000},
+		CapturedAt:  time.Now(),
 	}
 
 	s.Update(newState)
@@ -261,8 +261,8 @@ func TestBar(t *testing.T) {
 		{50, 10, "[#####-----]"},
 		{100, 10, "[##########]"},
 		{25, 8, "[##------]"},
-		{-10, 10, "[----------]"},  // negative -> 0 filled
-		{150, 10, "[##########]"},   // >100 -> all filled
+		{-10, 10, "[----------]"}, // negative -> 0 filled
+		{150, 10, "[##########]"}, // >100 -> all filled
 	}
 
 	for _, tt := range tests {
@@ -291,9 +291,9 @@ func TestFormatRateLimitCompactNoData(t *testing.T) {
 
 func TestFormatRateLimitCompactWithData(t *testing.T) {
 	state := &RateLimitState{
-		RequestsMin:  RateLimitBucket{Limit: 100, Remaining: 80},
-		TokensMin:    RateLimitBucket{Limit: 10000, Remaining: 5000},
-		CapturedAt:   time.Now(),
+		RequestsMin: RateLimitBucket{Limit: 100, Remaining: 80},
+		TokensMin:   RateLimitBucket{Limit: 10000, Remaining: 5000},
+		CapturedAt:  time.Now(),
 	}
 	got := FormatRateLimitCompact(state)
 	if got == "" || got == "No rate limit data." {

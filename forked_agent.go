@@ -45,16 +45,16 @@ type CanUseToolFn func(toolName string, args map[string]any) (allowed bool, reas
 // ─── ForkedAgentConfig ───────────────────────────────────────────────────────
 
 type ForkedAgentConfig struct {
-	CacheSafeParams     CacheSafeParams
-	ForkMessages        []anthropic.MessageParam // fork's own messages (only these differ → cache HIT)
-	CanUseTool          CanUseToolFn
-	MaxTokens           int
-	QuerySource         string // tracking label (e.g., "session_memory")
-	MaxTurns            int    // max tool call rounds (default: 10)
-	Registry            *tools.Registry
-	ProjectDir          string
-	SkipParentMessages  bool           // skip CacheSafeParams.Messages (for lightweight forks like session memory)
-	Client              anthropic.Client // reuse parent's client (same auth, base URL, HTTP client)
+	CacheSafeParams    CacheSafeParams
+	ForkMessages       []anthropic.MessageParam // fork's own messages (only these differ → cache HIT)
+	CanUseTool         CanUseToolFn
+	MaxTokens          int
+	QuerySource        string // tracking label (e.g., "session_memory")
+	MaxTurns           int    // max tool call rounds (default: 10)
+	Registry           *tools.Registry
+	ProjectDir         string
+	SkipParentMessages bool             // skip CacheSafeParams.Messages (for lightweight forks like session memory)
+	Client             anthropic.Client // reuse parent's client (same auth, base URL, HTTP client)
 }
 
 // ─── ForkedAgentResult ───────────────────────────────────────────────────────
@@ -401,9 +401,9 @@ func buildForkedToolParams(registry *tools.Registry) []anthropic.ToolUnionParam 
 func CaptureCacheSafeParams(systemPrompt string, model string, registry *tools.Registry, messages []anthropic.MessageParam) CacheSafeParams {
 	return CacheSafeParams{
 		SystemPrompt: systemPrompt,
-		Model:       model,
-		Tools:       buildForkedToolParams(registry),
-		Messages:    messages,
+		Model:        model,
+		Tools:        buildForkedToolParams(registry),
+		Messages:     messages,
 	}
 }
 

@@ -48,48 +48,48 @@ const (
 
 // Config holds all runtime configuration.
 type Config struct {
-	Model                  string
-	APIKey                 string
-	BaseURL                string
-	MaxTurns               int
-	MaxContextMsgs         int
-	PermissionMode         PermissionMode
-	PrePlanMode           PermissionMode // remembers the mode before entering plan mode (for ExitPlanMode to restore)
-	AllowedCommands        []string
-	DeniedPatterns         []string
-	ProjectDir             string
-	MCPManager             *mcp.Manager
-	SkillLoader            *skills.Loader
-	SkillTracker           *skills.SkillTracker
-	FileHistory            *SnapshotHistory
-	AutoCompactEnabled     bool
-	AutoCompactThreshold   float64
-	AutoCompactBuffer      int
-	MaxCompactOutputTokens int
-	MicroCompactEnabled         bool
-	MicroCompactKeepRecent     int
-	MicroCompactPlaceholder    string
-	MicroCompactMinCharCount  int // minimum chars in a tool result to consider clearing; preserves small results
-	MicroCompactGapMinutes     int // time gap (minutes) since last assistant message before triggering microcompact; 0 = disabled (run every turn)
-	PostCompactRecoverFiles    bool
-	PostCompactMaxFiles        int
-	PostCompactMaxFileChars    int // legacy char-based budget (deprecated, use PostCompactMaxFileTokens)
-	PostCompactMaxSkillChars   int // legacy char-based budget (deprecated, use PostCompactMaxSkillTokens)
+	Model                         string
+	APIKey                        string
+	BaseURL                       string
+	MaxTurns                      int
+	MaxContextMsgs                int
+	PermissionMode                PermissionMode
+	PrePlanMode                   PermissionMode // remembers the mode before entering plan mode (for ExitPlanMode to restore)
+	AllowedCommands               []string
+	DeniedPatterns                []string
+	ProjectDir                    string
+	MCPManager                    *mcp.Manager
+	SkillLoader                   *skills.Loader
+	SkillTracker                  *skills.SkillTracker
+	FileHistory                   *SnapshotHistory
+	AutoCompactEnabled            bool
+	AutoCompactThreshold          float64
+	AutoCompactBuffer             int
+	MaxCompactOutputTokens        int
+	MicroCompactEnabled           bool
+	MicroCompactKeepRecent        int
+	MicroCompactPlaceholder       string
+	MicroCompactMinCharCount      int // minimum chars in a tool result to consider clearing; preserves small results
+	MicroCompactGapMinutes        int // time gap (minutes) since last assistant message before triggering microcompact; 0 = disabled (run every turn)
+	PostCompactRecoverFiles       bool
+	PostCompactMaxFiles           int
+	PostCompactMaxFileChars       int // legacy char-based budget (deprecated, use PostCompactMaxFileTokens)
+	PostCompactMaxSkillChars      int // legacy char-based budget (deprecated, use PostCompactMaxSkillTokens)
 	PostCompactMaxTotalSkillChars int // legacy char-based budget (deprecated, use PostCompactMaxTotalSkillTokens)
 	// Token-based budgets for post-compact recovery (upstream uses tokens, not chars)
 	PostCompactMaxFileTokens       int // default 50000 (matches upstream POST_COMPACT_TOKEN_BUDGET)
 	PostCompactMaxTokensPerFile    int // default 5000 (matches upstream POST_COMPACT_MAX_TOKENS_PER_FILE)
 	PostCompactMaxSkillTokens      int // default 1250 (~5K chars / 4)
 	PostCompactMaxTotalSkillTokens int // default 6250 (~25K chars / 4)
-	PostCompactHistorySnipCount   int
-	SessionMemory           *SessionMemory
+	PostCompactHistorySnipCount    int
+	SessionMemory                  *SessionMemory
 	// Reactive compaction: trigger compaction when token count spikes above
 	// this threshold between turns, even if not exceeding the max buffer.
-	ReactiveCompactEnabled    bool
-	ReactiveCompactThreshold  int // default 5000 tokens
+	ReactiveCompactEnabled   bool
+	ReactiveCompactThreshold int // default 5000 tokens
 	// Partial compaction: directional compaction settings
 	PartialCompactEnabled bool
-	cachedPrompt           *CachedSystemPrompt
+	cachedPrompt          *CachedSystemPrompt
 	// Sub-agent settings
 	SubAgentMaxTurns int  // max turns for sub-agent loops (default 0 = no limit, matching Claude Code)
 	SubAgentEnabled  bool // enable/disable the agent tool (default true)
@@ -131,16 +131,16 @@ type Config struct {
 	// Values: "" (default), "fast" (use cheaper/faster model), "high" (use premium model with thinking)
 	EffortLevel string
 	// Runtime behavior settings from config file (takes priority over env vars)
-	PreferNonStreaming     bool
-	TelemetryDisabled      bool
-	ExitAfterStopDelay     time.Duration
-	SessionID              string
-	DefaultOpusModel       string
-	DefaultSonnetModel     string
-	DefaultHaikuModel      string
-	MaxContextTokens       int64
+	PreferNonStreaming      bool
+	TelemetryDisabled       bool
+	ExitAfterStopDelay      time.Duration
+	SessionID               string
+	DefaultOpusModel        string
+	DefaultSonnetModel      string
+	DefaultHaikuModel       string
+	MaxContextTokens        int64
 	MaxOutputTokensOverride int64
-	GitBashPath            string
+	GitBashPath             string
 }
 
 // MCPServerConfig holds the configuration for a single MCP server.
@@ -379,15 +379,15 @@ func DefaultConfig() Config {
 			"git push --force", "git reset --hard",
 			"> /dev/sda", "mkfs", "dd if=",
 		},
-		AutoCompactEnabled:     true,
-		AutoCompactThreshold:   0.75,
-		AutoCompactBuffer:      13000,
-		MaxCompactOutputTokens: 8192,
-		MicroCompactEnabled:         true,
-		MicroCompactKeepRecent:     5,
-		MicroCompactPlaceholder:    "[Old tool result content cleared]",
-		MicroCompactMinCharCount:  2000, // only clear results >= 2000 chars; preserve small useful results
-		MicroCompactGapMinutes:     60,  // trigger microcompact when gap > 60 min since last assistant; matches server cache TTL; 0 = disabled
+		AutoCompactEnabled:            true,
+		AutoCompactThreshold:          0.75,
+		AutoCompactBuffer:             13000,
+		MaxCompactOutputTokens:        8192,
+		MicroCompactEnabled:           true,
+		MicroCompactKeepRecent:        5,
+		MicroCompactPlaceholder:       "[Old tool result content cleared]",
+		MicroCompactMinCharCount:      2000, // only clear results >= 2000 chars; preserve small useful results
+		MicroCompactGapMinutes:        60,   // trigger microcompact when gap > 60 min since last assistant; matches server cache TTL; 0 = disabled
 		PostCompactRecoverFiles:       true,
 		PostCompactMaxFiles:           5,
 		PostCompactMaxFileChars:       50000, // legacy, use PostCompactMaxFileTokens
@@ -398,23 +398,23 @@ func DefaultConfig() Config {
 		PostCompactMaxTokensPerFile:    5000,  // matches upstream POST_COMPACT_MAX_TOKENS_PER_FILE
 		PostCompactMaxSkillTokens:      1250,  // ~5K chars at 4 chars/token
 		PostCompactMaxTotalSkillTokens: 6250,  // ~25K chars at 4 chars/token
-		PostCompactHistorySnipCount:   3,
-		ReactiveCompactEnabled:    true,
-		ReactiveCompactThreshold:  5000,
-		PartialCompactEnabled:     true,
-		cachedPrompt: NewCachedSystemPrompt(),
-		SubAgentMaxTurns:          0,
-		SubAgentEnabled:           true,
-		AutoClassifierEnabled:   true,
-		AutoClassifierMaxTokens: 128,
-		AutoDenialLimit:         3,
-		MaxOutputTokens:         16384,
-		EscalatedMaxOutputTokens: 64000,
-		Hooks:                  NewHookManager(),
+		PostCompactHistorySnipCount:    3,
+		ReactiveCompactEnabled:         true,
+		ReactiveCompactThreshold:       5000,
+		PartialCompactEnabled:          true,
+		cachedPrompt:                   NewCachedSystemPrompt(),
+		SubAgentMaxTurns:               0,
+		SubAgentEnabled:                true,
+		AutoClassifierEnabled:          true,
+		AutoClassifierMaxTokens:        128,
+		AutoDenialLimit:                3,
+		MaxOutputTokens:                16384,
+		EscalatedMaxOutputTokens:       64000,
+		Hooks:                          NewHookManager(),
 		// Runtime defaults (convention over configuration)
-		DefaultOpusModel:    "claude-opus-4-5-20250610",
-		DefaultSonnetModel:  "claude-sonnet-4-20250514",
-		DefaultHaikuModel:   "claude-haiku-4-5-20250610",
+		DefaultOpusModel:   "claude-opus-4-5-20250610",
+		DefaultSonnetModel: "claude-sonnet-4-20250514",
+		DefaultHaikuModel:  "claude-haiku-4-5-20250610",
 	}
 }
 
@@ -560,7 +560,6 @@ func (cfg *Config) applyEnvFallback() {
 		}
 	}
 }
-
 
 // DefaultRegistry creates and populates a registry with all built-in tools.
 func DefaultRegistry() *tools.Registry {

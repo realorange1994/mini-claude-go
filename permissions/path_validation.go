@@ -27,8 +27,8 @@ type PathValidationResult struct {
 
 // path validation regexes
 var (
-	reTilde       = regexp.MustCompile(`^~[^/]`)  // ~root, ~+, ~-
-	reShellExpand = regexp.MustCompile(`^[$%=]`)  // $VAR, %VAR%, =prefix
+	reTilde       = regexp.MustCompile(`^~[^/]`)    // ~root, ~+, ~-
+	reShellExpand = regexp.MustCompile(`^[$%=]`)    // $VAR, %VAR%, =prefix
 	reGlobWrite   = regexp.MustCompile(`[*?[\]{}]`) // glob chars in write
 )
 

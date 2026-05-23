@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,8 +87,8 @@ func (*ExecTool) InputSchema() map[string]any {
 				"description": "Set to true to run this command in the background. Returns immediately with a task ID. Use task_output to read results later.",
 			},
 			"env": map[string]any{
-				"type":        "object",
-				"description": "Environment variables to set for the command. Keys are variable names, values are strings. Example: {\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}. Only safe variables are allowed (PATH, HOME, etc. are NOT settable via this param — use shell syntax like PATH=/usr/bin cmd instead).",
+				"type":                 "object",
+				"description":          "Environment variables to set for the command. Keys are variable names, values are strings. Example: {\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}. Only safe variables are allowed (PATH, HOME, etc. are NOT settable via this param — use shell syntax like PATH=/usr/bin cmd instead).",
 				"additionalProperties": map[string]any{"type": "string"},
 			},
 			"max_memory_mb": map[string]any{
@@ -233,34 +233,34 @@ var denyRegexps = compileDenyPatterns()
 
 func compileDenyPatterns() []*regexp.Regexp {
 	patterns := []string{
-		`\brm\s+-[rf]{1,2}\b`,                       // rm -r, rm -rf
-		`\bdel\s+/[fq]\b`,                            // del /f, del /q
-		`\brmdir\s+/s\b`,                             // rmdir /s
-		`(?:^|[;&|]\s*)format\b`,                     // format (as standalone command only)
-		`\b(mkfs|diskpart)\b`,                        // disk formatting
-		`\bdd\s+.*\bof=`,                             // dd with output
-		`>\s*/dev/sd`,                                // write to disk device
-		`\b(shutdown|reboot|poweroff)\b`,             // power operations
-		`:\(\)\s*\{.*\};\s*:`,                        // fork bomb
-		`\w+\(\)\s*\{[^}]*\|\s*[^}]*&\s*\}\s*;\s*`,   // fork bomb variation
+		`\brm\s+-[rf]{1,2}\b`,                      // rm -r, rm -rf
+		`\bdel\s+/[fq]\b`,                          // del /f, del /q
+		`\brmdir\s+/s\b`,                           // rmdir /s
+		`(?:^|[;&|]\s*)format\b`,                   // format (as standalone command only)
+		`\b(mkfs|diskpart)\b`,                      // disk formatting
+		`\bdd\s+.*\bof=`,                           // dd with output
+		`>\s*/dev/sd`,                              // write to disk device
+		`\b(shutdown|reboot|poweroff)\b`,           // power operations
+		`:\(\)\s*\{.*\};\s*:`,                      // fork bomb
+		`\w+\(\)\s*\{[^}]*\|\s*[^}]*&\s*\}\s*;\s*`, // fork bomb variation
 		// PowerShell destructive cmdlets
-	`remove-item\s`,
-	`\bri\s+`,  // ri alias (PowerShell Remove-Item)
-	`remove-itemproperty\s`,
-	`rd\s+/[sS]\b`,  // rd /s (PowerShell recursive delete)
-	// Docker destructive operations
-	`docker\s+system\s+prune`,
-	`docker\s+\S+\s+prune`,
-	// Git destructive via exec
-	`git\s+push\s+.*--force`,
-	`git\s+push\s+-f\b`,
-	`git\s+clean\s+-[fd]`,
-	`git\s+reset\s+--hard`,
-	`git\s+checkout\s+--force`,
-	`git\s+rebase\s+--interactive`,
-	`git\s+filter-branch`,
-	`git\s+reflog\s+expire`,
-	`&\S*&\S*&`,                                  // chained background processes
+		`remove-item\s`,
+		`\bri\s+`, // ri alias (PowerShell Remove-Item)
+		`remove-itemproperty\s`,
+		`rd\s+/[sS]\b`, // rd /s (PowerShell recursive delete)
+		// Docker destructive operations
+		`docker\s+system\s+prune`,
+		`docker\s+\S+\s+prune`,
+		// Git destructive via exec
+		`git\s+push\s+.*--force`,
+		`git\s+push\s+-f\b`,
+		`git\s+clean\s+-[fd]`,
+		`git\s+reset\s+--hard`,
+		`git\s+checkout\s+--force`,
+		`git\s+rebase\s+--interactive`,
+		`git\s+filter-branch`,
+		`git\s+reflog\s+expire`,
+		`&\S*&\S*&`, // chained background processes
 	}
 	result := make([]*regexp.Regexp, len(patterns))
 	for i, p := range patterns {
@@ -392,7 +392,7 @@ func (et *ExecTool) execInBackground(params map[string]any) ToolResult {
 	}
 
 	return ToolResult{
-		Output: fmt.Sprintf("Background task started.\nTask ID: %s\nOutput file: %s\nUse the task_output tool to check results when ready.", taskID, outputFile),
+		Output:  fmt.Sprintf("Background task started.\nTask ID: %s\nOutput file: %s\nUse the task_output tool to check results when ready.", taskID, outputFile),
 		IsError: false,
 	}.WithMetadata(NewToolResultMetadata("exec", 0))
 }
@@ -1288,12 +1288,12 @@ func extractQuotedRegions(cmd string) map[int]bool {
 
 // deletionCommands are commands that delete files/directories.
 var deletionCommands = map[string]bool{
-	"rm":            true,
-	"rmdir":         true,
-	"unlink":        true,
-	"remove-item":   true,
-	"ri":            true,
-	"rd":            true,
+	"rm":          true,
+	"rmdir":       true,
+	"unlink":      true,
+	"remove-item": true,
+	"ri":          true,
+	"rd":          true,
 }
 
 // dangerousUnixPaths are root-level directories that should never be deleted.
@@ -1704,21 +1704,21 @@ func splitCompoundCommand(cmd string) []string {
 // hasFlags: whether the wrapper supports -flag style options.
 var safeWrapperPrefixes = []struct {
 	prefix   string
-	skipArgs int // positional args to skip (e.g., timeout 30 -> skipArgs=1)
+	skipArgs int  // positional args to skip (e.g., timeout 30 -> skipArgs=1)
 	hasFlags bool // whether wrapper takes -flag options
 }{
-	{"timeout", 1, true},  // timeout [flags] 30 cmd -> skip duration and any flags
-	{"nice", 0, true},     // nice [-n 10] cmd -> skip flags and their values
+	{"timeout", 1, true}, // timeout [flags] 30 cmd -> skip duration and any flags
+	{"nice", 0, true},    // nice [-n 10] cmd -> skip flags and their values
 	{"nohup", 0, false},
 	{"time", 0, false},
-	{"stdbuf", 0, true},   // stdbuf -oL cmd -> skip flags
-	{"ionice", 0, true},   // ionice [-c 3] cmd -> skip flags
-	{"env", -1, false},    // env VAR=val cmd -> strip all VAR=val assignments
+	{"stdbuf", 0, true}, // stdbuf -oL cmd -> skip flags
+	{"ionice", 0, true}, // ionice [-c 3] cmd -> skip flags
+	{"env", -1, false},  // env VAR=val cmd -> strip all VAR=val assignments
 	{"command", 0, false},
 	{"builtin", 0, false},
 	{"unbuffer", 0, false},
-	{"sudo", 0, true},     // sudo [-u user] cmd -> skip flags
-	{"doas", 0, true},     // doas [-u user] cmd -> skip flags
+	{"sudo", 0, true}, // sudo [-u user] cmd -> skip flags
+	{"doas", 0, true}, // doas [-u user] cmd -> skip flags
 }
 
 // stripSafeWrappers removes common command wrappers to expose the actual command.
@@ -2121,7 +2121,7 @@ func findGitBashForWindows() string {
 		// 2. Find git.exe and derive bash.exe path
 		gitPath := findGitExecutableWindows()
 		if gitPath != "" {
-		// git.exe is typically at: <GitInstall>\cmd\git.exe
+			// git.exe is typically at: <GitInstall>\cmd\git.exe
 			// bash.exe is at:          <GitInstall>\bin\bash.exe
 			// Derive bash.exe from git.exe using path-style normalization:
 			// filepath.Join treats git.exe as a path component, so ".." strips it.

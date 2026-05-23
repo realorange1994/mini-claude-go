@@ -13,9 +13,9 @@ import (
 // When enabled, the agent runs in the background and processes
 // prompts from a named pipe or file.
 type DaemonManager struct {
-	pidFile  string
-	pipeDir  string
-	running  bool
+	pidFile string
+	pipeDir string
+	running bool
 }
 
 // NewDaemonManager creates a daemon manager.

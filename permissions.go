@@ -30,11 +30,11 @@ func denyResult(msg string) *tools.ToolResult {
 
 // PermissionGate implements the two-layer permission check.
 type PermissionGate struct {
-	config        *Config
-	classifier    *AutoModeClassifier
-	transcriptSrc TranscriptSource
-	denialCount     int   // consecutive denial count for auto mode
-	totalDenialCount int  // total denial count for session-level cap
+	config           *Config
+	classifier       *AutoModeClassifier
+	transcriptSrc    TranscriptSource
+	denialCount      int // consecutive denial count for auto mode
+	totalDenialCount int // total denial count for session-level cap
 	// recentlyApproved tracks recent user approvals from AskUserQuestion.
 	// When the classifier would deny a tool, we check if the user already
 	// explicitly approved it — if so, bypass the classifier.
@@ -106,20 +106,21 @@ func (g *PermissionGate) ResetPostCompact() {
 
 // Check runs the permission gauntlet. Returns a ToolResult if denied, nil if allowed.
 // Implements upstream's hasPermissionsToUseToolInner flow:
-//   0:  auto mode: strip dangerous rules on entry, restore on exit
-//   1a: tool-level deny rule → deny (bypass-immune)
-//   1b: content-specific deny rule → deny
-//   1c: file path validation → deny/ask/safetyCheck
-//   1d: tool-level ask rule → ask (bypass-immune)
-//   1e: content-specific ask rule → ask (bypass-immune)
-//   2:  tool.CheckPermissions() → get PermissionResult
-//   2d: behavior === 'deny' → hard deny (bypass-immune)
-//   2e: requiresUserInteraction + ask → ask (bypass-immune)
-//   2f: content-specific ask rule → ask (bypass-immune)
-//   2g: safetyCheck → ask (bypass-immune)
-//   3a: bypassPermissions → behavior: 'allow' (only reached if 1-2 didn't return)
-//   3b: allow rule → allow
-//   4: passthrough → ask (mode-based)
+//
+//	0:  auto mode: strip dangerous rules on entry, restore on exit
+//	1a: tool-level deny rule → deny (bypass-immune)
+//	1b: content-specific deny rule → deny
+//	1c: file path validation → deny/ask/safetyCheck
+//	1d: tool-level ask rule → ask (bypass-immune)
+//	1e: content-specific ask rule → ask (bypass-immune)
+//	2:  tool.CheckPermissions() → get PermissionResult
+//	2d: behavior === 'deny' → hard deny (bypass-immune)
+//	2e: requiresUserInteraction + ask → ask (bypass-immune)
+//	2f: content-specific ask rule → ask (bypass-immune)
+//	2g: safetyCheck → ask (bypass-immune)
+//	3a: bypassPermissions → behavior: 'allow' (only reached if 1-2 didn't return)
+//	3b: allow rule → allow
+//	4: passthrough → ask (mode-based)
 func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.ToolResult {
 	// STEP 0a: Runtime disallowed — tool is in registry (schema matches parent)
 	// but blocked at execution time. Used by fork sub-agents for cache sharing.
@@ -243,30 +244,30 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	// STEP 1e: Content-specific ask rule (bypass-immune)
 	// Bypass mode: skip ask rules, allow through
 	if g.config.PermissionMode != ModeBypass {
-	if rule := g.findToolLevelAsk(upstreamName); rule != nil {
-		restoreStripped()
-		if g.shouldAvoidPrompts() {
-			return denyResult(fmt.Sprintf("%s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content))
+		if rule := g.findToolLevelAsk(upstreamName); rule != nil {
+			restoreStripped()
+			if g.shouldAvoidPrompts() {
+				return denyResult(fmt.Sprintf("%s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content))
+			}
+			msg := fmt.Sprintf("Tool requires confirmation by rule: %s", rule.Content)
+			if !g.askUserWithWarning(tool.Name(), params, msg) {
+				return denyResult("user rejected.")
+			}
+			return nil // user approved
 		}
-		msg := fmt.Sprintf("Tool requires confirmation by rule: %s", rule.Content)
-		if !g.askUserWithWarning(tool.Name(), params, msg) {
-			return denyResult("user rejected.")
-		}
-		return nil // user approved
-	}
 
-	// STEP 1e: Content-specific ask rule (bypass-immune)
-	if rule := g.findContentAsk(upstreamName, content); rule != nil {
-		restoreStripped()
-		if g.shouldAvoidPrompts() {
-			return denyResult(fmt.Sprintf("%s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content))
+		// STEP 1e: Content-specific ask rule (bypass-immune)
+		if rule := g.findContentAsk(upstreamName, content); rule != nil {
+			restoreStripped()
+			if g.shouldAvoidPrompts() {
+				return denyResult(fmt.Sprintf("%s requires confirmation (interactive prompts disabled for sub-agent)", rule.Content))
+			}
+			msg := fmt.Sprintf("Tool requires confirmation by rule: %s", rule.Content)
+			if !g.askUserWithWarning(tool.Name(), params, msg) {
+				return denyResult("user rejected.")
+			}
+			return nil // user approved
 		}
-		msg := fmt.Sprintf("Tool requires confirmation by rule: %s", rule.Content)
-		if !g.askUserWithWarning(tool.Name(), params, msg) {
-			return denyResult("user rejected.")
-		}
-		return nil // user approved
-	}
 	} // end bypass skip for steps 1d-1e
 
 	// STEP 2: tool-level self-check

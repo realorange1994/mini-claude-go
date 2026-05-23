@@ -10,12 +10,12 @@ import (
 
 // GitIgnorePattern represents a single .gitignore pattern.
 type GitIgnorePattern struct {
-	pattern   string // the parsed pattern
-	negated   bool   // ! prefix
-	dirOnly   bool   // trailing /
-	rooted    bool   // leading /
-	baseDir   string // directory where this .gitignore was found
-	raw       string // original raw pattern
+	pattern string // the parsed pattern
+	negated bool   // ! prefix
+	dirOnly bool   // trailing /
+	rooted  bool   // leading /
+	baseDir string // directory where this .gitignore was found
+	raw     string // original raw pattern
 }
 
 // GitIgnoreMatcher holds all loaded .gitignore patterns and answers

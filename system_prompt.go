@@ -351,13 +351,13 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 func buildToolList(registry *tools.Registry) string {
 	// Usage hints for key tools to guide optimal tool selection
 	toolHints := map[string]string{
-		"glob":      "(fast, use liberally)",
-		"grep":      "(fast, use liberally)",
-		"file_read": "(use before file_edit)",
-		"exec":      "(for shell commands, package installs, git operations)",
-		"file_edit": "(MUST read file first)",
+		"glob":       "(fast, use liberally)",
+		"grep":       "(fast, use liberally)",
+		"file_read":  "(use before file_edit)",
+		"exec":       "(for shell commands, package installs, git operations)",
+		"file_edit":  "(MUST read file first)",
 		"file_write": "(overwrites entire file)",
-		"TodoWrite": "(track multi-step tasks, update as you progress)",
+		"TodoWrite":  "(track multi-step tasks, update as you progress)",
 	}
 
 	var sb strings.Builder

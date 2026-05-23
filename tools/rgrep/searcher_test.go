@@ -27,12 +27,12 @@ func TestMultilineSearchContent(t *testing.T) {
 	dir := setupMultilineTestDir(t)
 
 	cfg := SearchConfig{
-		Pattern:     "start.*end",
-		Path:        dir,
-		OutputMode:  OutputContent,
-		Multiline:   true,
+		Pattern:         "start.*end",
+		Path:            dir,
+		OutputMode:      OutputContent,
+		Multiline:       true,
 		CaseInsensitive: false,
-		Ctx:         context.Background(),
+		Ctx:             context.Background(),
 	}
 	result := Search(cfg)
 	if result.Err != nil {
@@ -294,8 +294,8 @@ func TestContextBeforeAndAfterBothWork(t *testing.T) {
 		Pattern:       "MATCH_HERE",
 		Path:          dir,
 		OutputMode:    OutputContent,
-		ContextBefore:  2,
-		ContextAfter:   2,
+		ContextBefore: 2,
+		ContextAfter:  2,
 		Ctx:           context.Background(),
 	}
 	result := Search(cfg)

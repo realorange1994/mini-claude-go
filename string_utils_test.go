@@ -365,6 +365,7 @@ func TestSafeJoinLinesSingleEmpty(t *testing.T) {
 		t.Errorf("expected empty, got %q", result)
 	}
 }
+
 // Ported from upstream stringUtils.test.ts
 
 func TestSafeJoinLinesBasic(t *testing.T) {

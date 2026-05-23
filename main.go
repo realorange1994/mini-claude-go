@@ -96,7 +96,7 @@ func main() {
 	}
 	cfg.PermissionMode = PermissionMode(*mode)
 	cfg.MaxTurns = *maxTurns
-		// Apply config-derived runtime settings (config file > env > defaults)
+	// Apply config-derived runtime settings (config file > env > defaults)
 	if cfg.PreferNonStreaming {
 		*stream = false
 	}
@@ -358,7 +358,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 
 	var lastCtrlC time.Time
 
-		for {
+	for {
 		// Drain async sub-agent notifications and display them
 		if notifications := agent.DrainNotifications(); len(notifications) > 0 {
 			fmt.Println("\n--- Sub-agent notifications ---")
@@ -632,7 +632,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 		agent.SetInterrupted(false) // ensure clear before running
 		result := agent.Run(userInput)
 		agent.SetInterrupted(false) // clear after run
-
 
 		// In streaming mode, TerminalHandler displays output on stderr.
 		// When stdout is a terminal, skip printing to avoid duplication.
@@ -928,7 +927,6 @@ func truncateString(s string, maxLen int) string {
 	}
 	return s[:maxLen-3] + "..."
 }
-
 
 // runDoctor runs installation diagnostics.
 func runDoctor(agent *AgentLoop) {

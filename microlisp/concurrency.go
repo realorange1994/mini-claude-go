@@ -47,8 +47,8 @@ func builtinConditionWait(args []*Value) (*Value, error) {
 	// there is a gap between userMu.Unlock() and cv.Wait() where a
 	// condition-notify signal can be lost (classic lost-wakeup race).
 	cv.L = userMu
-	userMu.Lock()   // must hold L when calling Wait
-	cv.Wait()       // atomically releases userMu and waits; reacquires on wake
+	userMu.Lock() // must hold L when calling Wait
+	cv.Wait()     // atomically releases userMu and waits; reacquires on wake
 	// userMu is held again after Wait returns
 	return vnil(), nil
 }

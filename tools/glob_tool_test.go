@@ -23,7 +23,7 @@ func TestGlobRecursive(t *testing.T) {
 	dir := setupGlobTestDir(t)
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern": "**/*.go",
+		"pattern":   "**/*.go",
 		"directory": dir,
 	})
 	if result.IsError {
@@ -46,7 +46,7 @@ func TestGlobSimple(t *testing.T) {
 	dir := setupGlobTestDir(t)
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern": "*.go",
+		"pattern":   "*.go",
 		"directory": dir,
 	})
 	if result.IsError {
@@ -70,7 +70,7 @@ func TestGlobNoMatch(t *testing.T) {
 	dir := setupGlobTestDir(t)
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern": "*.rust",
+		"pattern":   "*.rust",
 		"directory": dir,
 	})
 	if result.IsError {
@@ -84,7 +84,7 @@ func TestGlobNoMatch(t *testing.T) {
 func TestGlobInvalidDirectory(t *testing.T) {
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern": "*.go",
+		"pattern":   "*.go",
 		"directory": "/nonexistent/path/xyz",
 	})
 	if !result.IsError {
@@ -99,7 +99,7 @@ func TestGlobMaxResults(t *testing.T) {
 	}
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern": "**/*.txt",
+		"pattern":   "**/*.txt",
 		"directory": dir,
 	})
 	if result.IsError {
@@ -263,8 +263,8 @@ func TestGlobHeadLimit(t *testing.T) {
 	}
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":   "**/*.txt",
-		"path":      dir,
+		"pattern":    "**/*.txt",
+		"path":       dir,
 		"head_limit": 5,
 	})
 	if result.IsError {

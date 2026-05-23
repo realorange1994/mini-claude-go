@@ -18,10 +18,12 @@ import (
 // lispExec is the core pure-Go exec function for Lisp.
 //
 // Signature (from Lisp perspective):
-//   (exec command &key args working-dir env timeout max-memory-mb max-cpu-ms)
+//
+//	(exec command &key args working-dir env timeout max-memory-mb max-cpu-ms)
 //
 // Returns a plist:
-//   (:stdout "..." :stderr "..." :exit-code 0)
+//
+//	(:stdout "..." :stderr "..." :exit-code 0)
 func builtinLispExec(args []*Value) (*Value, error) {
 	if len(args) < 1 || args[0].typ != VStr {
 		return nil, fmt.Errorf("exec: first argument must be the command string")

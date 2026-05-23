@@ -69,7 +69,7 @@ func BuildCompactTranscript(ctx *ConversationContext, maxMessages int) string {
 				}
 			}
 
-		// Skip CompactBoundaryContent, SummaryContent, AttachmentContent
+			// Skip CompactBoundaryContent, SummaryContent, AttachmentContent
 		}
 	}
 	sb.WriteString("</transcript>\n")

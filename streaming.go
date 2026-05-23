@@ -21,15 +21,15 @@ import (
 type ChunkType string
 
 const (
-	ChunkTypeText         ChunkType = "text"         // Incremental text token
-	ChunkTypeToolCall     ChunkType = "tool_call"    // Tool call started (id + name)
-	ChunkTypeToolArgument ChunkType = "tool_argument" // Tool argument JSON delta
-	ChunkTypeThinking     ChunkType = "thinking"     // Extended thinking block
-	ChunkTypeUsage    ChunkType = "usage"        // Token usage info
-	ChunkTypeError    ChunkType = "error"        // Error occurred
-	ChunkTypeDone     ChunkType = "done"         // Stream complete
-	ChunkTypeBlockStop ChunkType = "block_stop"  // Content block finished
-	ChunkTypeRefusal  ChunkType = "refusal"      // stop_reason: refusal (content policy)
+	ChunkTypeText             ChunkType = "text"              // Incremental text token
+	ChunkTypeToolCall         ChunkType = "tool_call"         // Tool call started (id + name)
+	ChunkTypeToolArgument     ChunkType = "tool_argument"     // Tool argument JSON delta
+	ChunkTypeThinking         ChunkType = "thinking"          // Extended thinking block
+	ChunkTypeUsage            ChunkType = "usage"             // Token usage info
+	ChunkTypeError            ChunkType = "error"             // Error occurred
+	ChunkTypeDone             ChunkType = "done"              // Stream complete
+	ChunkTypeBlockStop        ChunkType = "block_stop"        // Content block finished
+	ChunkTypeRefusal          ChunkType = "refusal"           // stop_reason: refusal (content policy)
 	ChunkTypeRedactedThinking ChunkType = "redacted_thinking" // redacted thinking block (content policy)
 )
 
@@ -44,10 +44,10 @@ type StreamChunk struct {
 
 // Usage holds token counts.
 type Usage struct {
-	InputTokens        int
-	OutputTokens       int
-	CacheWriteTokens   int
-	CacheReadTokens    int
+	InputTokens      int
+	OutputTokens     int
+	CacheWriteTokens int
+	CacheReadTokens  int
 }
 
 // streamHandler is the callback signature for consuming chunks.
@@ -61,16 +61,16 @@ type streamHandler func(chunk StreamChunk) error
 // final assembled response (text, tool calls, thinking) can be retrieved
 // after the stream finishes.
 type CollectHandler struct {
-	mu            sync.Mutex
-	Text          string
-	ToolCalls     []ToolCallInfo
-	Thinking      string
-	Err           error
-	Usage         *Usage
-	ChunksCollect int
-	toolUseAsText bool // detects model echoing tool syntax as text
-	finishReason  string // captured from MessageDeltaEvent.stop_reason
-	isRefusal          bool     // true when stop_reason is "refusal"
+	mu                   sync.Mutex
+	Text                 string
+	ToolCalls            []ToolCallInfo
+	Thinking             string
+	Err                  error
+	Usage                *Usage
+	ChunksCollect        int
+	toolUseAsText        bool     // detects model echoing tool syntax as text
+	finishReason         string   // captured from MessageDeltaEvent.stop_reason
+	isRefusal            bool     // true when stop_reason is "refusal"
 	redactedThinkingData []string // opaque data blobs from redacted_thinking blocks (for context continuity)
 	// toolCallDoneCh is an optional channel that receives the index of a
 	// completed tool call when its content block finishes during streaming.
@@ -292,10 +292,10 @@ func (h *CollectHandler) AsParsedResponse() ([]map[string]any, []string) {
 type ThinkFilterState int
 
 const (
-	ThinkNormal   ThinkFilterState = iota // normal text output
-	ThinkInTag                             // detected <think
-	ThinkInBlock                           // inside thinking block
-	ThinkClosing                           // detected </think
+	ThinkNormal  ThinkFilterState = iota // normal text output
+	ThinkInTag                           // detected <think
+	ThinkInBlock                         // inside thinking block
+	ThinkClosing                         // detected </think
 )
 
 // ---------------------------------------------------------------------------
@@ -305,12 +305,12 @@ const (
 // TerminalHandler shows a clean progress display during streaming.
 // Shows thinking tokens in dim text, tool calls, and results.
 type TerminalHandler struct {
-	seenToolCall   bool
-	thinkingBuf    strings.Builder
-	curToolName    string
-	curToolArgs    strings.Builder
-	thinkState     ThinkFilterState
-	thinkBuf       string
+	seenToolCall    bool
+	thinkingBuf     strings.Builder
+	curToolName     string
+	curToolArgs     strings.Builder
+	thinkState      ThinkFilterState
+	thinkBuf        string
 	thinkingPrinted bool // tracks if thinking was already printed (avoid double-print in Done)
 }
 
@@ -683,8 +683,8 @@ func (p *StreamProgress) Throughput() float64 {
 type DeltasState string
 
 const (
-	DeltasStateNone        DeltasState = "none"
-	DeltasStateTextOnly    DeltasState = "text_only"
+	DeltasStateNone         DeltasState = "none"
+	DeltasStateTextOnly     DeltasState = "text_only"
 	DeltasStateToolInFlight DeltasState = "tool_in_flight"
 )
 
@@ -697,9 +697,9 @@ const (
 type StreamAdapter struct {
 	handler        streamHandler
 	bus            *StreamBus
-	stallTimeoutMs int       // stall timeout in ms (0 = defaults)
-	startupMs      int       // startup timeout in ms (0 = defaults)
-	finishReason   string    // captured from MessageDeltaEvent.stop_reason
+	stallTimeoutMs int         // stall timeout in ms (0 = defaults)
+	startupMs      int         // startup timeout in ms (0 = defaults)
+	finishReason   string      // captured from MessageDeltaEvent.stop_reason
 	deltasState    DeltasState // tracks what was already streamed
 	progress       StreamProgress
 }
@@ -708,10 +708,10 @@ type StreamAdapter struct {
 // given handler and publishes on the bus (nil bus = no publishing).
 func NewStreamAdapter(handler streamHandler, bus *StreamBus) *StreamAdapter {
 	return &StreamAdapter{
-		handler:      handler,
-		bus:          bus,
-		deltasState:  DeltasStateNone,
-		progress:     StreamProgress{StartTime: time.Now()},
+		handler:     handler,
+		bus:         bus,
+		deltasState: DeltasStateNone,
+		progress:    StreamProgress{StartTime: time.Now()},
 	}
 }
 
@@ -812,7 +812,7 @@ func (sa *StreamAdapter) Process(stream *ssestream.Stream[anthropic.MessageStrea
 		}
 	}()
 
-		sa.deltasState = DeltasStateNone // tracks what was already streamed
+	sa.deltasState = DeltasStateNone // tracks what was already streamed
 
 	for stream.Next() {
 		// Signal stall detector that we received an event

@@ -111,14 +111,14 @@ var builtinDocMap = map[string]string{
 	"random":  "(random n) — Return a random number in [0, n).",
 
 	// Comparison
-	"=":   "(= a b) — Numeric equality.",
-	"/=":  "(/= a b) — Numeric inequality.",
-	"<":   "(< a b) — Less than.",
-	">":   "(> a b) — Greater than.",
-	"<=":  "(<= a b) — Less than or equal.",
-	">=":  "(>= a b) — Greater than or equal.",
-	"eq":  "(eq a b) — Identity comparison (same object).",
-	"eql": "(eql a b) — Value comparison (same value).",
+	"=":     "(= a b) — Numeric equality.",
+	"/=":    "(/= a b) — Numeric inequality.",
+	"<":     "(< a b) — Less than.",
+	">":     "(> a b) — Greater than.",
+	"<=":    "(<= a b) — Less than or equal.",
+	">=":    "(>= a b) — Greater than or equal.",
+	"eq":    "(eq a b) — Identity comparison (same object).",
+	"eql":   "(eql a b) — Value comparison (same value).",
 	"equal": "(equal a b) — Structural equality.",
 
 	// Strings
@@ -144,17 +144,17 @@ var builtinDocMap = map[string]string{
               ~F (float), ~% (newline), ~~ (tilde), ~{~} (loop).`,
 
 	// FFI
-	"ffi":        `(ffi "pkg.Func") — Import a Go function from stdlib.`,
+	"ffi":          `(ffi "pkg.Func") — Import a Go function from stdlib.`,
 	"ffi-register": `(ffi-register "name" value) — Register a custom Go value.`,
 
 	// Type predicates
-	"null":       "(null x) — Check if x is nil.",
-	"listp":      "(listp x) — Check if x is a list.",
-	"consp":      "(consp x) — Check if x is a cons cell.",
-	"symbolp":    "(symbolp x) — Check if x is a symbol.",
-	"stringp":    "(stringp x) — Check if x is a string.",
-	"numberp":    "(numberp x) — Check if x is a number.",
-	"characterp": "(characterp x) — Check if x is a character.",
+	"null":        "(null x) — Check if x is nil.",
+	"listp":       "(listp x) — Check if x is a list.",
+	"consp":       "(consp x) — Check if x is a cons cell.",
+	"symbolp":     "(symbolp x) — Check if x is a symbol.",
+	"stringp":     "(stringp x) — Check if x is a string.",
+	"numberp":     "(numberp x) — Check if x is a number.",
+	"characterp":  "(characterp x) — Check if x is a character.",
 	"hash-tablep": "(hash-tablep x) — Check if x is a hash table.",
 
 	// Arrays
@@ -162,9 +162,9 @@ var builtinDocMap = map[string]string{
 	"aref":       "(aref arr i...) — Access array element.",
 
 	// CLOS
-	"defclass":   "(defclass name (parents) (slots)) — Define a class.",
-	"defgeneric": "(defgeneric name (args)) — Define a generic function.",
-	"defmethod":  "(defmethod name ((arg type)) body...) — Define a method.",
+	"defclass":      "(defclass name (parents) (slots)) — Define a class.",
+	"defgeneric":    "(defgeneric name (args)) — Define a generic function.",
+	"defmethod":     "(defmethod name ((arg type)) body...) — Define a method.",
 	"make-instance": "(make-instance 'class key val...) — Create an instance.",
 
 	// Conditions
@@ -195,15 +195,15 @@ var goDocMap = map[string]string{
 
 	"go:channel": `(go:channel [buf-size]) — Create a Go channel.`,
 
-	"go:send":    `(go:send channel value) — Send value to channel.`,
+	"go:send": `(go:send channel value) — Send value to channel.`,
 
-	"go:recv":    `(go:recv channel) — Receive value from channel.`,
+	"go:recv": `(go:recv channel) — Receive value from channel.`,
 
-	"go:close":   `(go:close channel) — Close a channel.`,
+	"go:close": `(go:close channel) — Close a channel.`,
 
-	"go:select":  `(go:select cases...) — Go-style select on channels.`,
+	"go:select": `(go:select cases...) — Go-style select on channels.`,
 
-	"go:chanp":   `(go:chanp x) — Check if x is a channel.`,
+	"go:chanp": `(go:chanp x) — Check if x is a channel.`,
 
 	"go:new": `(go:new "pkg.TypeName") — Create a zero-value instance of a Go struct type.
   The type must be registered in GoTypeRegistry (auto-registered for all stdlib types).
@@ -219,10 +219,10 @@ var goDocMap = map[string]string{
   Pointer fields can be set to nil. Lisp lists convert to Go slices.
   Example: (go:set-field cert "IsCA" t) => nil`,
 
-		"go:type-of": `(go:type-of obj) — Return the Go type name of a VGoVal as a string.
+	"go:type-of": `(go:type-of obj) — Return the Go type name of a VGoVal as a string.
   Example: (go:type-of key) => "*rsa.PrivateKey"`,
 
-		"go:call": `(go:call obj "MethodName" args...) — Call a Go method on a VGoVal.
+	"go:call": `(go:call obj "MethodName" args...) — Call a Go method on a VGoVal.
   Automatically finds methods on both value and pointer receivers.
   Example: (go:call cert "Equal" otherCert) => t/nil`,
 }

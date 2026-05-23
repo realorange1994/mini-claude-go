@@ -29,7 +29,7 @@ func (t *SendMessageTool) Description() string {
 
 func (t *SendMessageTool) InputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"agent_id"},
 		"properties": map[string]any{
 			"agent_id": map[string]any{
@@ -52,7 +52,9 @@ func (t *SendMessageTool) InputSchema() map[string]any {
 	}
 }
 
-func (t *SendMessageTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (t *SendMessageTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *SendMessageTool) Execute(params map[string]any) ToolResult {
 	agentID, _ := params["agent_id"].(string)

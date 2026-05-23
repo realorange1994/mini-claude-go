@@ -125,9 +125,9 @@ func TestTaskCreateToolExecuteWithMetadata(t *testing.T) {
 	}
 	meta := map[string]any{"priority": "high"}
 	result := tool.Execute(map[string]any{
-		"subject":   "test",
+		"subject":     "test",
 		"description": "desc",
-		"metadata":  meta,
+		"metadata":    meta,
 	})
 	if result.IsError {
 		t.Errorf("unexpected error: %s", result.Output)

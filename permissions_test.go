@@ -13,10 +13,12 @@ type mockTool struct {
 	permissions tools.PermissionResult
 }
 
-func (m *mockTool) Name() string                                           { return m.name }
-func (m *mockTool) Description() string                                    { return "mock tool" }
-func (m *mockTool) InputSchema() map[string]any                            { return nil }
-func (m *mockTool) CheckPermissions(params map[string]any) tools.PermissionResult { return m.permissions }
+func (m *mockTool) Name() string                { return m.name }
+func (m *mockTool) Description() string         { return "mock tool" }
+func (m *mockTool) InputSchema() map[string]any { return nil }
+func (m *mockTool) CheckPermissions(params map[string]any) tools.PermissionResult {
+	return m.permissions
+}
 func (m *mockTool) Execute(params map[string]any) tools.ToolResult {
 	return tools.ToolResult{Output: "ok"}
 }
