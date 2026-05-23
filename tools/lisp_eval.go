@@ -25,7 +25,10 @@ type evalResult struct {
 func (*LispEvalTool) Name() string { return "lisp_eval" }
 
 func (*LispEvalTool) Description() string {
-	return "Evaluate Common Lisp expressions. State persists between calls. " +
+	return "Evaluate Common Lisp CODE / EXPRESSIONS — " +
+		"NOT a command runner. This is a Lisp interpreter, NOT os/exec. " +
+		"Do NOT use this to run system commands like go, python, npm, ls — use lisp_exec for that. " +
+		"Use this to evaluate Lisp code only. State persists between calls. " +
 		"Quick start: expression=\"(+ 1 2)\". " +
 		"Use operation=\"define\" to see function signatures (params, return types). " +
 		"Use operation=\"help\" for topic docs, \"examples\" for code samples, " +
@@ -35,10 +38,13 @@ func (*LispEvalTool) Description() string {
 func (*LispEvalTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
+		"description": "Evaluates Lisp CODE / EXPRESSIONS via a Lisp interpreter. " +
+			"NOT for running system commands (go, python, npm, shell) — use lisp_exec for that. " +
+			"Do NOT use this to execute CLI tools — it is a Lisp evaluator only.",
 		"properties": map[string]any{
 			"expression": map[string]any{
 				"type":        "string",
-				"description": "Lisp expression to evaluate, e.g. (+ 1 2), (car '(1 2 3)). For source/xref operations: use a PLAIN function name only (e.g. \"car\"). For help/skill: use a topic name like \"arithmetic\" or \"ffi\".",
+				"description": "Lisp expression to evaluate (e.g. (+ 1 2), (car '(1 2 3))). This is Lisp CODE, NOT a shell command. For system commands, use lisp_exec. For source/xref operations: use a PLAIN function name only (e.g. \"car\"). For help/skill: use a topic name like \"arithmetic\" or \"ffi\".",
 			},
 			"operation": map[string]any{
 				"type": "string",
