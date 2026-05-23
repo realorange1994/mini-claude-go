@@ -27,11 +27,13 @@ func wrapWithResourceLimits(cmd *exec.Cmd, maxMemoryMB int64, maxCPUMS int64) fu
 		return nil
 	}
 
-	oldMem, err := syscall.Getrlimit(syscall.RLIMIT_AS)
+	var oldMem syscall.Rlimit
+	err := syscall.Getrlimit(syscall.RLIMIT_AS, &oldMem)
 	if err != nil {
 		return nil
 	}
-	oldCPU, _ := syscall.Getrlimit(syscall.RLIMIT_CPU)
+	var oldCPU syscall.Rlimit
+	syscall.Getrlimit(syscall.RLIMIT_CPU, &oldCPU)
 
 	if maxMemoryMB > 0 {
 		_ = syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{
