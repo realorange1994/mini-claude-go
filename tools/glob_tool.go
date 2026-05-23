@@ -16,7 +16,7 @@ const maxResults = 100
 // GlobTool finds files matching a glob pattern.
 type GlobTool struct{}
 
-func (*GlobTool) Name() string        { return "glob" }
+func (*GlobTool) Name() string { return "glob" }
 func (*GlobTool) Description() string {
 	return "Fast file pattern matching tool that works with any codebase size. " +
 		"Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". " +
@@ -56,7 +56,9 @@ func (*GlobTool) InputSchema() map[string]any {
 	}
 }
 
-func (*GlobTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*GlobTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *GlobTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
 	// Check context early

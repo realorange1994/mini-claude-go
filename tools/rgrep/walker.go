@@ -46,14 +46,14 @@ type WalkEntry struct {
 
 // WalkOptions controls directory traversal.
 type WalkOptions struct {
-	Root          string   // root directory to walk
-	MaxDepth      int      // max depth (0 = unlimited)
-	Globs          []string // glob filters for filenames (multiple OR)
-	TypeFilter    string   // language type filter
-	Excludes      []string // additional exclude patterns
-	RespectGitIgnore bool   // respect .gitignore
+	Root             string   // root directory to walk
+	MaxDepth         int      // max depth (0 = unlimited)
+	Globs            []string // glob filters for filenames (multiple OR)
+	TypeFilter       string   // language type filter
+	Excludes         []string // additional exclude patterns
+	RespectGitIgnore bool     // respect .gitignore
 	Ctx              context.Context
-	MaxFilesize      int64  // max file size in bytes (0 = unlimited)
+	MaxFilesize      int64 // max file size in bytes (0 = unlimited)
 }
 
 // WalkDir traverses a directory tree and returns matching file entries.

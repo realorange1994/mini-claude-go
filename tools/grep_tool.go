@@ -123,7 +123,9 @@ func (*GrepTool) InputSchema() map[string]any {
 	}
 }
 
-func (*GrepTool) CheckPermissions(params map[string]any) PermissionResult { return PermissionResultPassthrough() }
+func (*GrepTool) CheckPermissions(params map[string]any) PermissionResult {
+	return PermissionResultPassthrough()
+}
 
 func (t *GrepTool) ExecuteContext(ctx context.Context, params map[string]any) ToolResult {
 	// Check context early
@@ -328,7 +330,6 @@ func splitGlobPatterns(glob string) []string {
 	}
 	return parts
 }
-
 
 func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, caseInsensitive, fixedStrings bool, outputMode string, showLineNumbers, multiline bool, ctxBefore, ctxAfter, headLimit, offset int, maxDepth int, maxFilesize string, excludes []string) ToolResult {
 	args := []string{"--hidden", "--max-columns", "500"}
