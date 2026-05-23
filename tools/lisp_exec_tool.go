@@ -3,10 +3,127 @@ package tools
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
+	"unicode"
 
 	"miniclaudecode-go/microlisp"
 )
+
+// shellSyntaxMarkers contains characters/sequences that indicate the user
+// intended shell syntax (pipes, redirects, command chaining, etc.).
+// These require a shell to execute and cannot work with os/exec directly.
+var shellSyntaxMarkers = []string{
+	"|", "||", "&&", ";",
+	">", ">>", "2>", "2>&1", "&>", "&>>",
+	"<", "<<", "<<<",
+	"$(", "`",
+	"{", "}",
+}
+
+// needsShell returns true if the command string contains shell syntax
+// that cannot be executed directly by os/exec.
+func needsShell(s string) bool {
+	// Quick check: if the string contains any of the markers
+	for _, marker := range shellSyntaxMarkers {
+		if strings.Contains(s, marker) {
+			// For single-char markers, ensure it's not part of a filename
+			// (e.g. "file.txt" contains "." but isn't shell syntax)
+			if len(marker) > 1 {
+				return true
+			}
+			// For "|" specifically, it's almost always shell syntax
+			if marker == "|" {
+				return true
+			}
+			// For ">" and "<", check context
+			if marker == ">" || marker == "<" {
+				// Find the position and check surroundings
+				idx := strings.Index(s, marker)
+				if idx > 0 {
+					prev := rune(s[idx-1])
+					if !unicode.IsSpace(prev) && prev != '"' {
+						continue // likely part of a filename like "a<b.txt"
+					}
+				}
+				return true
+			}
+			// For "$" and "`", always shell syntax
+			if marker == "$(" || marker == "`" {
+				return true
+			}
+			// For "{" and "}", check if they look like brace expansion
+			if marker == "{" || marker == "}" {
+				if strings.Contains(s, "{") && strings.Contains(s, "}") {
+					return true
+				}
+				continue
+			}
+		}
+	}
+	// Check for semicolons (command separator)
+	if strings.Contains(s, ";") {
+		return true
+	}
+	return false
+}
+
+// wrapWithShell wraps a command+args into a "bash -c" (Unix) or "cmd /c" (Windows) form.
+// Returns (shellProgram, shellArgs, shellInput).
+func wrapWithShell(command string, args []string, input string) (program string, allArgs []string, hasInput bool) {
+	// Reconstruct the full command string
+	fullCmd := command
+	if len(args) > 0 {
+		fullCmd += " " + strings.Join(args, " ")
+	}
+
+	if runtime.GOOS == "windows" {
+		return "cmd", []string{"/c", fullCmd}, input != ""
+	}
+	return "bash", []string{"-c", fullCmd}, input != ""
+}
+
+// splitCommand splits a command string into program name and implicit args.
+// If the command contains spaces (e.g. "mkdir -p dir"), the first token
+// is the program name and the rest are args. This fixes the issue where
+// exec.Command("mkdir -p dir") looks for a program literally named
+// "mkdir -p dir" instead of running mkdir with args.
+func splitCommand(s string) (program string, implicitArgs []string) {
+	parts := strings.Fields(s)
+	if len(parts) == 0 {
+		return "", nil
+	}
+	if len(parts) == 1 {
+		return parts[0], nil
+	}
+	return parts[0], parts[1:]
+}
+
+// extractArgs attempts to extract a []string slice from a param value.
+// Handles both []any (JSON-decoded array) and []string.
+// JSON numbers (float64) are converted to strings.
+func extractArgs(v any) []string {
+	switch arr := v.(type) {
+	case []any:
+		result := make([]string, 0, len(arr))
+		for _, item := range arr {
+			switch x := item.(type) {
+			case string:
+				result = append(result, x)
+			case float64:
+				result = append(result, fmt.Sprintf("%g", x))
+			case nil:
+				continue
+			default:
+				result = append(result, fmt.Sprintf("%v", x))
+			}
+		}
+		return result
+	case []string:
+		return arr
+	}
+	return nil
+}
 
 // LispExecTool provides a pure-Go command execution tool via the embedded
 // Lisp interpreter. Unlike the shell-based ExecTool, this tool runs commands
@@ -161,6 +278,30 @@ func (t *LispExecTool) executeExec(ctx context.Context, params map[string]any) T
 		return ToolResult{Output: "Error: command is required", IsError: true}
 	}
 
+	// Split command string into program + implicit args.
+	// e.g. "mkdir -p dir" -> program="mkdir", implicitArgs=["-p", "dir"]
+	program, implicitArgs := splitCommand(command)
+
+	// Merge explicit args from params with implicit args from splitting
+	explicitArgs := extractArgs(params["args"])
+
+	// Check for shell syntax in the original command string.
+	// If found, we need to wrap the entire command with a shell.
+	// This handles pipes, redirects, and other shell features.
+	if needsShell(command) {
+		shellProgram, shellArgs, shellHasInput := wrapWithShell(command, nil, "")
+		program = shellProgram
+		implicitArgs = nil
+		explicitArgs = shellArgs
+		// Remove the input param since we wrapped with shell
+		delete(params, "input")
+		if shellHasInput {
+			// Shouldn't happen with current wrapWithShell, but handle future cases
+		}
+	}
+
+	allArgs := append(implicitArgs, explicitArgs...)
+
 	// Build the Lisp expression
 	var exprBuilder strings.Builder
 
@@ -168,19 +309,17 @@ func (t *LispExecTool) executeExec(ctx context.Context, params map[string]any) T
 	input, hasInput := params["input"].(string)
 
 	if hasInput && input != "" {
-		exprBuilder.WriteString(fmt.Sprintf(`(exec-with-input %s %s`, lispQuote(command), lispQuote(input)))
+		exprBuilder.WriteString(fmt.Sprintf(`(exec-with-input %s %s`, lispQuote(program), lispQuote(input)))
 	} else {
-		exprBuilder.WriteString(fmt.Sprintf(`(exec %s`, lispQuote(command)))
+		exprBuilder.WriteString(fmt.Sprintf(`(exec %s`, lispQuote(program)))
 	}
 
-	// Add args
-	if args, ok := params["args"].([]any); ok && len(args) > 0 {
+	// Add all args (merged implicit + explicit)
+	if len(allArgs) > 0 {
 		exprBuilder.WriteString(" :args (list")
-		for _, arg := range args {
-			if s, ok := arg.(string); ok {
-				exprBuilder.WriteString(" ")
-				exprBuilder.WriteString(lispQuote(s))
-			}
+		for _, arg := range allArgs {
+			exprBuilder.WriteString(" ")
+			exprBuilder.WriteString(lispQuote(arg))
 		}
 		exprBuilder.WriteString(")")
 	}
@@ -300,46 +439,87 @@ func formatExecResult(lispResult string) ToolResult {
 }
 
 // extractPlistValue extracts a value from a Lisp plist string by key.
-// Very simple parser — handles :key "value" and :key N patterns.
+// Only matches keys at the plist structure level, not inside quoted strings.
+// This prevents false matches when command output contains key-like text
+// such as ":stdout" or ":exit-code".
 func extractPlistValue(plist, key string) string {
-	idx := strings.Index(plist, key)
-	if idx < 0 {
-		return ""
-	}
-	// Move past the key
-	rest := plist[idx+len(key):]
-	// Skip whitespace
-	rest = strings.TrimLeft(rest, " ")
-
-	if len(rest) == 0 {
-		return ""
-	}
-
-	// If starts with quote, extract quoted string
-	if rest[0] == '"' {
-		return extractQuotedString(rest)
-	}
-
-	// Otherwise extract until whitespace or closing paren
-	var val strings.Builder
-	for i := 0; i < len(rest); i++ {
-		ch := rest[i]
-		if ch == ' ' || ch == ')' || ch == '\n' {
-			break
+	// Walk through the plist, skipping over quoted strings.
+	// Only match the key when we're at the top level.
+	pos := 0
+	for pos < len(plist) {
+		idx := strings.Index(plist[pos:], key)
+		if idx < 0 {
+			return ""
 		}
-		val.WriteByte(ch)
+		absIdx := pos + idx
+
+		// Check that the key is at the plist structure level:
+		// it must be preceded by '(' or whitespace, and followed by whitespace.
+		// First, verify we're not inside a quoted string by counting unescaped
+		// quotes before this position.
+		if isOutsideQuotedString(plist, absIdx) {
+			// Valid match — extract the value
+			afterKey := absIdx + len(key)
+			// Skip whitespace
+			for afterKey < len(plist) && (plist[afterKey] == ' ' || plist[afterKey] == '\t' || plist[afterKey] == '\n') {
+				afterKey++
+			}
+			if afterKey >= len(plist) {
+				return ""
+			}
+
+			if plist[afterKey] == '"' {
+				return extractQuotedStringFrom(plist, afterKey)
+			}
+			// Extract number or atom
+			var val strings.Builder
+			for i := afterKey; i < len(plist); i++ {
+				ch := plist[i]
+				if ch == ' ' || ch == ')' || ch == '\n' {
+					break
+				}
+				val.WriteByte(ch)
+			}
+			return val.String()
+		}
+
+		// Key was inside a quoted string, skip past this quoted region
+		// Find the enclosing quotes
+		pos = absIdx + len(key)
 	}
-	return val.String()
+	return ""
 }
 
-// extractQuotedString extracts a Lisp string from "content", handling escapes.
-func extractQuotedString(s string) string {
-	if len(s) < 2 || s[0] != '"' {
+// isOutsideQuotedString checks if position `pos` in `s` is outside any
+// quoted string context. It counts unescaped double quotes before `pos`.
+func isOutsideQuotedString(s string, pos int) bool {
+	// Walk backwards from pos, counting unescaped quotes
+	quoteCount := 0
+	for i := pos - 1; i >= 0; i-- {
+		if s[i] == '"' {
+			// Check if this quote is escaped
+			escapeCount := 0
+			for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
+				escapeCount++
+			}
+			if escapeCount%2 == 0 {
+				quoteCount++
+			}
+		}
+	}
+	// Even number of quotes means we're outside a string
+	return quoteCount%2 == 0
+}
+
+// extractQuotedStringFrom extracts a Lisp string starting at the opening quote.
+// s[pos] must be '"'.
+func extractQuotedStringFrom(s string, pos int) string {
+	if pos+1 >= len(s) {
 		return ""
 	}
 	var result strings.Builder
 	escaped := false
-	for i := 1; i < len(s); i++ {
+	for i := pos + 1; i < len(s); i++ {
 		ch := s[i]
 		if escaped {
 			switch ch {
@@ -367,6 +547,15 @@ func extractQuotedString(s string) string {
 		result.WriteByte(ch)
 	}
 	return result.String()
+}
+
+// extractQuotedString extracts a Lisp string from a string starting with ".
+// Kept for backwards compatibility; prefer extractQuotedStringFrom.
+func extractQuotedString(s string) string {
+	if len(s) < 2 || s[0] != '"' {
+		return ""
+	}
+	return extractQuotedStringFrom(s, 0)
 }
 
 // lispQuote wraps a string in double quotes for Lisp, escaping special chars.
