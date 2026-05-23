@@ -594,7 +594,6 @@ func lispToReflectSafe(v *Value, t reflect.Type) (reflect.Value, error) {
 	default:
 		return reflect.ValueOf(lispToInterface(v)), nil
 	}
-	return reflect.Zero(t), nil
 }
 
 // isList checks if a value is a proper list
