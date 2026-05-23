@@ -873,7 +873,7 @@ func TestCoerceNumberInvalidString(t *testing.T) {
 	}
 }
 
-// Upstream: rejects empty string ''
+// Upstream: rejects empty string ”
 func TestCoerceNumberEmptyString(t *testing.T) {
 	schema := map[string]any{
 		"type": "object",

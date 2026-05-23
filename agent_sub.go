@@ -549,13 +549,13 @@ func (a *AgentLoop) SpawnSubAgent(
 }
 
 // resolveModelAlias resolves a model input string to a concrete model ID.
-// - Empty string: inherit parent's model (return parentModel as-is).
-// - "inherit": same as empty.
-// - Aliases "sonnet"/"opus"/"haiku": resolved via env vars or parent model tier matching.
-//   When an alias matches the parent's tier, the parent's exact model string is used.
-//   Otherwise resolved via ANTHROPIC_DEFAULT_SONNET_MODEL/OPUS_MODEL/HAIKU_MODEL env vars,
-//   with hardcoded defaults as fallback.
-// - Other strings: used verbatim (assumed to be a full model ID).
+//   - Empty string: inherit parent's model (return parentModel as-is).
+//   - "inherit": same as empty.
+//   - Aliases "sonnet"/"opus"/"haiku": resolved via env vars or parent model tier matching.
+//     When an alias matches the parent's tier, the parent's exact model string is used.
+//     Otherwise resolved via ANTHROPIC_DEFAULT_SONNET_MODEL/OPUS_MODEL/HAIKU_MODEL env vars,
+//     with hardcoded defaults as fallback.
+//   - Other strings: used verbatim (assumed to be a full model ID).
 func resolveModelAlias(modelInput string, parentModel string) string {
 	if modelInput == "" || strings.ToLower(modelInput) == "inherit" {
 		return parentModel

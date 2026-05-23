@@ -708,12 +708,12 @@ const (
 // callClassifier makes LLM API calls to classify the tool action using a
 // two-stage approach modeled after upstream yoloClassifier.ts:
 //
-//   Stage 1 (fast): 2112 max_tokens — quick allow/block decision.
-//     If allowed → return immediately (most safe commands are decided here).
-//     If blocked → escalate to Stage 2 for more thorough analysis.
+//	Stage 1 (fast): 2112 max_tokens — quick allow/block decision.
+//	  If allowed → return immediately (most safe commands are decided here).
+//	  If blocked → escalate to Stage 2 for more thorough analysis.
 //
-//   Stage 2 (thinking): 6144 max_tokens — full chain-of-thought reasoning
-//     with a richer prompt. Verdict is final.
+//	Stage 2 (thinking): 6144 max_tokens — full chain-of-thought reasoning
+//	  with a richer prompt. Verdict is final.
 //
 // Uses the Anthropic SDK's tool_use feature for structured JSON output.
 func (c *AutoModeClassifier) callClassifier(

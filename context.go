@@ -1415,7 +1415,9 @@ func (c *ConversationContext) MinimumHistory() {
 
 // truncateWithBoundary performs a naive truncation but preserves the compaction
 // boundary marker and summary if one exists. After compaction, entries look like:
-//   [0] initial-user, [1] CompactBoundary, [2] Summary, [3..n] attachments+recent
+//
+//	[0] initial-user, [1] CompactBoundary, [2] Summary, [3..n] attachments+recent
+//
 // Naive truncation (entries[:1] + recent) would discard entries[1] and [2],
 // causing the agent to lose all compressed memory. This function finds the
 // boundary and preserves everything from the boundary onwards.

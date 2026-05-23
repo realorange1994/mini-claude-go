@@ -474,7 +474,9 @@ func isErrorNonRetryable(errMsg string) bool {
 
 // parsePromptTooLongTokenGap extracts the actual and max token counts from a
 // prompt-too-long error message. The upstream API returns messages like:
-//   "prompt is too long: 137500 tokens > 135000 maximum"
+//
+//	"prompt is too long: 137500 tokens > 135000 maximum"
+//
 // Returns (actualTokens, maxTokens, found). If not parseable, found=false.
 func parsePromptTooLongTokenGap(errMsg string) (actual int, max int, found bool) {
 	// Match patterns like "137500 tokens > 135000 maximum" or
