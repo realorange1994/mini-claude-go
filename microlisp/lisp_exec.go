@@ -137,9 +137,11 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 	// This handles cases like "cd /home/work", "export FOO=bar", "source script", etc.
 	cmdName := command
 	cmdArgsList := cmdArgs
+	captureCwd := false
 
 	if needShellWrap(command) || containsShellSyntax(cmdArgs) {
 		cmdName, cmdArgsList = wrapShellBuiltin(command, cmdArgs)
+		captureCwd = true
 	}
 
 	// Special case: "cd /some/path" alone → change working dir for this exec call.
@@ -159,6 +161,32 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		// cd with no further commands: just run pwd to verify the path is accessible
 		cmdName = "bash"
 		cmdArgsList = []string{"-c", "cd " + targetDir + " && pwd"}
+		captureCwd = true
+	}
+
+	// When shell-wrapped, append a sentinel to capture the shell's final $PWD.
+	// This lets us report the working directory back to the agent.
+	const cwdSentinel = "__SHELL_CWD__:"
+	if captureCwd && len(cmdArgsList) >= 2 {
+		inner := cmdArgsList[1] // the -c argument
+		cmdArgsList[1] = inner + "; echo '" + cwdSentinel + "'$PWD"
+	}
+
+	// Helper: extract CWD sentinel from stdout and return result with :cwd field.
+	// Called once stdoutBuf is fully populated.
+	makeResult := func(stdout, stderr string, exitCode int) *Value {
+		cwd := ""
+		if captureCwd {
+			stdout, cwd = extractCwdFromStdout(stdout)
+		}
+		return makeExecResult(stdout, stderr, exitCode, cwd)
+	}
+	makeBgResult := func(stdout, stderr string, pid int, reason string) *Value {
+		cwd := ""
+		if captureCwd {
+			stdout, cwd = extractCwdFromStdout(stdout)
+		}
+		return makeBackgroundExecResult(stdout, stderr, pid, reason, cwd)
 	}
 
 	cmd := exec.Command(cmdName, cmdArgsList...)
@@ -210,7 +238,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 	}
 
 	if err := cmd.Start(); err != nil {
-		return makeExecResult("", err.Error(), 1), nil
+		return makeExecResult("", err.Error(), 1, ""), nil
 	}
 
 	// Start goroutine-based resource monitor for child process (pure Go, no bash dependency).
@@ -256,7 +284,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 					exitCode = 1
 				}
 			}
-			return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
+			return makeResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 
 		case reason := <-limitCh:
 			// Resource limit exceeded — process was killed by monitor
@@ -265,7 +293,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 			if reason != "" {
 				stderrBuf.WriteString("\n[resource limit] " + reason)
 			}
-			return makeExecResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
+			return makeResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
 
 		case <-stallTimer.C:
 			// 15s with no completion — check if process has produced any output.
@@ -279,7 +307,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 						"Process moved to background (PID %d). "+
 						"Try non-interactive flags: -y, --yes, --force, or pipe input via exec-with-input.",
 					pid)
-				return makeBackgroundExecResult("", "", pid, reason), nil
+				return makeBgResult("", "", pid, reason), nil
 			}
 			// Some output was produced — reset stall timer and wait for timeout
 			stallTimer.Reset(timeout)
@@ -295,14 +323,14 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 						exitCode = 1
 					}
 				}
-				return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
+				return makeResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 			case reason := <-limitCh:
 				stallTimer.Stop()
 				pipeWg.Wait()
 				if reason != "" {
 					stderrBuf.WriteString("\n[resource limit] " + reason)
 				}
-				return makeExecResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
+				return makeResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
 			case <-stallTimer.C:
 				// Timeout with some output — move to background
 				stdout := stdoutBuf.String()
@@ -311,7 +339,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 					"Command timed out after %s but produced output — moved to background (PID %d). "+
 						"It may still be running.",
 					timeout, pid)
-				return makeBackgroundExecResult(stdout, stderr, pid, reason), nil
+				return makeBgResult(stdout, stderr, pid, reason), nil
 			}
 
 		case <-time.After(timeout):
@@ -323,7 +351,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 				"Command timed out after %s — moved to background (PID %d). "+
 					"It may still be running.",
 				timeout, pid)
-			return makeBackgroundExecResult(stdout, stderr, pid, reason), nil
+			return makeBgResult(stdout, stderr, pid, reason), nil
 		}
 	}
 
@@ -342,14 +370,14 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 				exitCode = 1
 			}
 		}
-		return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
+		return makeResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 	case reason := <-limitCh:
 		// Resource limit exceeded — process was killed by monitor
 		if reason != "" {
 			stderrBuf.WriteString("\n[resource limit] " + reason)
 		}
 		<-done // Wait for goroutine cleanup
-		return makeExecResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
+		return makeResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
 	case <-time.After(timeout):
 		// Hard timeout — move to background
 		pid := cmd.Process.Pid
@@ -359,29 +387,37 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 			"Command timed out after %s — moved to background (PID %d). "+
 				"It may still be running.",
 			timeout, pid)
-		return makeBackgroundExecResult(stdout, stderr, pid, reason), nil
+		return makeBgResult(stdout, stderr, pid, reason), nil
 	}
 }
 
-// makeExecResult creates a Lisp plist: (:stdout "..." :stderr "..." :exit-code N)
-func makeExecResult(stdout, stderr string, exitCode int) *Value {
-	return listToPlist(
+// makeExecResult creates a Lisp plist: (:stdout "..." :stderr "..." :exit-code N :cwd "...")
+func makeExecResult(stdout, stderr string, exitCode int, cwd string) *Value {
+	parts := []*Value{
 		vsym(":stdout"), StringValue(stdout),
 		vsym(":stderr"), StringValue(stderr),
 		vsym(":exit-code"), vnum(float64(exitCode)),
-	)
+	}
+	if cwd != "" {
+		parts = append(parts, vsym(":cwd"), StringValue(cwd))
+	}
+	return listToPlist(parts...)
 }
 
 // makeBackgroundExecResult creates a plist with :background t and :stall-reason.
 // :exit-code is -1 to signal the process is still running.
-func makeBackgroundExecResult(stdout, stderr string, pid int, reason string) *Value {
-	return listToPlist(
+func makeBackgroundExecResult(stdout, stderr string, pid int, reason string, cwd string) *Value {
+	parts := []*Value{
 		vsym(":stdout"), StringValue(stdout),
 		vsym(":stderr"), StringValue(stderr),
 		vsym(":exit-code"), vnum(-1),
 		vsym(":background"), vnum(1),
 		vsym(":stall-reason"), StringValue(reason),
-	)
+	}
+	if cwd != "" {
+		parts = append(parts, vsym(":cwd"), StringValue(cwd))
+	}
+	return listToPlist(parts...)
 }
 
 // StringValue creates a VStr Value.
@@ -546,7 +582,7 @@ func builtinLispExecWithInput(args []*Value) (*Value, error) {
 	cmd.SysProcAttr = setupExecProcessGroupAttr()
 
 	if err := cmd.Start(); err != nil {
-		return makeExecResult("", err.Error(), 1), nil
+		return makeExecResult("", err.Error(), 1, ""), nil
 	}
 
 	err := cmd.Wait()
@@ -559,7 +595,7 @@ func builtinLispExecWithInput(args []*Value) (*Value, error) {
 		}
 	}
 
-	return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
+	return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode, ""), nil
 }
 
 // ─── exec-pipe (streaming) ───────────────────────────────────────────────────
@@ -773,4 +809,29 @@ func wrapShellBuiltin(command string, args []string) (string, []string) {
 		shellCmd += " " + a
 	}
 	return "bash", []string{"-c", shellCmd}
+}
+
+// extractCwdFromStdout parses the CWD sentinel from stdout.
+// It removes the sentinel line and returns the cleaned stdout and extracted CWD.
+func extractCwdFromStdout(stdout string) (cleaned string, cwd string) {
+	const sentinel = "__SHELL_CWD__:"
+	idx := strings.LastIndex(stdout, sentinel)
+	if idx < 0 {
+		return stdout, ""
+	}
+	// Extract CWD: everything after sentinel on the same line
+	after := stdout[idx+len(sentinel):]
+	newlineIdx := strings.IndexByte(after, '\n')
+	if newlineIdx >= 0 {
+		cwd = strings.TrimRight(after[:newlineIdx], "\r")
+	} else {
+		cwd = strings.TrimRight(after, "\r")
+	}
+	// Remove sentinel line (and the newline before it) from stdout
+	before := stdout[:idx]
+	// Trim trailing newline before sentinel
+	if len(before) > 0 && before[len(before)-1] == '\n' {
+		before = before[:len(before)-1]
+	}
+	return before, cwd
 }
