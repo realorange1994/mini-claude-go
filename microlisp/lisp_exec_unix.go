@@ -20,3 +20,8 @@ func killExecProcessTree(cmd *exec.Cmd) {
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	cmd.Process.Kill()
 }
+
+// defaultPathEnv returns a sensible default PATH for Unix systems.
+func defaultPathEnv() string {
+	return "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}

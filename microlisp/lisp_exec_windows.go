@@ -21,3 +21,8 @@ func killExecProcessTree(cmd *exec.Cmd) {
 	_ = exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
 	cmd.Process.Kill()
 }
+
+// defaultPathEnv returns a sensible default PATH for Windows systems.
+func defaultPathEnv() string {
+	return "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem"
+}

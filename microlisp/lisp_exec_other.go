@@ -17,3 +17,8 @@ func killExecProcessTree(cmd *exec.Cmd) {
 	}
 	cmd.Process.Kill()
 }
+
+// defaultPathEnv returns a sensible default PATH for other platforms.
+func defaultPathEnv() string {
+	return "PATH=/usr/local/bin:/usr/bin:/bin"
+}

@@ -138,8 +138,24 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		cmd.Dir = workingDir
 	}
 
+	// If :env is empty, inherit os.Environ().
+	// If :env is provided, merge with os.Environ() (child overrides parent).
+	// Always ensure PATH is set — if the parent has no PATH, use a sensible default.
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
+	} else {
+		cmd.Env = os.Environ()
+	}
+	// Ensure PATH exists in cmd.Env (handles case where parent has no PATH)
+	hasPath := false
+	for _, e := range cmd.Env {
+		if len(e) >= 5 && e[:5] == "PATH=" {
+			hasPath = true
+			break
+		}
+	}
+	if !hasPath {
+		cmd.Env = append(cmd.Env, defaultPathEnv())
 	}
 
 	// Set stdin: if :stdin was provided, pipe it in; otherwise /dev/null
