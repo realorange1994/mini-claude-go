@@ -42,7 +42,13 @@ func builtinLispExec(args []*Value) (*Value, error) {
 		key := args[i]
 		val := args[i+1]
 
-		switch key.str {
+		if key.typ != VSym {
+			i += 2
+			continue
+		}
+
+		keyStr := strings.ToLower(key.str)
+		switch keyStr {
 		case ":args":
 			if val.typ == VPair || val.typ == VNil {
 				cmdArgs = lispListToStringSlice(val)
@@ -413,7 +419,13 @@ func builtinLispExecWithInput(args []*Value) (*Value, error) {
 		key := args[i]
 		val := args[i+1]
 
-		switch key.str {
+		if key.typ != VSym {
+			i += 2
+			continue
+		}
+
+		keyStr := strings.ToLower(key.str)
+		switch keyStr {
 		case ":args":
 			if val.typ == VPair || val.typ == VNil {
 				cmdArgs = lispListToStringSlice(val)
@@ -473,7 +485,13 @@ func builtinLispExecPipe(args []*Value) (*Value, error) {
 		key := args[i]
 		val := args[i+1]
 
-		switch key.str {
+		if key.typ != VSym {
+			i += 2
+			continue
+		}
+
+		keyStr := strings.ToLower(key.str)
+		switch keyStr {
 		case ":args":
 			if val.typ == VPair || val.typ == VNil {
 				cmdArgs = lispListToStringSlice(val)
@@ -531,7 +549,7 @@ func builtinExecPipeRead(args []*Value) (*Value, error) {
 		}
 		key := args[i]
 		val := args[i+1]
-		if key.str == ":stream" && val.typ == VStr {
+		if key.typ == VSym && strings.ToLower(key.str) == ":stream" && val.typ == VStr {
 			stream = val.str
 		}
 		i += 2
