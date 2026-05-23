@@ -178,6 +178,27 @@ func SetDefaultModels(cfg *Config) {
 	}
 }
 
+// SetDefaultOpusModel overrides the default Opus model at runtime.
+func SetDefaultOpusModel(model string) {
+	defaultMu.Lock()
+	defer defaultMu.Unlock()
+	defaultOpusModel = model
+}
+
+// SetDefaultSonnetModel overrides the default Sonnet model at runtime.
+func SetDefaultSonnetModel(model string) {
+	defaultMu.Lock()
+	defer defaultMu.Unlock()
+	defaultSonnetModel = model
+}
+
+// SetDefaultHaikuModel overrides the default Haiku model at runtime.
+func SetDefaultHaikuModel(model string) {
+	defaultMu.Lock()
+	defer defaultMu.Unlock()
+	defaultHaikuModel = model
+}
+
 // getDefaultOpusModel returns the current default Opus model.
 // Upstream: getDefaultOpusModel() in model.ts:116
 func getDefaultOpusModel() string {

@@ -109,6 +109,21 @@ func main() {
 	// Apply config-derived default model settings (settings.json > env > hard-coded defaults)
 	SetDefaultModels(&cfg)
 
+	// When --model is specified but no individual default models are configured,
+	// use --model for all defaults so alias resolution, fallback, and sub-agents
+	// all use the same model
+	if *model != "" {
+		if cfg.DefaultOpusModel == "" {
+			SetDefaultOpusModel(*model)
+		}
+		if cfg.DefaultSonnetModel == "" {
+			SetDefaultSonnetModel(*model)
+		}
+		if cfg.DefaultHaikuModel == "" {
+			SetDefaultHaikuModel(*model)
+		}
+	}
+
 	// Wire session ID to streaming_executor package
 	if cfg.SessionID != "" {
 		packageSessionID = cfg.SessionID
