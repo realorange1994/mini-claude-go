@@ -99,6 +99,11 @@ func WalkDir(opts WalkOptions) ([]WalkEntry, error) {
 		rel, _ := filepath.Rel(root, path)
 
 		if d.IsDir() {
+			// Skip hidden directories (dot-prefixed, excluding "." itself)
+			if len(d.Name()) > 1 && d.Name()[0] == '.' {
+				return filepath.SkipDir
+			}
+
 			// Skip default ignored directories
 			if defaultIgnoredDirs[d.Name()] {
 				return filepath.SkipDir
@@ -244,6 +249,11 @@ func WalkDirStream(opts WalkOptions, fn func(WalkEntry) error) error {
 		rel, _ := filepath.Rel(root, path)
 
 		if d.IsDir() {
+			// Skip hidden directories (dot-prefixed, excluding "." itself)
+			if len(d.Name()) > 1 && d.Name()[0] == '.' {
+				return filepath.SkipDir
+			}
+
 			// Skip default ignored directories
 			if defaultIgnoredDirs[d.Name()] {
 				return filepath.SkipDir

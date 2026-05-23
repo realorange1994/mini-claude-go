@@ -143,6 +143,10 @@ func (t *GlobTool) ExecuteContext(ctx context.Context, params map[string]any) To
 		}
 		rel, _ := filepath.Rel(dir, path)
 		if d.IsDir() {
+			// Skip hidden directories (dot-prefixed, excluding "." itself)
+			if len(d.Name()) > 1 && d.Name()[0] == '.' {
+				return filepath.SkipDir
+			}
 			if isIgnoredDir(d.Name()) {
 				return filepath.SkipDir
 			}

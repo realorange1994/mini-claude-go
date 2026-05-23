@@ -345,6 +345,10 @@ func rgSearch(ctx context.Context, pattern, path, include, typeFilter string, ca
 		args = append(args, "--glob", "!"+dir)
 	}
 
+	// Exclude all hidden directories (dot-prefixed) like .vscode-server, .idea, etc.
+	// This glob only matches directory paths, keeping hidden files like .env searchable.
+	args = append(args, "--glob", "!.*/")
+
 	// Add user exclude patterns
 	for _, excl := range excludes {
 		args = append(args, "--glob", "!"+excl)
