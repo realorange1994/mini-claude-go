@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -133,19 +132,7 @@ func lispEnvToGoSlice(v *Value) []string {
 
 // executeCommand runs a command with the given parameters.
 func executeCommand(command string, cmdArgs []string, workingDir string, env []string, stdin string, timeout time.Duration, maxMemoryMB int64, maxCPUMS int64) (*Value, error) {
-	// Apply resource limits via bash -c ulimit wrapper (child-only, no parent impact).
-	// This must happen BEFORE exec.Command so we use the wrapped command name/args.
-	cmdName := command
-	cmdArgsList := cmdArgs
-	if maxMemoryMB > 0 || maxCPUMS > 0 {
-		var err error
-		cmdName, cmdArgsList, err = wrapWithResourceLimits(command, cmdArgs, maxMemoryMB, maxCPUMS)
-		if err != nil {
-			return makeExecResult("", err.Error(), 1), nil
-		}
-	}
-
-	cmd := exec.Command(cmdName, cmdArgsList...)
+	cmd := exec.Command(command, cmdArgs...)
 
 	if workingDir != "" {
 		cmd.Dir = workingDir
@@ -181,9 +168,9 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		return makeExecResult("", err.Error(), 1), nil
 	}
 
-	if runtime.GOOS == "windows" && (maxMemoryMB > 0 || maxCPUMS > 0) {
-		_ = setupWindowsJobObject(cmd, maxMemoryMB, maxCPUMS)
-	}
+	// Start goroutine-based resource monitor for child process (pure Go, no bash dependency).
+	// If the child exceeds memory/CPU limits, the monitor kills it and sends a reason.
+	limitCh := startResourceMonitor(cmd, maxMemoryMB, maxCPUMS)
 
 	if usePipes {
 		// Pipe-based reading with stall detection.
@@ -226,6 +213,15 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 			}
 			return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 
+		case reason := <-limitCh:
+			// Resource limit exceeded — process was killed by monitor
+			stallTimer.Stop()
+			pipeWg.Wait()
+			if reason != "" {
+				stderrBuf.WriteString("\n[resource limit] " + reason)
+			}
+			return makeExecResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
+
 		case <-stallTimer.C:
 			// 15s with no completion — check if process has produced any output.
 			pid := cmd.Process.Pid
@@ -255,6 +251,13 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 					}
 				}
 				return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
+			case reason := <-limitCh:
+				stallTimer.Stop()
+				pipeWg.Wait()
+				if reason != "" {
+					stderrBuf.WriteString("\n[resource limit] " + reason)
+				}
+				return makeExecResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
 			case <-stallTimer.C:
 				// Timeout with some output — move to background
 				stdout := stdoutBuf.String()
@@ -281,16 +284,38 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 
 	// Fallback: direct buffer attachment (no stall detection).
 	// Used when StdoutPipe/StderrPipe failed.
-	err := cmd.Wait()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = 1
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		exitCode := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 1
+			}
 		}
+		return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
+	case reason := <-limitCh:
+		// Resource limit exceeded — process was killed by monitor
+		if reason != "" {
+			stderrBuf.WriteString("\n[resource limit] " + reason)
+		}
+		<-done // Wait for goroutine cleanup
+		return makeExecResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
+	case <-time.After(timeout):
+		// Hard timeout — move to background
+		pid := cmd.Process.Pid
+		stdout := stdoutBuf.String()
+		stderr := stderrBuf.String()
+		reason := fmt.Sprintf(
+			"Command timed out after %s — moved to background (PID %d). "+
+				"It may still be running.",
+			timeout, pid)
+		return makeBackgroundExecResult(stdout, stderr, pid, reason), nil
 	}
-	return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 }
 
 // makeExecResult creates a Lisp plist: (:stdout "..." :stderr "..." :exit-code N)
