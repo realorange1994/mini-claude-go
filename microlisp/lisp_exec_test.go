@@ -165,6 +165,27 @@ func TestExecWithInput(t *testing.T) {
 	}
 }
 
+// TestExecStdinParam tests the new :stdin parameter on exec
+func TestExecStdinParam(t *testing.T) {
+	ResetGlobalEnv()
+
+	expr := `(exec "cat" :stdin "hello via stdin")`
+	result, err := SafeEvalString(expr)
+	if err != nil {
+		t.Fatalf("SafeEvalString(%q) error: %v", expr, err)
+	}
+
+	stdout := extractPlistTestValue(result, ":stdout")
+	exitCode := extractPlistTestValue(result, ":exit-code")
+
+	if exitCode != "0" {
+		t.Errorf("exec with :stdin: exit-code=%q, want 0", exitCode)
+	}
+	if !strings.Contains(stdout, "hello via stdin") {
+		t.Errorf("exec with :stdin: stdout=%q missing 'hello via stdin'", stdout)
+	}
+}
+
 // extractPlistTestValue extracts a value from a plist result string
 // using the same sequential state machine as extractPlistValue.
 func extractPlistTestValue(plist, key string) string {

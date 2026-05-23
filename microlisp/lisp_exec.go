@@ -31,6 +31,7 @@ func builtinLispExec(args []*Value) (*Value, error) {
 	var cmdArgs []string
 	var workingDir string
 	var env []string
+	var stdin string
 	var timeoutMs int64 = 120000
 	var maxMemoryMB int64
 	var maxCPUMS int64
@@ -61,6 +62,10 @@ func builtinLispExec(args []*Value) (*Value, error) {
 			if val.typ == VPair || val.typ == VNil {
 				env = lispEnvToGoSlice(val)
 			}
+		case ":stdin":
+			if val.typ == VStr {
+				stdin = val.str
+			}
 		case ":timeout":
 			if val.typ == VNum {
 				timeoutMs = int64(val.num)
@@ -84,7 +89,7 @@ func builtinLispExec(args []*Value) (*Value, error) {
 		timeoutMs = 600000
 	}
 
-	return executeCommand(command, cmdArgs, workingDir, env, time.Duration(timeoutMs)*time.Millisecond, maxMemoryMB, maxCPUMS)
+	return executeCommand(command, cmdArgs, workingDir, env, stdin, time.Duration(timeoutMs)*time.Millisecond, maxMemoryMB, maxCPUMS)
 }
 
 // lispListToStringSlice converts a Lisp list to a []string.
@@ -112,7 +117,7 @@ func lispEnvToGoSlice(v *Value) []string {
 }
 
 // executeCommand runs a command with the given parameters.
-func executeCommand(command string, cmdArgs []string, workingDir string, env []string, timeout time.Duration, maxMemoryMB int64, maxCPUMS int64) (*Value, error) {
+func executeCommand(command string, cmdArgs []string, workingDir string, env []string, stdin string, timeout time.Duration, maxMemoryMB int64, maxCPUMS int64) (*Value, error) {
 	cmd := exec.Command(command, cmdArgs...)
 
 	if workingDir != "" {
@@ -123,7 +128,10 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		cmd.Env = append(os.Environ(), env...)
 	}
 
-	cmd.Stdin = nil // Disconnect stdin — interactive commands will stall
+	// Set stdin: if :stdin was provided, pipe it in; otherwise /dev/null
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 
 	cmd.SysProcAttr = setupExecProcessGroupAttr()
 
