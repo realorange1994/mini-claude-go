@@ -350,6 +350,7 @@ var builtins = []builtinDef{
 	{"chan-p", builtinChanP},
 	{"chan-info", builtinChanInfo},
 	{"go:new", builtinGoNew},
+	{"go:make", builtinGoMake},
 	{"go:field", builtinGoField},
 	{"go:set-field", builtinGoSetField},
 	{"go:type-of", builtinGoTypeOf},

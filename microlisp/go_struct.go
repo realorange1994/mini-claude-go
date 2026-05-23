@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -352,4 +353,236 @@ func builtinGoCall(args []*Value) (*Value, error) {
 		lispResults[i] = reflectToLisp(r)
 	}
 	return listFromSlice(lispResults), nil
+}
+
+// -------- Go Type Parsing and make --------
+// parseGoType parses a Go type string like "[]int", "map[string]int", "chan T", "*T", or "pkg.Type".
+func parseGoType(spec string) (reflect.Type, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, fmt.Errorf("empty type specifier")
+	}
+
+	// Built-in types
+	switch spec {
+	case "bool":
+		return reflect.TypeOf(true), nil
+	case "int":
+		return reflect.TypeOf(int(0)), nil
+	case "int8":
+		return reflect.TypeOf(int8(0)), nil
+	case "int16":
+		return reflect.TypeOf(int16(0)), nil
+	case "int32":
+		return reflect.TypeOf(int32(0)), nil
+	case "int64":
+		return reflect.TypeOf(int64(0)), nil
+	case "uint":
+		return reflect.TypeOf(uint(0)), nil
+	case "uint8":
+		return reflect.TypeOf(uint8(0)), nil
+	case "uint16":
+		return reflect.TypeOf(uint16(0)), nil
+	case "uint32":
+		return reflect.TypeOf(uint32(0)), nil
+	case "uint64":
+		return reflect.TypeOf(uint64(0)), nil
+	case "uintptr":
+		return reflect.TypeOf(uintptr(0)), nil
+	case "float32":
+		return reflect.TypeOf(float32(0)), nil
+	case "float64":
+		return reflect.TypeOf(float64(0)), nil
+	case "complex64":
+		return reflect.TypeOf(complex64(0)), nil
+	case "complex128":
+		return reflect.TypeOf(complex128(0)), nil
+	case "string":
+		return reflect.TypeOf(""), nil
+	case "byte":
+		return reflect.TypeOf(byte(0)), nil
+	case "rune":
+		return reflect.TypeOf(rune(0)), nil
+	}
+
+	// *T — pointer
+	if strings.HasPrefix(spec, "*") {
+		elem, err := parseGoType(spec[1:])
+		if err != nil {
+			return nil, fmt.Errorf("invalid pointer element type: %w", err)
+		}
+		return reflect.PtrTo(elem), nil
+	}
+
+	// []T — slice
+	if strings.HasPrefix(spec, "[]") {
+		elem, err := parseGoType(spec[2:])
+		if err != nil {
+			return nil, fmt.Errorf("invalid slice element type: %w", err)
+		}
+		return reflect.SliceOf(elem), nil
+	}
+
+	// chan<- T — send-only channel
+	if strings.HasPrefix(spec, "chan<- ") {
+		elem, err := parseGoType(spec[7:])
+		if err != nil {
+			return nil, fmt.Errorf("invalid chan<- element type: %w", err)
+		}
+		return reflect.ChanOf(reflect.SendDir, elem), nil
+	}
+
+	// <-chan T — receive-only channel
+	if strings.HasPrefix(spec, "<-chan ") {
+		elem, err := parseGoType(spec[7:])
+		if err != nil {
+			return nil, fmt.Errorf("invalid <-chan element type: %w", err)
+		}
+		return reflect.ChanOf(reflect.RecvDir, elem), nil
+	}
+
+	// chan T — bidirectional channel
+	if strings.HasPrefix(spec, "chan ") {
+		elem, err := parseGoType(spec[5:])
+		if err != nil {
+			return nil, fmt.Errorf("invalid chan element type: %w", err)
+		}
+		return reflect.ChanOf(reflect.BothDir, elem), nil
+	}
+
+	// map[K]V — map
+	if strings.HasPrefix(spec, "map[") {
+		// Find matching ']' for key
+		depth := 0
+		keyEnd := -1
+		for i := 4; i < len(spec); i++ {
+			switch spec[i] {
+			case '[':
+				depth++
+			case ']':
+				if depth == 0 {
+					keyEnd = i
+					break
+				}
+				depth--
+			}
+		}
+		if keyEnd < 0 {
+			return nil, fmt.Errorf("invalid map type: missing ']'")
+		}
+		keySpec := spec[4:keyEnd]
+		valSpec := spec[keyEnd+1:]
+		keyType, err := parseGoType(keySpec)
+		if err != nil {
+			return nil, fmt.Errorf("invalid map key type: %w", err)
+		}
+		valType, err := parseGoType(valSpec)
+		if err != nil {
+			return nil, fmt.Errorf("invalid map value type: %w", err)
+		}
+		return reflect.MapOf(keyType, valType), nil
+	}
+
+	// array[T] — fixed-size array (not common in FFI but parseable)
+	if strings.HasPrefix(spec, "[") && !strings.HasPrefix(spec, "[]") {
+		// find ']' for array size
+		closeIdx := strings.Index(spec, "]")
+		if closeIdx < 2 {
+			return nil, fmt.Errorf("invalid array type")
+		}
+		sizeStr := spec[1:closeIdx]
+		elemSpec := spec[closeIdx+1:]
+		elemType, err := parseGoType(elemSpec)
+		if err != nil {
+			return nil, fmt.Errorf("invalid array element type: %w", err)
+		}
+		n, err := strconv.Atoi(sizeStr)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid array size: %s", sizeStr)
+		}
+		return reflect.ArrayOf(n, elemType), nil
+	}
+
+	// pkg.Type — look up in GoTypeRegistry
+	parts := strings.SplitN(spec, ".", 2)
+	if len(parts) == 2 {
+		pkgName, typeName := parts[0], parts[1]
+		if pkgTypes, ok := GoTypeRegistry[pkgName]; ok {
+			if t, ok := pkgTypes[typeName]; ok {
+				return t, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("unknown type: %q", spec)
+}
+
+// builtinGoMake creates a properly initialized Go value.
+// For slices: (go:make "[]int" size &optional capacity)
+// For maps:   (go:make "map[string]int")
+// For chans:  (go:make "chan int" buffer-size)
+// For others: behaves like go:new (creates zero-value)
+func builtinGoMake(args []*Value) (*Value, error) {
+	if len(args) < 1 || args[0].typ != VStr {
+		return nil, fmt.Errorf("go:make: need a string type specifier")
+	}
+	name := args[0].str
+
+	t, err := parseGoType(name)
+	if err != nil {
+		return nil, fmt.Errorf("go:make: %v", err)
+	}
+
+	var rv reflect.Value
+
+	switch t.Kind() {
+	case reflect.Slice:
+		size, cap := 0, 8
+		if len(args) >= 2 {
+			if !isNumeric(args[1]) {
+				return nil, fmt.Errorf("go:make: slice size must be numeric")
+			}
+			size = int(toNum(args[1]))
+			if size < 0 {
+				return nil, fmt.Errorf("go:make: negative slice size")
+			}
+		}
+		if len(args) >= 3 {
+			if !isNumeric(args[2]) {
+				return nil, fmt.Errorf("go:make: slice capacity must be numeric")
+			}
+			cap = int(toNum(args[2]))
+			if cap < size {
+				cap = size
+			}
+		}
+		rv = reflect.MakeSlice(t, size, cap)
+
+	case reflect.Map:
+		rv = reflect.MakeMap(t)
+
+	case reflect.Chan:
+		buf := 0
+		if len(args) >= 2 {
+			if !isNumeric(args[1]) {
+				return nil, fmt.Errorf("go:make: channel buffer must be numeric")
+			}
+			buf = int(toNum(args[1]))
+			if buf < 0 {
+				buf = 0
+			}
+		}
+		rv = reflect.MakeChan(t, buf)
+
+	default:
+		// Structs, interfaces, named types: same as go:new
+		rv = reflect.New(t)
+	}
+
+	return &Value{
+		typ:          VGoVal,
+		goVal:        rv.Interface(),
+		goValType:    t,
+		goValReflect: rv,
+	}, nil
 }
