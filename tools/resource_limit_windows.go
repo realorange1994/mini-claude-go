@@ -11,17 +11,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// ResourceLimits specifies resource constraints for an exec command.
-type ResourceLimits struct {
-	// MaxMemoryBytes sets the maximum memory the process can use.
-	// 0 means no limit.
-	MaxMemoryBytes int64
-
-	// MaxCPUMillis sets the maximum CPU time in milliseconds.
-	// 0 means no limit.
-	MaxCPUMillis int64
-}
-
 // JobObject wraps a Windows Job Object handle for resource limiting.
 type JobObject struct {
 	handle windows.Handle
@@ -86,21 +75,6 @@ func (j *JobObject) Close() error {
 		return nil
 	}
 	return windows.CloseHandle(j.handle)
-}
-
-// Format returns a human-readable description of the limits.
-func (rl ResourceLimits) Format() string {
-	if rl.MaxMemoryBytes == 0 && rl.MaxCPUMillis == 0 {
-		return ""
-	}
-	var parts []string
-	if rl.MaxMemoryBytes > 0 {
-		parts = append(parts, fmt.Sprintf("max memory: %d MB", rl.MaxMemoryBytes/1024/1024))
-	}
-	if rl.MaxCPUMillis > 0 {
-		parts = append(parts, fmt.Sprintf("max CPU: %d ms", rl.MaxCPUMillis))
-	}
-	return "(" + joinStr(parts, ", ") + ")"
 }
 
 func setJobMemoryLimit(job windows.Handle, maxBytes int64) error {
@@ -175,15 +149,4 @@ func setJobCpuLimit(job windows.Handle, maxMillis int64) error {
 		return fmt.Errorf("SetInformationJobObject (CPU): %w", err)
 	}
 	return nil
-}
-
-func joinStr(ss []string, sep string) string {
-	if len(ss) == 0 {
-		return ""
-	}
-	r := ss[0]
-	for i := 1; i < len(ss); i++ {
-		r += sep + ss[i]
-	}
-	return r
 }

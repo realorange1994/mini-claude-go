@@ -2,29 +2,13 @@
 
 package tools
 
-// wrapCommandForResourceLimits wraps the command with prlimit on Unix.
+// wrapCommandForResourceLimits prepends ulimit settings inside the bash -c string.
+// Since the command runs inside "bash -c <cmd>", ulimit (a shell builtin) is
+// always available — no dependency on external tools like prlimit.
 func wrapCommandForResourceLimits(command string, rl ResourceLimits) string {
-	return rl.WrapCommand(command)
-}
-
-// parseResourceLimits extracts ResourceLimits from the tool params.
-func parseResourceLimits(params map[string]any) ResourceLimits {
-	var rl ResourceLimits
-	if m, ok := params["max_memory_mb"]; ok {
-		switch v := m.(type) {
-		case float64:
-			rl.MaxMemoryBytes = int64(v) * 1024 * 1024
-		case int:
-			rl.MaxMemoryBytes = int64(v) * 1024 * 1024
-		}
+	prefix := rl.UlimitPrefix()
+	if prefix == "" {
+		return command
 	}
-	if c, ok := params["max_cpu_ms"]; ok {
-		switch v := c.(type) {
-		case float64:
-			rl.MaxCPUMillis = int64(v)
-		case int:
-			rl.MaxCPUMillis = int64(v)
-		}
-	}
-	return rl
+	return prefix + command
 }

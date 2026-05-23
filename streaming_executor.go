@@ -112,7 +112,7 @@ func (e *StreamingToolExecutor) SetMaxConcurrency(n int) {
 // Matching upstream's tool.isConcurrencySafe(input) which checks isReadOnly(cmd)
 // for BashTool — only read-only bash commands (ls, cat, grep, etc.) are safe.
 func (e *StreamingToolExecutor) isConcurrencySafe(toolName string, arguments string) bool {
-	if toolName == "exec" {
+	if toolName == "exec" || toolName == "lisp_exec" {
 		// Parse the command from arguments and check if it's read-only
 		var input map[string]any
 		if arguments != "" {
@@ -528,7 +528,7 @@ func (e *StreamingToolExecutor) execute(idx int, tc ToolCallInfo, tool tools.Too
 	// check after execution returns. If siblingCtx was cancelled, a Bash
 	// sibling errored — this tool should report a synthetic error unless it
 	// was the one that errored.
-	if e.siblingCtx.Err() != nil && !(wasError && tc.Name == "exec") {
+	if e.siblingCtx.Err() != nil && !(wasError && tc.Name == "exec") && !(wasError && tc.Name == "lisp_exec") {
 		// Sibling Bash errored — cancel this tool
 		e.recordResult(toolExecResult{
 			index:     idx,

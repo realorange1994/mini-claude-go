@@ -63,6 +63,12 @@ var ToolNameAliases = map[string]string{
 	"run_command": ExecToolName,
 	"run":         ExecToolName,
 	"command":     ExecToolName,
+	// lisp_exec aliases
+	"lisp_bash":      "lisp_exec",
+	"lisp_shell":     "lisp_exec",
+	"pure_exec":      "lisp_exec",
+	"pure_execute":   "lisp_exec",
+	"direct_exec":    "lisp_exec",
 	// grep aliases
 	"search_files":    "grep",
 	"search_in_files": "grep",

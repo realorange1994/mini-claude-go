@@ -385,7 +385,19 @@ var goStdlibLisp = `
 ;; 10. Process Execution
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+;; Native exec functions (no shell dependency, pure Go):
+;;   (exec command &key args working-dir env timeout max-memory-mb max-cpu-ms)
+;;     -> (:stdout "..." :stderr "..." :exit-code N)
+;;   (exec-simple command arg1 arg2 ...) -> (output . exit-code)
+;;   (exec-with-input command input &key args working-dir) -> plist
+;;   (exec-pipe command &key args) -> pipe object
+;;   (exec-read-line pipe &key stream) -> string
+;;   (exec-wait pipe) -> exit-code
+;;   (exec-kill pipe) -> t
+;;   (which command) -> path or nil
+
 ;; (run-command command &rest args) -> (output exit-code)
+;; Deprecated: prefer (exec-simple command . args) for simpler output
 (define (run-command command . args)
   (let* ((cmd (apply (go:import "os/exec.Command") (cons command args)))
          (output (go:call cmd "CombinedOutput"))
@@ -393,13 +405,12 @@ var goStdlibLisp = `
     (list output exit-code)))
 
 ;; (shell command-string) -> (output exit-code)
+;; Deprecated: prefer (exec "sh" :args (list "-c" command-string))
 (define (shell command-str)
   (run-command "sh" "-c" command-str))
 
 ;; (which command) -> path or nil
-(define (which command)
-  (let ((result (ignore-errors (funcall (go:import "os/exec.LookPath") command))))
-    (if result result nil)))
+;; Built-in native function, no longer uses FFI wrapper.
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; 11. String Utilities (wrapping strings package)

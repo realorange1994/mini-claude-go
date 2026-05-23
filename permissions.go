@@ -320,7 +320,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 	if len(g.config.DeniedPatterns) > 0 {
 		var target string
 		switch tool.Name() {
-		case "exec":
+		case "exec", "lisp_exec":
 			target, _ = params["command"].(string)
 		case "write_file", "edit_file", "multi_edit":
 			target, _ = params["file_path"].(string)
@@ -344,7 +344,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		restoreStripped()
 		return nil
 	case ModePlan:
-		writeTools := map[string]bool{"exec": true, "write_file": true, "edit_file": true, "multi_edit": true, "fileops": true}
+		writeTools := map[string]bool{"exec": true, "lisp_exec": true, "write_file": true, "edit_file": true, "multi_edit": true, "fileops": true}
 		if writeTools[tool.Name()] {
 			restoreStripped()
 			return denyResult(fmt.Sprintf("'%s' is blocked in plan (read-only) mode.", tool.Name()))
@@ -352,7 +352,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 
 	case ModeAsk:
 		dangerousTools := map[string]bool{
-			"exec": true, "write_file": true, "edit_file": true,
+			"exec": true, "lisp_exec": true, "write_file": true, "edit_file": true,
 			"multi_edit": true, "fileops": true,
 		}
 		isDangerous := dangerousTools[tool.Name()]
@@ -367,7 +367,7 @@ func (g *PermissionGate) Check(tool tools.Tool, params map[string]any) *tools.To
 		}
 
 		if isDangerous {
-			if tool.Name() == "exec" {
+			if tool.Name() == "exec" || tool.Name() == "lisp_exec" {
 				cmd, _ := params["command"].(string)
 				if g.isSafeCommand(cmd) {
 					restoreStripped()
@@ -533,7 +533,7 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 func (g *PermissionGate) askUserWithWarning(toolName string, params map[string]any, warning string) bool {
 	var detail string
 	switch toolName {
-	case "exec":
+	case "exec", "lisp_exec":
 		detail, _ = params["command"].(string)
 	case "write_file", "edit_file", "multi_edit":
 		detail, _ = params["file_path"].(string)
@@ -576,7 +576,7 @@ func (g *PermissionGate) toolMatchesRecentApproval(toolName string, params map[s
 // matching user approvals. Only includes the key identifying parameter.
 func compactParams(toolName string, params map[string]any) string {
 	switch toolName {
-	case "exec":
+	case "exec", "lisp_exec":
 		if cmd, ok := params["command"].(string); ok {
 			return cmd
 		}
@@ -605,7 +605,7 @@ func compactParams(toolName string, params map[string]any) string {
 // For exec/bash tools, uses the command; for file tools, uses the path.
 func (g *PermissionGate) extractRuleContent(toolName string, params map[string]any) string {
 	switch toolName {
-	case "exec":
+	case "exec", "lisp_exec":
 		if cmd, ok := params["command"].(string); ok {
 			return cmd
 		}

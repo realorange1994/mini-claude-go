@@ -865,4 +865,14 @@ var builtins = []builtinDef{
 	{"variable-information", builtinVariableInformation},
 	{"function-information", builtinFunctionInformation},
 	{"declaration-information", builtinDeclarationInformation},
+
+	// Pure-Go exec functions (no shell dependency)
+	{"exec", builtinLispExec},
+	{"exec-simple", builtinLispExecSimple},
+	{"exec-with-input", builtinLispExecWithInput},
+	{"exec-pipe", builtinLispExecPipe},
+	{"exec-read-line", builtinExecPipeRead},
+	{"exec-wait", builtinExecPipeWait},
+	{"exec-kill", builtinExecPipeKill},
+	{"which", builtinLispWhich},
 }
