@@ -83,13 +83,12 @@ func wrapWithShell(command string, args []string, input string) (program string,
 	return "bash", []string{"-c", fullCmd}, input != ""
 }
 
-// splitCommand splits a command string into program name and implicit args.
-// If the command contains spaces (e.g. "mkdir -p dir"), the first token
-// is the program name and the rest are args. This fixes the issue where
-// exec.Command("mkdir -p dir") looks for a program literally named
-// "mkdir -p dir" instead of running mkdir with args.
+// splitCommand splits a command string into program name and implicit args,
+// respecting shell quoting (single and double quotes).
+// e.g. `bash -c "echo 'Hello'"` → program="bash", args=["-c", "echo 'Hello'"]
+// e.g. `mkdir -p dir` → program="mkdir", args=["-p", "dir"]
 func splitCommand(s string) (program string, implicitArgs []string) {
-	parts := strings.Fields(s)
+	parts, _ := shellSplit(s)
 	if len(parts) == 0 {
 		return "", nil
 	}
@@ -97,6 +96,81 @@ func splitCommand(s string) (program string, implicitArgs []string) {
 		return parts[0], nil
 	}
 	return parts[0], parts[1:]
+}
+
+// shellSplit splits a command string into tokens, respecting single and
+// double quotes and backslash escaping. Returns the tokens and any error.
+func shellSplit(s string) ([]string, error) {
+	var tokens []string
+	var current strings.Builder
+	i := 0
+	n := len(s)
+
+	for i < n {
+		ch := s[i]
+
+		// Skip whitespace — flush current token
+		if ch == ' ' || ch == '\t' {
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+			i++
+			continue
+		}
+
+		// Double-quoted string
+		if ch == '"' {
+			i++ // skip opening quote
+			for i < n {
+				c := s[i]
+				if c == '\\' && i+1 < n {
+					// Backslash escaping inside double quotes
+					current.WriteByte(s[i+1])
+					i += 2
+					continue
+				}
+				if c == '"' {
+					i++ // skip closing quote
+					break
+				}
+				current.WriteByte(c)
+				i++
+			}
+			continue
+		}
+
+		// Single-quoted string
+		if ch == '\'' {
+			i++ // skip opening quote
+			for i < n {
+				if s[i] == '\'' {
+					i++ // skip closing quote
+					break
+				}
+				current.WriteByte(s[i])
+				i++
+			}
+			continue
+		}
+
+		// Backslash escaping outside quotes
+		if ch == '\\' && i+1 < n {
+			current.WriteByte(s[i+1])
+			i += 2
+			continue
+		}
+
+		// Regular character
+		current.WriteByte(ch)
+		i++
+	}
+
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+
+	return tokens, nil
 }
 
 // extractArgs attempts to extract a []string slice from a param value.
