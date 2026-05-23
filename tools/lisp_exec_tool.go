@@ -473,76 +473,89 @@ func formatExecResult(lispResult string) ToolResult {
 }
 
 // extractPlistValue extracts a value from a Lisp plist string by key.
-// Only matches keys at the plist structure level, not inside quoted strings.
-// This prevents false matches when command output contains key-like text
-// such as ":stdout" or ":exit-code".
+// Uses a sequential scan that properly tracks quoted string boundaries,
+// avoiding false matches when command output contains key-like text
+// such as ":stdout" or ":exit-code" inside a string value.
 func extractPlistValue(plist, key string) string {
-	// Walk through the plist, skipping over quoted strings.
-	// Only match the key when we're at the top level.
-	pos := 0
-	for pos < len(plist) {
-		idx := strings.Index(plist[pos:], key)
-		if idx < 0 {
-			return ""
+	i := 0
+	n := len(plist)
+	keyLen := len(key)
+
+	for i < n {
+		ch := plist[i]
+
+		// Skip whitespace and structural chars
+		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '(' || ch == ')' {
+			i++
+			continue
 		}
-		absIdx := pos + idx
 
-		// Check that the key is at the plist structure level:
-		// it must be preceded by '(' or whitespace, and followed by whitespace.
-		// First, verify we're not inside a quoted string by counting unescaped
-		// quotes before this position.
-		if isOutsideQuotedString(plist, absIdx) {
-			// Valid match — extract the value
-			afterKey := absIdx + len(key)
-			// Skip whitespace
-			for afterKey < len(plist) && (plist[afterKey] == ' ' || plist[afterKey] == '\t' || plist[afterKey] == '\n') {
-				afterKey++
+		// Check if key matches at position i with proper word boundary
+		if i+keyLen <= n && plist[i:i+keyLen] == key {
+			afterKey := i + keyLen
+			// Verify trailing boundary: whitespace, structural char, quote, or end
+			if afterKey >= n || plist[afterKey] == ' ' || plist[afterKey] == '\t' ||
+				plist[afterKey] == '\n' || plist[afterKey] == ')' ||
+				plist[afterKey] == '(' || plist[afterKey] == '"' {
+				// Key match at structure level — extract value
+				valStart := afterKey
+				for valStart < n && (plist[valStart] == ' ' || plist[valStart] == '\t' || plist[valStart] == '\n') {
+					valStart++
+				}
+				if valStart >= n {
+					return ""
+				}
+				if plist[valStart] == '"' {
+					return extractQuotedStringFrom(plist, valStart)
+				}
+				// Number or atom
+				var val strings.Builder
+				for j := valStart; j < n; j++ {
+					c := plist[j]
+					if c == ' ' || c == ')' || c == '\n' || c == '(' {
+						break
+					}
+					val.WriteByte(c)
+				}
+				return val.String()
 			}
-			if afterKey >= len(plist) {
-				return ""
-			}
+		}
 
-			if plist[afterKey] == '"' {
-				return extractQuotedStringFrom(plist, afterKey)
-			}
-			// Extract number or atom
-			var val strings.Builder
-			for i := afterKey; i < len(plist); i++ {
-				ch := plist[i]
-				if ch == ' ' || ch == ')' || ch == '\n' {
+		// Not a key match — skip this token
+		if ch == '"' {
+			// Skip entire quoted string, properly handling escape sequences
+			escaped := false
+			i++ // skip opening quote
+			for i < n {
+				c := plist[i]
+				if escaped {
+					escaped = false
+					i++
+					continue
+				}
+				if c == '\\' {
+					escaped = true
+					i++
+					continue
+				}
+				if c == '"' {
+					i++ // skip closing quote
 					break
 				}
-				val.WriteByte(ch)
+				i++
 			}
-			return val.String()
+		} else {
+			// Skip atom (non-whitespace, non-structural, non-quote token)
+			for i < n {
+				c := plist[i]
+				if c == ' ' || c == '\t' || c == '\n' || c == '(' || c == ')' || c == '"' {
+					break
+				}
+				i++
+			}
 		}
-
-		// Key was inside a quoted string, skip past this quoted region
-		// Find the enclosing quotes
-		pos = absIdx + len(key)
 	}
 	return ""
-}
-
-// isOutsideQuotedString checks if position `pos` in `s` is outside any
-// quoted string context. It counts unescaped double quotes before `pos`.
-func isOutsideQuotedString(s string, pos int) bool {
-	// Walk backwards from pos, counting unescaped quotes
-	quoteCount := 0
-	for i := pos - 1; i >= 0; i-- {
-		if s[i] == '"' {
-			// Check if this quote is escaped
-			escapeCount := 0
-			for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
-				escapeCount++
-			}
-			if escapeCount%2 == 0 {
-				quoteCount++
-			}
-		}
-	}
-	// Even number of quotes means we're outside a string
-	return quoteCount%2 == 0
 }
 
 // extractQuotedStringFrom extracts a Lisp string starting at the opening quote.
