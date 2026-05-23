@@ -37,13 +37,28 @@ func builtinLispExec(args []*Value) (*Value, error) {
 	var maxCPUMS int64
 
 	for i := 1; i < len(args); {
+		// Handle odd remaining arg (positional without a pair)
 		if i+1 >= len(args) {
+			if args[i].typ == VStr {
+				cmdArgs = append(cmdArgs, args[i].str)
+			}
 			break
 		}
+
 		key := args[i]
 		val := args[i+1]
 
-		if key.typ != VSym {
+		// Check if this is a keyword arg (VSym starting with ":")
+		isKw := key.typ == VSym && len(key.str) > 0 && key.str[0] == ':'
+
+		if !isKw {
+			// Both key and val are treated as positional command args
+			if key.typ == VStr {
+				cmdArgs = append(cmdArgs, key.str)
+			}
+			if val.typ == VStr {
+				cmdArgs = append(cmdArgs, val.str)
+			}
 			i += 2
 			continue
 		}
@@ -176,10 +191,14 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		// Pipe-based reading with stall detection.
 		// When stdin is nil and a command waits for input (e.g. sudo password),
 		// output stalls. We detect this and move the process to background.
+		var pipeWg sync.WaitGroup
+		pipeWg.Add(2)
 		go func() {
+			defer pipeWg.Done()
 			io.Copy(&stdoutBuf, stdoutPipe)
 		}()
 		go func() {
+			defer pipeWg.Done()
 			io.Copy(&stderrBuf, stderrPipe)
 		}()
 
@@ -198,6 +217,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 		case err := <-done:
 			// Process completed normally
 			stallTimer.Stop()
+			pipeWg.Wait() // Ensure all pipe data is captured
 			exitCode := 0
 			if err != nil {
 				if exitErr, ok := err.(*exec.ExitError); ok {
@@ -206,7 +226,6 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 					exitCode = 1
 				}
 			}
-			time.Sleep(50 * time.Millisecond) // let pipe readers finish
 			return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 
 		case <-stallTimer.C:
@@ -228,6 +247,7 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 			select {
 			case err := <-done:
 				stallTimer.Stop()
+				pipeWg.Wait() // Ensure all pipe data is captured
 				exitCode := 0
 				if err != nil {
 					if exitErr, ok := err.(*exec.ExitError); ok {
@@ -236,7 +256,6 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 						exitCode = 1
 					}
 				}
-				time.Sleep(50 * time.Millisecond)
 				return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 			case <-stallTimer.C:
 				// Timeout with some output — move to background

@@ -186,6 +186,84 @@ func TestExecStdinParam(t *testing.T) {
 	}
 }
 
+// TestExecShortOutput tests that short output (single line) is captured correctly.
+// This is a regression test for the pipe-reader race condition where
+// short commands finish before io.Copy goroutines have read all data.
+func TestExecShortOutput(t *testing.T) {
+	ResetGlobalEnv()
+
+	tests := []struct {
+		name  string
+		expr  string
+		want  string
+	}{
+		{"echo single word", `(exec "echo" :args (list "hello"))`, "hello"},
+		{"echo empty", `(exec "echo")`, ""},
+		{"whoami", `(exec "whoami")`, ""},
+		{"pwd", `(exec "pwd")`, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := SafeEvalString(tc.expr)
+			if err != nil {
+				t.Fatalf("SafeEvalString(%q) error: %v", tc.expr, err)
+			}
+
+			stdout := extractPlistTestValue(result, ":stdout")
+			exitCode := extractPlistTestValue(result, ":exit-code")
+
+			if exitCode != "0" {
+				t.Errorf("exit-code=%q, want 0, result=%q", exitCode, result)
+			}
+			if tc.want != "" && !strings.Contains(stdout, tc.want) {
+				t.Errorf("stdout=%q missing '%s', result=%q", stdout, tc.want, result)
+			}
+			// For commands that must produce output, verify stdout is not empty
+			if tc.name == "echo single word" && stdout == "" {
+				t.Errorf("stdout empty for 'echo hello', result=%q", result)
+			}
+			if tc.name == "whoami" && stdout == "" {
+				t.Errorf("stdout empty for 'whoami', result=%q", result)
+			}
+			if tc.name == "pwd" && stdout == "" {
+				t.Errorf("stdout empty for 'pwd', result=%q", result)
+			}
+		})
+	}
+}
+
+// TestExecPositionalArgs tests that non-keyword args are passed as command args.
+// This is a common user mistake: (exec "echo" "hello") instead of
+// (exec "echo" :args (list "hello")). The fix treats non-keyword args
+// as positional command arguments.
+func TestExecPositionalArgs(t *testing.T) {
+	ResetGlobalEnv()
+
+	tests := []struct {
+		name  string
+		expr  string
+		want  string
+	}{
+		{"echo hello", `(exec "echo" "hello")`, "hello"},
+		{"echo two args", `(exec "echo" "hello" "world")`, "hello"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := SafeEvalString(tc.expr)
+			if err != nil {
+				t.Fatalf("SafeEvalString(%q) error: %v", tc.expr, err)
+			}
+
+			stdout := extractPlistTestValue(result, ":stdout")
+			if !strings.Contains(stdout, tc.want) {
+				t.Errorf("stdout=%q missing '%s', full result=%q", stdout, tc.want, result)
+			}
+		})
+	}
+}
+
 // extractPlistTestValue extracts a value from a plist result string
 // using the same sequential state machine as extractPlistValue.
 func extractPlistTestValue(plist, key string) string {
