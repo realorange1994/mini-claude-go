@@ -412,9 +412,11 @@ func DefaultConfig() Config {
 		EscalatedMaxOutputTokens:       64000,
 		Hooks:                          NewHookManager(),
 		// Runtime defaults (convention over configuration)
-		DefaultOpusModel:   "claude-opus-4-5-20250610",
-		DefaultSonnetModel: "claude-sonnet-4-20250514",
-		DefaultHaikuModel:  "claude-haiku-4-5-20250610",
+		// Model defaults left empty here — hard-coded defaults live in model_aliases.go
+		// package-level vars. Only non-empty when explicitly set in settings.json.
+		DefaultOpusModel:   "",
+		DefaultSonnetModel: "",
+		DefaultHaikuModel:  "",
 	}
 }
 
