@@ -899,27 +899,27 @@ Booleans: t (true), nil (false)`,
   (translate-pathname path from-wildcard to-wildcard)
   (directory-pathname-p p)`,
 
-		"readtable": `Readtable System:
-  (make-readtable &key case base)  Create readtable
-  (copy-readtable &optional from-readtable)
-  (readtable-case rt) / (set-readtable-case rt case)
-  (set-macro-character char fn &optional non-terminating-p rt)
-  (get-macro-character char &optional rt)
-  (set-syntax-from-char to-char from-char &optional rt)
-  (make-dispatch-macro-character char &optional non-terminating-p rt)
-  (set-dispatch-macro-character disp-char sub-char fn rt)
-  (get-dispatch-macro-character disp-char sub-char rt)
-  (readtablep x)  Readtable predicate
-  *readtable*  Current readtable
-  #\"  String reader
-  #\\  Character reader
-  #\\|  Single-line comment
-  #\\#\\|  Multi-line comment
-  #\\(  List reader
-  #'  Function quote
-  #`  Backquote
-  #'x  (function x)
-  #.x  (eval x) at read time`,
+		"readtable": "Readtable System:\n" +
+			"  (make-readtable &key case base)  Create readtable\n" +
+			"  (copy-readtable &optional from-readtable)\n" +
+			"  (readtable-case rt) / (set-readtable-case rt case)\n" +
+			"  (set-macro-character char fn &optional non-terminating-p rt)\n" +
+			"  (get-macro-character char &optional rt)\n" +
+			"  (set-syntax-from-char to-char from-char &optional rt)\n" +
+			"  (make-dispatch-macro-character char &optional non-terminating-p rt)\n" +
+			"  (set-dispatch-macro-character disp-char sub-char fn rt)\n" +
+			"  (get-dispatch-macro-character disp-char sub-char rt)\n" +
+			"  (readtablep x)  Readtable predicate\n" +
+			"  *readtable*  Current readtable\n" +
+			"  #\\\"  String reader\n" +
+			"  #\\\\  Character reader\n" +
+			"  #\\\\|  Single-line comment\n" +
+			"  #\\\\#\\\\|  Multi-line comment\n" +
+			"  #\\\\(  List reader\n" +
+			"  #'  Function quote\n" +
+			"  #\x60  Backquote\n" +
+			"  #'x  (function x)\n" +
+			"  #.x  (eval x) at read time",
 
 		"time": `Time:
   (get-universal-time)  Seconds since 1900-01-01 00:00:00 UTC
