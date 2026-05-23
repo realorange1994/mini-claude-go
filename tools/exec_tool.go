@@ -664,40 +664,109 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		return ToolResult{Output: "Interrupted by user", IsError: true}
 	case stall := <-stallCh:
 		// Stall detected: the process is waiting for input but stdin is disconnected.
-		// Kill the process and return a helpful error message.
-		if cmd.Process != nil {
-			killProcessGroup(cmd.Process.Pid)
-			cmd.Process.Kill()
+		// Instead of killing, move the process to background so it can continue
+		// running (e.g., if the user provides input via another mechanism).
+		if cmd.Process == nil {
+			return ToolResult{Output: "Error: command process is nil, cannot background.", IsError: true}
 		}
-		<-errCh
-		var stdoutOut, stderrOut string
-		for i := 0; i < 2; i++ {
-			r := <-outputCh
-			if r.isStderr {
-				stderrOut = r.data
-			} else {
-				stdoutOut = r.data
+		pid := cmd.Process.Pid
+		if et.TimeoutCallback != nil {
+			taskID, outputFile, errText, onDone := et.TimeoutCallback(command, wd, cmd)
+			if errText != "" {
+				return ToolResult{
+					Output: fmt.Sprintf(
+						"Interactive prompt detected (pattern: %s). Failed to move to background: %s",
+						stall.matchedPattern, errText),
+					IsError: true,
+				}
+			}
+			// Spawn goroutine to wait for process exit, drain output, and call onDone.
+			go func(outFile string) {
+				wErr := <-errCh
+				var sOut, sErr string
+				for i := 0; i < 2; i++ {
+					r := <-outputCh
+					if r.isStderr {
+						sErr = r.data
+					} else {
+						sOut = r.data
+					}
+				}
+				if outFile != "" {
+					if sOut != "" || sErr != "" {
+						if f, err := os.OpenFile(outFile, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+							if sOut != "" {
+								fmt.Fprintf(f, "%s", sOut)
+							}
+							if sErr != "" && sErr != "STDERR:
+" {
+								fmt.Fprintf(f, "%s", sErr)
+							}
+							f.Close()
+						}
+					}
+					exitCode := 0
+					if wErr != nil {
+						if exitErr, ok := wErr.(*exec.ExitError); ok {
+							exitCode = exitErr.ExitCode()
+						} else {
+							exitCode = 1
+						}
+					}
+					if f, err := os.OpenFile(outFile, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+						fmt.Fprintf(f, "
+Exit code: %d
+", exitCode)
+						f.Close()
+					}
+				}
+				if onDone != nil {
+					onDone(wErr)
+				}
+			}(outputFile)
+			return ToolResult{
+				Output: fmt.Sprintf(
+					"Command moved to background — interactive prompt detected (PID %d).
+"+
+						"Detected pattern: %s
+
+"+
+						"Suggestions:
+"+
+						"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)
+"+
+						"  - For sudo: use 'echo password | sudo -S cmd' instead
+"+
+						"  - For SSH: use StrictHostKeyChecking=no
+
+"+
+						"Task ID: %s
+Output file: %s
+"+
+						"Use the task_output tool to check results when ready.",
+					pid, stall.matchedPattern, taskID, outputFile),
+				IsError: false,
 			}
 		}
-		output := stdoutOut + stderrOut
-		if len(output) > 2048 {
-			output = output[:2048]
-		}
+		// Fallback: no callback — return stall info (process continues in background)
 		return ToolResult{
 			Output: fmt.Sprintf(
-				"Error: command appears to be waiting for user input (interactive prompt detected).\n"+
-					"Stdin is disconnected — commands requiring user input cannot proceed.\n"+
-					"Detected pattern: %s\n\n"+
-					"Last output:\n%s\n\n"+
-					"Suggestions:\n"+
-					"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)\n"+
-					"  - For sudo: use 'echo password | sudo -S cmd' instead\n"+
-					"  - For SSH: use StrictHostKeyChecking=no\n"+
-					"  - Use run_in_background=true if the command will eventually complete without input",
-				stall.matchedPattern, output),
-			IsError: true,
+				"Command moved to background — interactive prompt detected (PID %d).
+"+
+					"Detected pattern: %s
+
+"+
+					"Suggestions:
+"+
+					"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)
+"+
+					"  - For sudo: use 'echo password | sudo -S cmd' instead
+"+
+					"  - For SSH: use StrictHostKeyChecking=no",
+				pid, stall.matchedPattern),
+			IsError: false,
 		}
-	case err := <-errCh:
+case err := <-errCh:
 		var stdoutOut, stderrOut string
 		for i := 0; i < 2; i++ {
 			r := <-outputCh
