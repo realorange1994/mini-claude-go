@@ -698,8 +698,7 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 							if sOut != "" {
 								fmt.Fprintf(f, "%s", sOut)
 							}
-							if sErr != "" && sErr != "STDERR:
-" {
+							if sErr != "" && sErr != "STDERR:\n" {
 								fmt.Fprintf(f, "%s", sErr)
 							}
 							f.Close()
@@ -714,9 +713,7 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 						}
 					}
 					if f, err := os.OpenFile(outFile, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
-						fmt.Fprintf(f, "
-Exit code: %d
-", exitCode)
+						fmt.Fprintf(f, "\nExit code: %d\n", exitCode)
 						f.Close()
 					}
 				}
@@ -726,47 +723,32 @@ Exit code: %d
 			}(outputFile)
 			return ToolResult{
 				Output: fmt.Sprintf(
-					"Command moved to background — interactive prompt detected (PID %d).
-"+
-						"Detected pattern: %s
-
-"+
-						"Suggestions:
-"+
-						"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)
-"+
-						"  - For sudo: use 'echo password | sudo -S cmd' instead
-"+
-						"  - For SSH: use StrictHostKeyChecking=no
-
-"+
-						"Task ID: %s
-Output file: %s
-"+
+					"Command moved to background \u2014 interactive prompt detected (PID %d).\n"+
+						"Detected pattern: %s\n\n"+
+						"Suggestions:\n"+
+						"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)\n"+
+						"  - For sudo: use 'echo password | sudo -S cmd' instead\n"+
+						"  - For SSH: use StrictHostKeyChecking=no\n\n"+
+						"Task ID: %s\nOutput file: %s\n"+
 						"Use the task_output tool to check results when ready.",
 					pid, stall.matchedPattern, taskID, outputFile),
 				IsError: false,
 			}
 		}
-		// Fallback: no callback — return stall info (process continues in background)
+		// Fallback: no callback \u2014 return stall info (process continues in background)
 		return ToolResult{
 			Output: fmt.Sprintf(
-				"Command moved to background — interactive prompt detected (PID %d).
-"+
-					"Detected pattern: %s
-
-"+
-					"Suggestions:
-"+
-					"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)
-"+
-					"  - For sudo: use 'echo password | sudo -S cmd' instead
-"+
+				"Command moved to background \u2014 interactive prompt detected (PID %d).\n"+
+					"Detected pattern: %s\n\n"+
+					"Suggestions:\n"+
+					"  - Use non-interactive flags (e.g., -y, --yes, --force, -f)\n"+
+					"  - For sudo: use 'echo password | sudo -S cmd' instead\n"+
 					"  - For SSH: use StrictHostKeyChecking=no",
 				pid, stall.matchedPattern),
 			IsError: false,
 		}
-case err := <-errCh:
+
+	case err := <-errCh:
 		var stdoutOut, stderrOut string
 		for i := 0; i < 2; i++ {
 			r := <-outputCh
