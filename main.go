@@ -454,7 +454,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
-				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/daemon" || cmd == "/errors" || cmd == "/feature" || cmd == "/settings" || cmd == "/telemetry" ||
+				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/errors" || cmd == "/feature" || cmd == "/settings" || cmd == "/telemetry" ||
 				cmd == "/status" || cmd == "/model"
 
 			if !isKnownCmd {
@@ -547,7 +547,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 						fmt.Println("  Operations:")
 						fmt.Println("    /doctor         -- Run installation diagnostics")
 						fmt.Println("    /cleanup        -- Remove stale session files")
-						fmt.Println("    /daemon         -- Manage daemon mode (start/stop/status/submit)")
 						fmt.Println("    /errors         -- View error logs (recent/clear)")
 						fmt.Println("    /telemetry      -- View telemetry events (recent/enable/disable/clear)")
 						fmt.Println("  Other:")
@@ -618,9 +617,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 					if err := handleBranch(agent, parts[1:]); err != nil {
 						fmt.Printf("Branch error: %v\n", err)
 					}
-					continue
-				case "/daemon":
-					handleDaemon(parts[1:])
 					continue
 				case "/errors":
 					handleErrors(parts[1:])
@@ -1292,7 +1288,6 @@ func showDetailedHelp(cmd string) {
 		"/feature":        "Manage feature flags.\nUsage: /feature [list|enable <name>|disable <name>]",
 		"/doctor":         "Run installation diagnostics: API key, base URL, tools (rg/python/node/git),\nMCP servers, skills, transcripts, CLAUDE.md files.\nUsage: /doctor",
 		"/cleanup":        "Remove stale session files older than cutoff days.\nUsage: /cleanup [days]",
-		"/daemon":         "Manage daemon mode for background processing.\nUsage: /daemon [start|stop|status|submit <prompt>]",
 		"/errors":         "View error logs.\nUsage: /errors [recent [N]|clear]",
 		"/telemetry":      "View telemetry events.\nUsage: /telemetry [recent [N]|enable|disable|clear]",
 		"/quit":           "Exit the interactive session.\nAliases: /exit, /q",
