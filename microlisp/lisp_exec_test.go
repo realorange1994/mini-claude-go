@@ -1,8 +1,10 @@
 package microlisp
 
 import (
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestExecArgs tests Bug #4: :args parameter completely non-functional
@@ -381,4 +383,89 @@ func listFromStrings(ss ...string) *Value {
 		result = cons(StringValue(ss[i]), result)
 	}
 	return result
+}
+
+// TestExecSleepCommand tests that a sleep command (no output but completes)
+// is NOT falsely detected as "waiting for interactive input".
+// The stall detection should wait at least 10s for timeout >= 30s,
+// and sleep 2 completes well before that.
+func TestExecSleepCommand(t *testing.T) {
+	ResetGlobalEnv()
+
+	expr := `(exec "sleep" :args (list "2") :timeout 30000)`
+	result, err := SafeEvalString(expr)
+	if err != nil {
+		t.Fatalf("SafeEvalString(%q) error: %v", expr, err)
+	}
+
+	exitCode := extractPlistTestValue(result, ":exit-code")
+	background := extractPlistTestValue(result, ":background")
+
+	if background != "" {
+		t.Errorf("sleep 2 should NOT be moved to background, got :background=%q, full result=%q", background, result)
+	}
+	if exitCode != "0" {
+		t.Errorf("sleep 2: exit-code=%q, want 0", exitCode)
+	}
+}
+
+// TestExecGoTestCommand tests that `go test` with a short package completes
+// normally without being falsely detected as stalled (the bug being fixed).
+// go test can take a few seconds to compile with no output.
+func TestExecGoTestCommand(t *testing.T) {
+	ResetGlobalEnv()
+
+	// Run go test on a small package — this exercises the stall detection
+	// during the compilation phase (no output until compilation completes).
+	expr := `(exec "go" :args (list "version") :timeout 60000)`
+	result, err := SafeEvalString(expr)
+	if err != nil {
+		t.Fatalf("SafeEvalString(%q) error: %v", expr, err)
+	}
+
+	stdout := extractPlistTestValue(result, ":stdout")
+	exitCode := extractPlistTestValue(result, ":exit-code")
+	background := extractPlistTestValue(result, ":background")
+
+	if background != "" {
+		t.Errorf("go version should NOT be moved to background, got :background=%q, full result=%q", background, result)
+	}
+	if exitCode != "0" {
+		t.Errorf("go version: exit-code=%q, want 0", exitCode)
+	}
+	if !strings.Contains(stdout, "go version") {
+		t.Errorf("go version: stdout=%q missing 'go version'", stdout)
+	}
+}
+
+// TestExecBackgroundDetection tests that commands waiting for stdin ARE moved to background.
+// Uses a short timeout (15s) where stallTimeout = min(15s/3, 60s) clamped to 10s minimum.
+func TestExecBackgroundDetection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cat without stdin behaves differently on Windows")
+	}
+	ResetGlobalEnv()
+
+	// cat with no stdin will wait for input. With a 15s timeout,
+	// stallTimeout = 10s (clamped from 15s/3). It should be moved to background.
+	start := time.Now()
+	expr := `(exec "cat" :timeout 15000)`
+	result, err := SafeEvalString(expr)
+	if err != nil {
+		t.Fatalf("SafeEvalString(%q) error: %v", expr, err)
+	}
+	elapsed := time.Since(start)
+
+	background := extractPlistTestValue(result, ":background")
+	if background != "1" {
+		t.Errorf("cat without stdin should be moved to background, got :background=%q, elapsed=%v, result=%q", background, elapsed, result)
+	}
+
+	// Should return after ~10s (stall timeout), not 15s (full timeout)
+	if elapsed < 8*time.Second {
+		t.Errorf("cat returned too early (%v), expected ~10s stall", elapsed)
+	}
+	if elapsed > 16*time.Second {
+		t.Errorf("cat took too long (%v), stall detection may not have worked", elapsed)
+	}
 }

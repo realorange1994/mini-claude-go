@@ -260,10 +260,27 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 			io.Copy(&stderrBuf, stderrPipe)
 		}()
 
-		// Stall detection: if the process produces no output after 15 seconds
+		// Stall detection: if the process produces no output for a while
 		// and is still running, it's likely waiting for interactive input.
 		// Instead of killing, we move it to background and return early.
-		stallTimer := time.NewTimer(15 * time.Second)
+		//
+		// The stall timeout is proportional to the command timeout:
+		//   - For short timeouts (<60s): use timeout/3 (at least 10s)
+		//   - For longer timeouts (>=60s): use 60s (allows compilation time)
+		// This avoids false positives for commands like "go test" that have
+		// long silent periods during compilation.
+		//
+		// Additionally, we only move to background if the total timeout
+		// is under 3 minutes. For very long commands, we wait for the
+		// full timeout rather than guessing "stall".
+		stallTimeout := timeout / 3
+		if timeout >= 60*time.Second {
+			stallTimeout = 60 * time.Second
+		}
+		if stallTimeout < 10*time.Second {
+			stallTimeout = 10 * time.Second
+		}
+		stallTimer := time.NewTimer(stallTimeout)
 		defer stallTimer.Stop()
 
 		done := make(chan error, 1)
@@ -296,17 +313,17 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 			return makeResult(stdoutBuf.String(), stderrBuf.String(), -1), nil
 
 		case <-stallTimer.C:
-			// 15s with no completion — check if process has produced any output.
+			// Stall period with no completion — check if process has produced any output.
 			pid := cmd.Process.Pid
 			if stdoutBuf.Len() == 0 && stderrBuf.Len() == 0 {
 				// No output at all — likely waiting for interactive input.
 				// Move to background instead of killing. The done goroutine
 				// will reap the zombie when the process eventually exits.
 				reason := fmt.Sprintf(
-					"Command produced no output for 15s — likely waiting for interactive input. "+
+					"Command produced no output for %s — likely waiting for interactive input. "+
 						"Process moved to background (PID %d). "+
 						"Try non-interactive flags: -y, --yes, --force, or pipe input via exec-with-input.",
-					pid)
+					stallTimeout, pid)
 				return makeBgResult("", "", pid, reason), nil
 			}
 			// Some output was produced — reset stall timer and wait for timeout
