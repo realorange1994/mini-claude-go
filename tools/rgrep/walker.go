@@ -26,6 +26,14 @@ var defaultIgnoredDirs = map[string]bool{
 	".ruff_cache":   true,
 	".coverage":     true,
 	"htmlcov":       true,
+	".cargo":        true,
+	".rustup":       true,
+	"target":        true,
+	".gradle":       true,
+	".dart_tool":    true,
+	"dist":          true,
+	"build":         true,
+	"out":           true,
 }
 
 // WalkEntry represents a file found during directory traversal.
