@@ -47,7 +47,7 @@ func (*ExecTool) Description() string {
 		"On timeout, the process continues running in the background — use task_output to check results later. " +
 		"SAFETY: Commands targeting system directories or using destructive patterns will be blocked. " +
 		"Use the env parameter to set environment variables (e.g. env={\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}). " +
-		"IMPORTANT: stdin is disconnected — commands requiring user input (sudo password, ssh host verification, vim/nano/less, REPLs, confirmation prompts) will hang and be killed after ~15 seconds. " +
+		"IMPORTANT: stdin is disconnected — commands requiring user input (sudo password, ssh host verification, vim/nano/less, REPLs, confirmation prompts) will hang and be killed after stall detection. " +
 		"Use non-interactive flags instead (e.g., sudo -S with echo, apt-get -y, ssh with StrictHostKeyChecking=no, echo y | command, --force, --yes). " +
 		"If a command needs to run for a long time without input, use run_in_background=true."
 }
@@ -105,8 +105,10 @@ func (*ExecTool) InputSchema() map[string]any {
 // Mirrors upstream's LocalShellTask.tsx stall watchdog (lines 48-144).
 
 const (
-	stallCheckIntervalMs = 5000  // check every 5s
-	stallThresholdMs     = 15000 // 15s with no output growth = stall
+	stallCheckIntervalMs = 5000 // check every 5s
+	// stallThresholdMs is the base threshold; actual threshold is computed
+	// dynamically in execToolExecute based on the command timeout.
+	stallThresholdMs = 15000 // 15s with no output growth = stall (base value)
 )
 
 // interactivePromptPatterns matches common interactive prompts that would
@@ -149,8 +151,9 @@ type stallResult struct {
 // output has stopped growing. If it has AND the tail matches a prompt
 // pattern, it returns a non-nil stallResult.
 // Returns nil if the context is cancelled or the chunkCh is closed.
-func watchForStall(ctx context.Context, chunkCh <-chan []byte, totalWritten *atomic.Int64, lastWriteTime *atomic.Int64) *stallResult {
-	ticker := time.NewTicker(time.Duration(stallCheckIntervalMs) * time.Millisecond)
+// stallThresholdMs controls how long without output growth before checking.
+func watchForStall(ctx context.Context, chunkCh <-chan []byte, totalWritten *atomic.Int64, lastWriteTime *atomic.Int64, stallThresholdMs int64) *stallResult {
+	ticker := time.NewTicker(stallCheckIntervalMs * time.Millisecond)
 	defer ticker.Stop()
 
 	var lastTotal int64 = -1
@@ -543,10 +546,22 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	}()
 
 	// Start the stall watchdog goroutine.
+	// Use a stall threshold proportional to the command timeout:
+	//   - For short timeouts (<60s): timeout/3, minimum 10s
+	//   - For longer timeouts (>=60s): 60s
+	// This avoids false positives for commands with long silent periods.
+	stallThreshold := int64(timeoutMs) / 3
+	if timeoutMs >= 60000 {
+		stallThreshold = 60000
+	}
+	if stallThreshold < 10000 {
+		stallThreshold = 10000
+	}
+
 	stallCtx, stallCancel := context.WithCancel(ctx)
 	defer stallCancel()
 	go func() {
-		result := watchForStall(stallCtx, mergeChunks(stdoutCh, stderrCh), &totalWritten, &lastWriteTime)
+		result := watchForStall(stallCtx, mergeChunks(stdoutCh, stderrCh), &totalWritten, &lastWriteTime, stallThreshold)
 		if result != nil {
 			select {
 			case stallCh <- result:

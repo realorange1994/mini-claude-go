@@ -1364,7 +1364,7 @@ func TestWatchForStallDetectsPrompt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	result := watchForStall(ctx, chunkCh, &totalWritten, &lastWriteTime)
+	result := watchForStall(ctx, chunkCh, &totalWritten, &lastWriteTime, 15000)
 	// Should detect stall since output stopped growing, but the text "password"
 	// isn't followed by ":\s" in the output — let's verify the behavior
 	_ = result
@@ -1389,7 +1389,7 @@ func TestWatchForStallNoStallWhenOutputGrows(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result := watchForStall(ctx, chunkCh, &totalWritten, &lastWriteTime)
+	result := watchForStall(ctx, chunkCh, &totalWritten, &lastWriteTime, 15000)
 	if result != nil {
 		t.Errorf("expected no stall when output is growing, got: %+v", result)
 	}
@@ -1409,7 +1409,7 @@ func TestWatchForStallNoPromptMatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	result := watchForStall(ctx, chunkCh, &totalWritten, &lastWriteTime)
+	result := watchForStall(ctx, chunkCh, &totalWritten, &lastWriteTime, 15000)
 	// Should NOT trigger because no interactive prompt matched
 	if result != nil {
 		t.Errorf("expected no stall (no prompt matched), got: %+v", result)
@@ -1426,7 +1426,7 @@ func TestWatchForStallContextCancellation(t *testing.T) {
 	// Cancel immediately
 	cancel()
 
-	result := watchForStall(ctx, chunkCh, &totalWritten, &lastWriteTime)
+	result := watchForStall(ctx, chunkCh, &totalWritten, &lastWriteTime, 15000)
 	if result != nil {
 		t.Errorf("expected nil result on context cancellation, got: %+v", result)
 	}
