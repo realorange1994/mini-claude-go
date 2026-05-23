@@ -405,15 +405,42 @@ func (t *LispExecTool) executeExec(ctx context.Context, params map[string]any) T
 }
 
 // formatExecResult converts a Lisp plist result into a human-readable format.
-// Input: (:stdout "..." :stderr "..." :exit-code N)
-// Output: stdout + stderr + "Exit code: N"
+// Input: (:stdout "..." :stderr "..." :exit-code N) or
+//        (:stdout "..." :stderr "..." :exit-code -1 :background 1 :stall-reason "...")
 func formatExecResult(lispResult string) ToolResult {
-	// Parse the plist to extract stdout, stderr, exit-code
 	stdout := extractPlistValue(lispResult, ":stdout")
 	stderr := extractPlistValue(lispResult, ":stderr")
 	exitCode := extractPlistValue(lispResult, ":exit-code")
+	background := extractPlistValue(lispResult, ":background")
+	stallReason := extractPlistValue(lispResult, ":stall-reason")
 
 	var output strings.Builder
+
+	// Background mode: command moved to background instead of killed
+	if background != "" && background != "0" {
+		output.WriteString("[Command moved to background]\n")
+		if stallReason != "" {
+			output.WriteString(stallReason)
+			output.WriteString("\n\n")
+		}
+		if stdout != "" {
+			output.WriteString(stdout)
+		}
+		if stderr != "" {
+			if output.Len() > 0 {
+				output.WriteString("\n")
+			}
+			output.WriteString("STDERR:\n")
+			output.WriteString(stderr)
+		}
+		result := output.String()
+		if result == "" {
+			result = "(no output)"
+		}
+		return ToolResult{Output: result, IsError: false}
+	}
+
+	// Normal completion
 	if stdout != "" {
 		output.WriteString(stdout)
 	}

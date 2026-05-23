@@ -145,29 +145,22 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 
 	// Read stdout and stderr concurrently with stall detection.
 	// When stdin is nil and a command waits for input (e.g. sudo password),
-	// output stalls. We detect this and kill the process early.
+	// output stalls. We detect this and move the process to background.
 	stdoutPipe, _ := cmd.StdoutPipe()
 	stderrPipe, _ := cmd.StderrPipe()
-
-	type pipeResult struct {
-		data string
-	}
-	outCh := make(chan pipeResult, 1)
-	errCh := make(chan pipeResult, 1)
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 
 	go func() {
 		io.Copy(&stdoutBuf, stdoutPipe)
-		outCh <- pipeResult{stdoutBuf.String()}
 	}()
 	go func() {
 		io.Copy(&stderrBuf, stderrPipe)
-		errCh <- pipeResult{stderrBuf.String()}
 	}()
 
 	// Stall detection: if the process produces no output after 15 seconds
 	// and is still running, it's likely waiting for interactive input.
+	// Instead of killing, we move it to background and return early.
 	stallTimer := time.NewTimer(15 * time.Second)
 	defer stallTimer.Stop()
 
@@ -175,15 +168,6 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 	go func() {
 		done <- cmd.Wait()
 	}()
-
-	// Collect output so far when we need to return early
-	collectOutput := func() (string, string) {
-		// Give pipe readers a moment to finish after kill
-		time.Sleep(50 * time.Millisecond)
-		stdout := stdoutBuf.String()
-		stderr := stderrBuf.String()
-		return stdout, stderr
-	}
 
 	select {
 	case err := <-done:
@@ -197,17 +181,22 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 				exitCode = 1
 			}
 		}
-		stdout, stderr := collectOutput()
-		return makeExecResult(stdout, stderr, exitCode), nil
+		time.Sleep(50 * time.Millisecond) // let pipe readers finish
+		return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 
 	case <-stallTimer.C:
 		// 15s with no completion — check if process has produced any output.
-		// If it's running with no output at all, likely waiting for input.
+		pid := cmd.Process.Pid
 		if stdoutBuf.Len() == 0 && stderrBuf.Len() == 0 {
-			killExecProcessTree(cmd)
-			<-done
-			stdout, stderr := collectOutput()
-			return makeExecResult(stdout, stderr+"\n[exec stall: command produced no output for 15s — likely waiting for interactive input. Stdin is disconnected. Try non-interactive flags: -y, --yes, --force, or pipe input via exec-with-input.]", 1), nil
+			// No output at all — likely waiting for interactive input.
+			// Move to background instead of killing. The done goroutine
+			// will reap the zombie when the process eventually exits.
+			reason := fmt.Sprintf(
+				"Command produced no output for 15s — likely waiting for interactive input. "+
+					"Process moved to background (PID %d). "+
+					"Try non-interactive flags: -y, --yes, --force, or pipe input via exec-with-input.",
+				pid)
+			return makeBackgroundExecResult("", "", pid, reason), nil
 		}
 		// Some output was produced — reset stall timer and wait for timeout
 		stallTimer.Reset(timeout)
@@ -222,20 +211,29 @@ func executeCommand(command string, cmdArgs []string, workingDir string, env []s
 					exitCode = 1
 				}
 			}
-			stdout, stderr := collectOutput()
-			return makeExecResult(stdout, stderr, exitCode), nil
+			time.Sleep(50 * time.Millisecond)
+			return makeExecResult(stdoutBuf.String(), stderrBuf.String(), exitCode), nil
 		case <-stallTimer.C:
-			killExecProcessTree(cmd)
-			<-done
-			stdout, stderr := collectOutput()
-			return makeExecResult(stdout, stderr+"\n[exec timeout: command killed after "+timeout.String()+"]", 137), nil
+			// Timeout with some output — move to background
+			stdout := stdoutBuf.String()
+			stderr := stderrBuf.String()
+			reason := fmt.Sprintf(
+				"Command timed out after %s but produced output — moved to background (PID %d). "+
+					"It may still be running.",
+				timeout, pid)
+			return makeBackgroundExecResult(stdout, stderr, pid, reason), nil
 		}
 
 	case <-time.After(timeout):
-		killExecProcessTree(cmd)
-		<-done
-		stdout, stderr := collectOutput()
-		return makeExecResult(stdout, stderr+"\n[exec timeout: command killed after "+timeout.String()+"]", 137), nil
+		// Hard timeout — move to background instead of killing
+		pid := cmd.Process.Pid
+		stdout := stdoutBuf.String()
+		stderr := stderrBuf.String()
+		reason := fmt.Sprintf(
+			"Command timed out after %s — moved to background (PID %d). "+
+				"It may still be running.",
+			timeout, pid)
+		return makeBackgroundExecResult(stdout, stderr, pid, reason), nil
 	}
 }
 
@@ -245,6 +243,18 @@ func makeExecResult(stdout, stderr string, exitCode int) *Value {
 		vsym(":stdout"), StringValue(stdout),
 		vsym(":stderr"), StringValue(stderr),
 		vsym(":exit-code"), vnum(float64(exitCode)),
+	)
+}
+
+// makeBackgroundExecResult creates a plist with :background t and :stall-reason.
+// :exit-code is -1 to signal the process is still running.
+func makeBackgroundExecResult(stdout, stderr string, pid int, reason string) *Value {
+	return listToPlist(
+		vsym(":stdout"), StringValue(stdout),
+		vsym(":stderr"), StringValue(stderr),
+		vsym(":exit-code"), vnum(-1),
+		vsym(":background"), vnum(1),
+		vsym(":stall-reason"), StringValue(reason),
 	)
 }
 
