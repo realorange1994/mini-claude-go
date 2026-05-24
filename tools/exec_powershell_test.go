@@ -510,6 +510,44 @@ func TestPsReadOnlyCmdletNamesContains(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// P0 Fix #2: Destructive alias mappings (del/rm/ri/erase/rd/rmdir → remove-item)
+// ---------------------------------------------------------------------------
+
+func TestPsDestructiveAliases(t *testing.T) {
+	for _, alias := range []string{"del", "rm", "ri", "erase", "rd", "rmdir"} {
+		canonical, ok := psCmdletAliases[alias]
+		if !ok {
+			t.Errorf("psCmdletAliases should contain destructive alias %q", alias)
+			continue
+		}
+		if canonical != "remove-item" {
+			t.Errorf("psCmdletAliases[%q] = %q, want remove-item", alias, canonical)
+		}
+	}
+}
+
+func TestCheckPowerShellPermission_RmAlias(t *testing.T) {
+	result := CheckPowerShellPermission("rm C:\\file.txt")
+	if result.Behavior != PermissionAsk {
+		t.Errorf("rm alias should ask, got %v", result.Behavior)
+	}
+}
+
+func TestCheckPowerShellPermission_DelAlias(t *testing.T) {
+	result := CheckPowerShellPermission("del C:\\file.txt")
+	if result.Behavior != PermissionAsk {
+		t.Errorf("del alias should ask, got %v", result.Behavior)
+	}
+}
+
+func TestCheckPowerShellPermission_RiAlias(t *testing.T) {
+	result := CheckPowerShellPermission("ri C:\\file.txt")
+	if result.Behavior != PermissionAsk {
+		t.Errorf("ri alias should ask, got %v", result.Behavior)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
 

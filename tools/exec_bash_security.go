@@ -189,6 +189,49 @@ var bashSecurityPatterns = []bashSecurityPattern{
 		re:       regexp.MustCompile(`(?i)(?:^|[\s;&|])\b(?:env|xargs|nice|stdbuf|nohup|sudo|doas|pkexec)\b\s`),
 		severity: "ask",
 	},
+	// --- P1 Missing patterns ---
+	// #8 Command substitution: $(), ``, <() process substitution, =cmd (zsh)
+	// can execute hidden commands that bypass top-level regex checks.
+	{
+		name:     "Command substitution ($()/backtick/process substitution)",
+		re:       regexp.MustCompile(`\$\(|` + "`" + `|<\(|=\w+`),
+		severity: "ask",
+	},
+	// #7 Brace expansion: {a,b} or {1..10} can expand to many arguments,
+	// potentially targeting unintended files.
+	{
+		name:     "Brace expansion",
+		re:       regexp.MustCompile(`\{[^}]*\}`),
+		severity: "ask",
+	},
+	// #9 Backslash-escaped whitespace: \ or \\ can be used to obfuscate
+	// arguments or bypass word-splitting detection.
+	{
+		name:     "Backslash-escaped whitespace",
+		re:       regexp.MustCompile(`\\[ \t]`),
+		severity: "ask",
+	},
+	// #10 Newline injection: actual newlines (\n) or %0a in commands can
+	// cause the shell to execute multiple commands.
+	{
+		name:     "Newline injection",
+		re:       regexp.MustCompile(`(?m)^.*\n.*$`),
+		severity: "ask",
+	},
+	// #11 Control characters: non-printable characters (except \t, \n, \r)
+	// can be used for obfuscation.
+	{
+		name:     "Control character injection",
+		re:       regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f]`),
+		severity: "ask",
+	},
+	// #15 Incomplete command: trailing |, ||, &&, ; without continuation
+	// may indicate malformed input or injection attempt.
+	{
+		name:     "Incomplete compound command",
+		re:       regexp.MustCompile(`(?:\||\|\||&&|;)\s*$`),
+		severity: "ask",
+	},
 }
 
 // checkBashSecurityPatterns scans a command for known dangerous bash patterns.
@@ -380,17 +423,20 @@ func checkXargsSecurity(cmd string) string {
 
 var safeFdFlags = map[string]bool{
 	"-e": true, "-E": true, "-d": true, "-t": true,
-	"-S": true, "-l": true, "-0": true, "-H": true,
+	"-S": true, "-0": true, "-H": true,
 	"-a": true, "-s": true, "-i": true, "-u": true,
 	"--type": true, "--size": true, "--depth": true,
 	"--owner": true, "--changed-within": true, "--changed-before": true,
 	"--ignore-vcs": true, "--follow": true, "--regex": true,
 	"--fixed-strings": true,
+	// NOTE: -l intentionally excluded — upstream excludes it because fd -l
+	// internally executes `ls` as a subprocess, creating PATH hijack risk.
 }
 
 var fdDangerousFlags = map[string]bool{
 	"-x": true, "--exec": true,
 	"-X": true, "--exec-batch": true,
+	"-l": true, // PATH hijack risk — internally executes `ls` as subprocess
 }
 
 // checkFdSecurity validates fd/fdfind commands against security patterns.
@@ -450,13 +496,23 @@ var ghDangerousSubs = map[string]bool{
 }
 
 // checkGhSecurity validates gh CLI commands against security patterns.
+// Includes network exfiltration detection (--repo= form, URL form, SSH form).
 func checkGhSecurity(cmd string) string {
 	lower := strings.ToLower(cmd)
 	if !strings.Contains(lower, "gh ") && !strings.HasSuffix(lower, "gh") {
 		return ""
 	}
+
+	// Network exfiltration: --repo=evil.com/owner/repo (equals-attached form)
+	if ghRepoExfil.MatchString(lower) {
+		return "gh security: --repo= form can redirect requests to external host"
+	}
+	// Network exfiltration: https:// or git@ URL forms
+	if ghURLExfil.MatchString(lower) {
+		return "gh security: URL form can redirect to external host"
+	}
 	// Check for 3-segment format HOST/OWNER/REPO (exfil vector)
-	if regexp.MustCompile(`\bgh\s+.*[a-z]+\.[a-z]+/[a-z]+/[a-z]+`).MatchString(lower) {
+	if ghHostExfil.MatchString(lower) {
 		return "gh security: HOST/OWNER/REPO format can exfiltrate data"
 	}
 	// Extract subcommand
@@ -473,6 +529,187 @@ func checkGhSecurity(cmd string) string {
 			// Check for gh api without --method GET
 			if strings.HasPrefix(sub, "api") && !strings.Contains(sub, "--method get") {
 				return "gh security: gh api requires --method GET for read-only"
+			}
+			// gist create/edit/delete are dangerous
+			if strings.HasPrefix(sub, "gist") {
+				for _, dangerous := range []string{"gist create", "gist edit", "gist delete"} {
+					if strings.HasPrefix(sub, dangerous) {
+						return "gh security: gh " + dangerous + " requires approval"
+					}
+				}
+			}
+			break
+		}
+	}
+	return ""
+}
+
+// ghRepoExfil detects --repo=evil.com/owner/repo (equals-attached form).
+var ghRepoExfil = regexp.MustCompile(`(?i)--repo=\S+\.\S+/`)
+
+// ghURLExfil detects https:// or git@ URL forms in gh commands.
+var ghURLExfil = regexp.MustCompile(`(?i)(?:https?://|git@)`)
+
+// ghHostExfil detects HOST/OWNER/REPO three-segment format.
+var ghHostExfil = regexp.MustCompile(`\bgh\s+.*[a-z]+\.[a-z]+/[a-z]+/[a-z]+`)
+
+// ===========================================================================
+// git command callbacks (upstream additionalCommandIsDangerousCallback)
+// ===========================================================================
+
+// gitDangerousArgs maps git subcommands to functions that check for dangerous args.
+// Upstream bashPermissions.ts has additionalCommandIsDangerousCallback for git
+// branch, tag, reflog, remote — each with subcommand-specific logic.
+var gitDangerousArgs = []struct {
+	sub    string
+	check  func(fields []string) string
+}{
+	{
+		"branch",
+		func(fields []string) string {
+			// Block positional args (branch names) — can create/delete branches
+			// Safe flags: -a, -r, -v, -vv, --list, --merged, --no-merged,
+			// --contains, --no-contains, --sort, --format, --points-at,
+			// --no-color, --abbrev, -c (copy), -m (move) are write ops
+			safeGitBranchFlags := map[string]bool{
+				"-a": true, "-r": true, "-v": true, "-vv": true,
+				"--list": true, "--merged": true, "--no-merged": true,
+				"--contains": true, "--no-contains": true,
+				"--sort": true, "--format": true, "--points-at": true,
+				"--no-color": true, "--abbrev": true,
+				"--verbose": true, "--quiet": true, "--all": true,
+				"--remotes": true, "--show-current": true,
+			}
+			for _, f := range fields {
+				if !strings.HasPrefix(f, "-") {
+					// Positional arg — could be a branch name being created
+					return "git security: positional args to 'git branch' can create/modify branches"
+				}
+				if !safeGitBranchFlags[strings.ToLower(f)] {
+					// Check if flag has a value (e.g., --sort=name)
+					if !strings.Contains(f, "=") {
+						return "git security: unrecognized flag to 'git branch': " + f
+					}
+				}
+			}
+			return ""
+		},
+	},
+	{
+		"tag",
+		func(fields []string) string {
+			// Block tag creation/deletion — only allow -l/--list
+			safeGitTagFlags := map[string]bool{
+				"-l": true, "--list": true,
+				"-n": true, "--contains": true, "--no-contains": true,
+				"--merged": true, "--no-merged": true,
+				"--sort": true, "--format": true,
+				"--no-color": true,
+			}
+			for _, f := range fields {
+				if !strings.HasPrefix(f, "-") {
+					return "git security: positional args to 'git tag' can create/delete tags"
+				}
+				if !safeGitTagFlags[strings.ToLower(f)] {
+					if !strings.Contains(f, "=") {
+						return "git security: unrecognized flag to 'git tag': " + f
+					}
+				}
+			}
+			return ""
+		},
+	},
+	{
+		"reflog",
+		func(fields []string) string {
+			// Block expire/delete — only allow show/exist
+			if len(fields) > 0 {
+				sub := strings.ToLower(fields[0])
+				if sub == "expire" || sub == "delete" {
+					return "git security: 'git reflog expire/delete' destroys reflog history"
+				}
+			}
+			return ""
+		},
+	},
+	{
+		"remote",
+		func(fields []string) string {
+			// Only allow -v (verbose listing)
+			if len(fields) == 0 {
+				return "git security: 'git remote' without -v can modify remotes"
+			}
+			for _, f := range fields {
+				lf := strings.ToLower(f)
+				if lf != "-v" && lf != "--verbose" {
+					return "git security: 'git remote' with non -v flags can modify remotes"
+				}
+			}
+			return ""
+		},
+	},
+}
+
+// checkGitSecurity validates git commands against subcommand-specific callbacks.
+// Returns a message if dangerous, empty if safe.
+// Upstream: additionalCommandIsDangerousCallback in bashPermissions.ts.
+func checkGitSecurity(cmd string) string {
+	lower := strings.ToLower(cmd)
+	if !strings.Contains(lower, "git ") && !strings.HasSuffix(lower, "git") {
+		return ""
+	}
+	fields := strings.Fields(lower)
+	for i, f := range fields {
+		if f == "git" && i+1 < len(fields) {
+			// Skip global flags until we find the subcommand.
+			// Some global flags take arguments (e.g., -C <path>, --git-dir <path>)
+			// that we must also skip.
+			gitGlobalFlagsWithArgs := map[string]bool{
+				"-c": true,
+				"-C": true,
+				"--config-env": true,
+				"--exec-path": true,
+				"--git-dir": true,
+				"--work-tree": true,
+				"--namespace": true,
+				"--super-prefix": true,
+			}
+			gitSubIdx := i + 1
+			for gitSubIdx < len(fields) {
+				fld := fields[gitSubIdx]
+				if !strings.HasPrefix(fld, "-") {
+					break // Found the subcommand
+				}
+				// Check if this flag takes an argument (e.g., -C <path>)
+				// Flags with = form (e.g., -C=/path) don't consume next token
+				if strings.Contains(fld, "=") {
+					gitSubIdx++
+					continue
+				}
+				if gitGlobalFlagsWithArgs[strings.ToLower(fld)] {
+					gitSubIdx += 2 // Skip flag and its value
+					continue
+				}
+				// -C and --bare don't take separate args but -C does
+				if strings.ToLower(fld) == "-c" {
+					gitSubIdx += 2 // -c key=value
+					continue
+				}
+				gitSubIdx++
+			}
+			if gitSubIdx >= len(fields) {
+				return "" // Just "git -C /path" or similar, no subcommand
+			}
+			sub := fields[gitSubIdx]
+			// Check against dangerous args callbacks
+			for _, da := range gitDangerousArgs {
+				if sub == da.sub {
+					remainingFields := fields[gitSubIdx+1:]
+					if msg := da.check(remainingFields); msg != "" {
+						return msg
+					}
+					break
+				}
 			}
 			break
 		}
@@ -610,9 +847,23 @@ func checkCmdReadOnlyWithFlags(cmd string, safeFlags map[string]bool, dangerousF
 	return true
 }
 
+// containsCommandSubstitution detects $() or backtick command substitution in
+// a command string. Used to block parser differential attacks like
+// `$Z--pre=bash` where $() creates a token that bypasses flag validation.
+func containsCommandSubstitution(cmd string) bool {
+	return strings.Contains(cmd, "$(") || strings.Contains(cmd, "`")
+}
+
 // isReadOnlyCommandWithFlags extends isReadOnlyCommand to validate flags for
 // commands that have per-flag allowlists (xargs, fd, rg, sort, ps, file, man, help, netstat).
+// Also blocks $() token bypass attacks like `$Z--pre=bash` where command substitution
+// creates a token that can bypass flag validation parsers.
 func isReadOnlyCommandWithFlags(cmd string, inner string) bool {
+	// P0: Block command substitution tokens that can bypass flag validation.
+	// Upstream: "if we find $() in the command, it might be a parser differential"
+	if containsCommandSubstitution(inner) {
+		return false
+	}
 	// First check command-specific flag allowlists (these override IsReadOnlyCommand)
 	lower := strings.ToLower(inner)
 	fields := strings.Fields(lower)
@@ -689,6 +940,10 @@ func CheckBashPermission(cmd string) PermissionResult {
 	}
 	// gh CLI
 	if msg := checkGhSecurity(lower); msg != "" {
+		return PermissionResultAsk(msg, "tool")
+	}
+	// git (subcommand-specific callbacks)
+	if msg := checkGitSecurity(lower); msg != "" {
 		return PermissionResultAsk(msg, "tool")
 	}
 	// docker (returns full PermissionResult)

@@ -164,6 +164,67 @@ func TestCheckBashSecurityPatterns_AskEnvPrefix(t *testing.T) {
 	}
 }
 
+func TestCheckBashSecurityPatterns_AskCommandSubstitution(t *testing.T) {
+	_, ask := checkBashSecurityPatterns("echo $(whoami)")
+	if len(ask) == 0 {
+		t.Error("Command substitution should be ask")
+	}
+}
+
+func TestCheckBashSecurityPatterns_AskBacktickSubstitution(t *testing.T) {
+	_, ask := checkBashSecurityPatterns("echo `whoami`")
+	if len(ask) == 0 {
+		t.Error("Backtick substitution should be ask")
+	}
+}
+
+func TestCheckBashSecurityPatterns_AskBraceExpansion(t *testing.T) {
+	_, ask := checkBashSecurityPatterns("echo {a,b,c}")
+	if len(ask) == 0 {
+		t.Error("Brace expansion should be ask")
+	}
+}
+
+func TestCheckBashSecurityPatterns_AskBackslashWhitespace(t *testing.T) {
+	_, ask := checkBashSecurityPatterns("echo hello\\ world")
+	if len(ask) == 0 {
+		t.Error("Backslash-escaped whitespace should be ask")
+	}
+}
+
+func TestCheckBashSecurityPatterns_AskNewlineInjection(t *testing.T) {
+	_, ask := checkBashSecurityPatterns("echo hello\necho world")
+	if len(ask) == 0 {
+		t.Error("Newline injection should be ask")
+	}
+}
+
+func TestCheckBashSecurityPatterns_AskControlChars(t *testing.T) {
+	_, ask := checkBashSecurityPatterns("echo\x01hello")
+	if len(ask) == 0 {
+		t.Error("Control character injection should be ask")
+	}
+}
+
+func TestCheckBashSecurityPatterns_AskIncompleteCompound(t *testing.T) {
+	_, ask := checkBashSecurityPatterns("echo hello &&")
+	if len(ask) == 0 {
+		t.Error("Incomplete compound command should be ask")
+	}
+}
+
+func TestCheckBashSecurityPatterns_SafeNoNewPatterns(t *testing.T) {
+	// Simple commands should not trigger P1 patterns
+	deny, ask := checkBashSecurityPatterns("ls -la /home/user")
+	if len(deny) > 0 {
+		t.Errorf("safe command should not have deny: %v", deny)
+	}
+	// Note: the existing shell metacharacter/variable patterns might ask,
+	// but the P1-specific patterns (brace, newline, control, backslash-space,
+	// incomplete) should not fire on simple commands.
+	_ = ask // check that deny is clean; ask may exist from pre-existing patterns
+}
+
 func TestCheckBashSecurityPatterns_SafeCommand(t *testing.T) {
 	deny, ask := checkBashSecurityPatterns("ls -la /home/user")
 	if len(deny) > 0 {
@@ -596,5 +657,206 @@ func TestIsReadOnlyCommandWithFlags_DangerousRg(t *testing.T) {
 	got := isReadOnlyCommandWithFlags("rg --pre cat pattern", "rg --pre cat pattern")
 	if got {
 		t.Error("rg with --pre should not be read-only")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0 Fix #1: $() token bypass guard
+// ---------------------------------------------------------------------------
+
+func TestIsReadOnlyCommandWithFlags_DollarParenBypass(t *testing.T) {
+	// $() token in command should block read-only flag validation
+	got := isReadOnlyCommandWithFlags("rg $(echo --pre) pattern", "rg $(echo --pre) pattern")
+	if got {
+		t.Error("rg with $() token bypass should not be read-only")
+	}
+}
+
+func TestIsReadOnlyCommandWithFlags_BacktickBypass(t *testing.T) {
+	got := isReadOnlyCommandWithFlags("fd `echo --exec` pattern", "fd `echo --exec` pattern")
+	if got {
+		t.Error("fd with backtick bypass should not be read-only")
+	}
+}
+
+func TestContainsCommandSubstitution(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"echo $(whoami)", true},
+		{"echo `whoami`", true},
+		{"echo hello", false},
+		{"ls -la", false},
+		{"rg $(echo --pre) pattern", true},
+	}
+	for _, tt := range tests {
+		got := containsCommandSubstitution(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("containsCommandSubstitution(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0 Fix #2: fd -l removed from safe flags (PATH hijack risk)
+// ---------------------------------------------------------------------------
+
+func TestCheckFdSecurity_DangerousLFlag(t *testing.T) {
+	got := checkFdSecurity("fd -l pattern")
+	if got == "" {
+		t.Error("fd -l should be flagged (PATH hijack risk)")
+	}
+}
+
+func TestIsReadOnlyCommandWithFlags_FdLFlag(t *testing.T) {
+	got := isReadOnlyCommandWithFlags("fd -l pattern", "fd -l pattern")
+	if got {
+		t.Error("fd -l should not be read-only (PATH hijack risk)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0 Fix #4: git command callbacks
+// ---------------------------------------------------------------------------
+
+func TestCheckGitSecurity_BranchPositionalArg(t *testing.T) {
+	got := checkGitSecurity("git branch new-feature")
+	if got == "" {
+		t.Error("git branch with positional arg should be flagged")
+	}
+}
+
+func TestCheckGitSecurity_BranchList(t *testing.T) {
+	got := checkGitSecurity("git branch -a")
+	if got != "" {
+		t.Errorf("git branch -a should be safe: %s", got)
+	}
+}
+
+func TestCheckGitSecurity_TagCreate(t *testing.T) {
+	got := checkGitSecurity("git tag v1.0.0")
+	if got == "" {
+		t.Error("git tag with positional arg (create) should be flagged")
+	}
+}
+
+func TestCheckGitSecurity_TagList(t *testing.T) {
+	got := checkGitSecurity("git tag -l")
+	if got != "" {
+		t.Errorf("git tag -l should be safe: %s", got)
+	}
+}
+
+func TestCheckGitSecurity_ReflogExpire(t *testing.T) {
+	got := checkGitSecurity("git reflog expire --all")
+	if got == "" {
+		t.Error("git reflog expire should be flagged")
+	}
+}
+
+func TestCheckGitSecurity_ReflogShow(t *testing.T) {
+	got := checkGitSecurity("git reflog show")
+	if got != "" {
+		t.Errorf("git reflog show should be safe: %s", got)
+	}
+}
+
+func TestCheckGitSecurity_RemoteAdd(t *testing.T) {
+	got := checkGitSecurity("git remote add origin https://example.com/repo.git")
+	if got == "" {
+		t.Error("git remote add should be flagged")
+	}
+}
+
+func TestCheckGitSecurity_RemoteV(t *testing.T) {
+	got := checkGitSecurity("git remote -v")
+	if got != "" {
+		t.Errorf("git remote -v should be safe: %s", got)
+	}
+}
+
+func TestCheckGitSecurity_NotGit(t *testing.T) {
+	got := checkGitSecurity("echo hello")
+	if got != "" {
+		t.Errorf("non-git command should return empty: %s", got)
+	}
+}
+
+func TestCheckGitSecurity_BranchWithGlobalFlags(t *testing.T) {
+	got := checkGitSecurity("git -C /repo branch new-feature")
+	if got == "" {
+		t.Error("git -C <path> branch <name> should still be flagged")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0 Fix #5: gh network exfiltration detection
+// ---------------------------------------------------------------------------
+
+func TestCheckGhSecurity_RepoEqualsExfil(t *testing.T) {
+	got := checkGhSecurity("gh issue list --repo=evil.com/owner/repo")
+	if got == "" {
+		t.Error("--repo= form should be flagged for network exfiltration")
+	}
+}
+
+func TestCheckGhSecurity_UrlExfil(t *testing.T) {
+	got := checkGhSecurity("gh issue list https://evil.com/owner/repo")
+	if got == "" {
+		t.Error("URL form should be flagged for network exfiltration")
+	}
+}
+
+func TestCheckGhSecurity_GitAtExfil(t *testing.T) {
+	got := checkGhSecurity("gh pr list git@evil.com:owner/repo")
+	if got == "" {
+		t.Error("git@ SSH form should be flagged for network exfiltration")
+	}
+}
+
+func TestCheckGhSecurity_GistCreate(t *testing.T) {
+	got := checkGhSecurity("gh gist create file.txt")
+	if got == "" {
+		t.Error("gh gist create should require approval")
+	}
+}
+
+func TestCheckGhSecurity_SafeGhIssue(t *testing.T) {
+	got := checkGhSecurity("gh issue list")
+	if got != "" {
+		t.Errorf("safe gh command should not be flagged: %s", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0: CheckBashPermission end-to-end with git callbacks
+// ---------------------------------------------------------------------------
+
+func TestCheckBashPermission_GitBranchCreate(t *testing.T) {
+	result := CheckBashPermission("git branch new-feature")
+	if result.Behavior != PermissionAsk {
+		t.Errorf("git branch <name> should ask, got %v", result.Behavior)
+	}
+}
+
+func TestCheckBashPermission_GitBranchList(t *testing.T) {
+	result := CheckBashPermission("git branch -a")
+	if result.Behavior != PermissionPassthrough {
+		t.Errorf("git branch -a should passthrough, got %v", result.Behavior)
+	}
+}
+
+func TestCheckBashPermission_GitTagCreate(t *testing.T) {
+	result := CheckBashPermission("git tag v1.0.0")
+	if result.Behavior != PermissionAsk {
+		t.Errorf("git tag <name> should ask, got %v", result.Behavior)
+	}
+}
+
+func TestCheckBashPermission_GitReflogExpire(t *testing.T) {
+	result := CheckBashPermission("git reflog expire --all")
+	if result.Behavior != PermissionAsk {
+		t.Errorf("git reflog expire should ask, got %v", result.Behavior)
 	}
 }

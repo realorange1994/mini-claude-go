@@ -177,6 +177,14 @@ var psCmdletAliases = map[string]string{
 	"write":  "write-output",
 	"cls":    "clear-host",
 	"clear":  "clear-host",
+	// Destructive aliases — map to Remove-Item so security patterns catch them.
+	// Without these, `rm ./x` bypasses the Remove-Item deny patterns.
+	"del":   "remove-item",
+	"rm":    "remove-item",
+	"ri":    "remove-item",
+	"erase": "remove-item",
+	"rd":    "remove-item",
+	"rmdir": "remove-item",
 }
 
 // IsPowerShellCommand detects if a command string appears to be PowerShell syntax.
