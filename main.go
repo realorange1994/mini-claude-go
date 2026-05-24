@@ -212,6 +212,9 @@ func main() {
 		}
 	}
 
+	// Initialize cron scheduler (runs background ticker for scheduled prompts)
+	agent.SetCronScheduler(createCronScheduler(getProjectDir(), nil))
+
 	// Detect if stdin is a terminal (interactive) or piped.
 	// This affects both one-shot mode (positional args) and pipe input mode
 	// inside runInteractive.

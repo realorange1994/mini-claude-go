@@ -592,7 +592,15 @@ func DefaultRegistry() *tools.Registry {
 	// after the registry is fully populated.
 	r.Register(&tools.BriefTool{})
 	r.Register(&tools.ToolSearchTool{})
+	RegisterCronTools(r)
 	return r
+}
+
+// RegisterCronTools adds cron management tools to the registry.
+func RegisterCronTools(r *tools.Registry) {
+	r.Register(&CronCreateTool{})
+	r.Register(&CronDeleteTool{})
+	r.Register(&CronListTool{})
 }
 
 // RegisterMCPAndSkills adds MCP and skills tools to the registry using the loaded config.

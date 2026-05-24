@@ -414,6 +414,25 @@ type AgentLoop struct {
 	featureFlags              *FeatureFlagStore                   // feature flag store
 	lastTransition            LoopTransitionReason                // reason for the most recent loop continue
 	telemetry                 *TelemetryManager                   // telemetry event tracking
+	cronScheduler             *CronScheduler                      // cron task scheduler (started after agent setup)
+}
+
+// SetCronScheduler attaches a cron scheduler to the agent loop and starts it.
+// The scheduler will inject cron prompts as user messages into the conversation.
+func (a *AgentLoop) SetCronScheduler(s *CronScheduler) {
+	if s == nil {
+		return
+	}
+	a.cronScheduler = s
+	s.onFire = func(prompt string) {
+		a.EnqueueCronPrompt(prompt)
+	}
+	s.start()
+}
+
+// EnqueueCronPrompt injects a cron prompt as a user message into the conversation.
+func (a *AgentLoop) EnqueueCronPrompt(prompt string) {
+	a.context.AddUserMessage(prompt)
 }
 
 // handle529Error processes a 529 Overloaded error. It increments the consecutive
@@ -1917,6 +1936,13 @@ func (a *AgentLoop) Close() {
 		close(a.evictionDone)
 		a.evictionDone = nil
 	}
+
+	// Stop cron scheduler
+	if a.cronScheduler != nil {
+		a.cronScheduler.stop()
+		a.cronScheduler = nil
+	}
+
 	if a.transcript != nil {
 		_ = a.transcript.Close()
 	}

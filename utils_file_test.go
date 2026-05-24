@@ -575,7 +575,7 @@ func TestAddLineNumbersStripLineNumberPrefixRoundtrip(t *testing.T) {
 	for _, line := range lines {
 		recovered = append(recovered, StripLineNumberPrefix(line))
 	}
-	result := joinLines(recovered)
+	result := joinLinesUtil(recovered)
 	if result != content {
 		t.Errorf("roundtrip failed: got %q, want %q", result, content)
 	}
@@ -588,7 +588,7 @@ func splitLines(s string) []string {
 	return regexp.MustCompile(`\r?\n`).Split(s, -1)
 }
 
-func joinLines(lines []string) string {
+func joinLinesUtil(lines []string) string {
 	result := ""
 	for i, line := range lines {
 		if i > 0 {
