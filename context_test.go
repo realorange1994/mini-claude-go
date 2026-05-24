@@ -710,20 +710,16 @@ func TestMicroCompactEntries(t *testing.T) {
 		t.Errorf("expected 5 entries cleared, got %d", cleared)
 	}
 
-	// Verify the last 5 tool results still have original content
+	// Verify entries still have original content (not mutated in-place for cache stability)
+	// Replacements are recorded in ctx.toolResultReplacements and applied in BuildMessages()
 	entries := ctx.Entries()
 	toolResultCount := 0
-	clearedCount := 0
 	for _, entry := range entries {
 		if results, ok := entry.content.(ToolResultContent); ok {
 			for _, r := range results {
 				for _, c := range r.Content {
-					if c.OfText != nil {
-						if c.OfText.Text == "[cleared]" {
-							clearedCount++
-						} else if strings.Contains(c.OfText.Text, "Content of file_") {
-							toolResultCount++
-						}
+					if c.OfText != nil && strings.Contains(c.OfText.Text, "Content of file_") {
+						toolResultCount++
 					}
 				}
 				// Verify ToolUseID is preserved (pairing intact)
@@ -734,11 +730,21 @@ func TestMicroCompactEntries(t *testing.T) {
 		}
 	}
 
-	if toolResultCount != 5 {
-		t.Errorf("expected 5 recent tool results preserved, got %d", toolResultCount)
+	// All 10 tool results should still have original content (not mutated)
+	if toolResultCount != 10 {
+		t.Errorf("expected 10 tool results with original content (cache-stable), got %d", toolResultCount)
 	}
-	if clearedCount != 5 {
-		t.Errorf("expected 5 cleared tool results, got %d", clearedCount)
+
+	// Verify replacement map has 5 entries (the cleared ones)
+	replacementCount := len(ctx.toolResultReplacements)
+	if replacementCount != 5 {
+		t.Errorf("expected 5 entries in replacement map, got %d", replacementCount)
+	}
+	// Verify the replacements contain the cleared placeholder
+	for _, repl := range ctx.toolResultReplacements {
+		if repl != "[cleared]" {
+			t.Errorf("expected replacement to be '[cleared]', got %q", repl)
+		}
 	}
 }
 

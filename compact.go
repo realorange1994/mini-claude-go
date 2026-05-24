@@ -3131,6 +3131,24 @@ func (t *CachedMicrocompactTracker) MarkSentToAPI() {
 	t.toolsSentToAPI = true
 }
 
+// HasPendingDeletions returns true if there are cache_edits ready to send
+// (not yet sent to API). Used for Phase 2 cache break detection.
+func (t *CachedMicrocompactTracker) HasPendingDeletions() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.toolsSentToAPI {
+		return false
+	}
+	// Count compactable tools — if above threshold, deletions are pending
+	count := 0
+	for _, id := range t.toolOrder {
+		if t.registeredTools[id] {
+			count++
+		}
+	}
+	return count >= t.maxTools
+}
+
 // GetCacheEditsBlock returns a cache_edits block if the threshold is exceeded.
 // Deletes all but the most recent `keepRecent` tool results.
 // Returns nil if fewer than maxTools compactable tools exist, or if tools

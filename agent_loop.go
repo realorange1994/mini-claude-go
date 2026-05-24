@@ -2505,6 +2505,16 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		}
 		// Update cache break detector baseline with current cache read tokens
 		a.cacheBreakDetector.UpdateBaseline(int64(collect.Usage.CacheReadTokens))
+
+		// Phase 2 of two-phase cache break detection: check response for cache break and explain why
+		gap := TimeSinceLastAssistantMsg()
+		// Check if cache_edits deletions are pending (from cached microcompact tracker)
+		cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
+		isBreak, reason := CheckResponseForCacheBreak(int64(collect.Usage.CacheReadTokens), int64(collect.Usage.CacheWriteTokens), gap, cacheDeletionsPending, false)
+		if isBreak {
+			a.out("[cache-break-2] %s\n", reason)
+		}
+		UpdateLastAssistantMsgTime()
 	}
 
 	// Record API call telemetry for streaming
@@ -2632,6 +2642,22 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	}
 	cacheMessageParams(&params) // Anthropic prompt caching (system_and_3)
 
+	// Phase 1 of cache break detection: hash current state before the API call
+	// to enable post-call diagnosis if cache_read drops >5%.
+	sysPrompt := a.context.SystemPrompt()
+	toolNames := make([]string, len(toolParams))
+	toolSchemas := make([]map[string]any, len(toolParams))
+	for i, tp := range toolParams {
+		schemaBytes, _ := json.Marshal(tp)
+		var s map[string]any
+		json.Unmarshal(schemaBytes, &s)
+		toolSchemas[i] = s
+		if name, ok := s["name"].(string); ok {
+			toolNames[i] = name
+		}
+	}
+	RecordPromptState(sysPrompt, toolSchemas, toolNames, a.config.Model, false)
+
 	// Extended thinking
 	if budget := a.config.ThinkingBudgetTokens; budget >= 1024 {
 		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
@@ -2703,6 +2729,15 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				}
 				// Update cache break detector baseline with current cache read tokens
 				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
+
+				// Phase 2 of two-phase cache break detection
+				gap := TimeSinceLastAssistantMsg()
+				cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
+				isBreak, reason := CheckResponseForCacheBreak(int64(response.Usage.CacheReadInputTokens), int64(response.Usage.CacheCreationInputTokens), gap, cacheDeletionsPending, false)
+				if isBreak {
+					a.out("[cache-break-2] %s\n", reason)
+				}
+				UpdateLastAssistantMsgTime()
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// Register compactable tool_use IDs for cache_edits tracking.
@@ -2825,6 +2860,15 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				}
 				// Update cache break detector baseline with current cache read tokens
 				a.cacheBreakDetector.UpdateBaseline(int64(response.Usage.CacheReadInputTokens))
+
+				// Phase 2 of two-phase cache break detection
+				gap := TimeSinceLastAssistantMsg()
+				cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
+				isBreak, reason := CheckResponseForCacheBreak(int64(response.Usage.CacheReadInputTokens), int64(response.Usage.CacheCreationInputTokens), gap, cacheDeletionsPending, false)
+				if isBreak {
+					a.out("[cache-break-2] %s\n", reason)
+				}
+				UpdateLastAssistantMsgTime()
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// Register compactable tool_use IDs for cache_edits tracking.

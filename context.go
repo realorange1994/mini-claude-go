@@ -338,8 +338,6 @@ type toolResultCandidate struct {
 	toolUseID   string
 	content     string
 	size        int
-	entryIdx    int    // index in the entries slice
-	blockIdx    int    // index within the ToolResultContent
 	replacement string // cached replacement string for mustReapply
 }
 
@@ -354,6 +352,10 @@ type toolResultCandidate struct {
 // frozen: previously-replaced results get the same replacement re-applied every
 // turn (zero I/O, byte-identical), and previously-unreplaced results are never
 // replaced later (would break prompt cache).
+//
+// Instead of mutating c.entries in-place (which breaks KV cache prefix),
+// replacements are recorded in c.toolResultReplacements and applied during
+// BuildMessages() serialization. This keeps original entries stable for cache.
 //
 // Returns the number of newly replaced results.
 func (c *ConversationContext) enforceToolResultBudget(
@@ -372,6 +374,11 @@ func (c *ConversationContext) enforceToolResultBudget(
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
+	// Ensure replacement map is initialized
+	if c.toolResultReplacements == nil {
+		c.toolResultReplacements = make(map[string]string)
+	}
+
 	// Build tool_use_id -> tool_name mapping from ToolUseContent entries
 	toolNameMap := make(map[string]string)
 	for _, entry := range c.entries {
@@ -389,7 +396,7 @@ func (c *ConversationContext) enforceToolResultBudget(
 	newlyReplaced := 0
 
 	// Process each ToolResultContent entry (each represents one user message)
-	for entryIdx, entry := range c.entries {
+	for _, entry := range c.entries {
 		results, ok := entry.content.(ToolResultContent)
 		if !ok {
 			continue
@@ -397,7 +404,7 @@ func (c *ConversationContext) enforceToolResultBudget(
 
 		// Collect candidates from this message
 		var candidates []toolResultCandidate
-		for blockIdx, r := range results {
+		for _, r := range results {
 			// Extract text content
 			contentText := ""
 			for _, cb := range r.Content {
@@ -408,12 +415,14 @@ func (c *ConversationContext) enforceToolResultBudget(
 			if contentText == "" || strings.HasPrefix(contentText, PERSISTED_OUTPUT_TAG) {
 				continue // skip empty or already-compacted
 			}
+			// Skip if already recorded as a replacement (from micro-compact or prior budget pass)
+			if _, ok := c.toolResultReplacements[r.ToolUseID]; ok {
+				continue
+			}
 			candidates = append(candidates, toolResultCandidate{
 				toolUseID: r.ToolUseID,
 				content:   contentText,
 				size:      len(contentText),
-				entryIdx:  entryIdx,
-				blockIdx:  blockIdx,
 			})
 		}
 
@@ -426,39 +435,29 @@ func (c *ConversationContext) enforceToolResultBudget(
 		var frozen []toolResultCandidate      // previously seen and left unreplaced
 		var fresh []toolResultCandidate       // never seen -> eligible
 
-		for _, c := range candidates {
-			if repl, ok := state.replacements[c.toolUseID]; ok {
-				c.replacement = repl // store for re-apply
-				mustReapply = append(mustReapply, c)
-			} else if state.seenIds[c.toolUseID] {
-				frozen = append(frozen, c)
+		for _, cand := range candidates {
+			if repl, ok := state.replacements[cand.toolUseID]; ok {
+				cand.replacement = repl // store for re-apply
+				mustReapply = append(mustReapply, cand)
+			} else if state.seenIds[cand.toolUseID] {
+				frozen = append(frozen, cand)
 			} else {
-				fresh = append(fresh, c)
+				fresh = append(fresh, cand)
 			}
 		}
 
-		// Re-apply cached replacements (zero I/O, byte-identical)
-		if len(mustReapply) > 0 {
-			resultsCopy := make([]anthropic.ToolResultBlockParam, len(results))
-			copy(resultsCopy, results)
-			for _, c := range mustReapply {
-				resultsCopy[c.blockIdx] = anthropic.ToolResultBlockParam{
-					ToolUseID: c.toolUseID,
-					Content: []anthropic.ToolResultBlockParamContentUnion{
-						{OfText: &anthropic.TextBlockParam{Text: c.replacement}},
-					},
-					IsError: resultsCopy[c.blockIdx].IsError,
-				}
-			}
-			c.entries[entryIdx].content = ToolResultContent(resultsCopy)
+		// Re-apply cached replacements via replacement map (zero I/O, byte-identical)
+		// No entry mutation — BuildMessages() applies these during serialization
+		for _, cand := range mustReapply {
+			c.toolResultReplacements[cand.toolUseID] = cand.replacement
 		}
 
 		// Mark all non-fresh IDs as seen
-		for _, c := range mustReapply {
-			state.seenIds[c.toolUseID] = true
+		for _, cand := range mustReapply {
+			state.seenIds[cand.toolUseID] = true
 		}
-		for _, c := range frozen {
-			state.seenIds[c.toolUseID] = true
+		for _, cand := range frozen {
+			state.seenIds[cand.toolUseID] = true
 		}
 
 		if len(fresh) == 0 {
@@ -467,12 +466,12 @@ func (c *ConversationContext) enforceToolResultBudget(
 
 		// Skip tools in skipToolNames (e.g., Read with Infinity threshold)
 		var eligible []toolResultCandidate
-		for _, c := range fresh {
-			toolName := toolNameMap[c.toolUseID]
+		for _, cand := range fresh {
+			toolName := toolNameMap[cand.toolUseID]
 			if skipToolNames[toolName] {
-				state.seenIds[c.toolUseID] = true // freeze without replacement
+				state.seenIds[cand.toolUseID] = true // freeze without replacement
 			} else {
-				eligible = append(eligible, c)
+				eligible = append(eligible, cand)
 			}
 		}
 
@@ -482,19 +481,19 @@ func (c *ConversationContext) enforceToolResultBudget(
 
 		// Calculate total size: frozen + eligible
 		frozenSize := 0
-		for _, c := range frozen {
-			frozenSize += c.size
+		for _, cand := range frozen {
+			frozenSize += cand.size
 		}
 		freshSize := 0
-		for _, c := range eligible {
-			freshSize += c.size
+		for _, cand := range eligible {
+			freshSize += cand.size
 		}
 
 		// If total exceeds limit, select largest fresh results to replace
 		if frozenSize+freshSize <= limit {
 			// Under budget — mark all as seen (frozen) without replacement
-			for _, c := range eligible {
-				state.seenIds[c.toolUseID] = true
+			for _, cand := range eligible {
+				state.seenIds[cand.toolUseID] = true
 			}
 			continue
 		}
@@ -507,22 +506,22 @@ func (c *ConversationContext) enforceToolResultBudget(
 		// Select candidates to replace until under budget
 		remaining := frozenSize + freshSize
 		var selected []toolResultCandidate
-		for _, c := range eligible {
+		for _, cand := range eligible {
 			if remaining <= limit {
 				break
 			}
-			selected = append(selected, c)
-			remaining -= c.size
+			selected = append(selected, cand)
+			remaining -= cand.size
 		}
 
 		// Mark non-selected as seen (frozen)
 		selectedSet := make(map[string]bool, len(selected))
-		for _, c := range selected {
-			selectedSet[c.toolUseID] = true
+		for _, cand := range selected {
+			selectedSet[cand.toolUseID] = true
 		}
-		for _, c := range eligible {
-			if !selectedSet[c.toolUseID] {
-				state.seenIds[c.toolUseID] = true
+		for _, cand := range eligible {
+			if !selectedSet[cand.toolUseID] {
+				state.seenIds[cand.toolUseID] = true
 			}
 		}
 
@@ -530,32 +529,22 @@ func (c *ConversationContext) enforceToolResultBudget(
 			continue
 		}
 
-		// Persist selected results and apply replacements
-		resultsCopy := make([]anthropic.ToolResultBlockParam, len(results))
-		copy(resultsCopy, results)
-
-		for _, c := range selected {
-			persisted := store.Persist(c.toolUseID, c.content)
+		// Persist selected results and record replacements in map
+		for _, cand := range selected {
+			persisted := store.Persist(cand.toolUseID, cand.content)
 			if persisted == nil {
 				// Persistence failed — mark as seen but unreplaced (frozen)
-				state.seenIds[c.toolUseID] = true
+				state.seenIds[cand.toolUseID] = true
 				continue
 			}
 			replacement := buildLargeToolResultMessage(persisted)
-			state.seenIds[c.toolUseID] = true
-			state.replacements[c.toolUseID] = replacement
+			state.seenIds[cand.toolUseID] = true
+			state.replacements[cand.toolUseID] = replacement
 			newlyReplaced++
 
-			resultsCopy[c.blockIdx] = anthropic.ToolResultBlockParam{
-				ToolUseID: c.toolUseID,
-				Content: []anthropic.ToolResultBlockParamContentUnion{
-					{OfText: &anthropic.TextBlockParam{Text: replacement}},
-				},
-				IsError: resultsCopy[c.blockIdx].IsError,
-			}
+			// Record replacement in map instead of mutating entry
+			c.toolResultReplacements[cand.toolUseID] = replacement
 		}
-
-		c.entries[entryIdx].content = ToolResultContent(resultsCopy)
 	}
 
 	return newlyReplaced
@@ -911,6 +900,14 @@ type ConversationContext struct {
 	// the delta for entries added since. Matching upstream's tokenCountWithEstimation().
 	apiTokenAnchor   int64 // exact input_tokens from last API response
 	apiAnchorEntries int   // number of entries in context when anchor was recorded
+	// toolResultReplacements maps tool_use_id -> replacement text to apply during
+	// BuildMessages() serialization. Populated by MicroCompactEntries() and
+	// enforceToolResultBudget(). This keeps original entries stable for KV cache
+	// prefix matching while the API still sees trimmed/placeholder content.
+	toolResultReplacements map[string]string
+	// clearedToolResults tracks tool_use_ids whose content was cleared by
+	// MicroCompactEntries, so enforceToolResultBudget() can skip them.
+	clearedToolResults map[string]bool
 	// compressionLevel tracks how many times the conversation has been compressed.
 	// Increments after each compaction, used for progressive summarization:
 	// Level 1 = full detail, Level 2 = concise, Level 3 = minimal, Level 4+ = ultra-minimal.
@@ -919,7 +916,11 @@ type ConversationContext struct {
 
 // NewConversationContext creates a new context.
 func NewConversationContext(cfg Config) *ConversationContext {
-	return &ConversationContext{config: cfg}
+	return &ConversationContext{
+		config:                  cfg,
+		toolResultReplacements:  make(map[string]string),
+		clearedToolResults:      make(map[string]bool),
+	}
 }
 
 // SetAPITokenAnchor records the exact input_tokens from an API response along
@@ -1213,6 +1214,12 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	// while other goroutines modify c.entries via AddMessage, AddToolResult, etc.
 	entriesCopy := make([]conversationEntry, len(c.entries))
 	copy(entriesCopy, c.entries)
+
+	// Copy replacement map for cache-stable serialization.
+	replacements := make(map[string]string, len(c.toolResultReplacements))
+	for k, v := range c.toolResultReplacements {
+		replacements[k] = v
+	}
 	c.mu.Unlock()
 
 	// Find the last compact boundary. Entries at or after this point are preserved;
@@ -1259,7 +1266,21 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 		case ToolResultContent:
 			blocks := make([]anthropic.ContentBlockParamUnion, len(v))
 			for i, r := range v {
-				blocks[i] = anthropic.ContentBlockParamUnion{OfToolResult: &r}
+				// Apply replacement if one exists for this tool_use_id.
+				// This keeps original entries stable for KV cache while sending
+				// trimmed/placeholder content to the API.
+				if repl, ok := replacements[r.ToolUseID]; ok {
+					replaced := anthropic.ToolResultBlockParam{
+						ToolUseID: r.ToolUseID,
+						Content: []anthropic.ToolResultBlockParamContentUnion{
+							{OfText: &anthropic.TextBlockParam{Text: repl}},
+						},
+						IsError: r.IsError,
+					}
+					blocks[i] = anthropic.ContentBlockParamUnion{OfToolResult: &replaced}
+				} else {
+					blocks[i] = anthropic.ContentBlockParamUnion{OfToolResult: &r}
+				}
 			}
 			msg.Content = blocks
 		case CompactBoundaryContent:
@@ -2086,6 +2107,11 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 		minCharCount = 2000 // default: only clear results >= 2000 chars
 	}
 
+	// Reset replacement tracking at the start of each micro-compact pass.
+	// BuildMessages() will apply replacements during serialization.
+	c.toolResultReplacements = make(map[string]string)
+	c.clearedToolResults = make(map[string]bool)
+
 	// Pass 1: Build tool_use_id -> tool_name mapping from ToolUseContent entries.
 	toolNameMap := make(map[string]string) // tool_use_id -> tool_name
 	for _, entry := range c.entries {
@@ -2100,7 +2126,7 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 		}
 	}
 
-	// Pass 2: Iterate backwards, clearing eligible tool results.
+	// Pass 2: Iterate backwards, recording replacements for eligible tool results.
 	recentCount := 0
 	cleared := 0
 	for i := len(c.entries) - 1; i >= 0; i-- {
@@ -2130,28 +2156,18 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 		allCleared := true
 		hasCompactable := false
 		for _, r := range results {
-			// Check if already cleared to placeholder
-			alreadyCleared := false
-			for _, c := range r.Content {
-				if c.OfText != nil && c.OfText.Text == placeholder {
-					alreadyCleared = true
-					break
-				}
+			// Check if already cleared (tracked by ID instead of content inspection)
+			if c.clearedToolResults[r.ToolUseID] {
+				continue
 			}
-			if !alreadyCleared {
-				allCleared = false
-			}
+			allCleared = false
 
 			// Check if this tool is compactable AND its content is large enough to justify clearing.
-			// Small tool results (< minCharCount) are preserved to prevent amnesia — they
-			// often contain error messages, short status outputs, or key identifiers that
-			// the model needs later. Only large outputs (file contents, command stdout)
-			// benefit from clearing.
 			if toolName, ok := toolNameMap[r.ToolUseID]; ok && compactableToolNames[toolName] {
 				totalChars := 0
-				for _, c := range r.Content {
-					if c.OfText != nil {
-						totalChars += len(c.OfText.Text)
+				for _, cb := range r.Content {
+					if cb.OfText != nil {
+						totalChars += len(cb.OfText.Text)
 					}
 				}
 				if totalChars >= minCharCount {
@@ -2165,55 +2181,54 @@ func (c *ConversationContext) MicroCompactEntries(keepRecent int, placeholder st
 			continue
 		}
 
-		// Clear only compactable tool results that are large enough; leave others untouched
-		var clearedResults []anthropic.ToolResultBlockParam
+		// Record replacements for compactable tool results that are large enough
 		for _, r := range results {
-			if toolName, ok := toolNameMap[r.ToolUseID]; ok && compactableToolNames[toolName] {
-				// Check size threshold: preserve small results to prevent amnesia
-				totalChars := 0
-				for _, c := range r.Content {
-					if c.OfText != nil {
-						totalChars += len(c.OfText.Text)
-					}
-				}
-				if totalChars >= minCharCount {
-					// Persist the content to disk before clearing from context.
-					// The model can re-read the result on demand without re-executing.
-					contentText := ""
-					for _, cb := range r.Content {
-						if cb.OfText != nil {
-							contentText += cb.OfText.Text
-						}
-					}
-					diskRef := ""
-					if c.toolResultStore != nil && contentText != "" {
-						result := c.toolResultStore.Persist(r.ToolUseID, contentText)
-						if result != nil {
-							diskRef = buildLargeToolResultMessage(result)
-						}
-					}
-					blockText := diskRef
-					if blockText == "" {
-						blockText = placeholder
-					}
-					clearedResults = append(clearedResults, anthropic.ToolResultBlockParam{
-						ToolUseID: r.ToolUseID,
-						Content: []anthropic.ToolResultBlockParamContentUnion{
-							{OfText: &anthropic.TextBlockParam{Text: blockText}},
-						},
-						IsError: r.IsError,
-					})
-				} else {
-					// Too small to justify clearing — preserve the result
-					clearedResults = append(clearedResults, r)
-				}
-			} else {
-				// Not a compactable tool — keep the original result
-				clearedResults = append(clearedResults, r)
+			toolName, ok := toolNameMap[r.ToolUseID]
+			if !ok || !compactableToolNames[toolName] {
+				continue
 			}
+			totalChars := 0
+			for _, cb := range r.Content {
+				if cb.OfText != nil {
+					totalChars += len(cb.OfText.Text)
+				}
+			}
+			if totalChars < minCharCount {
+				continue // Too small to justify clearing — preserve the result
+			}
+
+			// Already replaced in this pass
+			if c.clearedToolResults[r.ToolUseID] {
+				continue
+			}
+
+			// Persist the content to disk before clearing from context.
+			// The model can re-read the result on demand without re-executing.
+			contentText := ""
+			for _, cb := range r.Content {
+				if cb.OfText != nil {
+					contentText += cb.OfText.Text
+				}
+			}
+			diskRef := ""
+			if c.toolResultStore != nil && contentText != "" {
+				result := c.toolResultStore.Persist(r.ToolUseID, contentText)
+				if result != nil {
+					diskRef = buildLargeToolResultMessage(result)
+				}
+			}
+			blockText := diskRef
+			if blockText == "" {
+				blockText = placeholder
+			}
+
+			// Record replacement instead of mutating entry
+			c.toolResultReplacements[r.ToolUseID] = blockText
+			c.clearedToolResults[r.ToolUseID] = true
 		}
-		entry.content = ToolResultContent(clearedResults)
-		cleared++
+		if len(c.clearedToolResults) > cleared {
+			cleared++
+		}
 	}
 	return cleared
 }
