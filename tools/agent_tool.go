@@ -106,10 +106,6 @@ func (t *AgentTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Optional name for the agent, enabling routing via send_message. Must be a short alphanumeric identifier (max 32 chars, hyphens/underscores allowed).",
 			},
-			"run_in_background": map[string]any{
-				"type":        "boolean",
-				"description": "DEPRECATED — use mode=\"async\" instead. This parameter is ignored.",
-			},
 			"allowed_tools": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
