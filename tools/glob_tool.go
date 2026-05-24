@@ -70,11 +70,7 @@ func (t *GlobTool) ExecuteContext(ctx context.Context, params map[string]any) To
 
 	pattern, _ := params["pattern"].(string)
 
-	// Support path (official) and directory (legacy alias)
 	dirStr, _ := params["path"].(string)
-	if dirStr == "" {
-		dirStr, _ = params["directory"].(string)
-	}
 	if dirStr == "" {
 		dirStr = "."
 	}
