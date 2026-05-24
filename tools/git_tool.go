@@ -209,6 +209,11 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 		return executeGitInfo(workDir)
 	}
 
+	// Validate required params for each operation (early, before flag validation)
+	if err := validateGitParams(operation, params); err != nil {
+		return ToolResult{Output: err.Error(), IsError: true}
+	}
+
 	// Validate flags before executing (git operations only, not gh)
 	if operation != "gh" {
 		flags := getStringArray(params, "flags")
@@ -274,8 +279,121 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 }
 
 // ---------------------------------------------------------------------------
-// Git flag-level safety validation
+// Git operation parameter validation
 // ---------------------------------------------------------------------------
+
+// gitParamSpec describes the required and optional params for a git operation.
+type gitParamSpec struct {
+	required []string
+	example  string
+}
+
+// gitParamSpecs maps each operation to its parameter requirements.
+// Operations not listed have no required params beyond "operation" itself.
+var gitParamSpecs = map[string]gitParamSpec{
+	"clone":       {required: []string{"repo"}, example: `{"operation": "clone", "repo": "https://github.com/user/repo.git", "destination": "myrepo"}`},
+	"init":        {example: `{"operation": "init", "destination": "my-project"}`},
+	"commit":      {required: []string{"message"}, example: `{"operation": "commit", "message": "Fix bug in login"}`},
+	"rm":          {required: []string{"files"}, example: `{"operation": "rm", "files": ["old.txt"]}`},
+	"mv":          {required: []string{"source", "destination"}, example: `{"operation": "mv", "source": "old.txt", "destination": "new.txt"}`},
+	"switch":      {required: []string{"branch"}, example: `{"operation": "switch", "branch": "feature"}`}, // source is also valid
+	"cherry-pick": {required: []string{"target"}, example: `{"operation": "cherry-pick", "target": "abc1234"}`},
+	"revert":      {required: []string{"target"}, example: `{"operation": "revert", "target": "abc1234"}`},
+	"blame":       {required: []string{"file"}, example: `{"operation": "blame", "path": ".", "file": "main.go"}`}, // files array is also valid
+	"gh":          {required: []string{"gh_command"}, example: `{"operation": "gh", "gh_command": ["pr", "view", "123"]}`},
+}
+
+// knownGitOperations is the set of valid git operations (from the InputSchema enum).
+var knownGitOperations = map[string]bool{
+	"clone": true, "init": true, "add": true, "commit": true, "push": true,
+	"pull": true, "fetch": true, "branch": true, "checkout": true, "merge": true,
+	"rebase": true, "stash": true, "reset": true, "tag": true, "status": true,
+	"diff": true, "log": true, "remote": true, "show": true, "describe": true,
+	"ls-files": true, "ls-tree": true, "rev-parse": true, "rev-list": true,
+	"worktree": true, "rm": true, "mv": true, "restore": true, "switch": true,
+	"cherry-pick": true, "revert": true, "clean": true, "blame": true,
+	"reflog": true, "shortlog": true, "gh": true, "info": true,
+}
+
+// validateGitParams checks required parameters for each operation before execution.
+// Returns a descriptive error with usage examples if validation fails.
+func validateGitParams(operation string, params map[string]interface{}) error {
+	// Check if operation is known
+	if !knownGitOperations[operation] {
+		validOps := make([]string, 0, len(knownGitOperations))
+		for op := range knownGitOperations {
+			validOps = append(validOps, op)
+		}
+		sortStrings(validOps)
+		return fmt.Errorf("Unknown operation '%s'. Valid operations: %s", operation, strings.Join(validOps, ", "))
+	}
+
+	// Check required params for this operation
+	spec, hasSpec := gitParamSpecs[operation]
+	if !hasSpec {
+		return nil // no required params beyond operation
+	}
+
+	for _, req := range spec.required {
+		// Special cases for multi-source params
+		if req == "branch" && operation == "switch" {
+			// switch accepts either "branch" or "source"
+			if getStringParam(params, "branch") == "" && getStringParam(params, "source") == "" {
+				return fmt.Errorf("Parameter 'branch' or 'source' is required for '%s'. Example: %s", operation, spec.example)
+			}
+			continue
+		}
+		if req == "file" && operation == "blame" {
+			// blame accepts either "file" string or "files" array
+			if getStringParam(params, "file") == "" && len(getStringArray(params, "files")) == 0 {
+				return fmt.Errorf("Parameter 'file' or 'files' is required for '%s'. Example: %s", operation, spec.example)
+			}
+			continue
+		}
+		if req == "files" {
+			// files must be a non-empty array
+			if len(getStringArray(params, req)) == 0 {
+				return fmt.Errorf("Parameter '%s' is required for '%s'. Example: %s", req, operation, spec.example)
+			}
+			continue
+		}
+		if req == "gh_command" {
+			// gh_command must be a non-empty array
+			if len(getStringArray(params, req)) == 0 {
+				return fmt.Errorf("Parameter '%s' is required for '%s'. Example: %s", req, operation, spec.example)
+			}
+			continue
+		}
+
+		// Standard string param check
+		if getStringParam(params, req) == "" {
+			return fmt.Errorf("Parameter '%s' is required for '%s'. Example: %s", req, operation, spec.example)
+		}
+	}
+
+	return nil
+}
+
+// getStringParam extracts a string parameter from the params map.
+func getStringParam(params map[string]interface{}, key string) string {
+	if v, ok := params[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// sortStrings sorts a string slice in place.
+func sortStrings(s []string) {
+	for i := 0; i < len(s)-1; i++ {
+		for j := i + 1; j < len(s); j++ {
+			if s[i] > s[j] {
+				s[i], s[j] = s[j], s[i]
+			}
+		}
+	}
+}
 
 // gitFlagType classifies how a flag's argument should be validated
 type gitFlagType int

@@ -52,7 +52,7 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 		},
 		{
 			name:     "mv with force",
-			params:   map[string]interface{}{"operation": "mv", "source": "old.txt", "path": "new.txt", "force": true},
+			params:   map[string]interface{}{"operation": "mv", "source": "old.txt", "destination": "new.txt", "force": true},
 			wantArgs: []string{"mv", "-f", "old.txt", "new.txt"},
 		},
 		{
@@ -184,7 +184,7 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 		// --- blame ---
 		{
 			name:     "blame basic",
-			params:   map[string]interface{}{"operation": "blame", "path": "main.go"},
+			params:   map[string]interface{}{"operation": "blame", "file": "main.go"},
 			wantArgs: []string{"blame", "main.go"},
 		},
 		{
@@ -1183,7 +1183,7 @@ func TestGitTool_ExecuteInfo(t *testing.T) {
 		tool := &GitTool{}
 		params := map[string]interface{}{
 			"operation": "info",
-			"directory": dir,
+			"path": dir,
 		}
 		result := tool.Execute(params)
 		if result.IsError {
@@ -1214,7 +1214,7 @@ func TestGitTool_ExecuteInfo(t *testing.T) {
 		tool := &GitTool{}
 		params := map[string]interface{}{
 			"operation": "info",
-			"directory": t.TempDir(),
+			"path": t.TempDir(),
 		}
 		result := tool.Execute(params)
 		if !strings.Contains(result.Output, "Not a git repository") {
@@ -1233,4 +1233,131 @@ func TestBuildGitCommand_InfoRejected(t *testing.T) {
 	if err == nil {
 		t.Error("buildGitCommand(info) should return error (info is handled before buildGitCommand)")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for validateGitParams
+// ---------------------------------------------------------------------------
+
+func TestValidateGitParams_UnknownOperation(t *testing.T) {
+	err := validateGitParams("foo", nil)
+	if err == nil {
+		t.Fatal("expected error for unknown operation")
+	}
+	if !strings.Contains(err.Error(), "Unknown operation") {
+		t.Errorf("expected unknown operation message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Valid operations:") {
+		t.Errorf("expected valid operations list, got: %v", err)
+	}
+}
+
+func TestValidateGitParams_KnownNoRequired(t *testing.T) {
+	// Operations with no required params should pass
+	for _, op := range []string{"status", "log", "diff", "branch", "add", "push", "pull"} {
+		err := validateGitParams(op, map[string]interface{}{"operation": op})
+		if err != nil {
+			t.Errorf("validateGitParams(%q) unexpected error: %v", op, err)
+		}
+	}
+}
+
+func TestValidateGitParams_MissingRequired(t *testing.T) {
+	tests := []struct {
+		op      string
+		params  map[string]interface{}
+		wantErr string
+	}{
+		{"clone", map[string]interface{}{"operation": "clone"}, "repo"},
+		{"commit", map[string]interface{}{"operation": "commit"}, "message"},
+		{"rm", map[string]interface{}{"operation": "rm"}, "files"},
+		{"mv", map[string]interface{}{"operation": "mv", "source": "a"}, "destination"},
+		{"mv", map[string]interface{}{"operation": "mv", "destination": "b"}, "source"},
+		{"switch", map[string]interface{}{"operation": "switch"}, "branch"},
+		{"cherry-pick", map[string]interface{}{"operation": "cherry-pick"}, "target"},
+		{"revert", map[string]interface{}{"operation": "revert"}, "target"},
+		{"blame", map[string]interface{}{"operation": "blame"}, "file"},
+		{"gh", map[string]interface{}{"operation": "gh"}, "gh_command"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.op+"_"+tt.wantErr, func(t *testing.T) {
+			err := validateGitParams(tt.op, tt.params)
+			if err == nil {
+				t.Fatalf("expected error for %s missing %s", tt.op, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error should mention %q, got: %v", tt.wantErr, err)
+			}
+			if !strings.Contains(err.Error(), "Example:") {
+				t.Errorf("error should include usage example, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateGitParams_WithRequired(t *testing.T) {
+	tests := []struct {
+		op     string
+		params map[string]interface{}
+	}{
+		{"clone", map[string]interface{}{"operation": "clone", "repo": "https://github.com/user/repo.git"}},
+		{"commit", map[string]interface{}{"operation": "commit", "message": "fix bug"}},
+		{"rm", map[string]interface{}{"operation": "rm", "files": []interface{}{"old.txt"}}},
+		{"mv", map[string]interface{}{"operation": "mv", "source": "a", "destination": "b"}},
+		{"switch", map[string]interface{}{"operation": "switch", "branch": "feature"}},
+		{"cherry-pick", map[string]interface{}{"operation": "cherry-pick", "target": "abc1234"}},
+		{"revert", map[string]interface{}{"operation": "revert", "target": "abc1234"}},
+		{"blame", map[string]interface{}{"operation": "blame", "file": "main.go"}},
+		{"blame", map[string]interface{}{"operation": "blame", "files": []interface{}{"main.go"}}},
+		{"gh", map[string]interface{}{"operation": "gh", "gh_command": []interface{}{"pr", "view", "123"}}},
+		{"switch", map[string]interface{}{"operation": "switch", "source": "feature"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.op, func(t *testing.T) {
+			err := validateGitParams(tt.op, tt.params)
+			if err != nil {
+				t.Errorf("validateGitParams(%q) unexpected error: %v", tt.op, err)
+			}
+		})
+	}
+}
+
+func TestValidateGitParams_ExecuteIntegration(t *testing.T) {
+	t.Run("missing repo returns clear error", func(t *testing.T) {
+		tool := &GitTool{}
+		result := tool.Execute(map[string]interface{}{"operation": "clone"})
+		if !result.IsError {
+			t.Fatal("expected error for clone without repo")
+		}
+		if !strings.Contains(result.Output, "repo") {
+			t.Errorf("error should mention 'repo', got: %s", result.Output)
+		}
+		if !strings.Contains(result.Output, "Example:") {
+			t.Errorf("error should include usage example, got: %s", result.Output)
+		}
+	})
+
+	t.Run("missing message returns clear error", func(t *testing.T) {
+		tool := &GitTool{}
+		result := tool.Execute(map[string]interface{}{"operation": "commit"})
+		if !result.IsError {
+			t.Fatal("expected error for commit without message")
+		}
+		if !strings.Contains(result.Output, "message") {
+			t.Errorf("error should mention 'message', got: %s", result.Output)
+		}
+	})
+
+	t.Run("unknown operation returns clear error", func(t *testing.T) {
+		tool := &GitTool{}
+		result := tool.Execute(map[string]interface{}{"operation": "foobar"})
+		if !result.IsError {
+			t.Fatal("expected error for unknown operation")
+		}
+		if !strings.Contains(result.Output, "Unknown operation") {
+			t.Errorf("error should say 'Unknown operation', got: %s", result.Output)
+		}
+	})
 }
