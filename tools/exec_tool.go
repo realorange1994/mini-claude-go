@@ -293,6 +293,24 @@ func (*ExecTool) CheckPermissions(params map[string]any) PermissionResult {
 		return PermissionResultDeny("UNC path detected: commands targeting SMB/WebDAV shares are blocked")
 	}
 
+	// PowerShell-specific permission gate (Windows only).
+	// Detects dangerous patterns (Invoke-Expression, encoded commands, download
+	// cradles, COM objects) and auto-allows known read-only cmdlets.
+	if runtime.GOOS == "windows" {
+		psResult := CheckPowerShellPermission(cmd)
+		if psResult.Behavior != PermissionPassthrough {
+			return psResult
+		}
+	}
+
+	// Bash/shell security patterns (ANSI-C quoting, IFS injection, Unicode
+	// whitespace, unsafe env vars, jq/sed/xargs/fd/rg/gh/docker per-command
+	// validation).
+	bashResult := CheckBashPermission(cmd)
+	if bashResult.Behavior != PermissionPassthrough {
+		return bashResult
+	}
+
 	// Check each subcommand of a compound command independently
 	subcmds := splitCompoundCommand(cmd)
 	hasCd := false
@@ -308,6 +326,12 @@ func (*ExecTool) CheckPermissions(params map[string]any) PermissionResult {
 			hasCd = true
 		}
 	}
+
+	// Check for cd compound attacks (multiple cd, cd+git, cd+redirect)
+	if reason := checkCdCompoundAttacks(cmd, subcmds); reason != "" {
+		return PermissionResultAsk(reason, "tool")
+	}
+
 	// If the compound command contains cd, be more restrictive on redirects
 	// (path resolution would be relative to the changed directory)
 	if hasCd {
