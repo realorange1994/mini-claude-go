@@ -174,7 +174,7 @@ func (w *Writer) WriteInterrupt(interruptType string) error {
 	})
 }
 
-// Flush is a no-op kept for API compatibility; writes are already immediate.
+// [STUB] Flush is a no-op kept for API compatibility; writes are already immediate.
 func (w *Writer) Flush() error {
 	return nil
 }

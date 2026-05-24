@@ -1542,19 +1542,19 @@ func goErrorToCondition(err error) *Value {
 
 // -------- with-condition-restarts support builtins --------
 
-// builtinAssociateRestarts associates restart objects with a condition.
+// [STUB] builtinAssociateRestarts associates restart objects with a condition.
 // Called by the with-condition-restarts macro.
 func builtinAssociateRestarts(args []*Value) (*Value, error) {
-	// Stub: in a full implementation, this would link restartEntry.condition
+	// [STUB] in a full implementation, this would link restartEntry.condition
 	// in the restartStack to the given condition. For now, the restart-case
 	// mechanism already auto-associates restarts via conditionError wrapping.
 	return vnil(), nil
 }
 
-// builtinDissociateRestarts removes condition associations from restart objects.
+// [STUB] builtinDissociateRestarts removes condition associations from restart objects.
 // Called by the with-condition-restarts macro's cleanup form.
 func builtinDissociateRestarts(args []*Value) (*Value, error) {
-	// Stub: cleanup is handled by unwind-protect naturally.
+	// [STUB] cleanup is handled by unwind-protect naturally.
 	return vnil(), nil
 }
 func builtinHandlerEval(args []*Value) (*Value, error) {

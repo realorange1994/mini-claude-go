@@ -10,7 +10,7 @@ func wrapWithResourceLimits(command string, args []string, maxMemoryMB int64, ma
 	return command, args, nil
 }
 
-// startResourceMonitor is a no-op on unsupported platforms.
+// [STUB] startResourceMonitor is a no-op on unsupported platforms.
 func startResourceMonitor(cmd *exec.Cmd, maxMemoryMB int64, maxCPUMS int64) <-chan string {
 	return nil // nil channel never becomes ready in select
 }

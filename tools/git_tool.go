@@ -45,11 +45,19 @@ func (*GitTool) InputSchema() map[string]interface{} {
 			},
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "For clone: destination directory path. For init/worktree: target path. For mv: destination path. For blame: file path to blame (also supports 'files' array fallback). NOT used as working directory (use 'directory' for that)",
+				"description": "Working directory to run the git command in. Defaults to current directory.",
 			},
-			"directory": map[string]interface{}{
+			"destination": map[string]interface{}{
 				"type":        "string",
-				"description": "Working directory to run the git command in. For clone, this is where git clone runs (path is the clone destination). For other ops, this is the repo directory",
+				"description": "Destination path for clone or mv, or init directory name",
+			},
+			"worktree_path": map[string]interface{}{
+				"type":        "string",
+				"description": "Path for new worktree directory (for worktree add)",
+			},
+			"file": map[string]interface{}{
+				"type":        "string",
+				"description": "File path for blame (also supports 'files' array as fallback)",
 			},
 			"branch": map[string]interface{}{
 				"type":        "string",
@@ -197,12 +205,7 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 
 	// Handle "info" operation specially — it uses utility functions, not git CLI
 	if operation == "info" {
-		var workDir string
-		if dir, _ := params["directory"].(string); dir != "" {
-			workDir = dir
-		} else {
-			workDir, _ = params["path"].(string)
-		}
+		workDir, _ := params["path"].(string)
 		return executeGitInfo(workDir)
 	}
 
@@ -214,23 +217,9 @@ func gitExecute(ctx context.Context, params map[string]interface{}) ToolResult {
 		}
 	}
 
-	// Determine working directory:
-	// - For clone: use directory param (path is the clone destination, not workdir)
-	// - For blame: use directory param only; never use path as workdir (path is the file)
-	// - For other operations: use directory param if set, otherwise path param
+	// Determine working directory: 'path' always means working directory
 	var workDir string
-	if operation == "clone" {
-		workDir, _ = params["directory"].(string)
-	} else if operation == "blame" {
-		// For blame: only use explicit directory param. The 'path' param is the file to blame.
-		workDir, _ = params["directory"].(string)
-	} else {
-		if dir, _ := params["directory"].(string); dir != "" {
-			workDir = dir
-		} else {
-			workDir, _ = params["path"].(string)
-		}
-	}
+	workDir, _ = params["path"].(string)
 
 	// Check remote configuration for operations that need it
 	if operation == "push" || operation == "pull" || operation == "fetch" {
@@ -823,14 +812,14 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		}
 		args = []string{"clone"}
 		args = append(args, repo)
-		if path, _ := params["path"].(string); path != "" {
-			args = append(args, path)
+		if dest, _ := params["destination"].(string); dest != "" {
+			args = append(args, dest)
 		}
 
 	case "init":
 		args = []string{"init"}
-		if path, _ := params["path"].(string); path != "" {
-			args = append(args, path)
+		if dest, _ := params["destination"].(string); dest != "" {
+			args = append(args, dest)
 		}
 
 	case "add":
@@ -1007,8 +996,8 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		args = []string{"worktree", subOp}
 		switch subOp {
 		case "add":
-			if path, _ := params["path"].(string); path != "" {
-				args = append(args, path)
+			if wtp, _ := params["worktree_path"].(string); wtp != "" {
+				args = append(args, wtp)
 			}
 			if branch, _ := params["worktree_branch"].(string); branch != "" {
 				args = append(args, "-b", branch)
@@ -1038,9 +1027,9 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		if source == "" {
 			return nil, fmt.Errorf("source is required for mv")
 		}
-		dest, _ := params["path"].(string)
+		dest, _ := params["destination"].(string)
 		if dest == "" {
-			return nil, fmt.Errorf("path (destination) is required for mv")
+			return nil, fmt.Errorf("destination is required for mv")
 		}
 		args = []string{"mv"}
 		if force, _ := params["force"].(bool); force {
@@ -1116,13 +1105,13 @@ func buildGitCommand(params map[string]interface{}) ([]string, error) {
 		}
 
 	case "blame":
-		if file, _ := params["path"].(string); file != "" {
+		if file, _ := params["file"].(string); file != "" {
 			args = []string{"blame", file}
 		} else if files := getStringArray(params, "files"); len(files) > 0 {
 			args = []string{"blame"}
 			args = append(args, files...)
 		} else {
-			return nil, fmt.Errorf("path or files is required for blame (file path)")
+			return nil, fmt.Errorf("file or files is required for blame (file path)")
 		}
 
 	case "reflog":

@@ -60,7 +60,7 @@ func reopenStdin() *bufio.Reader {
 	return bufio.NewReader(f)
 }
 
-// interruptStdin is a no-op on Windows. Ctrl+C already unblocks
+// [STUB] interruptStdin is a no-op on Windows. Ctrl+C already unblocks
 // ReadString on Windows when console input mode is set correctly.
 func interruptStdin() {}
 

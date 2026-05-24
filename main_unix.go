@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-// ensureConsoleInputMode is a no-op on non-Windows platforms.
+// [STUB] ensureConsoleInputMode is a no-op on non-Windows platforms.
 func ensureConsoleInputMode() {}
 
 // sigintFlag is set to 1 when SIGINT is received.

@@ -47,7 +47,7 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 		// --- mv ---
 		{
 			name:     "mv basic",
-			params:   map[string]interface{}{"operation": "mv", "source": "old.txt", "path": "new.txt"},
+			params:   map[string]interface{}{"operation": "mv", "source": "old.txt", "destination": "new.txt"},
 			wantArgs: []string{"mv", "old.txt", "new.txt"},
 		},
 		{
@@ -57,7 +57,7 @@ func TestBuildGitCommand_NewOperations(t *testing.T) {
 		},
 		{
 			name:      "mv missing source",
-			params:    map[string]interface{}{"operation": "mv", "path": "new.txt"},
+			params:    map[string]interface{}{"operation": "mv", "destination": "new.txt"},
 			wantError: true,
 		},
 		{

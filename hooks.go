@@ -429,7 +429,7 @@ func (hm *HookManager) ExecuteGenericHooks(event HookEvent, metadata map[string]
 		}
 	}
 
-	_ = startTotal // reserved for future timeout-at-iteration-level feature
+	_ = startTotal // [STUB] reserved for future timeout-at-iteration-level feature
 	return results, firstErr
 }
 

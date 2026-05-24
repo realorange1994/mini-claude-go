@@ -8,18 +8,18 @@ import (
 	"strings"
 )
 
-// JobObject is a Windows-only type. Stub definition for Unix compilation.
+// [STUB] JobObject is a Windows-only type. Stub definition for Unix compilation.
 type JobObject struct {
 	handle any
 }
 
-// prepareResourceLimitsWindows is a no-op on Unix.
+// [STUB] prepareResourceLimitsWindows is a no-op on Unix.
 func prepareResourceLimitsWindows(rl ResourceLimits) (*JobObject, error) { return nil, nil }
 
-// assignResourceLimitsWindows is a no-op on Unix.
+// [STUB] assignResourceLimitsWindows is a no-op on Unix.
 func assignResourceLimitsWindows(cmd *exec.Cmd, job *JobObject) error { return nil }
 
-// closeResourceLimitsWindows is a no-op on Unix.
+// [STUB] closeResourceLimitsWindows is a no-op on Unix.
 func closeResourceLimitsWindows(job *JobObject) {}
 
 // UlimitPrefix returns a bash-compatible prefix that sets resource limits

@@ -1941,7 +1941,7 @@ func hashToolResultContent(result *anthropic.ToolResultBlockParam) string {
 	return fmt.Sprintf("%08x", h)
 }
 
-// summarizeOldToolResults was a pre-compaction hook that replaced old tool result
+// [STUB] summarizeOldToolResults was a pre-compaction hook that replaced old tool result
 // content with one-line summaries. This caused information loss: the LLM compaction
 // call never saw the actual tool results and generated inaccurate summaries.
 //
@@ -1949,16 +1949,16 @@ func hashToolResultContent(result *anthropic.ToolResultBlockParam) string {
 // clear tool results server-side without modifying local state. The Go implementation
 // uses CachedMicrocompactTracker + injectCacheEdits for this.
 //
-// This function is kept as a stub for future use if cache_edits is unavailable.
+// This function is kept as a [STUB] for future use if cache_edits is unavailable.
 // Currently it is NOT called from pruneToolResults.
 func summarizeOldToolResults(messages []anthropic.MessageParam, tailBudget int) []anthropic.MessageParam {
-	// NO-OP: upstream uses cache_edits instead of local content replacement.
+	// [STUB] NO-OP: upstream uses cache_edits instead of local content replacement.
 	// The cache_edits approach clears tool results server-side during the API call,
 	// preserving the local message state for correctness while reducing prompt size.
 	return messages
 }
 
-// generateToolResultSummary is unused since summarizeOldToolResults is a NO-OP.
+// [STUB] generateToolResultSummary is unused since summarizeOldToolResults is a NO-OP.
 // Kept for reference: it would create brief summaries of tool results for LLM context.
 func generateToolResultSummary(toolName string, result *anthropic.ToolResultBlockParam) string {
 	var contentText string
@@ -3197,7 +3197,7 @@ func (t *CachedMicrocompactTracker) ResetForTimeBasedMC() {
 	t.Reset()
 }
 
-// ─── Post-compact cleanup stubs matching upstream's runPostCompactCleanup() ─────
+// [STUB] Post-compact cleanup stubs matching upstream's runPostCompactCleanup()
 //
 // These functions clear module-level state that is invalidated by compaction.
 // They mirror the corresponding functions in upstream's postCompactCleanup.ts.
@@ -3205,26 +3205,26 @@ func (t *CachedMicrocompactTracker) ResetForTimeBasedMC() {
 // corresponding module-level caches yet. As features are added, these stubs
 // should be replaced with real implementations.
 
-// clearSpeculativeChecks clears bash permission speculative check cache.
+// [STUB] clearSpeculativeChecks clears bash permission speculative check cache.
 // Upstream: clearSpeculativeChecks from bashPermissions.js.
 func clearSpeculativeChecks() {
-	// No-op: Go doesn't cache speculative bash permission checks yet.
+	// [STUB] No-op: Go doesn't cache speculative bash permission checks yet.
 }
 
-// clearBetaTracingState resets beta session tracing state.
+// [STUB] clearBetaTracingState resets beta session tracing state.
 // Upstream: clearBetaTracingState from betaSessionTracing.js.
 func clearBetaTracingState() {
-	// No-op: Go doesn't have beta tracing state yet.
+	// [STUB] No-op: Go doesn't have beta tracing state yet.
 }
 
-// clearSessionMessagesCache clears the session messages cache used by
+// [STUB] clearSessionMessagesCache clears the session messages cache used by
 // transcript/CLI display. Upstream: clearSessionMessagesCache from sessionStorage.js.
 func clearSessionMessagesCache() {
-	// No-op: Go doesn't cache session messages for display yet.
+	// [STUB] No-op: Go doesn't cache session messages for display yet.
 }
 
-// sweepFileContentCache invalidates cached file snapshots for commit attribution.
+// [STUB] sweepFileContentCache invalidates cached file snapshots for commit attribution.
 // Upstream: sweepFileContentCache from attributionHooks.js (COMMIT_ATTRIBUTION feature).
 func sweepFileContentCache() {
-	// No-op: Go doesn't have commit attribution file content cache yet.
+	// [STUB] No-op: Go doesn't have commit attribution file content cache yet.
 }

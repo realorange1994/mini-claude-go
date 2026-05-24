@@ -39,7 +39,7 @@ func closeResourceLimitsWindows(job *JobObject) {
 	}
 }
 
-// wrapCommandForResourceLimits is a no-op on Windows (limits are via Job Objects).
+// [STUB] wrapCommandForResourceLimits is a no-op on Windows (limits are via Job Objects).
 func wrapCommandForResourceLimits(command string, rl ResourceLimits) string {
 	return command
 }
