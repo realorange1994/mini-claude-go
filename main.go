@@ -212,6 +212,24 @@ func main() {
 		}
 	}
 
+	// Detect if stdin is a terminal (interactive) or piped.
+	// This affects both one-shot mode (positional args) and pipe input mode
+	// inside runInteractive.
+	isInteractive := func() bool {
+		fi, err := os.Stdin.Stat()
+		if err != nil {
+			return false
+		}
+		return fi.Mode()&os.ModeCharDevice != 0
+	}()
+
+	// Non-interactive (pipe or one-shot): default to auto permission mode if ask
+	// was the default. Without this, the agent gets stuck waiting for user
+	// confirmation on tool calls, but non-interactive mode has no user to respond.
+	if !isInteractive && cfg.PermissionMode == ModeAsk && *mode == "ask" {
+		cfg.PermissionMode = ModeAuto
+	}
+
 	// One-shot mode: positional args are appended as prompt (works with --resume too)
 	args := flag.Args()
 	if len(args) > 0 {
