@@ -292,85 +292,513 @@ func checkJqSecurity(cmd string) string {
 // ===========================================================================
 // sed security (upstream sedValidation.ts + sedEditParser.ts)
 // ===========================================================================
+// Upstream uses a two-layer approach:
+//   Pattern 1 (line printing): sed -n '1p;2,5p' — STRICT allowlist for p, Np, N,Mp
+//   Pattern 2 (substitution):  sed 's/foo/bar/g' — STRICT allowlist for flags gpimIM[1-9]
+// Defense-in-depth: both patterns must also pass containsDangerousOperations denylist.
 
-var sedDenyPatterns = []*regexp.Regexp{
-	// w filename — write pattern space to file (data exfiltration)
-	regexp.MustCompile(`(?i)\bsed\b.*['"]\s*w\s+[^\s'"]+['"]`),
-	// W filename — write without newline
-	regexp.MustCompile(`(?i)\bsed\b.*['"]\s*W\s+[^\s'"]+['"]`),
-	// e flag — execute shell command in replacement
-	regexp.MustCompile(`(?i)\bsed\b.*['"][^'"]*s[^'"]*[a-zA-Z]\s*/\s*e\s*['"]`),
-	// r filename — read file into pattern space
-	regexp.MustCompile(`(?i)\bsed\b.*['"]\s*r\s+[^\s'"]+['"]`),
-	// s///ge — substitute with global + eval flag
-	regexp.MustCompile(`(?i)\bsed\b.*s/[^/]*/[^/]*/[a-zA-Z]*e[a-zA-Z]*`),
-}
-
-var sedAskPatterns = []*regexp.Regexp{
-	// Unrecognized flags (not in safe set npegiI)
-	// This is checked by validating that all flags after s/// are in the safe set
-}
-
-// safeSedFlags is the set of allowed sed flags for substitution commands.
-var safeSedFlags = map[byte]bool{
-	'n': true, 'p': true, 'e': false, // e is dangerous
-	'g': true, 'i': true, 'I': true,
-}
-
-// checkSedSecurity validates sed commands for dangerous patterns.
-// Upstream sedValidation.ts checks for write-to-file, execute, and read-file
-// commands. Go's RE2 regex doesn't support backreferences, so we use a
-// simple approach: find 'e' flag after the third delimiter of s/// commands.
-func checkSedSecurity(cmd string) string {
-	fields := strings.Fields(cmd)
-	if len(fields) == 0 || fields[0] != "sed" {
-		return ""
+// isPrintCommand checks if a single sed command is a valid print command.
+// STRICT ALLOWLIST — only these exact forms:
+//   p       (print all)
+//   Np      (print line N)
+//   N,Mp    (print lines N through M)
+// Matches upstream isPrintCommand: /^(?:\d+|\d+,\d+)?p$/
+func isPrintCommand(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return false
 	}
-
-	lower := strings.ToLower(cmd)
-
-	// Check deny patterns for w/W (write to file), r (read file), s///e (execute)
-	for _, re := range sedDenyPatterns {
-		if re.MatchString(lower) {
-			return "sed security: dangerous sed operation detected (w/r/e flag)"
+	// Allow optional digits or digit,digit range before 'p'
+	if cmd[len(cmd)-1] != 'p' {
+		return false
+	}
+	prefix := cmd[:len(cmd)-1]
+	if prefix == "" {
+		return true // just 'p'
+	}
+	// Check for N or N,M pattern (digits only, with optional comma)
+	if commaIdx := strings.Index(prefix, ","); commaIdx >= 0 {
+		before := prefix[:commaIdx]
+		after := prefix[commaIdx+1:]
+		if before == "" || after == "" {
+			return false
+		}
+		for _, c := range before {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		for _, c := range after {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	// Single line number
+	for _, c := range prefix {
+		if c < '0' || c > '9' {
+			return false
 		}
 	}
+	return true
+}
 
-	// Additional check for 'e' flag in s/// commands using a simple scan.
-	// Since RE2 doesn't support backreferences, we manually find s-expressions
-	// and check their trailing flags.
-	// We look for patterns like s/.../.../...flags where flags contain 'e'.
-	// Simplified: just check if a sed expression contains s/ followed by 'e' flag
-	// somewhere after the third / (or other common delimiter).
+// isLinePrintingCommand checks Pattern 1: sed -n with print expressions only.
+// Allows: sed -n '1p', sed -n '1,5p', sed -n '1p;2p;3p' with optional -E, -r, -z flags.
+// File arguments are ALLOWED for this pattern (read-only, no file writes).
+func isLinePrintingCommand(cmd string, expressions []string) bool {
+	// Must have at least one expression
+	if len(expressions) == 0 {
+		return false
+	}
+	// Validate flags: only allow -n, --quiet, --silent, -E, -r, -z, --posix, --regexp-extended
+	if !validateSedFlags(cmd, map[string]bool{
+		"-n": true, "--quiet": true, "--silent": true,
+		"-E": true, "--regexp-extended": true, "-r": true,
+		"-z": true, "--zero-terminated": true, "--posix": true,
+	}) {
+		return false
+	}
+	// Check -n flag is present
+	if !hasSedNFlag(cmd) {
+		return false
+	}
+	// All expressions must be print commands (semicolons allowed for separating print commands)
+	for _, expr := range expressions {
+		for _, part := range strings.Split(expr, ";") {
+			if !isPrintCommand(strings.TrimSpace(part)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isSubstitutionCommand checks Pattern 2: sed 's/pattern/replacement/flags'.
+// Strict: only / delimiter, flags only gpimIM[1-9].
+// When allowFileWrites is false (default), rejects file arguments and -i flag.
+func isSubstitutionCommand(cmd string, expressions []string, hasFileArgs bool, allowFileWrites bool) bool {
+	if !allowFileWrites && hasFileArgs {
+		return false
+	}
+	// Validate flags
+	allowedSubstFlags := map[string]bool{
+		"-E": true, "--regexp-extended": true, "-r": true, "--posix": true,
+	}
+	if allowFileWrites {
+		allowedSubstFlags["-i"] = true
+		allowedSubstFlags["--in-place"] = true
+	}
+	if !validateSedFlags(cmd, allowedSubstFlags) {
+		return false
+	}
+	// Must have exactly one expression
+	if len(expressions) != 1 {
+		return false
+	}
+	expr := strings.TrimSpace(expressions[0])
+	// Must start with 's' (substitution command)
+	if len(expr) == 0 || expr[0] != 's' {
+		return false
+	}
+	// Parse s<delim>...<delim>...<delim><flags>
+	// sed allows any character except backslash and newline as delimiter,
+	// but we only allow / for strict mode.
+	rest := expr[1:]
+	if len(rest) == 0 {
+		return false
+	}
+	delim := rest[0]
+	if delim == '\\' || delim == '\n' {
+		return false
+	}
+	// Find exactly 2 more occurrences of the delimiter (pattern + replacement + flags)
+	delimiterCount := 0
+	lastDelimIdx := -1
+	for i := 1; i < len(rest); i++ {
+		if rest[i] == '\\' {
+			i++ // skip escaped character
+			continue
+		}
+		if rest[i] == delim {
+			delimiterCount++
+			lastDelimIdx = i
+		}
+	}
+	// Must have exactly 2 delimiters (3 total with the first one)
+	if delimiterCount != 2 || lastDelimIdx < 0 {
+		return false
+	}
+	// Extract flags after the last delimiter
+	exprFlags := rest[lastDelimIdx+1:]
+	// Validate flags: only gpimIM and optionally one digit 1-9
+	validFlags := map[byte]bool{
+		'g': true, 'p': true, 'i': true, 'I': true, 'm': true, 'M': true,
+	}
+	digitSeen := false
+	for i := 0; i < len(exprFlags); i++ {
+		c := exprFlags[i]
+		if c >= '1' && c <= '9' {
+			if digitSeen {
+				return false // only one digit allowed
+			}
+			digitSeen = true
+			continue
+		}
+		if !validFlags[c] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateSedFlags checks that all flags in the command are in the allowed set.
+// Handles both single flags (-E) and combined flags (-nE).
+func validateSedFlags(cmd string, allowed map[string]bool) bool {
+	fields := strings.Fields(cmd)
 	for _, f := range fields {
+		if !strings.HasPrefix(f, "-") || f == "--" {
+			continue
+		}
+		// Long flags
+		if strings.HasPrefix(f, "--") {
+			if !allowed[f] {
+				return false
+			}
+			continue
+		}
+		// Short flags: combined like -nEr
+		if len(f) > 2 {
+			for _, c := range f[1:] {
+				single := "-" + string(c)
+				if !allowed[single] {
+					return false
+				}
+			}
+			continue
+		}
+		// Single short flag
+		if !allowed[f] {
+			return false
+		}
+	}
+	return true
+}
+
+// hasSedNFlag checks if the sed command has the -n flag (or --quiet/--silent).
+func hasSedNFlag(cmd string) bool {
+	fields := strings.Fields(cmd)
+	for _, f := range fields {
+		if f == "-n" || f == "--quiet" || f == "--silent" {
+			return true
+		}
+		// Check combined flags like -En
+		if strings.HasPrefix(f, "-") && !strings.HasPrefix(f, "--") && len(f) > 1 {
+			for _, c := range f[1:] {
+				if c == 'n' {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// hasFileArgs checks if a sed command has file arguments (not just stdin).
+// Uses simple field parsing: after removing 'sed' and flag args, remaining
+// non-flag args beyond the first (the expression) are file arguments.
+func hasFileArgs(cmd string) bool {
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 || strings.ToLower(fields[0]) != "sed" {
+		return false
+	}
+
+	argCount := 0
+	foundExpression := false
+	for _, f := range fields[1:] {
+		// Handle -e and --expression
+		if f == "-e" || f == "--expression" {
+			// Next arg is the expression, skip it
+			foundExpression = true
+			continue
+		}
+		if strings.HasPrefix(f, "-e=") || strings.HasPrefix(f, "--expression=") {
+			foundExpression = true
+			continue
+		}
 		// Skip flags
 		if strings.HasPrefix(f, "-") {
 			continue
 		}
-		// Check for e flag in s<delim> expressions
-		if len(f) > 3 && f[0] == 's' {
-			delim := f[1]
-			// Find the third occurrence of the delimiter
+		// Non-flag argument
+		if !foundExpression {
+			// First non-flag is the sed expression
+			foundExpression = true
+			continue
+		}
+		// Additional non-flag = file argument
+		argCount++
+	}
+	return argCount > 0
+}
+
+// extractSedExpressions extracts sed expressions from a command string.
+// Handles -e expressions, standalone expressions, and --expression=value format.
+// Returns empty slice if the command is not a valid sed command.
+func extractSedExpressions(cmd string) []string {
+	// Check it starts with 'sed '
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return nil
+	}
+	if strings.ToLower(fields[0]) != "sed" {
+		return nil
+	}
+
+	// Reject dangerous flag combinations: -ew, -eW, -ee, -we
+	for i, f := range fields {
+		if strings.HasPrefix(f, "-e") {
+			// Check combined -e with dangerous chars
+			if len(f) > 2 {
+				for _, c := range f[2:] {
+					if c == 'w' || c == 'W' || c == 'e' {
+						return nil // dangerous flag combo like -ew
+					}
+				}
+			}
+		}
+		// Check -w or -W followed by expression
+		if f == "-w" || f == "-W" {
+			if i+1 < len(fields) {
+				return nil // -w flag (write to file)
+			}
+		}
+	}
+
+	var expressions []string
+	foundEFlag := false
+
+	for _, f := range fields[1:] {
+		// Handle -e followed by expression
+		if f == "-e" || f == "--expression" {
+			foundEFlag = true
+			continue
+		}
+		// Handle --expression=value, -e=value
+		if strings.HasPrefix(f, "--expression=") {
+			foundEFlag = true
+			expressions = append(expressions, f[len("--expression="):])
+			continue
+		}
+		if strings.HasPrefix(f, "-e=") {
+			foundEFlag = true
+			expressions = append(expressions, f[len("-e="):])
+			continue
+		}
+		// Skip other flags
+		if strings.HasPrefix(f, "-") {
+			continue
+		}
+		// Non-flag argument
+		if !foundEFlag {
+			// First non-flag is the sed expression
+			expressions = append(expressions, f)
+			foundEFlag = true
+			continue
+		}
+		// If we already have -e, remaining non-flag args are filenames
+		break
+	}
+
+	return expressions
+}
+
+// containsDangerousOperations checks if a sed expression contains dangerous
+// operations. This is a defense-in-depth denylist that runs AFTER the allowlist.
+// Conservative: when in doubt, treat as unsafe.
+func containsDangerousOperations(expression string) bool {
+	cmd := strings.TrimSpace(expression)
+	if cmd == "" {
+		return false
+	}
+	// Reject non-ASCII characters (Unicode homoglyphs, combining chars)
+	for _, c := range cmd {
+		if c > 127 {
+			return true
+		}
+	}
+	// Reject curly braces (blocks)
+	if strings.ContainsRune(cmd, '{') || strings.ContainsRune(cmd, '}') {
+		return true
+	}
+	// Reject newlines
+	if strings.ContainsRune(cmd, '\n') {
+		return true
+	}
+	// Reject comments (# not after s command — delimiter check)
+	hashIdx := strings.Index(cmd, "#")
+	if hashIdx != -1 && !(hashIdx > 0 && cmd[hashIdx-1] == 's') {
+		return true
+	}
+	// Reject negation (! at start or after address)
+	if cmd[0] == '!' || strings.Contains(cmd, "!") {
+		return true
+	}
+	// Reject tilde in GNU step address
+	if strings.ContainsRune(cmd, '~') {
+		return true
+	}
+	// Reject comma at start (shorthand for 1,$)
+	if cmd[0] == ',' {
+		return true
+	}
+	// Reject backslash tricks: s\ (backslash delimiter), \# etc
+	if strings.HasPrefix(cmd, "s\\") {
+		return true
+	}
+	if strings.Contains(cmd, "\\#") || strings.Contains(cmd, "\\|") ||
+		strings.Contains(cmd, "\\%") || strings.Contains(cmd, "\\@") {
+		return true
+	}
+	// Reject escaped slashes followed by w/W
+	if strings.Contains(cmd, "\\/") {
+		for _, c := range "wW" {
+			if strings.ContainsRune(cmd, c) {
+				return true
+			}
+		}
+	}
+	// Reject w/W/e/E commands at start or after line numbers
+	wWEERe := sedWriteExecRe
+	if wWEERe.MatchString(cmd) {
+		return true
+	}
+	// Reject y command (transliteration — complex)
+	if cmd[0] == 'y' && len(cmd) > 1 {
+		return true
+	}
+	// Reject substitution with w or e flag
+	if cmd[0] == 's' {
+		// Find flags after the 3rd delimiter
+		rest := cmd[1:]
+		if len(rest) > 0 {
+			delim := rest[0]
 			count := 0
-			lastDelimIdx := -1
-			for i := 1; i < len(f); i++ {
-				if f[i] == delim {
+			flagsStart := -1
+			escaped := false
+			for i := 0; i < len(rest); i++ {
+				if escaped {
+					escaped = false
+					continue
+				}
+				if rest[i] == '\\' {
+					escaped = true
+					continue
+				}
+				if rest[i] == delim {
 					count++
 					if count == 3 {
-						lastDelimIdx = i
+						flagsStart = i
 						break
 					}
 				}
 			}
-			// If we found 3 delimiters, check the flags after the 3rd one for 'e'
-			if lastDelimIdx >= 0 && lastDelimIdx+1 < len(f) {
-				flags := f[lastDelimIdx+1:]
+			if flagsStart >= 0 {
+				flags := rest[flagsStart+1:]
 				for _, c := range flags {
-					if c == 'e' {
-						return "sed security: 'e' flag executes shell commands"
+					if c == 'w' || c == 'e' || c == 'W' || c == 'E' {
+						return true
 					}
 				}
 			}
+		}
+	}
+	// Reject suspicious patterns that look like write/execute
+	if sedWriteInContextRe.MatchString(cmd) {
+		return true
+	}
+	return false
+}
+
+var sedWriteExecRe = regexp.MustCompile(
+	`^(?:[wWeE]\s*\S+|\d+\s*[wWeE]|\$[ \t]+[wWeE]|` +
+		`/\w+/[IMim]*[ \t]+[wWeE]|\d+,\d+[ \t]*[wWeE]|` +
+		`/\w+/[IMim]*,/\w+/[IMim]*\s*[wWeE]|` +
+		`(?:^s.|^\d+\s*e|^\$\s*e|^/\w+/[IMim]*\s*e|^\d+,\d+\s*e|^\d+,\$\s*e))`,
+)
+
+var sedWriteInContextRe = regexp.MustCompile(`/[^/]*\s+[wWeE]`)
+
+// checkSedSecurity validates sed commands against the upstream allowlist + denylist.
+// Returns empty string if safe, otherwise a security message.
+// Pattern 1: sed -n '1p;2,5p' — line printing only
+// Pattern 2: sed 's/foo/bar/g' — substitution with safe flags only
+// Both must also pass containsDangerousOperations denylist.
+func checkSedSecurity(cmd string) string {
+	// Quick check: does this look like a sed command?
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 || strings.ToLower(fields[0]) != "sed" {
+		return ""
+	}
+
+	// Extract sed expressions
+	expressions := extractSedExpressions(cmd)
+	if len(expressions) == 0 {
+		// No expressions found — could be malformed, let denylist catch it
+	}
+
+	// Check if sed has file arguments
+	hasFiles := hasFileArgs(cmd)
+
+	// Check Pattern 1 (line printing) and Pattern 2 (substitution)
+	isPattern1 := false
+	isPattern2 := false
+
+	if len(expressions) > 0 {
+		isPattern1 = isLinePrintingCommand(cmd, expressions)
+		isPattern2 = isSubstitutionCommand(cmd, expressions, hasFiles, false)
+	}
+
+	// Pattern 2 does not allow semicolons (command separators)
+	if isPattern2 {
+		for _, expr := range expressions {
+			if strings.Contains(expr, ";") {
+				isPattern2 = false
+				break
+			}
+		}
+	}
+
+	// If neither pattern matches, check denylist for defense-in-depth
+	if !isPattern1 && !isPattern2 {
+		// Run containsDangerousOperations on all expressions
+		for _, expr := range expressions {
+			if containsDangerousOperations(expr) {
+				return "sed security: dangerous operation in sed expression"
+			}
+		}
+		// If no expressions extracted, do a basic denylist scan on the whole command
+		if len(expressions) == 0 {
+			lower := strings.ToLower(cmd)
+			if regexp.MustCompile(`(?i)\bsed\b.*\bw\s+\S+`).MatchString(lower) ||
+				regexp.MustCompile(`(?i)\bsed\b.*\bW\s+\S+`).MatchString(lower) {
+				return "sed security: write to file (w/W command)"
+			}
+			if regexp.MustCompile(`(?i)\bsed\b.*\br\s+\S+`).MatchString(lower) {
+				return "sed security: read file (r command)"
+			}
+			if regexp.MustCompile(`(?i)\bsed\b.*s/[^/]*/[^/]*/[a-zA-Z]*e`).MatchString(lower) {
+				return "sed security: execute shell command (s///e flag)"
+			}
+		}
+		return ""
+	}
+
+	// Defense-in-depth: even if allowlist matches, check denylist
+	for _, expr := range expressions {
+		if containsDangerousOperations(expr) {
+			return "sed security: dangerous operation in sed expression"
 		}
 	}
 
@@ -381,39 +809,198 @@ func checkSedSecurity(cmd string) string {
 // xargs security (upstream readOnlyValidation.ts xargs config)
 // ===========================================================================
 
-// safeXargsFlags is the set of allowed xargs flags.
-var safeXargsFlags = map[string]bool{
-	"-I": true, "-n": true, "-P": true, "-L": true,
-	"-s": true, "-E": true, "-0": true, "-t": true,
-	"-r": true, "-x": true, "-d": true,
+// safeXargsFlags is the set of allowed xargs flags with their arg types.
+// Arg types: 'none' (no argument), 'replace' (requires '{}' literal),
+// 'number' (numeric argument), 'EOF' (requires 'EOF' literal), 'char' (single char).
+// NOTE: -i and -e are explicitly excluded because of GNU optional-arg parser differential.
+var safeXargsFlags = map[string]string{
+	"-I": "replace", // requires literal '{}' as next arg
+	"-n": "number",
+	"-P": "number",
+	"-L": "number",
+	"-s": "number",
+	"-E": "EOF",    // requires literal 'EOF' as next arg
+	"-0": "none",   // null delimiter
+	"-t": "none",   // trace/verbose
+	"-r": "none",   // no run if empty
+	"-x": "none",   // exit if max procs exceeded
+	"-d": "char",   // delimiter character
+}
+
+// xargsSafeTargets is the allowlist of safe target commands for xargs.
+// These commands have been verified to have NO flags that can:
+// 1. Write to files (e.g., find's -fprint, sed's -i)
+// 2. Execute code (e.g., find's -exec, awk's system(), perl's -e)
+// 3. Make network requests
+var xargsSafeTargets = map[string]bool{
+	"echo":   true,
+	"printf": true, // /usr/bin/printf binary, not bash builtin (-v not available)
+	"wc":     true,
+	"grep":   true,
+	"head":   true,
+	"tail":   true,
+}
+
+// xargsArgTakingFlags are flags that consume arguments (not 'none' type).
+// Used to reject bundled short flags that include arg-taking flags.
+var xargsArgTakingFlags = map[string]bool{
+	"-I": true, "-n": true, "-P": true, "-L": true, "-s": true, "-E": true, "-d": true,
 }
 
 // checkXargsSecurity validates xargs commands against security patterns.
+// Returns empty string if safe, otherwise a message describing the risk.
 func checkXargsSecurity(cmd string) string {
 	lower := strings.ToLower(cmd)
 	if !strings.Contains(lower, "xargs ") && !strings.HasSuffix(lower, "xargs") {
 		return ""
 	}
-	// Check for dangerous flags: lowercase -i and -e (GNU optional-arg parser differential)
-	if regexp.MustCompile(`(?i)\bxargs\b`).MatchString(cmd) {
-		// Check for -i without value (dangerous in GNU xargs)
-		fields := strings.Fields(cmd)
-		for i, f := range fields {
-			if strings.ToLower(f) == "xargs" {
-				// Check remaining args for dangerous patterns
-				for _, arg := range fields[i+1:] {
-					if arg == "-i" {
-						return "xargs security: -i flag has GNU optional-arg parser differential"
-					}
-					if arg == "-e" && !strings.HasPrefix(fields[bashMin(i+2, len(fields)-1)], "") {
-						// -e without value is dangerous
-						return "xargs security: -e flag has GNU optional-arg parser differential"
-					}
+
+	fields := strings.Fields(cmd)
+	xargsIdx := -1
+	for i, f := range fields {
+		if strings.ToLower(f) == "xargs" {
+			xargsIdx = i
+			break
+		}
+	}
+	if xargsIdx == -1 {
+		return ""
+	}
+
+	args := fields[xargsIdx+1:]
+
+	// Find the target command — first non-xargs-flag token.
+	// Only validate xargs flags BEFORE the target command.
+	// Once we find the target, flags after it belong to the target, not xargs.
+	targetIdx := -1
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--" {
+			// End of xargs flags; target is right after --
+			targetIdx = i + 1
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			// Non-flag token = target command
+			targetIdx = i
+			break
+		}
+		// It's a xargs flag — check arg type to see if it consumes the next token
+		argType, ok := safeXargsFlags[arg]
+		if ok && argType != "none" {
+			i += 2 // skip flag and its argument
+			continue
+		}
+		// Bundled flags like -rt — no arg consumption for 'none' types
+		if strings.HasPrefix(arg, "-") && len(arg) > 2 && arg[1] != '-' {
+			i++
+			continue
+		}
+		// Long flags
+		if strings.HasPrefix(arg, "--") && strings.Contains(arg, "=") {
+			i++ // --flag=value doesn't consume next token
+			continue
+		}
+		i++
+	}
+
+	// Separate xargs flags (before target) from target command + target flags
+	xargsFlags := args
+	if targetIdx >= 0 {
+		xargsFlags = args[:targetIdx]
+	}
+
+	// Step 1: Check for dangerous flags (-i, -e with GNU optional-arg parser differential)
+	for _, arg := range xargsFlags {
+		if arg == "-i" {
+			return "xargs security: -i flag has GNU optional-arg parser differential — use -I {} instead"
+		}
+		if arg == "-e" {
+			return "xargs security: -e flag has GNU optional-arg parser differential — use -E EOF instead"
+		}
+		// Check bundled flags like -it, -eX
+		if strings.HasPrefix(arg, "-") && len(arg) > 2 && arg[1] != '-' && arg[1] != '=' {
+			for _, c := range arg[1:] {
+				if c == 'i' {
+					return "xargs security: bundled -i flag has GNU optional-arg parser differential"
 				}
-				break
+				if c == 'e' {
+					return "xargs security: bundled -e flag has GNU optional-arg parser differential"
+				}
 			}
 		}
 	}
+
+	// Step 2: Reject bundled flags containing arg-taking flags.
+	for _, arg := range xargsFlags {
+		if strings.HasPrefix(arg, "-") && len(arg) > 2 && arg[1] != '-' && arg[1] != '=' {
+			hasArgFlag := false
+			allNone := true
+			for _, c := range arg[1:] {
+				shortFlag := "-" + string(c)
+				if safeXargsFlags[shortFlag] == "" {
+					return "xargs security: unrecognized flag " + shortFlag
+				}
+				if xargsArgTakingFlags[shortFlag] {
+					hasArgFlag = true
+				}
+				if safeXargsFlags[shortFlag] != "none" {
+					allNone = false
+				}
+			}
+			if hasArgFlag && !allNone {
+				return "xargs security: bundled flags with arg-taking flags must be separated"
+			}
+		}
+	}
+
+	// Step 3: Validate that all xargs flags are in the safe allowlist
+	for _, arg := range xargsFlags {
+		if !strings.HasPrefix(arg, "-") {
+			continue // skip consumed arguments (like {} for -I)
+		}
+		if arg == "--" {
+			continue
+		}
+		// Bundled short flags (already validated in step 2)
+		if strings.HasPrefix(arg, "-") && len(arg) > 2 && arg[1] != '-' {
+			continue
+		}
+		// Long flags
+		if strings.HasPrefix(arg, "--") {
+			safeLongFlags := map[string]bool{
+				"--null": true, "--delimiter": true, "--max-args": true,
+				"--max-procs": true, "--max-lines": true, "--max-chars": true,
+				"--eof": true, "--verbose": true, "--no-run-if-empty": true,
+				"--exit": true,
+			}
+			flagPart := arg
+			if strings.Contains(arg, "=") {
+				flagPart = arg[:strings.Index(arg, "=")]
+			}
+			if !safeLongFlags[flagPart] {
+				return "xargs security: unrecognized long flag: " + flagPart
+			}
+			continue
+		}
+		// Single short flag
+		if _, ok := safeXargsFlags[arg]; !ok {
+			return "xargs security: unrecognized flag: " + arg
+		}
+	}
+
+	// Step 4: Validate target command is in safe allowlist
+	if targetIdx >= 0 && targetIdx < len(args) {
+		targetCmd := args[targetIdx]
+		if strings.ToLower(targetCmd) == "--" && targetIdx+1 < len(args) {
+			targetCmd = args[targetIdx+1]
+		}
+		if !xargsSafeTargets[strings.ToLower(targetCmd)] {
+			return "xargs security: target command '" + targetCmd + "' is not in safe allowlist"
+		}
+	}
+
 	return ""
 }
 
@@ -888,6 +1475,180 @@ func isReadOnlyCommandWithFlags(cmd string, inner string) bool {
 }
 
 // ===========================================================================
+// QUOTED_NEWLINE security check (upstream bashSecurity.ts #23 validateQuotedNewline)
+// ===========================================================================
+// Detects: a quoted newline (inside single or double quotes) immediately followed
+// by a line starting with '#'. Attack vector: parser differential — bash sees a
+// single multi-line command, but line-based permission checkers strip lines
+// beginning with '#' as comments. Malicious args can hide on #-prefixed lines.
+// Severity: ASK
+
+// validateQuotedNewline checks for quoted newline followed by #-prefixed line.
+// Returns a message if found, empty string otherwise.
+func validateQuotedNewline(cmd string) string {
+	// Fast-path: must contain both newline and '#' characters
+	if !strings.Contains(cmd, "\n") || !strings.Contains(cmd, "#") {
+		return ""
+	}
+
+	inSingleQuote := false
+	inDoubleQuote := false
+	inQuote := false
+	i := 0
+
+	for i < len(cmd) {
+		c := cmd[i]
+
+		switch {
+		case c == '\\' && !inSingleQuote:
+			// Backslash escapes in double quotes and unquoted context
+			i += 2
+			continue
+		case c == '\'' && !inDoubleQuote:
+			inSingleQuote = !inSingleQuote
+			inQuote = inSingleQuote || inDoubleQuote
+			i++
+			continue
+		case c == '"' && !inSingleQuote:
+			inDoubleQuote = !inDoubleQuote
+			inQuote = inSingleQuote || inDoubleQuote
+			i++
+			continue
+		case c == '\n' && inQuote:
+			// We're inside a quoted region and hit a newline.
+			// Find the next line and check if it starts with '#'.
+			nextLineStart := i + 1
+			for nextLineStart < len(cmd) && (cmd[nextLineStart] == ' ' || cmd[nextLineStart] == '\t') {
+				nextLineStart++
+			}
+			if nextLineStart < len(cmd) && cmd[nextLineStart] == '#' {
+				return "Bash security: quoted newline followed by #-prefixed line can hide arguments from line-based permission checks"
+			}
+		}
+		i++
+	}
+	return ""
+}
+
+// ===========================================================================
+// PROC_ENVIRON_ACCESS security check (upstream bashSecurity.ts #13 validateProcEnvironAccess)
+// ===========================================================================
+// Detects: attempts to access /proc/*/environ files, which expose sensitive
+// environment variables (API keys, secrets, credentials) of any process.
+// Severity: ASK
+
+var procEnvironRe = regexp.MustCompile(`/proc/[^/]+/environ`)
+
+// validateProcEnvironAccess checks for /proc/*/environ access.
+func validateProcEnvironAccess(cmd string) string {
+	if procEnvironRe.MatchString(cmd) {
+		return "Bash security: command accesses /proc/*/environ which could expose sensitive environment variables"
+	}
+	return ""
+}
+
+// ===========================================================================
+// GIT_COMMIT_SUBSTITUTION security check (upstream bashSecurity.ts #12 validateGitCommit)
+// ===========================================================================
+// Detects: command injection patterns within git commit -m "..." messages.
+// Specifically: $(), backticks, or ${} inside double-quoted commit messages.
+// Severity: ASK
+
+// validateGitCommit checks for command substitution in git commit messages.
+func validateGitCommit(cmd string) string {
+	lower := strings.ToLower(cmd)
+	// Bail early if it doesn't look like git commit
+	if !strings.Contains(lower, "git") || !strings.Contains(lower, "commit") || !strings.Contains(lower, "-m") {
+		return ""
+	}
+
+	// Bail if input contains backslashes — let full validator handle it
+	if strings.Contains(cmd, "\\") {
+		return ""
+	}
+
+	// Extract the commit message content without using backreferences
+	// (Go's regexp doesn't support \1). We manually parse the -m argument.
+	quoteChar := byte(0)
+	msgContent := strings.Builder{}
+	remainder := strings.Builder{}
+	foundMsg := false
+
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+
+		if !foundMsg {
+			// Look for -m followed by quote
+			if c == '-' && i+1 < len(cmd) && cmd[i+1] == 'm' {
+				// Check it's -m (not -message, -m=x etc.)
+				afterM := i + 2
+				if afterM < len(cmd) && cmd[afterM] == '=' {
+					// -m="message" form
+					afterEq := afterM + 1
+					if afterEq < len(cmd) && (cmd[afterEq] == '"' || cmd[afterEq] == '\'') {
+						quoteChar = cmd[afterEq]
+						i = afterEq + 1
+						foundMsg = true
+						continue
+					}
+				} else if afterM < len(cmd) && cmd[afterM] == ' ' {
+					// -m "message" form — skip spaces to find quote
+					j := afterM + 1
+					for j < len(cmd) && cmd[j] == ' ' {
+						j++
+					}
+					if j < len(cmd) && (cmd[j] == '"' || cmd[j] == '\'') {
+						quoteChar = cmd[j]
+						i = j + 1
+						foundMsg = true
+						continue
+					}
+				}
+			}
+			continue
+		}
+
+		// We're reading the message content
+		if c == quoteChar {
+			// End of quoted message
+			// Everything after this is remainder
+			if i+1 < len(cmd) {
+				remainder.WriteString(cmd[i+1:])
+			}
+			break
+		}
+		msgContent.WriteByte(c)
+	}
+
+	if !foundMsg {
+		return ""
+	}
+
+	msg := msgContent.String()
+
+	// Check for command substitution in the message
+	if strings.Contains(msg, "$(") || strings.Contains(msg, "`") || strings.Contains(msg, "${") {
+		return "Bash security: command substitution in git commit message requires approval"
+	}
+
+	// Check for shell operator chaining in the remainder
+	rem := strings.TrimSpace(remainder.String())
+	if rem != "" {
+		for _, c := range rem {
+			switch c {
+			case ';', '|', '&', '(', ')':
+				return "Bash security: shell operator chaining after git commit -m requires approval"
+			}
+		}
+		if strings.Contains(rem, "$(") || strings.Contains(rem, "${") {
+			return "Bash security: command substitution after git commit -m requires approval"
+		}
+	}
+
+	return ""
+}
+
+// ===========================================================================
 // CheckBashPermission — main entry point for bash/shell permission checks
 // ===========================================================================
 
@@ -915,6 +1676,24 @@ func CheckBashPermission(cmd string) PermissionResult {
 	// Step 2: Unsafe env var prefixes
 	if unsafeEnv := checkUnsafeEnvPrefixes(lower); unsafeEnv != "" {
 		return PermissionResultAsk("Unsafe environment variable: "+unsafeEnv, "tool")
+	}
+
+	// Step 2b: QUOTED_NEWLINE — parser differential attack where a quoted
+	// newline followed by a #-prefixed line hides args from line-based checks.
+	if msg := validateQuotedNewline(cmd); msg != "" {
+		return PermissionResultAsk(msg, "tool")
+	}
+
+	// Step 2c: PROC_ENVIRON_ACCESS — accessing /proc/*/environ can leak
+	// sensitive environment variables (API keys, credentials) of any process.
+	if msg := validateProcEnvironAccess(cmd); msg != "" {
+		return PermissionResultAsk(msg, "tool")
+	}
+
+	// Step 2d: GIT_COMMIT_SUBSTITUTION — command substitution in git commit
+	// messages can execute arbitrary commands disguised as commit text.
+	if msg := validateGitCommit(cmd); msg != "" {
+		return PermissionResultAsk(msg, "tool")
 	}
 
 	// Step 3: Read-only command allowlist (before security checks)

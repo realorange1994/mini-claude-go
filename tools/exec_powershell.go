@@ -13,79 +13,216 @@ type psSecurityPattern struct {
 }
 
 // psSecurityPatterns is the ordered list of security checks.
-// Matches upstream powershellSecurity.ts checks (24 sequential checks reduced
+// Matches upstream powershellSecurity.ts checks (26 AST-based checks reduced
 // to the most impactful regex-based patterns for Go).
 var psSecurityPatterns = []psSecurityPattern{
 	// --- DENY patterns (hard blocks) ---
+
+	// Upstream #1: checkInvokeExpression — Invoke-Expression / iex
 	{
-		name: "Invoke-Expression / iex",
-		re:   regexp.MustCompile(`(?i)\b(?:invoke-expression|iex)\b`),
+		name:     "Invoke-Expression / iex",
+		re:       regexp.MustCompile(`(?i)\b(?:invoke-expression|iex)\b`),
 		severity: "deny",
 	},
+	// Upstream #3: checkEncodedCommand — -EncodedCommand/-Enc
 	{
-		name: "EncodedCommand",
-		re:   regexp.MustCompile(`(?i)-encodedcommand\s|-enc\s`),
+		name:     "EncodedCommand",
+		re:       regexp.MustCompile(`(?i)(?:-encodedcommand\s|-enc\s|/encodedcommand\s)`),
 		severity: "deny",
 	},
+	// Upstream #5: checkDownloadCradles — piped download+execute
 	{
-		name: "Download cradle (download|pipe|execute)",
-		re:   regexp.MustCompile(`(?i)(?:invoke-webrequest|invoke-restmethod|iwr|irm)\b.*\|.*\b(?:invoke-expression|iex)\b`),
+		name:     "Download cradle (download|pipe|execute)",
+		re:       regexp.MustCompile(`(?i)(?:invoke-webrequest|invoke-restmethod|iwr|irm)\b.*\|.*\b(?:invoke-expression|iex)\b`),
 		severity: "deny",
 	},
+	// Upstream #5 (cross-statement): split download cradle ($r = IWR ...; IEX $r.Content)
 	{
-		name: "Script block execution",
-		re:   regexp.MustCompile(`&\s*\{`),
+		name:     "Download cradle (cross-statement)",
+		re:       regexp.MustCompile(`(?i)\$\w+\s*=\s*(?:invoke-webrequest|invoke-restmethod|iwr|irm)\b.*;\s*\b(?:invoke-expression|iex)\b`),
 		severity: "deny",
 	},
+	// Upstream #6: checkDownloadUtilities — certutil, bitsadmin, Start-BitsTransfer
 	{
-		name: "COM object creation",
-		re:   regexp.MustCompile(`(?i)new-object\s+-comobject\b|createobject\(`),
+		name:     "Download utility (certutil/bitsadmin/Start-BitsTransfer)",
+		re:       regexp.MustCompile(`(?i)(?:certutil\s+-urlcache|bitsadmin\s+/transfer|start-bitstransfer)\b`),
 		severity: "deny",
 	},
+	// Upstream #4: checkPwshCommandOrFile — PowerShell re-invocation
 	{
-		name: "Bypass execution policy",
-		re:   regexp.MustCompile(`(?i)-executionpolicy\s+bypass\b|-ep\s+bypass\b`),
+		name:     "PowerShell re-invocation (pwsh/powershell.exe)",
+		re:       regexp.MustCompile(`(?i)\b(?:pwsh|powershell)(?:\.exe)?\b(?:\s+-|.*-command|.*-file|.*-encoded)`),
 		severity: "deny",
 	},
+	// Script block execution (& { ... })
 	{
-		name: "Base64 decode execution",
-		re:   regexp.MustCompile(`(?i)\[convert\]::frombase64string`),
+		name:     "Script block execution",
+		re:       regexp.MustCompile(`&\s*\{`),
 		severity: "deny",
 	},
+	// Upstream #8: checkComObject — COM object creation
+	{
+		name:     "COM object creation",
+		re:       regexp.MustCompile(`(?i)new-object\s+-comobject\b|createobject\(`),
+		severity: "deny",
+	},
+	// Bypass execution policy
+	{
+		name:     "Bypass execution policy",
+		re:       regexp.MustCompile(`(?i)-executionpolicy\s+bypass\b|-ep\s+bypass\b`),
+		severity: "deny",
+	},
+	// Base64 decode execution
+	{
+		name:     "Base64 decode execution",
+		re:       regexp.MustCompile(`(?i)\[convert\]::frombase64string`),
+		severity: "deny",
+	},
+	// Upstream #19: checkInvokeItem — Invoke-Item / ii
+	{
+		name:     "Invoke-Item / ii",
+		re:       regexp.MustCompile(`(?i)\b(?:invoke-item|ii)\b`),
+		severity: "deny",
+	},
+	// Upstream #20: checkScheduledTask — scheduled task persistence
+	{
+		name:     "Scheduled task creation",
+		re:       regexp.MustCompile(`(?i)(?:register-scheduledtask|schtasks\s+/create)\b`),
+		severity: "deny",
+	},
+	// Upstream #24: checkWmiProcessSpawn — WMI/CIM process spawn
+	{
+		name:     "WMI/CIM process spawn",
+		re:       regexp.MustCompile(`(?i)\b(?:invoke-wmimethod|invoke-cimmethod)\b`),
+		severity: "deny",
+	},
+
 	// --- ASK patterns (user approval required) ---
+
+	// Upstream #5 (variant): download with file output
 	{
-		name: "Download with file output",
-		re:   regexp.MustCompile(`(?i)(?:invoke-webrequest|iwr|irm)\b.*-outfile\b`),
+		name:     "Download with file output",
+		re:       regexp.MustCompile(`(?i)(?:invoke-webrequest|iwr|irm)\b.*-outfile\b`),
 		severity: "ask",
 	},
+	// Upstream #9: checkDangerousFilePathExecution — Invoke-Command -FilePath, Start-Job -FilePath
 	{
-		name: "Reflection / type invocation",
-		re:   regexp.MustCompile(`\[.*\]::`),
+		name:     "Dangerous file path execution",
+		re:       regexp.MustCompile(`(?i)\b(?:invoke-command|start-job)\b.*-filepath\b`),
 		severity: "ask",
 	},
+	// Upstream #11: checkStartProcess — Start-Process -Verb RunAs
 	{
-		name: "Add-Type (compile and load .NET code)",
-		re:   regexp.MustCompile(`(?i)\badd-type\b`),
+		name:     "Start-Process RunAs",
+		re:       regexp.MustCompile(`(?i)\bstart-process\b.*-verb\s+(?:runas|runas:)`),
 		severity: "ask",
 	},
+	// Upstream #11 (variant): Start-Process targeting PowerShell
 	{
-		name: "Hidden window",
-		re:   regexp.MustCompile(`(?i)-windowstyle\s+hidden\b|-w\s+hidden\b`),
+		name:     "Start-Process targeting PowerShell",
+		re:       regexp.MustCompile(`(?i)\bstart-process\b.*(?:pwsh|powershell)`),
 		severity: "ask",
 	},
+	// Upstream #12: checkScriptBlockInjection — dangerous script block cmdlets
 	{
-		name: "Subexpression",
-		re:   regexp.MustCompile(`\$\(`),
+		name:     "Script block injection",
+		re:       regexp.MustCompile(`(?i)\b(?:invoke-command|start-job|register-wmievent|register-cimindicationquery)\b.*-scriptblock\b`),
 		severity: "ask",
 	},
+	// Upstream #17: Reflection / type invocation
 	{
-		name: "Environment variable access",
-		re:   regexp.MustCompile(`\$env:`),
+		name:     "Reflection / type invocation",
+		re:       regexp.MustCompile(`\[.*\]::`),
 		severity: "ask",
 	},
+	// Upstream #7: Add-Type (compile and load .NET code)
 	{
-		name: "Home directory variable",
-		re:   regexp.MustCompile(`\$home\\|\$home/`),
+		name:     "Add-Type (compile and load .NET code)",
+		re:       regexp.MustCompile(`(?i)\badd-type\b`),
+		severity: "ask",
+	},
+	// Upstream #10: checkForEachMemberName — ForEach-Object -MemberName
+	{
+		name:     "ForEach-Object -MemberName (method invocation)",
+		re:       regexp.MustCompile(`(?i)\b(?:foreach-object|%)\b.*-membername\b`),
+		severity: "ask",
+	},
+	// Upstream #21: checkEnvVarManipulation — env var write operations
+	{
+		name:     "Environment variable manipulation",
+		re:       regexp.MustCompile(`(?i)\b(?:set-item|remove-item|clear-item)\s+(?:env:|environment::)`),
+		severity: "ask",
+	},
+	// Upstream #22: checkModuleLoading — Import-Module, Install-Module, Save-Module
+	{
+		name:     "Module loading/installation",
+		re:       regexp.MustCompile(`(?i)\b(?:import-module|ipmo|install-module|save-module)\b`),
+		severity: "ask",
+	},
+	// Upstream #23: checkRuntimeStateManipulation — Set-Alias, Set-Variable, New-Alias, New-Variable
+	{
+		name:     "Runtime state manipulation",
+		re:       regexp.MustCompile(`(?i)\b(?:set-alias|new-alias|set-variable|sv|new-variable|nv)\b`),
+		severity: "ask",
+	},
+	// Hidden window
+	{
+		name:     "Hidden window",
+		re:       regexp.MustCompile(`(?i)-windowstyle\s+hidden\b|-w\s+hidden\b`),
+		severity: "ask",
+	},
+	// Upstream #13: Subexpression
+	{
+		name:     "Subexpression",
+		re:       regexp.MustCompile(`\$\(`),
+		severity: "ask",
+	},
+	// Upstream #14: Expandable strings / environment variable access
+	{
+		name:     "Environment variable access",
+		re:       regexp.MustCompile(`\$env:`),
+		severity: "ask",
+	},
+	// Home directory variable
+	{
+		name:     "Home directory variable",
+		re:       regexp.MustCompile(`\$home\\|\$home/`),
+		severity: "ask",
+	},
+	// Upstream #15: checkSplatting — splatting (@var)
+	{
+		name:     "Splatting (@variable)",
+		re:       regexp.MustCompile(`@\w+`),
+		severity: "ask",
+	},
+	// Upstream #16: checkStopParsing — stop-parsing token (--)
+	{
+		name:     "Stop-parsing token (--%)",
+		re:       regexp.MustCompile(`--%`),
+		severity: "ask",
+	},
+	// Upstream pathValidation: UNC path blocking
+	{
+		name:     "UNC path access",
+		re:       regexp.MustCompile(`(?:\\\\|//)\S+`),
+		severity: "ask",
+	},
+	// Upstream readOnlyValidation: Provider path detection
+	{
+		name:     "Non-filesystem provider path",
+		re:       regexp.MustCompile(`(?i)\b(?:env:|HKLM:|HKCU:|function:|alias:|variable:|cert:|wsman:)`),
+		severity: "ask",
+	},
+	// Upstream #25: using statements
+	{
+		name:     "Using statement",
+		re:       regexp.MustCompile(`(?i)\busing\s+(?:namespace|module|assembly)\b`),
+		severity: "ask",
+	},
+	// Upstream #26: #Requires directive
+	{
+		name:     "#Requires directive",
+		re:       regexp.MustCompile(`(?i)#requires\s`),
 		severity: "ask",
 	},
 }
@@ -152,9 +289,28 @@ var psReadOnlyAllowlist = map[string][]string{
 	"get-module":           {"-Name", "-ListAvailable", "-FullyQualifiedName"},
 	"get-help":             {"-Name", "-Examples", "-Full", "-Detailed", "-Online"},
 	"hostname":             {},
+	// Additional cmdlets from upstream readOnlyValidation.ts CMDLET_ALLOWLIST
+	"get-netipconfiguration": {},
+	"get-netadapter":         {},
+	"get-netroute":           {},
+	"test-connection":        {"-ComputerName", "-Count", "-Quiet", "-Source", "-Destination"},
+	"get-eventlog":           {"-LogName", "-Newest", "-EntryType", "-Source", "-Message", "-InstanceId", "-After", "-Before"},
+	"get-wmiobject":          {"-Class", "-Query", "-Namespace", "-ComputerName", "-Filter", "-Property"},
+	"get-ciminstance":        {"-ClassName", "-Query", "-Namespace", "-ComputerName", "-Filter", "-Property"},
+	"get-culture":            {},
+	"get-uiculture":          {},
+	"get-timezone":           {},
+	"get-winssystemlocale":   {},
+	"get-pssession":          {"-Name", "-Id", "-InstanceId", "-ComputerName", "-ConfigurationName"},
+	"get-command":            {"-Name", "-CommandType", "-Module", "-Syntax", "-Verb", "-Noun"},
+	"get-history":            {"-Id", "-Count"},
+	"get-alias":              {"-Name", "-Definition", "-Exclude"},
+	"get-variable":           {"-Name", "-ValueOnly", "-Scope", "-Include", "-Exclude"},
+	"get-cred":               {},
 }
 
 // psCmdletAliases maps common PowerShell aliases to their canonical cmdlet names.
+// Sourced from upstream powershellPermissions.ts COMMON_ALIASES.
 var psCmdletAliases = map[string]string{
 	"ls":   "get-childitem",
 	"dir":  "get-childitem",
@@ -177,6 +333,20 @@ var psCmdletAliases = map[string]string{
 	"write":  "write-output",
 	"cls":    "clear-host",
 	"clear":  "clear-host",
+	// Additional aliases from upstream COMMON_ALIASES
+	"ii":     "invoke-item",
+	"saps":   "start-process",
+	"start":  "start-process",
+	"ndr":    "new-psdrive",
+	"mount":  "new-psdrive",
+	"sal":    "set-alias",
+	"sv":     "set-variable",
+	"nv":     "new-variable",
+	"ipmo":   "import-module",
+	"iwmi":   "invoke-wmimethod",
+	"icm":    "invoke-command",
+	"sajb":   "start-job",
+	"rbp":    "remove-psbreakpoint",
 	// Destructive aliases — map to Remove-Item so security patterns catch them.
 	// Without these, `rm ./x` bypasses the Remove-Item deny patterns.
 	"del":   "remove-item",
@@ -185,6 +355,9 @@ var psCmdletAliases = map[string]string{
 	"erase": "remove-item",
 	"rd":    "remove-item",
 	"rmdir": "remove-item",
+	"rp":    "remove-itemproperty",
+	"rni":   "rename-item",
+	"rmp":   "remove-itemproperty",
 }
 
 // IsPowerShellCommand detects if a command string appears to be PowerShell syntax.
@@ -407,8 +580,165 @@ var psReadOnlyCmdletNames = func() map[string]bool {
 	return m
 }()
 
+// ===========================================================================
+// Collect-then-reduce decision model (upstream powershellPermissions.ts)
+// ===========================================================================
+// Upstream uses a decision array and reduces with deny > ask > allow precedence.
+// This structurally prevents ask-before-deny bugs where an early ask masks a
+// later deny.
+
+// psDecision represents a single permission decision with its behavior and reason.
+type psDecision struct {
+	behavior string // "deny", "ask", "allow"
+	message  string
+}
+
+// psDecisionCollector collects security decisions and reduces them with
+// deny > ask > allow precedence (upstream collect-then-reduce model).
+type psDecisionCollector struct {
+	denials []psDecision
+	asks    []psDecision
+	allows  []psDecision
+}
+
+func (c *psDecisionCollector) deny(msg string) {
+	c.denials = append(c.denials, psDecision{behavior: "deny", message: msg})
+}
+func (c *psDecisionCollector) ask(msg string) {
+	c.asks = append(c.asks, psDecision{behavior: "ask", message: msg})
+}
+func (c *psDecisionCollector) allow(msg string) {
+	c.allows = append(c.allows, psDecision{behavior: "allow", message: msg})
+}
+
+// reduce returns the first decision in deny > ask > allow precedence.
+// Returns nil if no decision was made (caller should use passthrough).
+func (c *psDecisionCollector) reduce() *PermissionResult {
+	if len(c.denials) > 0 {
+		msgs := make([]string, 0, len(c.denials))
+		for _, d := range c.denials {
+			msgs = append(msgs, d.message)
+		}
+		r := PermissionResultDeny(strings.Join(msgs, "; "))
+		return &r
+	}
+	if len(c.asks) > 0 {
+		msgs := make([]string, 0, len(c.asks))
+		for _, d := range c.asks {
+			msgs = append(msgs, d.message)
+		}
+		r := PermissionResultAsk(strings.Join(msgs, "; "), "tool")
+		return &r
+	}
+	if len(c.allows) > 0 {
+		r := PermissionResultAllow()
+		return &r
+	}
+	return nil
+}
+
+// ===========================================================================
+// Fragment-based deny scanning for parse-failed commands (upstream step 8-10)
+// ===========================================================================
+
+// psSplitSeparators splits a command on common separators for fragment-based
+// fallback when AST parsing fails. Matches upstream separator pattern.
+var psSplitSeparators = regexp.MustCompile(`[;|&]+`)
+
+// psNormalizeFragment normalizes a command fragment for deny rule matching.
+// Strips assignment prefixes ($x = $y = ...) and invocation prefixes (&, .).
+// Matches upstream normalization logic.
+var psAssignmentPrefixRe = regexp.MustCompile(`^\$[\w:]+\s*(?:[+\-*/%]|\?\?)?\s*=\s*`)
+
+func psNormalizeFragment(fragment string) string {
+	fragment = strings.TrimSpace(fragment)
+
+	// Strip nested assignment prefixes (e.g., "$x = $y = iex" -> "iex")
+	for {
+		if !psAssignmentPrefixRe.MatchString(fragment) {
+			break
+		}
+		fragment = psAssignmentPrefixRe.ReplaceAllString(fragment, "")
+		fragment = strings.TrimSpace(fragment)
+	}
+
+	// Strip invocation/dot-source prefixes
+	if strings.HasPrefix(fragment, "& ") {
+		fragment = strings.TrimSpace(fragment[2:])
+	}
+	if strings.HasPrefix(fragment, ". ") {
+		fragment = strings.TrimSpace(fragment[2:])
+	}
+
+	// Strip surrounding quotes from first token
+	if len(fragment) > 2 {
+		if (fragment[0] == '"' && fragment[len(fragment)-1] == '"') ||
+			(fragment[0] == '\'' && fragment[len(fragment)-1] == '\'') {
+			fragment = fragment[1 : len(fragment)-1]
+		}
+	}
+
+	return strings.ToLower(fragment)
+}
+
+// scanFragmentForDenial checks if a normalized fragment matches any deny rules.
+// Returns a denial message if found, empty string if safe.
+func scanFragmentForDenial(fragment string) string {
+	// Check if fragment matches invoke-expression/iex
+	if strings.Contains(fragment, "invoke-expression") || strings.Contains(fragment, "iex") {
+		return "PowerShell security: Invoke-Expression detected in command fragment"
+	}
+	// Check for encoded command
+	if strings.Contains(fragment, "-encodedcommand") || strings.Contains(fragment, "-enc ") {
+		return "PowerShell security: EncodedCommand detected"
+	}
+	// Check for download cradle patterns
+	if strings.Contains(fragment, "invoke-webrequest") || strings.Contains(fragment, "iwr") {
+		// Cross-reference with other fragments checked in caller
+	}
+	return ""
+}
+
+// scanFragmentsForDenial scans command fragments for denial patterns.
+// Used when AST parsing fails and we need to do fragment-based fallback.
+func scanFragmentsForDenial(fragments []string) string {
+	// First pass: check each fragment for individual deny patterns
+	for _, frag := range fragments {
+		if msg := scanFragmentForDenial(frag); msg != "" {
+			return msg
+		}
+	}
+
+	// Second pass: check for cross-statement patterns
+	// (e.g., one fragment has downloader, another has IEX)
+	hasDownloader := false
+	for _, frag := range fragments {
+		fragLower := strings.ToLower(frag)
+		if strings.Contains(fragLower, "invoke-webrequest") ||
+			strings.Contains(fragLower, "invoke-restmethod") ||
+			strings.Contains(fragLower, "iwr") ||
+			strings.Contains(fragLower, "irm") ||
+			strings.Contains(fragLower, "start-bitstransfer") {
+			hasDownloader = true
+			break
+		}
+	}
+	if hasDownloader {
+		for _, frag := range fragments {
+			fragLower := strings.ToLower(frag)
+			if strings.Contains(fragLower, "invoke-expression") ||
+				strings.Contains(fragLower, "iex") {
+				return "PowerShell security: cross-statement download cradle detected"
+			}
+		}
+	}
+
+	return ""
+}
+
 // CheckPowerShellPermission evaluates a PowerShell command against security patterns
-// and the read-only allowlist. Returns:
+// and the read-only allowlist. Uses collect-then-reduce decision model matching
+// upstream powershellPermissions.ts. Returns:
 //   - PermissionResultDeny for hard-blocked patterns (Invoke-Expression, encoded commands, etc.)
 //   - PermissionResultAsk for suspicious but not outright-blocked patterns
 //   - PermissionResultAllow for verified read-only cmdlets
@@ -421,49 +751,98 @@ func CheckPowerShellPermission(cmd string) PermissionResult {
 		return PermissionResultPassthrough()
 	}
 
-	// Step 1: Check security patterns — deny
+	// Collect-then-reduce decision model (upstream powershellPermissions.ts)
+	// All decisions are collected and reduced with deny > ask > allow precedence.
+	// This structurally prevents ask-before-deny bugs.
+	collector := &psDecisionCollector{}
+
+	// Step 1: Check security patterns (deny + ask collected separately)
 	denyMsgs, askMsgs := checkPsSecurityPatterns(lower)
-	if len(denyMsgs) > 0 {
-		return PermissionResultDeny(strings.Join(denyMsgs, "; "))
+	for _, msg := range denyMsgs {
+		collector.deny(msg)
+	}
+	for _, msg := range askMsgs {
+		collector.ask(msg)
 	}
 
-	// Step 2: Check security patterns — ask
-	if len(askMsgs) > 0 {
-		return PermissionResultAsk(strings.Join(askMsgs, "; "), "tool")
-	}
-
-	// Step 3: Check read-only allowlist
+	// Step 2: Check read-only allowlist
 	if isPsReadOnlyCommand(lower) {
-		return PermissionResultAllow()
-	}
-
-	// Step 4: Classify the first cmdlet's verb for targeted messages
-	first := lower
-	if idx := strings.IndexAny(first, "|;"); idx >= 0 {
-		first = first[:idx]
-	}
-	fields := strings.Fields(first)
-	if len(fields) > 0 {
-		cmdlet := fields[0]
-		if canonical, ok := psCmdletAliases[cmdlet]; ok {
-			cmdlet = canonical
+		collector.allow("PowerShell command is read-only")
+	} else {
+		// Not in allowlist — classify the verb for targeted messages
+		first := lower
+		if idx := strings.IndexAny(first, "|;"); idx >= 0 {
+			first = first[:idx]
 		}
-		verbClass := classifyPsVerb(cmdlet)
+		fields := strings.Fields(first)
+		if len(fields) > 0 {
+			cmdlet := fields[0]
+			if canonical, ok := psCmdletAliases[cmdlet]; ok {
+				cmdlet = canonical
+			}
+			verbClass := classifyPsVerb(cmdlet)
 
-		switch verbClass {
-		case "readonly":
-			// Known read-only verb but not in allowlist (new cmdlet or unusual flags)
-			// Fall through to ask
-			return PermissionResultAsk("PowerShell cmdlet '"+cmdlet+"' requires verification", "tool")
-		case "destructive":
-			return PermissionResultAsk("PowerShell destructive cmdlet '"+cmdlet+"' requires approval", "tool")
-		case "execution":
-			return PermissionResultAsk("PowerShell execution cmdlet '"+cmdlet+"' requires approval", "tool")
-		case "write":
-			return PermissionResultAsk("PowerShell write cmdlet '"+cmdlet+"' requires approval", "tool")
+			switch verbClass {
+			case "readonly":
+				// Known read-only verb but not in allowlist
+				collector.ask("PowerShell cmdlet '" + cmdlet + "' requires verification")
+			case "destructive":
+				collector.ask("PowerShell destructive cmdlet '" + cmdlet + "' requires approval")
+			case "execution":
+				collector.ask("PowerShell execution cmdlet '" + cmdlet + "' requires approval")
+			case "write":
+				collector.ask("PowerShell write cmdlet '" + cmdlet + "' requires approval")
+			default:
+				collector.ask("Unrecognized PowerShell command requires approval")
+			}
+		} else {
+			collector.ask("Unrecognized PowerShell command requires approval")
 		}
 	}
 
-	// Step 5: Unknown PowerShell command — ask
-	return PermissionResultAsk("Unrecognized PowerShell command requires approval", "tool")
+	// Step 3: Fragment-based deny scanning for complex commands (parse-failed fallback)
+	// When the command contains multiple sub-commands separated by ;|&, we split
+	// and check each fragment individually as defense-in-depth.
+	subCmds := splitPsSubCommands(lower)
+	if len(subCmds) > 1 {
+		fragments := make([]string, 0, len(subCmds))
+		for _, sub := range subCmds {
+			fragments = append(fragments, psNormalizeFragment(sub))
+		}
+		if msg := scanFragmentsForDenial(fragments); msg != "" {
+			collector.deny(msg)
+		}
+	}
+
+	// Step 4: Reduce with deny > ask > allow precedence
+	if result := collector.reduce(); result != nil {
+		return *result
+	}
+
+	// Step 5: Fallback — ask for anything not yet decided
+	return PermissionResultAsk("PowerShell command requires approval", "tool")
+}
+
+// splitPsSubCommands splits a PowerShell command on common separators.
+// Used for fragment-based analysis when the command may contain multiple
+// sub-commands that need individual security checking.
+func splitPsSubCommands(cmd string) []string {
+	// Split on semicolons, && and ||
+	// Note: we don't split on pipes (|) because piped commands are a single
+	// pipeline, not separate sub-commands.
+	var result []string
+	for _, part := range strings.Split(cmd, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// Further split on && and ||
+		for _, sub := range psSplitSeparators.Split(part, -1) {
+			sub = strings.TrimSpace(sub)
+			if sub != "" {
+				result = append(result, sub)
+			}
+		}
+	}
+	return result
 }
