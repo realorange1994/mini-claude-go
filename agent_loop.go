@@ -408,6 +408,7 @@ type AgentLoop struct {
 	toolSchemaCacheHash       uint64                              // hash of tool names for cache invalidation
 	thinkingClearLatched      bool                                // once set (>1h idle), stays true for session — clears thinking via context_management
 	lastApiCompletionTime     time.Time                           // timestamp of last successful API call (for thinking latch)
+	ttlLockedUntil           time.Time                           // TTL lock: cache stays valid until this time (session-stable locking)
 	announcedMCPServers       map[string]bool                     // servers whose instructions have been announced this session (delta tracking)
 	betaHeadersLatched        []string                            // once set, stays same for session — prevents mid-session header churn
 	errorReporter             *ErrorReporter                      // captures error events for analysis
@@ -665,6 +666,10 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		announcedMCPServers: make(map[string]bool),
 		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 	}
+	// Latch beta headers for session stability — once set, stays same for the
+	// entire session to prevent mid-session anthropic-beta header churn.
+	// Upstream: sticky-on latch pattern (claude.ts:1456-1507).
+	agent.betaHeadersLatched = append([]string(nil), betas...)
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
 	SetGlobalModelCapabilities(agent.modelCapabilities)
@@ -870,6 +875,10 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		announcedMCPServers: make(map[string]bool),
 		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 	}
+	// Latch beta headers for session stability — once set, stays same for the
+	// entire session to prevent mid-session anthropic-beta header churn.
+	// Upstream: sticky-on latch pattern (claude.ts:1456-1507).
+	agent.betaHeadersLatched = append([]string(nil), betas...)
 	// Initialize model capabilities cache and wire it globally
 	agent.modelCapabilities = NewModelCapabilitiesCacheDefault()
 	SetGlobalModelCapabilities(agent.modelCapabilities)
@@ -2310,7 +2319,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System:    buildSystemBlocks(a.context.SystemPrompt(), "1h"),
+		System:    buildSystemBlocks(a.context.SystemPrompt(), a.getCacheTTL()),
 	}
 	if len(toolParams) > 0 {
 		params.Tools = toolParams
@@ -2321,7 +2330,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
 	}
 
-	cacheMessageParams(&params) // Anthropic prompt caching (system_and_3)
+	cacheMessageParams(&params, a.getCacheTTL()) // Anthropic prompt caching (system_and_3)
 
 	// Persistent collect handler across retries (tracks partial delivery)
 	collect := NewCollectHandler()
@@ -2415,7 +2424,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 				messages = NormalizeAPIMessages(messages)
 				messages = a.injectCacheEdits(messages)
 				params.Messages = messages
-				cacheMessageParams(&params) // re-apply cache_control on rebuilt messages
+				cacheMessageParams(&params, a.getCacheTTL()) // re-apply cache_control on rebuilt messages
 			}
 
 			// Smart retry decision based on what was already delivered
@@ -2661,12 +2670,12 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System:    buildSystemBlocks(a.context.SystemPrompt(), "1h"),
+		System:    buildSystemBlocks(a.context.SystemPrompt(), a.getCacheTTL()),
 	}
 	if len(toolParams) > 0 {
 		params.Tools = toolParams
 	}
-	cacheMessageParams(&params) // Anthropic prompt caching (system_and_3)
+	cacheMessageParams(&params, a.getCacheTTL()) // Anthropic prompt caching (system_and_3)
 
 	// Phase 1 of cache break detection: hash current state before the API call
 	// to enable post-call diagnosis if cache_read drops >5%.
@@ -2707,10 +2716,10 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
 		Messages:  messages,
-		System:    buildSystemBlocks(a.context.SystemPrompt(), "1h"),
+		System:    buildSystemBlocks(a.context.SystemPrompt(), a.getCacheTTL()),
 	}
 	// NOTE: No tools set -- model can only return text
-	cacheMessageParams(&params) // rolling cache for grace call
+	cacheMessageParams(&params, a.getCacheTTL()) // rolling cache for grace call
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {

@@ -314,7 +314,7 @@ func TestCacheHitRateCacheMessageParamsNoOverride(t *testing.T) {
 	}
 
 	// Apply cacheMessageParams — should NOT override System[0]'s scope:global
-	cacheMessageParams(&params)
+	cacheMessageParams(&params, "1h")
 
 	ccJSON, _ := json.Marshal(params.System[0].CacheControl)
 	if !strings.Contains(string(ccJSON), `"scope":"global"`) {
@@ -407,7 +407,7 @@ func TestCacheHitRateMultiTurn(t *testing.T) {
 			System:    systemBlocks,
 			Messages:  messages,
 		}
-		cacheMessageParams(&params)
+		cacheMessageParams(&params, "1h")
 
 		// Verify system blocks NOT overwritten
 		postCCJSON, _ := json.Marshal(params.System[0].CacheControl)

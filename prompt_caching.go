@@ -357,11 +357,11 @@ func deepCopyMessages(messages []map[string]any) []map[string]any {
 
 // cacheMessageParams converts []anthropic.MessageParam to []map[string]any,
 // applies prompt caching, and converts back.
-func cacheMessageParams(params *anthropic.MessageNewParams) {
+func cacheMessageParams(params *anthropic.MessageNewParams, ttl string) {
 	// Convert messages to maps
 	msgMaps := messageParamToMaps(params.Messages)
 
-	msgMaps = ApplyPromptCaching(msgMaps, "1h")
+	msgMaps = ApplyPromptCaching(msgMaps, ttl)
 
 	// Add cache_reference to tool_result blocks that are within the cached prefix.
 	// This tells the Anthropic server "this tool_result is already cached" and
@@ -371,6 +371,35 @@ func cacheMessageParams(params *anthropic.MessageNewParams) {
 
 	// Convert back to MessageParam
 	params.Messages = mapsToMessageParam(msgMaps)
+}
+
+// getCacheTTL determines the cache TTL based on session activity.
+// When the session is active (recent API calls), locks the TTL to "1h" to prevent
+// mid-session KV cache eviction. When idle for >5 minutes, allows the cache to
+// expire naturally by using a shorter TTL.
+//
+// Upstream: session-stable TTL locking (claude.ts) — the cache TTL is extended
+// on each API call so the KV cache stays warm during active sessions. Without
+// this, a 5-minute idle between turns can evict the entire cached prefix.
+func (a *AgentLoop) getCacheTTL() string {
+	now := time.Now()
+
+	// If we have a TTL lock that hasn't expired, keep using "1h"
+	if !a.ttlLockedUntil.IsZero() && now.Before(a.ttlLockedUntil) {
+		return "1h"
+	}
+
+	// If the session has been idle for >5 minutes, let the cache expire
+	// naturally (shorter TTL). This prevents wasting server-side cache
+	// resources on inactive sessions.
+	if !a.lastApiCompletionTime.IsZero() && now.Sub(a.lastApiCompletionTime) > 5*time.Minute {
+		return "5m"
+	}
+
+	// Session is active or recently active — lock TTL to 1h for 10 minutes
+	// from now. This ensures the KV cache survives the gap between turns.
+	a.ttlLockedUntil = now.Add(10 * time.Minute)
+	return "1h"
 }
 
 // addCacheReference adds cache_reference to tool_result blocks that are strictly

@@ -121,6 +121,24 @@ func ClearBetaHeaderCache() {
 	betaHeaderCache = make(map[string][]string)
 }
 
+// GetLatchedBetaHeaders returns the session-latched beta headers.
+// If not yet latched, computes and latches them on first call.
+// This prevents mid-session header churn even if env vars or
+// model configuration change during the session.
+func (a *AgentLoop) GetLatchedBetaHeaders() []string {
+	if len(a.betaHeadersLatched) > 0 {
+		return append([]string(nil), a.betaHeadersLatched...)
+	}
+	// Fallback: compute from current model and latch
+	model := a.config.Model
+	if resolved, _ := ResolveModelAlias(model); resolved != "" {
+		model = resolved
+	}
+	betas := BuildBetaHeaders(model)
+	a.betaHeadersLatched = append([]string(nil), betas...)
+	return append([]string(nil), betas...)
+}
+
 // FormatBetaHeader formats the beta headers as a comma-separated string
 // for the anthropic-beta HTTP header.
 func FormatBetaHeader(betas []string) string {
