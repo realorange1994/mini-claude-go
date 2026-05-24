@@ -942,9 +942,17 @@ func CheckBashPermission(cmd string) PermissionResult {
 	if msg := checkGhSecurity(lower); msg != "" {
 		return PermissionResultAsk(msg, "tool")
 	}
-	// git (subcommand-specific callbacks)
+	// git: check read-only allowlist first, then subcommand-specific callbacks
+	// Use original `cmd` (not `lower`) to preserve case-sensitive git flags (-M vs -m)
+	if bashROIsGitReadOnlyCommand(cmd) {
+		return PermissionResultAllow()
+	}
 	if msg := checkGitSecurity(lower); msg != "" {
 		return PermissionResultAsk(msg, "tool")
+	}
+	// git: unknown subcommand with safe global flags → ask
+	if strings.HasPrefix(lower, "git ") {
+		return PermissionResultAsk("git: unrecognized subcommand or flags requires approval", "tool")
 	}
 	// docker (returns full PermissionResult)
 	if dockerResult := checkDockerSecurity(lower); dockerResult != nil {

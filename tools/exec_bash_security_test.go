@@ -842,8 +842,9 @@ func TestCheckBashPermission_GitBranchCreate(t *testing.T) {
 
 func TestCheckBashPermission_GitBranchList(t *testing.T) {
 	result := CheckBashPermission("git branch -a")
-	if result.Behavior != PermissionPassthrough {
-		t.Errorf("git branch -a should passthrough, got %v", result.Behavior)
+	// git branch -a is in the read-only allowlist — auto-approved
+	if result.Behavior != PermissionAllow {
+		t.Errorf("git branch -a should be auto-allowed (read-only), got %v", result.Behavior)
 	}
 }
 
@@ -858,5 +859,369 @@ func TestCheckBashPermission_GitReflogExpire(t *testing.T) {
 	result := CheckBashPermission("git reflog expire --all")
 	if result.Behavior != PermissionAsk {
 		t.Errorf("git reflog expire should ask, got %v", result.Behavior)
+	}
+}
+
+// ===========================================================================
+// Git read-only command allowlist tests (bashROIsGitReadOnlyCommand)
+// ===========================================================================
+
+func TestBashROIsGitReadOnlyCommand_Diff(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git diff", true},
+		{"git diff --stat", true},
+		{"git diff --cached", true},
+		{"git diff --staged", true},
+		{"git diff --name-only", true},
+		{"git diff --numstat", true},
+		{"git diff -M -C", true},
+		{"git diff -S foo", true},
+		{"git diff --output=/tmp/pwned", false}, // --output not in allowlist
+		{"git diff HEAD~1", true},               // positional args allowed
+		{"git diff main..feature", true},
+		{"git diff --unknown-flag", false},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_Log(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git log", true},
+		{"git log --oneline", true},
+		{"git log --oneline -20", true},
+		{"git log --all --graph --decorate", true},
+		{"git log --author=alice --since=2024-01-01", true},
+		{"git log -S needle", true},
+		{"git log -G regex", true},
+		{"git log --format='%h %s'", true},
+		{"git log --unknown", false},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_Show(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git show", true},
+		{"git show HEAD", true},
+		{"git show --stat abc123", true},
+		{"git show --format='%h %s' HEAD", true},
+		{"git show --unknown", false},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_Status(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git status", true},
+		{"git status --short", true},
+		{"git status --porcelain", true},
+		{"git status -s -b", true},
+		{"git status --unknown", false},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_Branch(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git branch", true},
+		{"git branch -a", true},
+		{"git branch --list", true},
+		{"git branch -l", true},
+		{"git branch -vv", true},
+		{"git branch --all --no-color", true},
+		{"git branch --contains=abc123", true},
+		{"git branch --sort=-committerdate", true},
+		{"git branch new-feature", false},            // positional = create
+		{"git branch -d old-branch", false},          // -d not in allowlist
+		{"git branch -D old-branch", false},          // -D not in allowlist
+		{"git branch -m old new", false},             // -m not in allowlist
+		{"git branch --list feature*", true},         // --list with pattern
+		{"git branch -la", true},                     // combined -la (includes 'l')
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_Tag(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git tag", true},           // bare tag = list
+		{"git tag -l", true},
+		{"git tag --list", true},
+		{"git tag -n5", true},
+		{"git tag --contains=abc", true},
+		{"git tag --sort=-version:refname", true},
+		{"git tag v1.0.0", false},   // positional = create
+		{"git tag -d v1.0.0", false}, // -d not in allowlist
+		{"git tag -a v1.0.0", false},  // -a not in allowlist
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_Reflog(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git reflog", true},        // bare = show
+		{"git reflog show", true},
+		{"git reflog show --oneline", true},
+		{"git reflog expire", false},
+		{"git reflog delete", false},
+		{"git reflog exists", false},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_Remote(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git remote", true},
+		{"git remote -v", true},
+		{"git remote --verbose", true},
+		{"git remote show origin", true},
+		{"git remote show origin -n", true},
+		{"git remote add upstream https://...", false},
+		{"git remote remove origin", false},
+		{"git remote show", false},                    // no remote name
+		{"git remote show origin extra", false},       // too many args
+		{"git remote show evil.com/owner/repo", false}, // bad chars in name
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_ConfigGet(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git config --get user.name", true},
+		{"git config --get --global core.autocrlf", true},
+		{"git config --get --type=bool core.bare", true},
+		{"git config --set user.name bob", false}, // --set not in allowlist
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_OtherSubs(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git rev-parse --verify HEAD", true},
+		{"git rev-parse --is-inside-work-tree", true},
+		{"git describe --tags", true},
+		{"git describe --always HEAD", true},
+		{"git ls-remote --tags origin", true},
+		{"git ls-remote --sort=-refname", true},
+		{"git shortlog -sn -10 HEAD", true},
+		{"git stash list", true},
+		{"git stash list --oneline -5", true},
+		{"git stash show -p", true},
+		{"git merge-base --is-ancestor main HEAD", true},
+		{"git for-each-ref --format='%(refname:short)'", true},
+		{"git grep -n pattern", true},
+		{"git grep -E -i pattern", true},
+		{"git worktree list", true},
+		{"git blame file.go", true},
+		{"git ls-files", true},
+		{"git ls-files --cached", true},
+		{"git ls-files --stage -z", true},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_GlobalFlags(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git -C /repo diff --stat", true},
+		{"git -c core.autocrlf=false status", true},
+		{"git --git-dir=/repo/.git log --oneline", true},
+		{"git -C /repo branch -a", true},
+		{"git -C /repo branch new-name", false},  // create, not list
+		{"git commit -m 'fix'", false},            // not a read-only subcommand
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_NotGit(t *testing.T) {
+	if bashROIsGitReadOnlyCommand("ls -la") {
+		t.Error("non-git command should return false")
+	}
+	if bashROIsGitReadOnlyCommand("echo hello") {
+		t.Error("non-git command should return false")
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_LsRemoteNoServerOption(t *testing.T) {
+	// --server-option / -o is intentionally excluded (network WRITE)
+	if bashROIsGitReadOnlyCommand("git ls-remote --server-option=hello origin") {
+		t.Error("git ls-remote --server-option should NOT be read-only")
+	}
+	if bashROIsGitReadOnlyCommand("git ls-remote -o hello origin") {
+		t.Error("git ls-remote -o should NOT be read-only")
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_FlagArgValidation(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		// --abbrev takes a number arg, not a string
+		{"git describe --abbrev=7", true},
+		{"git describe --abbrev=short", false}, // --abbrev expects number, not string
+		// -n takes number arg
+		{"git log -n 10", true},
+		// Positional args are allowed for read-only subs
+		{"git diff HEAD~3..HEAD", true},
+		{"git log -- main.go", true},
+		// --format takes string arg
+		{"git log --format='%h %s'", true},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_CombinedShortFlags(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		// Combined short flags: all must be 'none' type
+		{"git diff -R", true},       // -R is none
+		{"git diff -v", false},      // -v not in allowlist for diff
+		// -la for branch (l=list, a=all)
+		{"git branch -la", true},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_EqualsAttachedFlags(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		expect bool
+	}{
+		{"git log --format=%h", true},
+		{"git diff --color=never", false}, // --color is none type, = not allowed
+		{"git log --max-count=5", true},
+	}
+	for _, tt := range tests {
+		got := bashROIsGitReadOnlyCommand(tt.cmd)
+		if got != tt.expect {
+			t.Errorf("bashROIsGitReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
+		}
+	}
+}
+
+func TestBashROIsGitReadOnlyCommand_DashDash(t *testing.T) {
+	// After --, everything is positional args
+	got := bashROIsGitReadOnlyCommand("git log -- --unknown-flag")
+	if !got {
+		t.Error("git log -- --unknown-flag should be read-only (after --, all positional)")
+	}
+}
+
+func TestCheckBashPermission_GitReadOnlyVsUnknown(t *testing.T) {
+	// Read-only git commands should auto-allow
+	result := CheckBashPermission("git diff --stat")
+	if result.Behavior != PermissionAllow {
+		t.Errorf("git diff --stat should auto-allow, got %v", result.Behavior)
+	}
+
+	// Unknown git subcommand should ask
+	result = CheckBashPermission("git commit -m 'fix'")
+	if result.Behavior != PermissionAsk {
+		t.Errorf("git commit should ask, got %v", result.Behavior)
+	}
+
+	// Known subcommand with dangerous positional (branch create) should ask
+	result = CheckBashPermission("git branch new-feature")
+	if result.Behavior != PermissionAsk {
+		t.Errorf("git branch new-feature should ask, got %v", result.Behavior)
 	}
 }
