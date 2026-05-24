@@ -116,9 +116,11 @@ func processList(params map[string]any, isWindows bool) ToolResult {
 	hasFilters := filterName != "" || filterStatus != "" || filterUser != "" || maxCPU > 0 || maxMemory > 0
 
 	if isWindows {
-		// Use ConvertTo-Json for structured output so we can filter in Go
+		// Use Get-Process without -IncludeUserName to avoid needing admin rights.
+		// -IncludeUserName requires PROCESS_QUERY_LIMITED_INFORMATION on every process,
+		// which fails for system processes when running without elevation.
 		cmd := exec.Command("powershell", "-NoProfile", "-Command",
-			`Get-Process -IncludeUserName | Select-Object Id, ProcessName, CPU, @{N='MemMB';E={[math]::Round($_.WorkingSet64/1MB,1)}}, UserName | ConvertTo-Json`)
+			`Get-Process | Select-Object Id, ProcessName, CPU, @{N='MemMB';E={[math]::Round($_.WorkingSet64/1MB,1)}} | ConvertTo-Json`)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return ToolResult{Output: fmt.Sprintf("Error: %v\n%s", err, strings.TrimSpace(string(out))), IsError: true}
@@ -257,16 +259,13 @@ func filterWindowsProcesses(jsonStr, filterName, filterStatus, filterUser string
 	var filtered []map[string]any
 	for _, p := range procs {
 		name, _ := p["ProcessName"].(string)
-		user, _ := p["UserName"].(string)
 		cpu, _ := p["CPU"].(float64)
 		memMB, _ := p["MemMB"].(float64)
 
 		if filterName != "" && !strings.Contains(strings.ToLower(name), strings.ToLower(filterName)) {
 			continue
 		}
-		if filterUser != "" && !strings.Contains(strings.ToLower(user), strings.ToLower(filterUser)) {
-			continue
-		}
+		// user filter skipped — requires -IncludeUserName which needs admin rights
 		if filterStatus != "" {
 			// Windows doesn't have Unix-style stat codes; skip filter
 		}
@@ -284,14 +283,13 @@ func filterWindowsProcesses(jsonStr, filterName, filterStatus, filterUser string
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s %s\n", "Id", "ProcessName", "CPU", "MemMB", "UserName"))
+	sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s\n", "Id", "ProcessName", "CPU", "MemMB"))
 	for _, p := range filtered {
 		id := fmt.Sprintf("%v", p["Id"])
 		name, _ := p["ProcessName"].(string)
 		cpu := fmt.Sprintf("%.1f", p["CPU"])
 		mem := fmt.Sprintf("%.1f", p["MemMB"])
-		user, _ := p["UserName"].(string)
-		sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s %s\n", id, name, cpu, mem, user))
+		sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s\n", id, name, cpu, mem))
 	}
 	return strings.TrimSpace(sb.String())
 }
@@ -302,14 +300,13 @@ func formatWinProcJSON(jsonStr string) string {
 		return strings.TrimSpace(jsonStr)
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s %s\n", "Id", "ProcessName", "CPU", "MemMB", "UserName"))
+	sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s\n", "Id", "ProcessName", "CPU", "MemMB"))
 	for _, p := range procs {
 		id := fmt.Sprintf("%v", p["Id"])
 		name, _ := p["ProcessName"].(string)
 		cpu := fmt.Sprintf("%.1f", p["CPU"])
 		mem := fmt.Sprintf("%.1f", p["MemMB"])
-		user, _ := p["UserName"].(string)
-		sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s %s\n", id, name, cpu, mem, user))
+		sb.WriteString(fmt.Sprintf("%-8s %-25s %-10s %-10s\n", id, name, cpu, mem))
 	}
 	return strings.TrimSpace(sb.String())
 }
