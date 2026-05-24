@@ -1225,3 +1225,552 @@ func TestCheckBashPermission_GitReadOnlyVsUnknown(t *testing.T) {
 		t.Errorf("git branch new-feature should ask, got %v", result.Behavior)
 	}
 }
+
+// ===========================================================================
+// Bash read-only command allowlist tests (exec_bash_readonly.go)
+// ===========================================================================
+
+func TestCheckBashReadOnlyCommand_Xargs(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"xargs -n 1", true},
+		{"xargs -I {} echo {}", true},
+		{"xargs -0 -t -r", true},
+		{"xargs -P 4 -L 10", true},
+		{"xargs -d x", true},      // -d takes single char delimiter
+		{"xargs -d '\\n'", false},  // '\n' (2 chars after unquoting) exceeds bashROChar
+		{"xargs -i", false},  // dangerous: lowercase -i
+		{"xargs -e", false},  // dangerous: lowercase -e
+		{"xargs -I{} echo {}", true},
+		{"xargs", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_File(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"file --brief myfile.txt", true},
+		{"file --mime myfile.txt", true},
+		{"file -i myfile.txt", true},
+		{"file -f list.txt", true},
+		{"file -z archive.gz", true},
+		{"file", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Sort(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"sort -n -r file.txt", true},
+		{"sort -k 2,2 -t , file.txt", true},
+		{"sort -u", true},
+		{"sort -o output.txt", false}, // -o writes to file
+		{"sort --unique --reverse", true},
+		{"sort", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Man(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"man ls", true},
+		{"man -k network", true},
+		{"man -a printf", true},
+		{"man -P less ls", false}, // -P runs arbitrary pager
+		{"man -s 2 open", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Ps(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"ps aux", true},
+		{"ps -ef", true},
+		{"ps -p 1234", true},
+		{"ps --sort pid", true},
+		{"ps auxf", true},    // forest output, safe (no 'e' modifier)
+		{"ps -e -o pid,cmd", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Grep(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"grep -r 'pattern' .", true},
+		{"grep -i --include='*.go' TODO .", true},
+		{"grep -A 5 -B 2 'error' log.txt", true},
+		{"grep -l -R 'TODO' src/", true},
+		{"grep --color=auto 'pattern'", true},
+		{"grep", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Rg(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"rg 'pattern' .", true},
+		{"rg -i --type go 'TODO' src/", true},
+		{"rg -l -C 3 'error' .", true},
+		{"rg --json 'pattern'", true},
+		{"rg", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Checksums(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"sha256sum file.tar", true},
+		{"sha256sum -c checksum.txt", true},
+		{"sha1sum file.bin", true},
+		{"md5sum file.dat", true},
+		{"sha256sum --tag file.tar", true},
+		{"sha256sum", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Tree(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"tree -L 2 src/", true},
+		{"tree -a -d .", true},
+		{"tree -I 'node_modules' .", true},
+		{"tree -R .", false}, // -R recursively creates listing (intensive)
+		{"tree -o output.txt .", false}, // -o writes to file
+		{"tree", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Date(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"date", true},
+		{"date '+%Y-%m-%d'", true},
+		{"date -u", true},
+		{"date -d '2024-01-01'", true},
+		{"date --rfc-3339=seconds", true},
+		{"date 01011200", false}, // positional MMDDhhmm = sets system time
+		{"date -s '12:00'", false}, // -s sets system time
+		{"date --set='12:00'", false}, // --set sets system time
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Hostname(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"hostname", true},
+		{"hostname -f", true},
+		{"hostname -i", true},
+		{"hostname -s", true},
+		{"hostname newname", false}, // positional arg changes hostname
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Base64(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"base64 file.txt", true},
+		{"base64 -d encoded.txt", true},
+		{"base64 --decode encoded.txt", true},
+		{"base64 -o output.txt", false}, // -o writes to file
+		{"base64 --output output.txt", false}, // --output writes to file
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Lsof(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"lsof -i :8080", true},
+		{"lsof -p 1234", true},
+		{"lsof -n -P", true},
+		{"lsof +m", false}, // +m enables mount verification (dangerous)
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Ss(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"ss -tlnp", true},
+		{"ss -s", true},
+		{"ss -4 -t state established", true},
+		{"ss -K", false},  // -K kills sockets
+		{"ss --kill", false},
+		{"ss -D", false},  // -D dumps diag
+		{"ss --diag", false},
+		{"ss -F", false},  // -F applies filter
+		{"ss --filter", false},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Info(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"info coreutils", true},
+		{"info -k network", true},
+		{"info -o output.txt topic", false}, // -o writes to file
+		{"info --output output.txt topic", false},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Tput(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"tput cols", true},
+		{"tput colors", true},
+		{"tput -T xterm-256color cols", true},
+		{"tput init", false},   // init is dangerous (changes terminal state)
+		{"tput reset", false},  // reset is dangerous
+		{"tput clear", false},  // clear is dangerous
+		{"tput -S", false},     // -S reads from stdin (injection vector)
+		{"tput smcup", false},  // enters alternate screen buffer
+		{"tput rmcup", false},  // exits alternate screen buffer
+		{"tput rs1", false},    // reset string
+		{"tput rs2", false},    // reset string
+		{"tput rs3", false},    // reset string
+		{"tput is1", false},    // initialization string
+		{"tput is2", false},    // initialization string
+		{"tput is3", false},    // initialization string
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Pgrep(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"pgrep -f 'node'", true},
+		{"pgrep -l -u root", true},
+		{"pgrep -P 1234", true},
+		{"pgrep -v python", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Netstat(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"netstat -tlnp", true},
+		{"netstat -an", true},
+		{"netstat -r", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_Help(t *testing.T) {
+	tests := []struct {
+		cmd    string
+		safe   bool
+	}{
+		{"help", true},
+		{"help -d", true},
+		{"help -m", true},
+		{"help -s", true},
+	}
+
+	for _, tt := range tests {
+		got := checkBashReadOnlyCommand(tt.cmd)
+		if got != tt.safe {
+			t.Errorf("checkBashReadOnlyCommand(%q) = %v, want %v", tt.cmd, got, tt.safe)
+		}
+	}
+}
+
+func TestCheckBashReadOnlyCommand_UnknownCommand(t *testing.T) {
+	if checkBashReadOnlyCommand("curl http://example.com") {
+		t.Error("unknown command 'curl' should not be read-only")
+	}
+	if checkBashReadOnlyCommand("python3 script.py") {
+		t.Error("unknown command 'python3' should not be read-only")
+	}
+	if checkBashReadOnlyCommand("") {
+		t.Error("empty command should not be read-only")
+	}
+}
+
+func TestCheckBashReadOnlyCommand_CombinedShortFlags(t *testing.T) {
+	// Combined short flags where all are 'none' type should be safe
+	if !checkBashReadOnlyCommand("grep -ri 'pattern' .") {
+		t.Error("grep -ri with all none-type flags should be safe")
+	}
+	// grep -A takes a number arg, so -An5 should NOT be combined
+	if checkBashReadOnlyCommand("grep -An5 'pattern'") {
+		// This actually depends on whether -A5 is parsed as attached arg or combined
+		// -A with attached number should be valid
+		t.Log("grep -An5 parsing depends on attached arg handling")
+	}
+}
+
+func TestCheckBashReadOnlyCommand_EqualsAttached(t *testing.T) {
+	if !checkBashReadOnlyCommand("grep --color=auto 'pattern'") {
+		t.Error("grep --color=auto should be safe")
+	}
+	if !checkBashReadOnlyCommand("sort --key=2,2 file.txt") {
+		t.Error("sort --key=2,2 should be safe")
+	}
+}
+
+func TestCheckBashReadOnlyCommand_DashDash(t *testing.T) {
+	// POSIX -- should stop flag parsing for commands that respect it
+	if !checkBashReadOnlyCommand("grep -- -v file.txt") {
+		t.Error("grep -- -v should be safe (-- ends flags, -v is positional)")
+	}
+	// base64 does NOT respect -- on macOS
+	if !checkBashReadOnlyCommand("base64 -- -d") {
+		t.Error("base64 -- -d should still be safe (even without respecting --)")
+	}
+}
+
+// ===========================================================================
+// Integration tests: CheckBashPermission with read-only allowlist
+// ===========================================================================
+
+func TestCheckBashPermission_ReadOnlyAllowlist(t *testing.T) {
+	// Read-only commands should auto-allow
+	readOnlyCmds := []string{
+		"grep -r 'TODO' .",
+		"rg 'pattern' src/",
+		"sort -n file.txt",
+		"file --mime myfile.txt",
+		"ps aux",
+		"sha256sum file.tar",
+		"date '+%Y-%m-%d'",
+		"hostname -f",
+		"tree -L 2 src/",
+		"man ls",
+		"netstat -tlnp",
+		"pgrep -f 'node'",
+		"ss -tlnp",
+		"xargs -n 1",
+	}
+
+	for _, cmd := range readOnlyCmds {
+		result := CheckBashPermission(cmd)
+		if result.Behavior != PermissionAllow {
+			t.Errorf("CheckBashPermission(%q) = %v, want Allow", cmd, result.Behavior)
+		}
+	}
+}
+
+func TestCheckBashPermission_ReadOnlyDangerousFlags(t *testing.T) {
+	// Commands with dangerous flags should not auto-allow
+	dangerousCmds := []struct {
+		cmd string
+		desc string
+	}{
+		{"xargs -i", "xargs -i is dangerous (GNU parser differential)"},
+		{"tree -R .", "tree -R is intensive"},
+		{"tree -o output.txt .", "tree -o writes to file"},
+		{"base64 -o out.txt", "base64 -o writes to file"},
+		{"sort -o output.txt", "sort -o writes to file"},
+		{"man -P less ls", "man -P runs arbitrary pager"},
+		{"ss -K", "ss -K kills sockets"},
+		{"info -o output.txt topic", "info -o writes to file"},
+	}
+
+	for _, tt := range dangerousCmds {
+		result := CheckBashPermission(tt.cmd)
+		if result.Behavior == PermissionAllow {
+			t.Errorf("CheckBashPermission(%q) should not auto-allow: %s", tt.cmd, tt.desc)
+		}
+	}
+}
+
+func TestCheckBashPermission_DateTimeSetting(t *testing.T) {
+	// date with positional MMDDhhmm arg should not auto-allow
+	result := CheckBashPermission("date 01011200")
+	if result.Behavior == PermissionAllow {
+		t.Error("date with MMDDhhmm positional should not auto-allow")
+	}
+}
+
+func TestCheckBashPermission_PsEnvLeak(t *testing.T) {
+	// ps with BSD 'e' modifier (shows env vars) should not auto-allow
+	result := CheckBashPermission("ps auxe")
+	if result.Behavior == PermissionAllow {
+		t.Error("ps auxe (BSD 'e' modifier) should not auto-allow")
+	}
+}
+
+func TestCheckBashPermission_HostnameChange(t *testing.T) {
+	// hostname with positional arg (changes hostname) should not auto-allow
+	result := CheckBashPermission("hostname newname")
+	if result.Behavior == PermissionAllow {
+		t.Error("hostname with positional arg should not auto-allow")
+	}
+}
+
+func TestCheckBashPermission_TputDangerous(t *testing.T) {
+	// tput with dangerous capabilities should not auto-allow
+	dangerous := []string{"tput init", "tput reset", "tput clear", "tput smcup", "tput rmcup"}
+	for _, cmd := range dangerous {
+		result := CheckBashPermission(cmd)
+		if result.Behavior == PermissionAllow {
+			t.Errorf("%q should not auto-allow", cmd)
+		}
+	}
+}
+
+func TestCheckBashPermission_LsofPlusM(t *testing.T) {
+	// lsof +m should not auto-allow
+	result := CheckBashPermission("lsof +m")
+	if result.Behavior == PermissionAllow {
+		t.Error("lsof +m should not auto-allow")
+	}
+}

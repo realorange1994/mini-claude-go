@@ -186,7 +186,7 @@ var bashSecurityPatterns = []bashSecurityPattern{
 	},
 	{
 		name:     "Dangerous command modifier prefix",
-		re:       regexp.MustCompile(`(?i)(?:^|[\s;&|])\b(?:env|xargs|nice|stdbuf|nohup|sudo|doas|pkexec)\b\s`),
+		re:       regexp.MustCompile(`(?i)(?:^|[\s;&|])\b(?:env|nice|stdbuf|nohup|sudo|doas|pkexec)\b\s`),
 		severity: "ask",
 	},
 	// --- P1 Missing patterns ---
@@ -917,7 +917,15 @@ func CheckBashPermission(cmd string) PermissionResult {
 		return PermissionResultAsk("Unsafe environment variable: "+unsafeEnv, "tool")
 	}
 
-	// Step 3: Per-command security validation
+	// Step 3: Read-only command allowlist (before security checks)
+	// Read-only allowlist uses original `cmd` to preserve case-sensitive flags,
+	// while security checks use `lower`. For xargs/rg/grep etc, if the command
+	// passes the read-only allowlist, security checks are redundant.
+	if checkBashReadOnlyCommand(cmd) {
+		return PermissionResultAllow()
+	}
+
+	// Step 4: Per-command security validation
 	// jq
 	if msg := checkJqSecurity(lower); msg != "" {
 		return PermissionResultAsk(msg, "tool")
@@ -926,15 +934,16 @@ func CheckBashPermission(cmd string) PermissionResult {
 	if msg := checkSedSecurity(lower); msg != "" {
 		return PermissionResultAsk(msg, "tool")
 	}
-	// xargs
+	// xargs (dangerous flags like -i/-e are also caught by read-only allowlist's
+	// dangerousFlags map, but this check catches them if they bypass read-only)
 	if msg := checkXargsSecurity(lower); msg != "" {
 		return PermissionResultAsk(msg, "tool")
 	}
-	// fd/fdfind
+	// fd/fdfind (dangerous flags like -x/-X are also caught by read-only allowlist)
 	if msg := checkFdSecurity(lower); msg != "" {
 		return PermissionResultAsk(msg, "tool")
 	}
-	// ripgrep
+	// ripgrep (dangerous flags like --pre are also caught by read-only allowlist)
 	if msg := checkRgSecurity(lower); msg != "" {
 		return PermissionResultAsk(msg, "tool")
 	}
