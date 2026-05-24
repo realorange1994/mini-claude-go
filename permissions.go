@@ -460,25 +460,29 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 		if !g.askUserWithWarning(tool.Name(), params, toolResult.Message) {
 			return denyResult("user rejected.")
 		}
-		return nil // user approved
+		toolResult.Behavior = tools.PermissionAllow // user approved
+		return nil
 	}
 
 	// Step 3c: toolAlwaysAllowedRule — if rule store has a tool-level allow rule,
 	// allow without classifier evaluation.
 	if g.ruleStore != nil && g.ruleStore.HasAllowRule(tool.Name()) {
 		g.denialCount = 0
+		toolResult.Behavior = tools.PermissionAllow
 		return nil
 	}
 
 	// Fast path: whitelisted tools are always allowed
 	if IsAutoAllowlisted(tool.Name(), params) {
 		g.denialCount = 0
+		toolResult.Behavior = tools.PermissionAllow
 		return nil
 	}
 
 	// If classifier is not available, fall back to legacy behavior: allow all
 	if g.classifier == nil || !g.classifier.IsEnabled() {
 		// No classifier configured: auto mode allows all tools (old behavior)
+		toolResult.Behavior = tools.PermissionAllow
 		return nil
 	}
 
@@ -487,6 +491,7 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 	// their explicit consent is binding — skip the classifier.
 	if g.toolMatchesRecentApproval(tool.Name(), params) {
 		g.denialCount = 0
+		toolResult.Behavior = tools.PermissionAllow
 		return nil
 	}
 
@@ -508,6 +513,7 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 			fmt.Fprintf(os.Stderr, "  [auto-classifier] %d consecutive denials, falling back to manual approval\n", g.denialCount)
 			if g.askUser(tool.Name(), params) {
 				g.denialCount = 0
+				toolResult.Behavior = tools.PermissionAllow
 				return nil
 			}
 			return denyResult("user rejected.")
@@ -519,6 +525,7 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 			g.totalDenialCount = 0 // reset after forcing review
 			if g.askUser(tool.Name(), params) {
 				g.denialCount = 0
+				toolResult.Behavior = tools.PermissionAllow
 				return nil
 			}
 			return denyResult("user rejected.")
@@ -526,8 +533,10 @@ func (g *PermissionGate) checkAutoMode(tool tools.Tool, params map[string]any, t
 		return denyResult(result.Reason)
 	}
 
-	// Allowed: reset denial count
+	// Allowed: reset denial count and mark as allowed so Step 3b/Step 4
+	// recognize the approval (prevents ModeAsk from re-evaluating).
 	g.denialCount = 0
+	toolResult.Behavior = tools.PermissionAllow
 	return nil
 }
 
