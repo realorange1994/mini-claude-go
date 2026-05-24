@@ -29,7 +29,7 @@ func TestFileEncodingInputSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("expected properties in schema")
 	}
-	for _, key := range []string{"path", "encoding", "operation"} {
+	for _, key := range []string{"file_path", "encoding", "operation"} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("schema should have %q property", key)
 		}
@@ -48,7 +48,7 @@ func TestFileEncodingDetectOperation(t *testing.T) {
 	tool := &FileEncodingTool{}
 	// Detect encoding of a simple ASCII file (the test file itself)
 	result := tool.Execute(map[string]any{
-		"path":      "file_encoding_test.go",
+		"file_path":      "file_encoding_test.go",
 		"operation": "detect",
 	})
 	if result.IsError {
@@ -72,7 +72,7 @@ func TestFileEncodingDetectNoPath(t *testing.T) {
 func TestFileEncodingDetectNonexistent(t *testing.T) {
 	tool := &FileEncodingTool{}
 	result := tool.Execute(map[string]any{
-		"path":      "nonexistent_file_xyz_12345.go",
+		"file_path":      "nonexistent_file_xyz_12345.go",
 		"operation": "detect",
 	})
 	if !result.IsError {
@@ -83,7 +83,7 @@ func TestFileEncodingDetectNonexistent(t *testing.T) {
 func TestFileEncodingUnknownOperation(t *testing.T) {
 	tool := &FileEncodingTool{}
 	result := tool.Execute(map[string]any{
-		"path":      "file_encoding_test.go",
+		"file_path":      "file_encoding_test.go",
 		"operation": "convert",
 	})
 	// "convert" is not a valid operation — should error
@@ -99,7 +99,7 @@ func TestFileEncodingReadOperation(t *testing.T) {
 	tool := &FileEncodingTool{}
 	// Read with explicit encoding
 	result := tool.Execute(map[string]any{
-		"path":      "file_encoding_test.go",
+		"file_path":      "file_encoding_test.go",
 		"operation": "read",
 		"encoding":  "utf-8",
 	})
@@ -114,7 +114,7 @@ func TestFileEncodingReadOperation(t *testing.T) {
 func TestFileEncodingReadUnsupportedEncoding(t *testing.T) {
 	tool := &FileEncodingTool{}
 	result := tool.Execute(map[string]any{
-		"path":      "file_encoding_test.go",
+		"file_path":      "file_encoding_test.go",
 		"operation": "read",
 		"encoding":  "bogus-encoding-xyz",
 	})
@@ -126,7 +126,7 @@ func TestFileEncodingReadUnsupportedEncoding(t *testing.T) {
 func TestFileEncodingDetectWithEncodingHint(t *testing.T) {
 	tool := &FileEncodingTool{}
 	result := tool.Execute(map[string]any{
-		"path":      "file_encoding_test.go",
+		"file_path":      "file_encoding_test.go",
 		"operation": "detect",
 		"encoding":  "utf-8",
 	})

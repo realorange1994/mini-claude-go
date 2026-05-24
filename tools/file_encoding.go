@@ -42,7 +42,7 @@ func (*FileEncodingTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{
+			"file_path": map[string]any{
 				"type":        "string",
 				"description": "Absolute path to the file to operate on.",
 			},
@@ -94,12 +94,12 @@ func (*FileEncodingTool) InputSchema() map[string]any {
 				},
 			},
 		},
-		"required": []string{"path"},
+		"required": []string{"file_path"},
 	}
 }
 
 func (*FileEncodingTool) CheckPermissions(params map[string]any) PermissionResult {
-	pathStr, _ := params["path"].(string)
+	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		return PermissionResultPassthrough()
 	}
@@ -107,7 +107,7 @@ func (*FileEncodingTool) CheckPermissions(params map[string]any) PermissionResul
 }
 
 func (e *FileEncodingTool) Execute(params map[string]any) ToolResult {
-	pathStr, _ := params["path"].(string)
+	pathStr, _ := params["file_path"].(string)
 	if pathStr == "" {
 		return ToolResult{Output: "Error: path is required", IsError: true}
 	}

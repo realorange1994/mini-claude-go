@@ -29,7 +29,7 @@ func (*SystemTool) InputSchema() map[string]any {
 			},
 			"flags": map[string]any{
 				"type":        "string",
-				"description": "Additional flags for the command (Unix only)",
+				"description": "Additional flags for the command. Only applies to: uname, df, free. Ignored for other operations.",
 			},
 			"lines": map[string]any{
 				"type":        "integer",

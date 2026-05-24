@@ -34,7 +34,7 @@ func (*NotebookEditTool) InputSchema() map[string]any {
 			},
 			"cell_id": map[string]any{
 				"type":        "string",
-				"description": "Cell ID to operate on. Can be the actual cell ID or index format 'cell-N' (e.g., 'cell-0', 'cell-1'). For insert mode, specifies the position to insert before.",
+				"description": "Cell ID to operate on. Resolution order: 1) exact match against cell ID field; 2) index format 'cell-N' (e.g., 'cell-0' for 0th cell); 3) substring/prefix match against cell source content (may match unintended cells — prefer cell ID or index). For insert mode, specifies the position to insert before.",
 			},
 			"new_source": map[string]any{
 				"type":        "string",

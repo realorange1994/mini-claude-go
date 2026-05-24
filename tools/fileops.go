@@ -38,10 +38,6 @@ func (*FileOpsTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Permission mode (for mkdir/chmod, e.g. 755, 644).",
 			},
-			"recursive": map[string]any{
-				"type":        "boolean",
-				"description": "Create parent directories (for mkdir).",
-			},
 			"force": map[string]any{
 				"type":        "boolean",
 				"description": "Force operation (for ln).",

@@ -33,9 +33,6 @@ func TestFileOpsToolSchema(t *testing.T) {
 	if _, ok := props["mode"]; !ok {
 		t.Error("schema should have mode property")
 	}
-	if _, ok := props["recursive"]; !ok {
-		t.Error("schema should have recursive property")
-	}
 	if _, ok := props["force"]; !ok {
 		t.Error("schema should have force property")
 	}

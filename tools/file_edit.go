@@ -39,7 +39,7 @@ func (*FileEditTool) InputSchema() map[string]any {
 			},
 			"old_string": map[string]any{
 				"type":        "string",
-				"description": "Exact text to find. Use empty string to create a new file.",
+				"description": "Exact text to find in the file. Must not be empty — to create a new file, use write_file instead.",
 			},
 			"new_string": map[string]any{
 				"type":        "string",
