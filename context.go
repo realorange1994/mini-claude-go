@@ -1339,6 +1339,61 @@ func (c *ConversationContext) InjectTimeContext() {
 	})
 }
 
+// InjectTodoReminder adds the current todo list as a user message with the
+// system-injected prefix. This replaces the previous approach of appending
+// the todo reminder to the system prompt, which changed the system prompt
+// every turn and broke prompt caching. By injecting as a separate message
+// with SystemInjectedPrefix, the system prompt stays fully static and
+// cacheable, and the todo message is skipped for cache breakpoint placement.
+func (c *ConversationContext) InjectTodoReminder(reminder string) {
+	if reminder == "" {
+		return
+	}
+	msg := fmt.Sprintf("%s%s\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", SystemInjectedPrefix, reminder)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: TextContent(msg),
+	})
+}
+
+// InjectIdleReminder adds a TodoWrite idle nudge as a user message with the
+// system-injected prefix. Used when the model hasn't used TodoWrite for a while
+// and has no task list.
+func (c *ConversationContext) InjectIdleReminder(idleMsg string) {
+	if idleMsg == "" {
+		return
+	}
+	msg := fmt.Sprintf("%s%s", SystemInjectedPrefix, idleMsg)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: TextContent(msg),
+	})
+}
+
+// InjectSessionState adds session state (tracked files, search patterns, etc.)
+// as a user message with the system-injected prefix. This replaces the previous
+// approach of appending to the system prompt, which changed the system prompt
+// every turn and broke prompt caching.
+func (c *ConversationContext) InjectSessionState(state string) {
+	if state == "" {
+		return
+	}
+	msg := fmt.Sprintf("%s%s", SystemInjectedPrefix, state)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: TextContent(msg),
+	})
+}
+
 // must hold c.mu write lock
 func (c *ConversationContext) truncateIfNeeded() {
 	maxMsgs := c.config.MaxContextMsgs

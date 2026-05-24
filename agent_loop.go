@@ -698,10 +698,10 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		ctx.SetSystemPrompt(sysPrompt)
 	}
 
-	// Inject todo reminder into system prompt
+	// Inject todo reminder as a system-injected user message (not system prompt)
+	// to keep the system prompt fully static and cacheable.
 	if reminder := agent.todoList.BuildReminder(); reminder != "" {
-		currentPrompt := ctx.SystemPrompt()
-		ctx.SetSystemPrompt(currentPrompt + "\n\n" + reminder + "\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.")
+		ctx.InjectTodoReminder(reminder)
 	}
 
 	// Register the sub-agent tool (wires AgentTool.SpawnFunc to this loop's SpawnSubAgent)
@@ -1419,20 +1419,20 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 		}
 
-		// Inject tool state tracker session state into system prompt.
+		// Inject session state as a system-injected user message (not system prompt)
+		// to keep the system prompt fully static and cacheable.
 		// This gives the agent visibility into what it has already done,
 		// preventing redundant reads and searches.
 		if a.toolStateTracker != nil {
-			currentPrompt := a.context.SystemPrompt()
 			sessionState := a.toolStateTracker.BuildSessionStateNote()
-			a.context.SetSystemPrompt(currentPrompt + "\n\n" + sessionState)
+			a.context.InjectSessionState(sessionState)
 		}
 
-		// Inject todo reminder into system prompt every turn (if tasks exist).
-		// This ensures the model sees its task list and stays on track.
+		// Inject todo reminder as a system-injected user message (not system prompt)
+		// to keep the system prompt fully static and cacheable.
+		// The reminder message is skipped for cache breakpoint placement.
 		if reminder := a.todoList.BuildReminder(); reminder != "" {
-			currentPrompt := a.context.SystemPrompt()
-			a.context.SetSystemPrompt(currentPrompt + "\n\n" + reminder + "\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.")
+			a.context.InjectTodoReminder(reminder)
 		}
 
 		// Periodic TodoWrite idle reminder: if model hasn't used TodoWrite
@@ -1441,8 +1441,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			if a.todoList.BuildReminder() == "" {
 				// No tasks exist and model is idle — nudge to use TodoWrite
 				idleMsg := a.todoList.BuildIdleReminder()
-				currentPrompt := a.context.SystemPrompt()
-				a.context.SetSystemPrompt(currentPrompt + "\n\n" + idleMsg)
+				a.context.InjectIdleReminder(idleMsg)
 			}
 		}
 
@@ -4630,23 +4629,17 @@ func buildTaskRecoveryAttachment(ctx *ConversationContext) string {
 	return sb.String()
 }
 
-// injectTodoReminder re-injects the in-memory todo list into the system prompt.
-// Called after compaction when the system prompt is rebuilt but the todo reminder
-// wasn't included. The TodoList survives compaction in memory; this just ensures
-// it's visible to the model. Skips if the reminder is already present to avoid
-// duplicate injection (can happen when compaction runs mid-turn after the
-// per-turn injection at line ~979).
+// injectTodoReminder re-injects the in-memory todo list into the conversation
+// as a system-injected user message.
+// Called after compaction when the todo reminder entry may have been dropped.
+// The TodoList survives compaction in memory; this just ensures
+// it's visible to the model.
 func (a *AgentLoop) injectTodoReminder() {
 	reminder := a.todoList.BuildReminder()
 	if reminder == "" {
 		return
 	}
-	fullReminder := reminder + "\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work."
-	currentPrompt := a.context.SystemPrompt()
-	if strings.Contains(currentPrompt, fullReminder) {
-		return // Already present — skip to avoid duplication
-	}
-	a.context.SetSystemPrompt(currentPrompt + "\n\n" + fullReminder)
+	a.context.InjectTodoReminder(reminder)
 }
 
 // buildPostCompactAgentAnnouncement re-announces active and completed-but-unretrieved
