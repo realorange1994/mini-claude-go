@@ -24,7 +24,7 @@ func TestGlobRecursive(t *testing.T) {
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
 		"pattern":   "**/*.go",
-		"directory": dir,
+		"path": dir,
 	})
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Output)
@@ -46,8 +46,8 @@ func TestGlobSimple(t *testing.T) {
 	dir := setupGlobTestDir(t)
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":   "*.go",
-		"directory": dir,
+		"pattern": "*.go",
+		"path":    dir,
 	})
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Output)
@@ -70,8 +70,8 @@ func TestGlobNoMatch(t *testing.T) {
 	dir := setupGlobTestDir(t)
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":   "*.rust",
-		"directory": dir,
+		"pattern": "*.rust",
+		"path":    dir,
 	})
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Output)
@@ -84,8 +84,8 @@ func TestGlobNoMatch(t *testing.T) {
 func TestGlobInvalidDirectory(t *testing.T) {
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":   "*.go",
-		"directory": "/nonexistent/path/xyz",
+		"pattern": "*.go",
+		"path":    "/nonexistent/path/xyz",
 	})
 	if !result.IsError {
 		t.Error("expected error for nonexistent directory")
@@ -99,8 +99,8 @@ func TestGlobMaxResults(t *testing.T) {
 	}
 	tool := &GlobTool{}
 	result := tool.Execute(map[string]any{
-		"pattern":   "**/*.txt",
-		"directory": dir,
+		"pattern": "**/*.txt",
+		"path":    dir,
 	})
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Output)
