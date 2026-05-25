@@ -5538,7 +5538,10 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 	}
 }
 
-// tryLLMCompaction performs LLM-driven compaction (the existing path).
+// tryLLMCompaction performs LLM-driven compaction using the insert-then-compress
+// pattern from openclacky: inject a compression instruction into the existing
+// conversation, make a single API call (reusing cached system prompt + tools),
+// parse the <topics> + <summary> response, and rebuild context.
 // Returns true if compaction was performed.
 func (a *AgentLoop) tryLLMCompaction(preCompactInst string) {
 	messages := a.context.BuildMessages()
@@ -5561,118 +5564,243 @@ func (a *AgentLoop) tryLLMCompaction(preCompactInst string) {
 			tools.ListChunks(a.config.ProjectDir, ""))
 	}
 
-	summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL, a.context.SystemPrompt(), a.TranscriptPath())
-	if performed && summary != "" {
-		// Augment summary with chunk path reference and previous chunks index
-		if chunkPath != "" {
-			summary = augmentSummaryWithChunk(summary, chunkPath)
-		}
-		if prevChunksIndex != "" {
-			summary += prevChunksIndex
-		}
-		// Advance compaction epoch BEFORE clearing context — marks all tracked items as stale.
-		if a.toolStateTracker != nil {
-			a.toolStateTracker.OnCompaction()
-		}
-		// Clear stale state entries from session memory - the old state context is no
-		// longer valid after compaction, and the new compaction will write fresh state.
-		if a.config.SessionMemory != nil {
-			a.config.SessionMemory.ClearStateEntries()
-		}
+	// ─── Insert-then-compress (openclacky pattern) ────────────────────────────
+	// Instead of making a separate API call with its own prompt, inject the
+	// compression instruction into the conversation messages and make the API
+	// call with the instruction already embedded. This reuses the existing
+	// prompt cache prefix (system prompt + tools + prior messages are cached,
+	// only the instruction text itself is new tokens).
+	//
+	// The instruction is built and appended as the final user message:
+	compressPrompt := buildCompressionPrompt(level)
+	finalMsgs := make([]anthropic.MessageParam, len(messages)+1)
+	copy(finalMsgs, messages)
+	finalMsgs[len(messages)] = anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{
+			{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + compressPrompt}},
+		},
+	}
 
-		// Inject boundary marker and summary into context
-		preTokens := a.context.EstimatedTokens()
+	// Call the inline compaction API (no additional prompt appended — the
+	// instruction is already in the messages as the final user message).
+	result, err := doInlineCompactLLMCall(finalMsgs, a.config.Model, a.config.APIKey, a.config.BaseURL, a.context.SystemPrompt(), a.TranscriptPath(), level)
 
-		// Capture discovered tool names before compaction — the summary doesn't
-		// preserve tool_reference blocks, so post-compact recovery needs this
-		// to keep sending already-loaded deferred tool schemas to the API.
-		discoveredTools := collectDiscoveredToolNames(a.context)
-
-		a.context.AddCompactBoundary(CompactTriggerAuto, preTokens,
-			func(bc *CompactBoundaryContent) {
-				if len(discoveredTools) > 0 {
-					bc.PreCompactDiscoveredTools = discoveredTools
-				}
-			},
-		)
-		a.context.AddSummary(summary)
-
-		// Anti-replay rules: injected as a separate system message so they
-		// survive compaction even when the LLM summary is compressed further.
-		// This matches the SM-compact and truncation paths which include the
-		// same rules.
-		a.context.AddAntiReplayRules()
-
-		// Inject structured goal block — deterministic task state from TodoList
-		// + toolStateTracker. Without this, the LLM-generated summary may lack
-		// explicit completed/pending task distinction.
-		if goalBlock, hasContent := a.buildStructuredGoalBlock(messages); hasContent {
-			a.context.AddGoalBlock(goalBlock)
-		}
-
-		if preCompactInst != "" {
-			a.context.AddSummary("\n\n## Custom instructions for this compaction:\n" + preCompactInst)
-		}
-
-		// Persist compaction boundary and summary to transcript for resume support.
-		// Without this, --resume replays the full un-compacted history.
-		if a.transcript != nil {
-			_ = a.transcript.WriteCompact("auto", preTokens)
-			_ = a.transcript.WriteSummary(summary)
-		}
-
-		// Save compaction state to session memory — store a compact token count marker,
-		// not the full summary text (which bloats session memory for future sessions).
-		if a.config.SessionMemory != nil {
-			a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction (auto): %d tokens compressed", preTokens), "auto")
-			// Track lastSummarizedMessageUUID for incremental SM-compact.
-			// Subsequent compactions will only compact forward from this point.
-			a.config.SessionMemory.SetLastSummarizedMessageUUID(a.context.LastCompactBoundaryUUID())
-		}
-
-		// Phase 2: Keep recent messages — preserve with tool structure intact.
-		// Run BEFORE post-compact recovery so attachments appear AFTER kept messages.
-		// Use adaptive token-based calculation (10K min, 5 text msgs, 40K max)
-		// matching SM-compact path. Fixed count is too small for large tool results
-		// and too large for small text messages.
-		a.context.KeepRecentMessagesAdaptive(10_000, 5, 40_000)
-
-		// Fix message structure after KeepRecentMessages: remove orphaned tool_results
-		// (whose tool_use was in the summarized portion) and merge consecutive same-role
-		// messages. Without this, the API returns error 2013 for invalid message structure.
-		a.context.ValidateToolPairing()
-		a.context.FixRoleAlternation()
-
-		// Phase 3: Post-compact recovery — re-inject critical context
-		recoveredPaths := a.PostCompactRecovery(HookTriggerAuto, summary)
-
-		// Phase 3b: Inject running agent status so model doesn't spawn duplicates
-		a.InjectRunningAgentStatus()
-
-		// Mark recovered files as fresh (content is back in context).
-		// NOTE: RunPostCompactCleanup() (called from PostCompactRecovery above)
-		// already saves conclusions to session memory and clears them.
-		// The outer conditional that checked len(recoveredPaths) was removed —
-		// conclusions should ALWAYS be saved before clearing, regardless of
-		// whether files were recovered (conclusions contain semantic knowledge
-		// that file content doesn't capture, like "the bug was in line 42").
-		if a.toolStateTracker != nil {
-			for _, path := range recoveredPaths {
-				a.toolStateTracker.MarkFileFresh(path)
+	if err != nil || result.Summary == "" {
+		// Fall back to the existing separate-call path
+		a.logDebug("\n[Compaction] inline compaction failed or empty, falling back to separate call\n")
+		summary, performed := a.compactor.Compact(messages, a.config.Model, a.config.APIKey, a.config.BaseURL, a.context.SystemPrompt(), a.TranscriptPath())
+		if performed && summary != "" {
+			// Augment summary with chunk path reference and previous chunks index
+			if chunkPath != "" {
+				summary = augmentSummaryWithChunk(summary, chunkPath)
 			}
+			if prevChunksIndex != "" {
+				summary += prevChunksIndex
+			}
+			// Advance compaction epoch BEFORE clearing context — marks all tracked items as stale.
+			if a.toolStateTracker != nil {
+				a.toolStateTracker.OnCompaction()
+			}
+			// Clear stale state entries from session memory - the old state context is no
+			// longer valid after compaction, and the new compaction will write fresh state.
+			if a.config.SessionMemory != nil {
+				a.config.SessionMemory.ClearStateEntries()
+			}
+
+			// Inject boundary marker and summary into context
+			preTokens := a.context.EstimatedTokens()
+
+			// Capture discovered tool names before compaction — the summary doesn't
+			// preserve tool_reference blocks, so post-compact recovery needs this
+			// to keep sending already-loaded deferred tool schemas to the API.
+			discoveredTools := collectDiscoveredToolNames(a.context)
+
+			a.context.AddCompactBoundary(CompactTriggerAuto, preTokens,
+				func(bc *CompactBoundaryContent) {
+					if len(discoveredTools) > 0 {
+						bc.PreCompactDiscoveredTools = discoveredTools
+					}
+				},
+			)
+			a.context.AddSummary(summary)
+
+			// Anti-replay rules: injected as a separate system message so they
+			// survive compaction even when the LLM summary is compressed further.
+			// This matches the SM-compact and truncation paths which include the
+			// same rules.
+			a.context.AddAntiReplayRules()
+
+			// Inject structured goal block — deterministic task state from TodoList
+			// + toolStateTracker. Without this, the LLM-generated summary may lack
+			// explicit completed/pending task distinction.
+			if goalBlock, hasContent := a.buildStructuredGoalBlock(messages); hasContent {
+				a.context.AddGoalBlock(goalBlock)
+			}
+
+			if preCompactInst != "" {
+				a.context.AddSummary("\n\n## Custom instructions for this compaction:\n" + preCompactInst)
+			}
+
+			// Persist compaction boundary and summary to transcript for resume support.
+			// Without this, --resume replays the full un-compacted history.
+			if a.transcript != nil {
+				_ = a.transcript.WriteCompact("auto", preTokens)
+				_ = a.transcript.WriteSummary(summary)
+			}
+
+			// Save compaction state to session memory — store a compact token count marker,
+			// not the full summary text (which bloats session memory for future sessions).
+			if a.config.SessionMemory != nil {
+				a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction (auto): %d tokens compressed", preTokens), "auto")
+				// Track lastSummarizedMessageUUID for incremental SM-compact.
+				// Subsequent compactions will only compact forward from this point.
+				a.config.SessionMemory.SetLastSummarizedMessageUUID(a.context.LastCompactBoundaryUUID())
+			}
+
+			// Phase 2: Keep recent messages — preserve with tool structure intact.
+			// Run BEFORE post-compact recovery so attachments appear AFTER kept messages.
+			// Use adaptive token-based calculation (10K min, 5 text msgs, 40K max)
+			// matching SM-compact path. Fixed count is too small for large tool results
+			// and too large for small text messages.
+			a.context.KeepRecentMessagesAdaptive(10_000, 5, 40_000)
+
+			// Fix message structure after KeepRecentMessages: remove orphaned tool_results
+			// (whose tool_use was in the summarized portion) and merge consecutive same-role
+			// messages. Without this, the API returns error 2013 for invalid message structure.
+			a.context.ValidateToolPairing()
+			a.context.FixRoleAlternation()
+
+			// Phase 3: Post-compact recovery — re-inject critical context
+			recoveredPaths := a.PostCompactRecovery(HookTriggerAuto, summary)
+
+			// Phase 3b: Inject running agent status so model doesn't spawn duplicates
+			a.InjectRunningAgentStatus()
+
+			// Mark recovered files as fresh (content is back in context).
+			// NOTE: RunPostCompactCleanup() (called from PostCompactRecovery above)
+			// already saves conclusions to session memory and clears them.
+			// The outer conditional that checked len(recoveredPaths) was removed —
+			// conclusions should ALWAYS be saved before clearing, regardless of
+			// whether files were recovered (conclusions contain semantic knowledge
+			// that file content doesn't capture, like "the bug was in line 42").
+			if a.toolStateTracker != nil {
+				for _, path := range recoveredPaths {
+					a.toolStateTracker.MarkFileFresh(path)
+				}
+			}
+
+			// Rebuild messages from the actual context (summary + attachments + any tail entries)
+			// and calculate the real post-compact token count for cooldown.
+			actualMessages := a.context.BuildMessages()
+			postTokens := estimateMessageParamsTokens(actualMessages)
+			a.compactor.SetPostCompactTokens(postTokens)
+			return
 		}
 
-		// Rebuild messages from the actual context (summary + attachments + any tail entries)
-		// and calculate the real post-compact token count for cooldown.
-		actualMessages := a.context.BuildMessages()
-		postTokens := estimateMessageParamsTokens(actualMessages)
-		a.compactor.SetPostCompactTokens(postTokens)
+		// LLM compaction was not performed (not needed or disabled).
+		// Do NOT fall through to CompactContext() -- the LLM compactor's
+		// ShouldCompact() check already determined that compaction isn't needed.
 		return
 	}
 
-	// LLM compaction was not performed (not needed or disabled).
-	// Do NOT fall through to CompactContext() -- the LLM compactor's
-	// ShouldCompact() check already determined that compaction isn't needed.
+	// ─── Inline compaction succeeded ──────────────────────────────────────────
+	summary := result.Summary
+	topics := result.Topics
+
+	// Augment summary with chunk path reference and previous chunks index
+	if chunkPath != "" {
+		summary = augmentSummaryWithChunk(summary, chunkPath)
+	}
+	if prevChunksIndex != "" {
+		summary += prevChunksIndex
+	}
+
+	// Advance compaction epoch BEFORE clearing context — marks all tracked items as stale.
+	if a.toolStateTracker != nil {
+		a.toolStateTracker.OnCompaction()
+	}
+	// Clear stale state entries from session memory - the old state context is no
+	// longer valid after compaction, and the new compaction will write fresh state.
+	if a.config.SessionMemory != nil {
+		a.config.SessionMemory.ClearStateEntries()
+	}
+
+	// Inject boundary marker and summary into context
+	preTokens := a.context.EstimatedTokens()
+
+	// Capture discovered tool names before compaction — the summary doesn't
+	// preserve tool_reference blocks, so post-compact recovery needs this
+	// to keep sending already-loaded deferred tool schemas to the API.
+	discoveredTools := collectDiscoveredToolNames(a.context)
+
+	a.context.AddCompactBoundary(CompactTriggerAuto, preTokens,
+		func(bc *CompactBoundaryContent) {
+			if len(discoveredTools) > 0 {
+				bc.PreCompactDiscoveredTools = discoveredTools
+			}
+		},
+	)
+
+	// Use CompressedSummaryContent instead of raw SummaryContent — this preserves
+	// topics metadata and chunk path for on-demand recall.
+	a.context.AddCompressedSummary(summary, topics, chunkPath)
+
+	// Anti-replay rules: injected as a separate system message so they
+	// survive compaction even when the LLM summary is compressed further.
+	a.context.AddAntiReplayRules()
+
+	// Inject structured goal block — deterministic task state from TodoList
+	// + toolStateTracker. Without this, the LLM-generated summary may lack
+	// explicit completed/pending task distinction.
+	if goalBlock, hasContent := a.buildStructuredGoalBlock(messages); hasContent {
+		a.context.AddGoalBlock(goalBlock)
+	}
+
+	if preCompactInst != "" {
+		a.context.AddSummary("\n\n## Custom instructions for this compaction:\n" + preCompactInst)
+	}
+
+	// Persist compaction boundary and summary to transcript for resume support.
+	// Without this, --resume replays the full un-compacted history.
+	if a.transcript != nil {
+		_ = a.transcript.WriteCompact("auto", preTokens)
+		_ = a.transcript.WriteSummary(summary)
+	}
+
+	// Save compaction state to session memory
+	if a.config.SessionMemory != nil {
+		a.config.SessionMemory.AddNote("state", fmt.Sprintf("Compaction (auto, inline): %d tokens compressed", preTokens), "auto")
+		a.config.SessionMemory.SetLastSummarizedMessageUUID(a.context.LastCompactBoundaryUUID())
+	}
+
+	// Phase 2: Keep recent messages
+	a.context.KeepRecentMessagesAdaptive(10_000, 5, 40_000)
+
+	// Fix message structure after KeepRecentMessages
+	a.context.ValidateToolPairing()
+	a.context.FixRoleAlternation()
+
+	// Phase 3: Post-compact recovery — re-inject critical context
+	recoveredPaths := a.PostCompactRecovery(HookTriggerAuto, summary)
+
+	// Phase 3b: Inject running agent status so model doesn't spawn duplicates
+	a.InjectRunningAgentStatus()
+
+	// Mark recovered files as fresh
+	if a.toolStateTracker != nil {
+		for _, path := range recoveredPaths {
+			a.toolStateTracker.MarkFileFresh(path)
+		}
+	}
+
+	// Rebuild messages and calculate post-compact token count
+	actualMessages := a.context.BuildMessages()
+	postTokens := estimateMessageParamsTokens(actualMessages)
+	a.compactor.SetPostCompactTokens(postTokens)
+
+	fmt.Fprintf(os.Stderr, "\n[Compaction] inline: %d messages compressed, topics=[%s]\n",
+		len(messages), topics)
 }
 
 // messagesToChunkMessages converts API message params into simplified

@@ -665,6 +665,19 @@ type CompressionInstructionContent struct {
 
 func (CompressionInstructionContent) entryContent() {}
 
+// CompressedSummaryContent holds the parsed LLM response from an inline
+// compression call. Inspired by openclacky's parse_compressed_result:
+// wraps summary with chunk anchors, topics metadata, and previous-chunks index
+// so the AI knows where to find archived conversation details.
+type CompressedSummaryContent struct {
+	Summary    string // the actual summary text
+	Topics     string // comma-separated topic phrases extracted from <topics>
+	ChunkPath  string // path to archived chunk file for this compaction
+	TopicsOnly bool   // true if only topics were extracted (parsing fallback)
+}
+
+func (CompressedSummaryContent) entryContent() {}
+
 // AttachmentContent represents post-compact recovery content (file/skill re-injection).
 type AttachmentContent string
 
@@ -1055,6 +1068,8 @@ func estimateEntriesTokens(entries []conversationEntry) int {
 			rawTotal += EstimateContentTokens(string(v), "natural")
 		case CompressionInstructionContent:
 			rawTotal += EstimateContentTokens(buildCompressionPrompt(v.Level), "natural")
+		case CompressedSummaryContent:
+			rawTotal += EstimateContentTokens(v.Summary, "natural")
 		}
 	}
 	return rawTotal
@@ -1360,6 +1375,17 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 		case CompressionInstructionContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
 				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + buildCompressionPrompt(v.Level)}},
+			}
+		case CompressedSummaryContent:
+			// Render as user message with chunk anchor.
+			// This matches openclacky's parse_compressed_result output:
+			// system_injected prefix + summary + optional chunk path reference.
+			text := SystemInjectedPrefix + v.Summary
+			if v.ChunkPath != "" {
+				text += fmt.Sprintf("\n\n📁 **Current chunk archived at:** `%s`\n_Use `file_reader` tool to recall details from this chunk._", v.ChunkPath)
+			}
+			msg.Content = []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: text}},
 			}
 		default:
 			msg.Content = []anthropic.ContentBlockParamUnion{
@@ -1738,6 +1764,18 @@ func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage
 				Content:   string(v),
 				Timestamp: time.Now().Format(time.RFC3339),
 			})
+		case CompressionInstructionContent:
+			msgs = append(msgs, CompactionMessage{
+				Role:      "user",
+				Content:   buildCompressionPrompt(v.Level),
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
+		case CompressedSummaryContent:
+			msgs = append(msgs, CompactionMessage{
+				Role:      "user",
+				Content:   v.Summary,
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
 		}
 	}
 
@@ -1889,6 +1927,52 @@ func (c *ConversationContext) AddGoalBlock(content string) {
 	})
 }
 
+// AddCompressionInstruction injects an inline compression instruction into the
+// conversation as a user message. This enables the insert-then-compress pattern
+// from openclacky: instead of a separate API call for summarization, the
+// instruction is injected and the next LLM call reuses the prompt cache prefix
+// (system prompt + tools + prior messages are already cached, only the
+// instruction text is new).
+func (c *ConversationContext) AddCompressionInstruction(level int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: CompressionInstructionContent{Level: level},
+	})
+}
+
+// AddCompressedSummary injects a parsed compaction result as a CompressedSummaryContent
+// entry. This is the output side of the insert-then-compress pattern: after the
+// LLM responds to the compression instruction, we parse <topics> + <summary>,
+// then inject this structured entry so it survives further compaction.
+// Matches openclacky's parse_compressed_result: role "user", compressed_summary: true.
+func (c *ConversationContext) AddCompressedSummary(summary, topics, chunkPath string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role: "user",
+		content: CompressedSummaryContent{
+			Summary:   summary,
+			Topics:    topics,
+			ChunkPath: chunkPath,
+		},
+	})
+}
+
+// HasCompressionInstruction returns true if the context currently contains
+// a CompressionInstructionContent entry that hasn't been processed yet.
+func (c *ConversationContext) HasCompressionInstruction() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if _, ok := c.entries[i].content.(CompressionInstructionContent); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // KeepRecentMessages preserves the most recent conversation entries verbatim
 // after compaction, keeping their original structure (including ToolUseContent
 // and ToolResultContent). This matches upstream's messagesToKeep mechanism
@@ -1928,7 +2012,7 @@ func (c *ConversationContext) KeepRecentMessages(count int) {
 	for i := boundaryIdx - 1; i >= 0 && len(keptEntries) < count; i-- {
 		entry := c.entries[i]
 		switch entry.content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent, AntiReplayContent, GoalContent:
+		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent, AntiReplayContent, GoalContent, CompressedSummaryContent:
 			continue // skip meta entries from previous compactions
 		default:
 			keptEntries = append([]conversationEntry{entry}, keptEntries...)
@@ -2001,7 +2085,7 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 			continue // already included in a previous compaction summary
 		}
 		switch entry.content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent:
+		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent, CompressedSummaryContent:
 			continue // skip meta entries
 		}
 
@@ -2054,7 +2138,7 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 	compactedCount := 0
 	for i := 0; i < boundaryIdx; i++ {
 		switch c.entries[i].content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent:
+		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent, CompressedSummaryContent:
 		default:
 			compactedCount++
 		}
@@ -2964,6 +3048,10 @@ func entryContentToText(c EntryContent) string {
 		return string(v)
 	case GoalContent:
 		return string(v)
+	case CompressionInstructionContent:
+		return buildCompressionPrompt(v.Level)
+	case CompressedSummaryContent:
+		return v.Summary
 	default:
 		return ""
 	}

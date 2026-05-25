@@ -1839,6 +1839,95 @@ func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, 
 	return nil, fmt.Errorf("compact streaming failed after %d retries: %w", MAX_COMPACT_STREAMING_RETRIES, lastErr)
 }
 
+// doInlineCompactLLMCall makes an inline (insert-then-compress) compaction API
+// call. Unlike doCompactLLMCall, the compression instruction is already the
+// final user message in the messages slice (injected by the caller), so no
+// additional userPrompt is appended.
+// This matches openclacky's pattern: inject instruction → LLM processes with
+// cache reuse → parse <topics> + <summary> → rebuild context.
+func doInlineCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, systemPrompt string, transcriptPath string, compressionLevel int) (*InlineCompactionResult, error) {
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("no messages to compact")
+	}
+
+	// Apply same pre-pruning as doCompactLLMCall for consistency
+	preTokens := estimateMessageParamsTokens(messages)
+	tailBudget := preTokens / 4
+	pruned := pruneToolResults(messages, tailBudget)
+	pruned = stripImages(pruned)
+
+	// Redact sensitive information
+	for i := range pruned {
+		for j := range pruned[i].Content {
+			if pruned[i].Content[j].OfText != nil {
+				pruned[i].Content[j].OfText.Text = redactSensitiveText(pruned[i].Content[j].OfText.Text)
+			}
+			if pruned[i].Content[j].OfToolResult != nil {
+				for k := range pruned[i].Content[j].OfToolResult.Content {
+					if pruned[i].Content[j].OfToolResult.Content[k].OfText != nil {
+						pruned[i].Content[j].OfToolResult.Content[k].OfText.Text = redactSensitiveText(pruned[i].Content[j].OfToolResult.Content[k].OfText.Text)
+					}
+				}
+			}
+		}
+	}
+
+	opts := []option.RequestOption{
+		option.WithHeader("Authorization", "Bearer "+apiKey),
+		option.WithHeader("anthropic-version", "2023-06-01"),
+	}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	client := anthropic.NewClient(opts...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	params := anthropic.MessageNewParams{
+		Model:     GetModelForAPI(model),
+		MaxTokens: 20000,
+		System: []anthropic.TextBlockParam{
+			{Text: systemPrompt, CacheControl: anthropic.CacheControlEphemeralParam{}},
+		},
+		Messages: pruned,
+		Thinking: anthropic.ThinkingConfigParamUnion{
+			OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
+		},
+	}
+
+	stream := client.Messages.NewStreaming(ctx, params,
+		option.WithJSONSet("context_management", map[string]any{
+			"edits": []map[string]any{
+				{"type": "clear_tool_uses_20250919", "clear_tool_inputs": true},
+				{"type": "clear_thinking_20251015"},
+			},
+		}),
+	)
+
+	var accumulated strings.Builder
+	for stream.Next() {
+		event := stream.Current()
+		switch e := event.AsAny().(type) {
+		case anthropic.ContentBlockDeltaEvent:
+			if e.Delta.Type == "text_delta" {
+				accumulated.WriteString(e.Delta.Text)
+			}
+		}
+	}
+
+	if err := stream.Err(); err != nil {
+		return nil, fmt.Errorf("inline compact streaming error: %w", err)
+	}
+
+	result := accumulated.String()
+	if result == "" {
+		return nil, ErrCompactStreamIncomplete
+	}
+
+	return parseInlineCompactionResponse(result), nil
+}
+
 // ─── Content-type-aware token estimation for API messages ────────────────────
 
 // EstimateMessageTokensSmart estimates tokens for a message using content-type
@@ -2118,6 +2207,38 @@ func extractSummaryFromCompactOutput(text string) string {
 
 	// Fallback: if no <summary> tags, return cleaned text
 	return strings.TrimSpace(text)
+}
+
+// parseTopicsFromCompactOutput extracts the <topics> block from the LLM's
+// compaction response. Returns the topics string if found, empty string otherwise.
+// Matches openclacky's parse_topics: "<topics>Rails setup, database config</topics>"
+// → "Rails setup, database config"
+func parseTopicsFromCompactOutput(text string) string {
+	topicsRe := regexp.MustCompile(`(?s)<topics>(.*?)</topics>`)
+	matches := topicsRe.FindStringSubmatch(text)
+	if len(matches) >= 2 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
+}
+
+// InlineCompactionResult holds the parsed result of an inline (insert-then-compress)
+// compaction call. The LLM response is parsed into topics + summary.
+type InlineCompactionResult struct {
+	Summary string // extracted from <summary> tags
+	Topics  string // extracted from <topics> tags
+}
+
+// parseInlineCompactionResponse parses the LLM response from an inline
+// compression call (insert-then-compress pattern). Extracts both <topics>
+// and <summary> from the response text.
+func parseInlineCompactionResponse(text string) *InlineCompactionResult {
+	topics := parseTopicsFromCompactOutput(text)
+	summary := extractSummaryFromCompactOutput(text)
+	return &InlineCompactionResult{
+		Summary: summary,
+		Topics:  topics,
+	}
 }
 
 // ─── Partial Compaction (Directional) ────────────────────────────────────────
