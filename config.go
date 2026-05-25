@@ -71,6 +71,14 @@ type Config struct {
 	MicroCompactPlaceholder       string
 	MicroCompactMinCharCount      int // minimum chars in a tool result to consider clearing; preserves small results
 	MicroCompactGapMinutes        int // time gap (minutes) since last assistant message before triggering microcompact; 0 = disabled (run every turn)
+	// Skill evolution (openclacky pattern): auto-create skills from complex tasks
+	// and reflect on executed skills to improve them.
+	SkillEvolutionEnabled  bool // default true
+	SkillEvolutionMinTurns int  // min task iterations to trigger (default 12 for auto-create, 5 for reflect)
+	// Memory updater (openclacky pattern): persist knowledge from conversations
+	// to session memory after qualifying tasks.
+	MemoryUpdateEnabled  bool // default true
+	MemoryUpdateMinTurns int  // min task iterations to trigger (default 10)
 	PostCompactRecoverFiles       bool
 	PostCompactMaxFiles           int
 	PostCompactMaxFileChars       int // legacy char-based budget (deprecated, use PostCompactMaxFileTokens)
@@ -388,6 +396,10 @@ func DefaultConfig() Config {
 		MicroCompactPlaceholder:       "[Old tool result content cleared]",
 		MicroCompactMinCharCount:      2000, // only clear results >= 2000 chars; preserve small useful results
 		MicroCompactGapMinutes:        60,   // trigger microcompact when gap > 60 min since last assistant; matches server cache TTL; 0 = disabled
+		SkillEvolutionEnabled:         true,
+		SkillEvolutionMinTurns:        12, // auto-create threshold; reflect threshold is 5 (hardcoded in skills/task_evolution.go)
+		MemoryUpdateEnabled:           true,
+		MemoryUpdateMinTurns:          10,
 		PostCompactRecoverFiles:       true,
 		PostCompactMaxFiles:           5,
 		PostCompactMaxFileChars:       50000, // legacy, use PostCompactMaxFileTokens

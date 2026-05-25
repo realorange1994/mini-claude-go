@@ -93,6 +93,20 @@ func (l *Loader) SetBuiltinDir(dir string) {
 	l.builtinDir = dir
 }
 
+// WorkspaceDir returns the workspace skills directory path.
+func (l *Loader) WorkspaceDir() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.workspace
+}
+
+// BuiltinDir returns the builtin skills directory path.
+func (l *Loader) BuiltinDir() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.builtinDir
+}
+
 // Refresh re-scans skill directories and rebuilds the index.
 func (l *Loader) Refresh() error {
 	l.mu.Lock()

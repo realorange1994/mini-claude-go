@@ -418,6 +418,11 @@ type AgentLoop struct {
 	telemetry                 *TelemetryManager                   // telemetry event tracking
 	cronScheduler             *CronScheduler                      // cron task scheduler (started after agent setup)
 	debugLog                  *os.File                            // file handle for diagnostic logging (not console)
+	// Task-scoped iteration tracking (openclacky pattern): tracks iteration
+	// count and skill read count at task start, used to compute task-local
+	// iteration counts for skill evolution and memory updater triggers.
+	taskStartTurns            int                                 // turns consumed at task start
+	taskStartReadSkillCount   int                                 // skillTracker.ReadCount() at task start
 }
 
 // SetCronScheduler attaches a cron scheduler to the agent loop and starts it.
@@ -1348,6 +1353,15 @@ func (a *AgentLoop) Run(userMessage string) string {
 	a.budget = NewIterationBudget(a.maxTurns)
 	a.lastDeltasState = DeltasStateNone // reset streaming state
 
+	// Track task-scoped iteration start (openclacky pattern): records the
+	// budget consumption and skill read count at task start, used by the
+	// post-run skill evolution and memory updater to compute task-local
+	// iteration counts (rather than session-cumulative).
+	a.taskStartTurns = a.budget.Consumed()
+	if a.skillTracker != nil {
+		a.taskStartReadSkillCount = a.skillTracker.ReadCount()
+	}
+
 	a.logDebug("[session] Run started: model=%s mode=%s maxTurns=%d stream=%v input=%dchars\n",
 		a.config.Model, a.config.PermissionMode, a.maxTurns, a.useStream, len(userMessage))
 
@@ -1971,6 +1985,16 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// Flush transcript after each turn
 	if a.transcript != nil {
 		_ = a.transcript.Flush()
+	}
+
+	// Post-run skill evolution and memory update (openclacky pattern):
+	// After the main loop completes (normal exit, not interrupted), run the
+	// skill evolution system to reflect on executed skills or auto-create new
+	// ones from complex workflows, then run memory update to persist knowledge.
+	taskTurns := a.budget.Consumed() - a.taskStartTurns
+	if !a.IsInterrupted() {
+		a.runSkillEvolutionIntegration(taskTurns)
+		a.runMemoryUpdate(taskTurns)
 	}
 
 	a.fireStopHook("completed", a.budget.Consumed(), false)
