@@ -476,3 +476,56 @@ func TestFileEditEmptyOldStringEmptyFile(t *testing.T) {
 		t.Errorf("error should mention 'old_string must not be empty', got: %q", result.Output)
 	}
 }
+
+// ─── ValidateEditPreview (pre-flight check) ─────────────────────────────────
+
+func TestValidateEditPreviewFileNotFound(t *testing.T) {
+	errMsg := ValidateEditPreview("/nonexistent/file.go", "some text")
+	if !strings.Contains(errMsg, "File not found") {
+		t.Errorf("expected 'File not found', got %q", errMsg)
+	}
+}
+
+func TestValidateEditPreviewEmptyOldString(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	os.WriteFile(fp, []byte("hello"), 0o644)
+	errMsg := ValidateEditPreview(fp, "")
+	if !strings.Contains(errMsg, "No old_string") {
+		t.Errorf("expected 'No old_string', got %q", errMsg)
+	}
+}
+
+func TestValidateEditPreviewStringNotFound(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	os.WriteFile(fp, []byte("hello world\nfoo bar\n"), 0o644)
+	errMsg := ValidateEditPreview(fp, "not in file")
+	if !strings.Contains(errMsg, "String to replace not found") {
+		t.Errorf("expected 'String to replace not found', got %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "file_reader") {
+		t.Errorf("should mention file_reader for recovery, got %q", errMsg)
+	}
+}
+
+func TestValidateEditPreviewStringFound(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	os.WriteFile(fp, []byte("hello world\nfoo bar\n"), 0o644)
+	errMsg := ValidateEditPreview(fp, "hello world")
+	if errMsg != "" {
+		t.Errorf("expected empty (success), got %q", errMsg)
+	}
+}
+
+func TestValidateEditPreviewCurlyQuotes(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "test.txt")
+	os.WriteFile(fp, []byte("\u201Chello\u201D world\n"), 0o644)
+	// Straight quotes should match curly quotes in file (normalizeQuotes)
+	errMsg := ValidateEditPreview(fp, `"hello"`)
+	if errMsg != "" {
+		t.Errorf("expected empty (success via quote normalization), got %q", errMsg)
+	}
+}

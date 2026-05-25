@@ -403,6 +403,7 @@ type AgentLoop struct {
 	modelCapabilities         *ModelCapabilitiesCache             // per-model context window and capability lookup
 	consecutiveStreamFailures int                                 // tracks consecutive streaming failures for non-streaming fallback
 	timeoutHintInjected       bool                                // one-shot: timeout hint injected this session (openclacky pattern)
+	truncationHintInjected    bool                                // one-shot: truncation hint injected this session (openclacky pattern)
 	inlineCompressionMode     bool                                // set during inline cache-reusing compaction (openclacky pattern)
 	toolSchemaCache           map[string]anthropic.ToolUnionParam // tool name → cached schema (avoid re-serialize)
 	toolSchemaCacheHash       uint64                              // hash of tool names for cache invalidation
@@ -1384,6 +1385,16 @@ func (a *AgentLoop) Run(userMessage string) string {
 	a.cacheBreakDetector.RecordChange(CacheChangeUserMessage, 1)
 	if a.transcript != nil {
 		_ = a.transcript.WriteUser(userMessage)
+	}
+
+	// Idle auto-compact (openclacky pattern): if the user has been idle for
+	// a while (>10 min since last API call), run a lightweight micro-compact
+	// to clear old tool results before processing the new message. This
+	// prevents context bloat across long-lived sessions where the user walks
+	// away and comes back later.
+	if !a.lastApiCompletionTime.IsZero() && time.Since(a.lastApiCompletionTime) > 10*time.Minute {
+		a.logDebug("[idle-compact] Last API was %v ago, running micro-compact before processing\n", time.Since(a.lastApiCompletionTime))
+		a.runPerTurnMicroCompact()
 	}
 
 	// Hook: PostUserMessage — after user message is added to context
@@ -3188,6 +3199,14 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 			// Inspired by openclacky's detect_upstream_truncation!()
 			if len(v.Input) == 0 {
 				a.out("\n[WARN] Upstream truncation: tool %q has empty arguments\n", v.Name)
+				// Inject one-shot behavioral hint (openclacky pattern):
+				// On first truncation in a session, inject a hint telling the LLM
+				// to prefer smaller tool_call arguments. This prevents recurrence
+				// without modifying the system prompt or breaking prompt cache.
+				if !a.truncationHintInjected {
+					a.truncationHintInjected = true
+					a.context.AddUserMessage("Note: Your previous response was truncated because a tool_call had overly large arguments. Please prefer smaller, more focused tool_call arguments on future turns — large single-shot payloads are more likely to be truncated by the API. Continue with your task.")
+				}
 				return nil, nil, fmt.Sprintf("upstream truncated response: tool %q has empty arguments", v.Name)
 			}
 
@@ -3438,6 +3457,48 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 			Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: msg}}},
 			IsError:   param.NewOpt(true),
 		}, msg
+	}
+
+	// ─── Pre-flight validation (openclacky tool preview validation) ──────
+	// Validate edit_file before execution to prevent wasted turns.
+	// Instead of executing and failing, we deny upfront with structured
+	// feedback telling the LLM exactly what to do differently.
+	// This matches openclacky's show_tool_preview / show_edit_preview.
+	if toolName == "edit_file" {
+		pathStr, _ := input["file_path"].(string)
+		oldStr, _ := input["old_string"].(string)
+		if pathStr != "" && oldStr != "" {
+			if previewErr := tools.ValidateEditPreview(pathStr, oldStr); previewErr != "" {
+				a.logDebug("[tool] edit_file pre-flight denied: %s\n", previewErr)
+				return anthropic.ToolResultBlockParam{
+					ToolUseID: toolUseID,
+					Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "Error: " + previewErr}}},
+					IsError:   param.NewOpt(true),
+				}, previewErr
+			}
+		}
+	}
+	if toolName == "multi_edit" {
+		pathStr, _ := input["file_path"].(string)
+		if pathStr != "" {
+			if edits, ok := input["edits"].([]any); ok {
+				for _, edit := range edits {
+					if editMap, ok2 := edit.(map[string]any); ok2 {
+						oldStr, _ := editMap["old_string"].(string)
+						if oldStr != "" {
+							if previewErr := tools.ValidateEditPreview(pathStr, oldStr); previewErr != "" {
+								a.logDebug("[tool] multi_edit pre-flight denied: %s\n", previewErr)
+								return anthropic.ToolResultBlockParam{
+									ToolUseID: toolUseID,
+									Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "Error: " + previewErr}}},
+									IsError:   param.NewOpt(true),
+								}, previewErr
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Read-before-write/edit enforcement (matches Claude Code official behavior):

@@ -337,6 +337,58 @@ func straightToCurlySingle(s string) string {
 	return sb.String()
 }
 
+// ValidateEditPreview performs a pre-flight check for edit_file operations.
+// It checks if old_string would be found in the file using the same matching
+// logic as Execute. Returns an error message if the edit would fail, or
+// empty string if the edit should succeed.
+// This matches openclacky's show_edit_preview pattern: deny the tool call
+// BEFORE execution with structured feedback telling the LLM to re-read the file.
+func ValidateEditPreview(filePath, oldString string) (errMsg string) {
+	fp := expandPath(filePath)
+
+	// Check file existence
+	if _, err := os.Stat(fp); os.IsNotExist(err) {
+		return fmt.Sprintf("File not found: %s", filePath)
+	}
+
+	// Empty old_string
+	if oldString == "" {
+		return "No old_string provided (nothing to replace)"
+	}
+
+	// Read file content
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		return fmt.Sprintf("Error reading file: %v", err)
+	}
+	content, fileMeta := DecodeFileContent(data)
+	hasCRLF := fileMeta.LineEndings == LineEndingCRLF
+
+	// Apply same normalization as Execute
+	contentNorm := normalizeQuotes(content)
+	oldStrNorm := normalizeQuotes(oldString)
+
+	if hasCRLF {
+		contentNorm = strings.ReplaceAll(contentNorm, "\r\n", "\n")
+		oldStrNorm = strings.ReplaceAll(oldStrNorm, "\r\n", "\n")
+	}
+
+	// Check with same matching logic as Execute
+	count := strings.Count(contentNorm, oldStrNorm)
+	if count == 0 {
+		// Try desanitized version
+		desanitizedOld := desanitize(oldStrNorm)
+		if desanitizedOld != oldStrNorm {
+			count = strings.Count(contentNorm, desanitizedOld)
+		}
+	}
+	if count == 0 {
+		return fmt.Sprintf("String to replace not found in file %s. Please use file_reader to read the file first, find the correct string to replace, and try again with the exact string (including whitespace).", filePath)
+	}
+
+	return ""
+}
+
 // stripTrailingWhitespace removes trailing whitespace from each line.
 func stripTrailingWhitespace(s string) string {
 	lines := strings.Split(s, "\n")
