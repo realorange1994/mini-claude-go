@@ -2850,7 +2850,7 @@ func (a *AgentLoop) reactiveCompact(targetTokens int) error {
 		// Precise reactive compact: we know exactly how many tokens to shed.
 		// Use SM-compact if session memory is available, otherwise fall back
 		// to tryCompaction which handles LLM and truncation paths.
-		a.out("[reactive-compact] Precise targeting: %d tokens (current: %d, shedding: %d)\n",
+		a.logDebug("[reactive-compact] Precise targeting: %d tokens (current: %d, shedding: %d)\n",
 			targetTokens, currentTokens, currentTokens-targetTokens)
 
 		if a.config.SessionMemory != nil {
@@ -2876,7 +2876,7 @@ func (a *AgentLoop) reactiveCompact(targetTokens int) error {
 	} else {
 		// Aggressive reactive compact: no precise token count available.
 		// Keep only the most recent messages, discarding the rest.
-		a.out("[reactive-compact] Aggressive compaction (current: %d tokens)\n", currentTokens)
+		a.logDebug("[reactive-compact] Aggressive compaction (current: %d tokens)\n", currentTokens)
 
 		preTokens := currentTokens
 		a.context.TruncateHistory()
@@ -2927,7 +2927,7 @@ func (a *AgentLoop) reactiveCompact(targetTokens int) error {
 		a.compactor.SetPostCompactTokens(postCompactTokens)
 	}
 
-	a.out("[reactive-compact] Complete: %d -> %d tokens\n", currentTokens, postCompactTokens)
+	a.logDebug("[reactive-compact] Complete: %d -> %d tokens\n", currentTokens, postCompactTokens)
 	return nil
 }
 
@@ -3121,6 +3121,23 @@ func (t *CachedMicrocompactTracker) RegisterCompactableToolUse(toolUseID string,
 // and registers only those whose names are in compactableToolNames.
 // Called before the API call to pre-populate the tracker with compactable
 // tool IDs from the current conversation context.
+func (t *CachedMicrocompactTracker) RegisterCompactableToolIDsFromMessages(messages []anthropic.MessageParam) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, msg := range messages {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, block := range msg.Content {
+			if block.OfToolUse != nil && block.OfToolUse.ID != "" && compactableToolNames[block.OfToolUse.Name] {
+				if !t.registeredTools[block.OfToolUse.ID] {
+					t.registeredTools[block.OfToolUse.ID] = true
+					t.toolOrder = append(t.toolOrder, block.OfToolUse.ID)
+				}
+			}
+		}
+	}
+}
 
 // MarkSentToAPI flags that cache_edits were included in the last API request.
 // This prevents issuing another cache_edits until the server has processed

@@ -296,7 +296,7 @@ func (a *AgentLoop) EnqueueAgentNotification(taskID, status, result, transcriptP
 	default:
 		// Channel is full — log instead of silently dropping.
 		// With 64 slots this should only happen with many concurrent sub-agents.
-		a.out("[warning] notification channel full, dropping: %s\n", taskID)
+		a.logDebug("[warning] notification channel full, dropping: %s\n", taskID)
 	}
 }
 
@@ -416,6 +416,7 @@ type AgentLoop struct {
 	lastTransition            LoopTransitionReason                // reason for the most recent loop continue
 	telemetry                 *TelemetryManager                   // telemetry event tracking
 	cronScheduler             *CronScheduler                      // cron task scheduler (started after agent setup)
+	debugLog                  *os.File                            // file handle for diagnostic logging (not console)
 }
 
 // SetCronScheduler attaches a cron scheduler to the agent loop and starts it.
@@ -441,6 +442,7 @@ func (a *AgentLoop) EnqueueCronPrompt(prompt string) {
 // Returns true if the caller should continue retrying, false if fallback was triggered.
 func (a *AgentLoop) handle529Error() bool {
 	a.consecutive529Errors++
+	a.logDebug("[529] consecutive=%d model=%s fallback=%s\n", a.consecutive529Errors, a.config.Model, a.sonnetModel)
 	if a.consecutive529Errors >= 3 {
 		originalModel := a.config.Model
 		fallbackModel := a.sonnetModel
@@ -469,6 +471,7 @@ func (a *AgentLoop) handleRefusal(stopReason string) string {
 // and falls back to non-streaming API calls.
 func (a *AgentLoop) trackStreamFailure() {
 	a.consecutiveStreamFailures++
+	a.logDebug("[stream-fallback] consecutive failures=%d threshold=%d\n", a.consecutiveStreamFailures, 3)
 	if a.consecutiveStreamFailures >= 3 {
 		a.out("\n[WARN] Streaming failed %d times consecutively — switching to non-streaming mode for this session\n",
 			a.consecutiveStreamFailures)
@@ -487,6 +490,7 @@ func (r LoopTransitionReason) String() string {
 // handle429Error determines whether a 429 rate-limit error should be retried
 // based on the subscriber's tier. Returns true if the caller should retry.
 func (a *AgentLoop) handle429Error(errMsg string) bool {
+	a.logDebug("[429] subscription=%s errMsg=%s\n", a.config.SubscriptionType, errMsg)
 	isOverage := containsOverageSignal(errMsg)
 	if !shouldRetry429(a.config.SubscriptionType, isOverage) {
 		a.out("\n[429 Rate Limit] Subscription type %q -- skipping retry (usage limit hit)%s\n",
@@ -562,6 +566,17 @@ func (a *AgentLoop) out(format string, args ...interface{}) {
 		w = os.Stderr
 	}
 	fmt.Fprintf(w, format, args...)
+}
+
+// logDebug writes an internal diagnostic message to the debug log file.
+// Messages are NOT printed to console — they go to .claude/debug.log instead.
+// If the debug log file is not open, the message is silently dropped.
+func (a *AgentLoop) logDebug(format string, args ...interface{}) {
+	if a.debugLog == nil {
+		return
+	}
+	fmt.Fprintf(a.debugLog, format, args...)
+	a.debugLog.Sync()
 }
 
 // newHTTPClient creates an HTTP client with sensible timeouts to prevent
@@ -773,6 +788,14 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	if tst, ok := agent.registry.Get("tool_search"); ok {
 		if tst, ok := tst.(*tools.ToolSearchTool); ok {
 			tst.Registry = agent.registry
+		}
+	}
+
+	// Open debug log file for diagnostic messages (not printed to console)
+	if logDir, err := filepath.Abs(filepath.Join(cfg.ProjectDir, ".claude")); err == nil {
+		os.MkdirAll(logDir, 0o755)
+		if f, err := os.OpenFile(filepath.Join(logDir, "debug.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			agent.debugLog = f
 		}
 	}
 
@@ -995,6 +1018,14 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		})
 	}
 
+	// Open debug log file for diagnostic messages (not printed to console)
+	if logDir, err := filepath.Abs(filepath.Join(cfg.ProjectDir, ".claude")); err == nil {
+		os.MkdirAll(logDir, 0o755)
+		if f, err := os.OpenFile(filepath.Join(logDir, "debug.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			agent.debugLog = f
+		}
+	}
+
 	return agent, nil
 }
 
@@ -1179,6 +1210,9 @@ func (a *AgentLoop) IsStreaming() bool {
 
 // fireStopHook fires HookStop with session metadata. Call at every Run() exit point.
 func (a *AgentLoop) fireStopHook(reason string, turnsUsed int, interrupted bool) {
+	a.logDebug("[session] Run ended: reason=%s turns=%d in=%d out=%d cache_read=%d cache_write=%d int=%v\n",
+		reason, turnsUsed, a.totalInputTokens.Load(), a.totalOutputTokens.Load(),
+		a.totalCacheReadTokens.Load(), a.totalCacheCreationTokens.Load(), interrupted)
 	if a.hooks == nil {
 		return
 	}
@@ -1313,6 +1347,9 @@ func (a *AgentLoop) Run(userMessage string) string {
 	a.budget = NewIterationBudget(a.maxTurns)
 	a.lastDeltasState = DeltasStateNone // reset streaming state
 
+	a.logDebug("[session] Run started: model=%s mode=%s maxTurns=%d stream=%v input=%dchars\n",
+		a.config.Model, a.config.PermissionMode, a.maxTurns, a.useStream, len(userMessage))
+
 	// Expand @ context references (e.g., @file:main.go, @diff)
 	cwd, _ := os.Getwd()
 
@@ -1369,6 +1406,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// Preflight compression for resumed sessions
 	const preflightThreshold = 100000 // ~100k tokens
 	if a.context.EstimatedTokens() > preflightThreshold {
+		a.logDebug("[compact] preflight: est_tokens=%d > threshold=%d\n", a.context.EstimatedTokens(), preflightThreshold)
 		for i := 0; i < 3; i++ {
 			a.tryCompaction()
 			if a.context.EstimatedTokens() <= preflightThreshold {
@@ -1379,6 +1417,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 	for a.budget.Consume() {
 		a.lastTransition = TransitionNone // reset per-turn
+
+		// Per-turn micro-compact: clear old tool results before each API call.
+		// Prevents context from growing unboundedly between full compactions,
+		// matching upstream's per-turn microCompact call in query.ts.
+		a.runPerTurnMicroCompact()
+
 		// Check for cancelCtx (set by sub-agent Kill) at the start of each turn
 		if a.cancelCtx != nil {
 			select {
@@ -1414,7 +1458,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				threshold = 5000
 			}
 			if result := CheckReactiveCompact(currentTokens, a.prevTurnTokens, threshold); result != nil {
-				a.out("\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
+				a.logDebug("\n[reactive-compact] Token spike detected: %d -> %d (delta=%d, threshold=%d)\n",
 					a.prevTurnTokens, currentTokens, result.TokenDelta, threshold)
 				a.tryCompaction()
 				a.consecutiveContextErrors = 0 // reset after successful compaction
@@ -1579,6 +1623,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			var fbErr *FallbackTriggeredError
 			if errors.As(err, &fbErr) {
 				a.out("\n[Fallback] %v -- continuing with %s\n", fbErr, fbErr.FallbackModel)
+				a.logDebug("[fallback] model switched: %s -> %s\n", a.config.Model, fbErr.FallbackModel)
 				a.lastTransition = TransitionModelFallback
 				continue
 			}
@@ -1596,6 +1641,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 			// compaction to break the cycle.
 			if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
 				a.consecutive2013Errors++
+				a.logDebug("[2013] error recovery: consecutive=%d entries=%d\n", a.consecutive2013Errors, len(a.context.entries))
 				if a.consecutive2013Errors > 3 {
 					a.out("\n[ERR] Tool pairing error after %d repair attempts, giving up.\n", a.consecutive2013Errors-1)
 					a.fireStopHook("tool_pairing_failed", a.budget.Consumed(), false)
@@ -1665,7 +1711,7 @@ func (a *AgentLoop) Run(userMessage string) string {
 				// Try precise token-gap parsing for reactive compaction.
 				if a.config.ReactiveCompactEnabled {
 					if overflowTokens, found := parseMaxTokensContextOverflowError(err); found {
-						a.out("\n[reactive-compact] Parsed context overflow: %d tokens over, shedding precisely...\n",
+						a.logDebug("\n[reactive-compact] Parsed context overflow: %d tokens over, shedding precisely...\n",
 							overflowTokens)
 						currentTokens := a.context.EstimatedTokens()
 						safetyMargin := 5000
@@ -1961,7 +2007,7 @@ func (a *AgentLoop) Close() {
 		if tp := a.TranscriptPath(); tp != "" {
 			costPath := tp + ".cost.json"
 			_ = a.costTracker.SaveToFile(costPath)
-			a.out("\n[cost] Session cost saved to %s\n", costPath)
+			a.logDebug("\n[cost] Session cost saved to %s\n", costPath)
 		}
 		a.out("\n%s\n", a.costTracker.FormatCostDisplay())
 	}
@@ -1998,7 +2044,7 @@ func (a *AgentLoop) ForceCompact() {
 		postTokens := a.context.EstimatedTokens()
 		postEntries := len(a.context.Entries())
 		saved := preTokens - postTokens
-		a.out("[compact] Compacted: %d → %d entries, %s → %s tokens (saved %s)\n",
+		a.logDebug("[compact] Compacted: %d → %d entries, %s → %s tokens (saved %s)\n",
 			preEntries, postEntries,
 			formatTokenCount(int64(preTokens)), formatTokenCount(int64(postTokens)),
 			formatTokenCount(int64(saved)))
@@ -2034,7 +2080,7 @@ func (a *AgentLoop) ForceCompact() {
 	if after < before {
 		preTokens := beforeTokens
 		saved := beforeTokens - afterTokens
-		a.out("[compact] Truncated: %d → %d entries, %s → %s tokens (saved %s)\n",
+		a.logDebug("[compact] Truncated: %d → %d entries, %s → %s tokens (saved %s)\n",
 			before, after,
 			formatTokenCount(int64(beforeTokens)), formatTokenCount(int64(afterTokens)),
 			formatTokenCount(int64(saved)))
@@ -2165,7 +2211,7 @@ func (a *AgentLoop) checkThinkingClearLatch() {
 	}
 	if !a.lastApiCompletionTime.IsZero() && time.Since(a.lastApiCompletionTime) > time.Hour {
 		a.thinkingClearLatched = true
-		a.out("[cache] thinking clear latched (>1h idle) — clearing old thinking blocks\n")
+		a.logDebug("[cache] thinking clear latched (>1h idle) — clearing old thinking blocks\n")
 	}
 }
 
@@ -2311,9 +2357,17 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
+	// Pre-populate the cached MC tracker with compactable tool IDs from the
+	// current conversation context. This ensures the tracker knows about tools
+	// registered in earlier turns, enabling cache_edits to delete them.
+	a.cachedMC.RegisterCompactableToolIDsFromMessages(messages)
+
 	// Inject cache_edits block if the cached microcompact tracker has deletions pending.
 	// This deletes old tool results server-side while preserving the prompt cache.
 	messages = a.injectCacheEdits(messages)
+
+	a.logDebug("[api] streaming call: model=%s msgs=%d est_tokens=%d turn=%d\n",
+		GetModelForAPI(a.config.Model), len(messages), a.context.EstimatedTokens(), a.budget.Consumed()+1)
 
 	params := anthropic.MessageNewParams{
 		Model:     GetModelForAPI(a.config.Model),
@@ -2422,6 +2476,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 				a.context.AddUserMessage("[SYSTEM] The previous response timed out. This usually means the model was trying to produce too much output. Please adapt:\n- Break the task into multiple smaller steps with separate tool calls\n- For long files: first create a skeleton with `write`, then fill sections individually\n- Keep each single tool-call argument well under ~500 lines\n- Do NOT attempt to output the entire deliverable in one response")
 				messages = a.context.BuildMessages()
 				messages = NormalizeAPIMessages(messages)
+				a.cachedMC.RegisterCompactableToolIDsFromMessages(messages)
 				messages = a.injectCacheEdits(messages)
 				params.Messages = messages
 				cacheMessageParams(&params, a.getCacheTTL()) // re-apply cache_control on rebuilt messages
@@ -2525,17 +2580,15 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 			int64(collect.Usage.CacheWriteTokens), int64(collect.Usage.CacheReadTokens))
 		// Anchor the token estimate to the actual API response to prevent drift
 		a.context.SetAPITokenAnchor(int64(collect.Usage.InputTokens))
-		// Per-turn cache stats for verification
-		a.out("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
-			collect.Usage.InputTokens, collect.Usage.CacheWriteTokens, collect.Usage.CacheReadTokens, a.totalCacheReadTokens.Load())
+		a.context.SetAPITokenAnchor(int64(collect.Usage.InputTokens))
 		// Detect cache break: warn if cache reuse dropped significantly from previous call
 		if a.cacheBreakDetector.DetectBreak(int64(collect.Usage.CacheReadTokens)) {
 			baseline := a.cacheBreakDetector.LastBaseline()
 			current := int64(collect.Usage.CacheReadTokens)
 			detail := fmt.Sprintf("cache_read dropped: baseline=%d → current=%d (delta=%d)", baseline, current, baseline-current)
-			a.out("[cache-break] %s\n", detail)
+			a.logDebug("[cache-break] %s\n", detail)
 			if fpath := a.cacheBreakDetector.WriteDiagnosticFile(baseline, current, detail); fpath != "" {
-				a.out("[cache-break] diagnostic written to: %s\n", fpath)
+				a.logDebug("[cache-break] diagnostic written to: %s\n", fpath)
 			}
 		}
 		// Update cache break detector baseline with current cache read tokens
@@ -2547,7 +2600,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
 		isBreak, reason := CheckResponseForCacheBreak(int64(collect.Usage.CacheReadTokens), int64(collect.Usage.CacheWriteTokens), gap, cacheDeletionsPending, false)
 		if isBreak {
-			a.out("[cache-break-2] %s\n", reason)
+			a.logDebug("[cache-break-2] %s\n", reason)
 		}
 		UpdateLastAssistantMsgTime()
 	}
@@ -2621,7 +2674,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 		if fr == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
 			prev := a.currentMaxTokens.Load()
 			a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
-			a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+			a.logDebug("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
 			a.lastTransition = TransitionMaxTokens
 		} else if fr == "max_tokens" {
 			// Already at escalated level -- inject recovery message for next turn.
@@ -2637,6 +2690,8 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 // callWithNonStreamingOnly is the primary entry point when streaming is disabled.
 // It's identical to callWithNonStreamingFallback but named for the non-streaming path.
 func (a *AgentLoop) callWithNonStreamingOnly() ([]map[string]any, []string, error) {
+	a.logDebug("[api] non-streaming call: model=%s est_tokens=%d turn=%d\n",
+		GetModelForAPI(a.config.Model), a.context.EstimatedTokens(), a.budget.Consumed()+1)
 	return a.callWithNonStreamingFallback(a.buildMessageParams())
 }
 
@@ -2705,6 +2760,8 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, error) {
 	const maxRetries = 3 // shorter retry budget for grace call
 
+	a.logDebug("[api] grace call (no tools): model=%s\n", GetModelForAPI(a.config.Model))
+
 	// Build messages WITHOUT tools, but still validate before sending.
 	// Skip compaction here (grace call should not trigger new compaction).
 	a.context.InjectTimeContext()
@@ -2749,7 +2806,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
 				// Per-turn cache stats for verification
-				a.out("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
+				a.logDebug("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
 					response.Usage.InputTokens, response.Usage.CacheCreationInputTokens, response.Usage.CacheReadInputTokens, a.totalCacheReadTokens.Load())
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
 				a.context.SetAPITokenAnchor(response.Usage.InputTokens)
@@ -2757,9 +2814,9 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 					baseline := a.cacheBreakDetector.LastBaseline()
 					current := int64(response.Usage.CacheReadInputTokens)
 					detail := fmt.Sprintf("cache_read dropped: baseline=%d → current=%d (delta=%d)", baseline, current, baseline-current)
-					a.out("[cache-break] %s\n", detail)
+					a.logDebug("[cache-break] %s\n", detail)
 					if fpath := a.cacheBreakDetector.WriteDiagnosticFile(baseline, current, detail); fpath != "" {
-						a.out("[cache-break] diagnostic written to: %s\n", fpath)
+						a.logDebug("[cache-break] diagnostic written to: %s\n", fpath)
 					}
 				}
 				// Update cache break detector baseline with current cache read tokens
@@ -2770,7 +2827,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
 				isBreak, reason := CheckResponseForCacheBreak(int64(response.Usage.CacheReadInputTokens), int64(response.Usage.CacheCreationInputTokens), gap, cacheDeletionsPending, false)
 				if isBreak {
-					a.out("[cache-break-2] %s\n", reason)
+					a.logDebug("[cache-break-2] %s\n", reason)
 				}
 				UpdateLastAssistantMsgTime()
 			}
@@ -2798,7 +2855,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
 				prev := a.currentMaxTokens.Load()
 				a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
-				a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+				a.logDebug("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
 				a.lastTransition = TransitionMaxTokens
 			} else if stopReason == "max_tokens" {
 				// Already at escalated level -- inject recovery message for next turn.
@@ -2888,9 +2945,9 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 					baseline := a.cacheBreakDetector.LastBaseline()
 					current := int64(response.Usage.CacheReadInputTokens)
 					detail := fmt.Sprintf("cache_read dropped: baseline=%d → current=%d (delta=%d)", baseline, current, baseline-current)
-					a.out("[cache-break] %s\n", detail)
+					a.logDebug("[cache-break] %s\n", detail)
 					if fpath := a.cacheBreakDetector.WriteDiagnosticFile(baseline, current, detail); fpath != "" {
-						a.out("[cache-break] diagnostic written to: %s\n", fpath)
+						a.logDebug("[cache-break] diagnostic written to: %s\n", fpath)
 					}
 				}
 				// Update cache break detector baseline with current cache read tokens
@@ -2901,7 +2958,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
 				isBreak, reason := CheckResponseForCacheBreak(int64(response.Usage.CacheReadInputTokens), int64(response.Usage.CacheCreationInputTokens), gap, cacheDeletionsPending, false)
 				if isBreak {
-					a.out("[cache-break-2] %s\n", reason)
+					a.logDebug("[cache-break-2] %s\n", reason)
 				}
 				UpdateLastAssistantMsgTime()
 			}
@@ -2929,7 +2986,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
 				prev := a.currentMaxTokens.Load()
 				a.currentMaxTokens.Store(int64(a.config.EscalatedMaxOutputTokens))
-				a.out("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
+				a.logDebug("\n[auto] max_tokens hit (%d), escalating to %d for next request\n", prev, a.config.EscalatedMaxOutputTokens)
 				a.lastTransition = TransitionMaxTokens
 			} else if stopReason == "max_tokens" {
 				// Already at escalated level -- inject recovery message for next turn.
@@ -2958,6 +3015,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			// Rebuild messages from repaired entries so the fix takes effect
 			rebuilt := a.context.BuildMessages()
 			rebuilt = NormalizeAPIMessages(rebuilt)
+			a.cachedMC.RegisterCompactableToolIDsFromMessages(rebuilt)
 			// Re-inject cache_edits after rebuild.
 			rebuilt = a.injectCacheEdits(rebuilt)
 			params.Messages = rebuilt
@@ -2988,7 +3046,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			currentTokens := a.context.EstimatedTokens()
 			safetyMargin := 5000 // shed extra tokens to avoid boundary issues
 			targetTokens := currentTokens - overflowTokens - safetyMargin
-			a.out("\n[reactive-compact] Parsed token overflow: %d tokens over limit, triggering precise compaction (current=%d, target=%d)...\n",
+			a.logDebug("\n[reactive-compact] Parsed token overflow: %d tokens over limit, triggering precise compaction (current=%d, target=%d)...\n",
 				overflowTokens, currentTokens, targetTokens)
 			a.reactiveCompact(targetTokens)
 			return nil, nil, fmt.Errorf("context_length_exceeded")
@@ -3293,6 +3351,8 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		input = make(map[string]any)
 	}
 
+	a.logDebug("[tool] executing: %s (id=%s, checkPerms=%v)\n", toolName, toolUseID, checkPermissions)
+
 	// Guard: if toolUseID is empty, try to recover it from the raw map
 	// or generate a fallback. Empty toolUseID causes API error 2013.
 	if toolUseID == "" {
@@ -3551,6 +3611,7 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		})
 	}
 
+	a.logDebug("[tool] completed: %s (isError=%v, output_len=%d)\n", toolName, result.IsError, len(output))
 	return anthropic.ToolResultBlockParam{
 		ToolUseID: toolUseID,
 		Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: output}}},
@@ -4063,7 +4124,7 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 		}
 
 		if filesRecovered > 0 {
-			a.out("[post-compact] Recovered %d files (~%d tokens)\n", filesRecovered, totalTokens)
+			a.logDebug("[post-compact] Recovered %d files (~%d tokens)\n", filesRecovered, totalTokens)
 		}
 	}
 
@@ -4118,7 +4179,7 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 		}
 
 		if skillsRecovered > 0 {
-			a.out("[post-compact] Recovered %d skills (~%d tokens)\n", skillsRecovered, totalSkillTokens)
+			a.logDebug("[post-compact] Recovered %d skills (~%d tokens)\n", skillsRecovered, totalSkillTokens)
 		}
 	}
 
@@ -4128,14 +4189,14 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 	planAttachment := buildPostCompactPlanAttachment(a.config.ProjectDir)
 	if planAttachment != "" {
 		a.context.AddAttachment(planAttachment)
-		a.out("[post-compact] Recovered plan file\n")
+		a.logDebug("[post-compact] Recovered plan file\n")
 	}
 
 	// --- Plan mode recovery ---
 	// If in plan mode, remind the model to continue planning without executing.
 	if a.config.PermissionMode == ModePlan {
 		a.context.AddAttachment("## Plan Mode Active\n\nYou are in plan mode. Do NOT execute any tools without first presenting your plan to the user and getting their approval. Continue planning — do not execute.")
-		a.out("[post-compact] Plan mode reminder injected\n")
+		a.logDebug("[post-compact] Plan mode reminder injected\n")
 	}
 
 	// --- Tools re-announcement (delta-based) ---
@@ -4149,9 +4210,9 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 		toolsAttachment := a.buildPostCompactToolsAnnouncement(preservedToolNames)
 		if toolsAttachment != "" {
 			a.context.AddAttachment(toolsAttachment)
-			a.out("[post-compact] Re-announced tool inventory (delta)\n")
+			a.logDebug("[post-compact] Re-announced tool inventory (delta)\n")
 		} else {
-			a.out("[post-compact] All tools already visible in preserved tail, skipping re-announcement\n")
+			a.logDebug("[post-compact] All tools already visible in preserved tail, skipping re-announcement\n")
 		}
 	}
 
@@ -4163,7 +4224,7 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 		mcpAttachment := a.buildPostCompactMCPAnnouncement(preservedToolNames)
 		if mcpAttachment != "" {
 			a.context.AddAttachment(mcpAttachment)
-			a.out("[post-compact] Re-announced MCP tools (delta)\n")
+			a.logDebug("[post-compact] Re-announced MCP tools (delta)\n")
 		}
 	}
 
@@ -4176,7 +4237,7 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 		agentAttachment := a.buildPostCompactAgentAnnouncement(preservedToolNames)
 		if agentAttachment != "" {
 			a.context.AddAttachment(agentAttachment)
-			a.out("[post-compact] Re-announced background agents (delta)\n")
+			a.logDebug("[post-compact] Re-announced background agents (delta)\n")
 		}
 	}
 
@@ -4186,7 +4247,7 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 	taskAttachment := buildTaskRecoveryAttachment(a.context)
 	if taskAttachment != "" {
 		a.context.AddAttachment(taskAttachment)
-		a.out("[post-compact] Task/Todo state recovered\n")
+		a.logDebug("[post-compact] Task/Todo state recovered\n")
 	}
 
 	// --- Session Memory Recovery ---
@@ -4198,7 +4259,7 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 		if smContent != "" {
 			attachment := fmt.Sprintf("<session_memory>\n%s\n</session_memory>", smContent)
 			a.context.AddAttachment(attachment)
-			a.out("[post-compact] Session memory recovered\n")
+			a.logDebug("[post-compact] Session memory recovered\n")
 		}
 	}
 
@@ -4253,7 +4314,7 @@ func (a *AgentLoop) injectCacheEdits(messages []anthropic.MessageParam) []anthro
 	// which the Go SDK doesn't expose.
 	if deletedCount > 0 {
 		a.totalCacheEditsDeletions.Add(int64(deletedCount))
-		a.out("[cache] cache_edits: deleted=%d total_deletions=%d\n", deletedCount, a.totalCacheEditsDeletions.Load())
+		a.logDebug("[cache] cache_edits: deleted=%d total_deletions=%d\n", deletedCount, a.totalCacheEditsDeletions.Load())
 	}
 
 	// Serialize messages to JSON for manipulation
@@ -5102,10 +5163,54 @@ func (a *AgentLoop) InjectRunningAgentStatus() {
 	}
 }
 
+// runPerTurnMicroCompact executes lightweight micro-compact at the start of each
+// turn to prevent old tool results from accumulating between full compactions.
+// This matches upstream's per-turn microCompact call in query.ts.
+//
+// Strategy: prefer the cached MC path (cache_edits API) which deletes tool
+// results server-side WITHOUT modifying local messages, preserving the prompt
+// cache prefix. Fall back to local content-replacement (MicroCompactEntries)
+// only when cached MC has no pending deletions — typically after a full
+// compaction reset or when below the trigger threshold.
+func (a *AgentLoop) runPerTurnMicroCompact() {
+	if !a.config.MicroCompactEnabled {
+		return
+	}
+
+	// Phase 1: Try cached micro-compact (cache_edits API path).
+	// This is the preferred approach — it deletes tool results server-side
+	// while preserving the cached prefix, matching upstream's cached MC.
+	// injectCacheEdits() is called later in the API call path to actually
+	// inject the block, but we need to check here if deletions are pending
+	// to avoid the destructive local MC path.
+	if a.cachedMC != nil && a.cachedMC.HasPendingDeletions() {
+		a.logDebug("\n[per-turn-micro-compact] Cached MC has pending deletions, using cache_edits path\n")
+		return
+	}
+
+	// Phase 2: Fall back to local content-replacement when cached MC is
+	// not applicable (below threshold, or after a full compaction reset).
+	// This DOES break the prompt cache, but only fires when cached MC
+	// can't help (e.g., fewer than 10 compactable tool results accumulated).
+	keepRecent := a.config.MicroCompactKeepRecent
+	if keepRecent <= 0 {
+		keepRecent = 5
+	}
+	cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
+	if cleared > 0 {
+		a.logDebug("\n[per-turn-micro-compact] Local MC: cleared %d old tool results\n", cleared)
+		// Local MC mutates message content, invalidating the server cache.
+		// Reset cached MC state to prevent stale cache_edit attempts.
+		a.cachedMC.ResetForTimeBasedMC()
+	}
+}
+
 // tryCompaction attempts LLM-driven compaction, falling back to truncation.
 // When session memory exists and has content, uses SM-compact (API-free compaction)
 // to skip the LLM call and use session memory as the summary directly.
 func (a *AgentLoop) tryCompaction() {
+	a.logDebug("[compact] tryCompaction called: est_tokens=%d\n", a.context.EstimatedTokens())
+
 	// Phase 0: Micro-compact — clear old tool results (cheap, no LLM call)
 	// Time-based trigger: only fire when gap since last assistant > threshold (default 60 min).
 	// When gapMinutes=0, fires every turn (legacy count-based behavior).
@@ -5116,7 +5221,7 @@ func (a *AgentLoop) tryCompaction() {
 		}
 		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
 		if cleared > 0 {
-			a.out("\n[micro-compact] Cleared %d old tool results\n", cleared)
+			a.logDebug("\n[micro-compact] Cleared %d old tool results\n", cleared)
 			// Time-based microcompact content-clears tool results and invalidates the
 			// server prompt cache. The cached MC state would reference non-existent
 			// server entries, so reset it to prevent stale cache_edit attempts.
@@ -5321,7 +5426,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 	smContentForSummary := sessionMemoryContent
 	if smTokens > maxSessionMemoryTokens {
 		smContentForSummary = truncateSessionMemoryForCompact(sessionMemoryContent, maxSessionMemoryTokens)
-		a.out("\n[sm-compact] Session memory truncated: %d tokens -> %d token limit\n", smTokens, maxSessionMemoryTokens)
+		a.logDebug("\n[sm-compact] Session memory truncated: %d tokens -> %d token limit\n", smTokens, maxSessionMemoryTokens)
 	}
 
 	boundaryText := fmt.Sprintf("[SM-compact: %d tokens compressed, session memory used as summary]", preTokens)
@@ -5355,7 +5460,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 		summaryContent += "\n\n## Custom instructions for this compaction:\n" + preCompactInst
 	}
 
-	a.out("\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
+	a.logDebug("\n[sm-compact] Using session memory as summary (%d tokens -> ~%d tokens)\n",
 		preTokens, EstimateTokens(summaryContent)+6)
 
 	// Inject boundary + summary into context
@@ -5414,7 +5519,7 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 	// upstream's autoCompactThreshold check in trySessionMemoryCompaction.
 	compactThreshold := a.compactor.CompactThreshold()
 	if actualPostTokens >= compactThreshold {
-		a.out("\n[sm-compact] Post-compact tokens (%d) still above threshold (%d), falling back to LLM compaction\n",
+		a.logDebug("\n[sm-compact] Post-compact tokens (%d) still above threshold (%d), falling back to LLM compaction\n",
 			actualPostTokens, compactThreshold)
 		// Undo SM-compact and fall back to LLM compaction.
 		// tryLLMCompaction will re-check ShouldCompact and may skip if tokens
@@ -5491,6 +5596,20 @@ func (a *AgentLoop) tryLLMCompaction(preCompactInst string) {
 			},
 		)
 		a.context.AddSummary(summary)
+
+		// Anti-replay rules: injected as a separate system message so they
+		// survive compaction even when the LLM summary is compressed further.
+		// This matches the SM-compact and truncation paths which include the
+		// same rules.
+		a.context.AddAntiReplayRules()
+
+		// Inject structured goal block — deterministic task state from TodoList
+		// + toolStateTracker. Without this, the LLM-generated summary may lack
+		// explicit completed/pending task distinction.
+		if goalBlock, hasContent := a.buildStructuredGoalBlock(messages); hasContent {
+			a.context.AddGoalBlock(goalBlock)
+		}
+
 		if preCompactInst != "" {
 			a.context.AddSummary("\n\n## Custom instructions for this compaction:\n" + preCompactInst)
 		}

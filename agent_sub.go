@@ -300,6 +300,7 @@ func (a *AgentLoop) SpawnSubAgent(
 	maxTurns int,
 	parentMessages []map[string]any,
 ) (agentID string, result string, errText string, outputFile string, toolsUsed int, durationMs int64) {
+	a.logDebug("[sub-agent] spawning: type=%s model=%s background=%v inherit=%v\n", subagentType, model, runInBackground, inheritContext)
 	start := time.Now()
 
 	// Hook: OnSubagent — when a sub-agent is started (matches upstream's SubagentStart hook)
@@ -847,6 +848,7 @@ func (a *AgentLoop) runChildAgentSync(
 	start time.Time,
 ) (result string, errText string, outputFile string, toolsUsed int, durationMs int64) {
 	defer a.activeSubAgents.Done()
+	a.logDebug("[sub-agent] sync run started: taskID=%s type=%s\n", taskID, subagentType)
 
 	// Mark as running in legacy task store
 	if a.taskStore != nil {

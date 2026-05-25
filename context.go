@@ -670,6 +670,18 @@ type AttachmentContent string
 
 func (AttachmentContent) entryContent() {}
 
+// AntiReplayContent contains post-compaction rules to prevent re-execution of completed tasks.
+// Separated from the summary so it survives further compaction.
+type AntiReplayContent string
+
+func (AntiReplayContent) entryContent() {}
+
+// GoalContent contains the structured goal block (pending/completed tasks, current work).
+// Separated from the summary so it survives further compaction.
+type GoalContent string
+
+func (GoalContent) entryContent() {}
+
 type fileState struct {
 	epoch int
 	mtime int64 // mtimeMs when read
@@ -1037,6 +1049,10 @@ func estimateEntriesTokens(entries []conversationEntry) int {
 			// Boundary markers are small, ignore for estimation
 		case SummaryContent:
 			rawTotal += EstimateContentTokens(string(v), "natural")
+		case AntiReplayContent:
+			rawTotal += EstimateContentTokens(string(v), "natural")
+		case GoalContent:
+			rawTotal += EstimateContentTokens(string(v), "natural")
 		case CompressionInstructionContent:
 			rawTotal += EstimateContentTokens(buildCompressionPrompt(v.Level), "natural")
 		}
@@ -1292,6 +1308,14 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + string(v)}},
 			}
 		case AttachmentContent:
+			msg.Content = []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + string(v)}},
+			}
+		case AntiReplayContent:
+			msg.Content = []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + string(v)}},
+			}
+		case GoalContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
 				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + string(v)}},
 			}
@@ -1658,6 +1682,24 @@ func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage
 				Content:   string(v),
 				Timestamp: time.Now().Format(time.RFC3339),
 			})
+		case AntiReplayContent:
+			msgs = append(msgs, CompactionMessage{
+				Role:      entry.role,
+				Content:   string(v),
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
+		case GoalContent:
+			msgs = append(msgs, CompactionMessage{
+				Role:      entry.role,
+				Content:   string(v),
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
+		case AttachmentContent:
+			msgs = append(msgs, CompactionMessage{
+				Role:      entry.role,
+				Content:   string(v),
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
 		}
 	}
 
@@ -1783,6 +1825,32 @@ func (c *ConversationContext) AddAttachment(content string) {
 	})
 }
 
+// AddAntiReplayRules injects post-compaction rules to prevent re-execution of
+// completed tasks. Separated from the summary so it survives further compaction.
+func (c *ConversationContext) AddAntiReplayRules() {
+	rules := "## Rules After Compaction\n" +
+		"1. DO NOT re-execute any task listed in \"Completed Work\" — those are done.\n" +
+		"2. Start from the first item in \"Pending Tasks\" that you have not yet completed.\n" +
+		"3. Do NOT ask the user what to work on — you already know.\n"
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: AntiReplayContent(rules),
+	})
+}
+
+// AddGoalBlock injects a structured goal block (pending/completed tasks, current work).
+// Separated from the summary so it survives further compaction.
+func (c *ConversationContext) AddGoalBlock(content string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: GoalContent(content),
+	})
+}
+
 // KeepRecentMessages preserves the most recent conversation entries verbatim
 // after compaction, keeping their original structure (including ToolUseContent
 // and ToolResultContent). This matches upstream's messagesToKeep mechanism
@@ -1822,7 +1890,7 @@ func (c *ConversationContext) KeepRecentMessages(count int) {
 	for i := boundaryIdx - 1; i >= 0 && len(keptEntries) < count; i-- {
 		entry := c.entries[i]
 		switch entry.content.(type) {
-		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent:
+		case CompactBoundaryContent, SummaryContent, AttachmentContent, CompressionInstructionContent, AntiReplayContent, GoalContent:
 			continue // skip meta entries from previous compactions
 		default:
 			keptEntries = append([]conversationEntry{entry}, keptEntries...)
@@ -2563,7 +2631,7 @@ func (c *ConversationContext) FixRoleAlternation() {
 						wasMerged = true
 					} else if entry.role == "user" {
 						switch entry.content.(type) {
-						case SummaryContent, AttachmentContent:
+						case SummaryContent, AttachmentContent, AntiReplayContent, GoalContent:
 							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
 							wasMerged = true
 						}
@@ -2571,7 +2639,7 @@ func (c *ConversationContext) FixRoleAlternation() {
 				case SummaryContent:
 					if entry.role == "user" {
 						switch entry.content.(type) {
-						case SummaryContent, TextContent, AttachmentContent:
+						case SummaryContent, TextContent, AttachmentContent, AntiReplayContent, GoalContent:
 							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
 							wasMerged = true
 						}
@@ -2579,7 +2647,23 @@ func (c *ConversationContext) FixRoleAlternation() {
 				case AttachmentContent:
 					if entry.role == "user" {
 						switch entry.content.(type) {
-						case SummaryContent, TextContent, AttachmentContent:
+						case SummaryContent, TextContent, AttachmentContent, AntiReplayContent, GoalContent:
+							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
+							wasMerged = true
+						}
+					}
+				case AntiReplayContent:
+					if entry.role == "user" {
+						switch entry.content.(type) {
+						case SummaryContent, TextContent, AttachmentContent, AntiReplayContent, GoalContent:
+							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
+							wasMerged = true
+						}
+					}
+				case GoalContent:
+					if entry.role == "user" {
+						switch entry.content.(type) {
+						case SummaryContent, TextContent, AttachmentContent, AntiReplayContent, GoalContent:
 							last.content = TextContent(string(a) + "\n" + entryContentToText(entry.content))
 							wasMerged = true
 						}
@@ -2792,6 +2876,10 @@ func entryContentToText(c EntryContent) string {
 	case SummaryContent:
 		return string(v)
 	case AttachmentContent:
+		return string(v)
+	case AntiReplayContent:
+		return string(v)
+	case GoalContent:
 		return string(v)
 	default:
 		return ""
