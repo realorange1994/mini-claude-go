@@ -1152,14 +1152,52 @@ func (c *ConversationContext) SetContentReplacementState(state *ContentReplaceme
 // SetToolResultStore configures the disk persistence store for tool results.
 
 // AddUserMessage appends a user text message.
+// Drops any trailing assistant tool_calls that have no matching tool_result,
+// matching openclacky's drop_dangling_tool_calls! pattern. This prevents
+// 400 errors when a previous turn was interrupted before tool results arrived.
 func (c *ConversationContext) AddUserMessage(content string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.dropDanglingToolCalls()
 	c.entries = append(c.entries, conversationEntry{
 		role:    "user",
 		content: TextContent(content),
 	})
 	c.truncateIfNeeded()
+}
+
+// dropDanglingToolCalls removes trailing assistant entries that contain
+// ToolUseContent with no subsequent ToolResultContent. This happens when
+// the agent is interrupted mid-turn (e.g., user sends new message before
+// tool results arrive). Without cleanup, the API rejects the conversation
+// with a 400 error for unanswered tool_calls.
+func (c *ConversationContext) dropDanglingToolCalls() {
+	// Walk backwards from the end, dropping assistant entries that have
+	// tool_use blocks with no matching tool_result after them.
+	for len(c.entries) > 0 {
+		last := c.entries[len(c.entries)-1]
+		if last.role != "assistant" {
+			break
+		}
+		blocks, ok := last.content.(ToolUseContent)
+		if !ok {
+			break // not a tool_use entry, stop
+		}
+		// Since this is the last entry, there can't be tool results after it.
+		// If it has any tool_use blocks, they are dangling — drop it.
+		hasToolCalls := false
+		for _, b := range blocks {
+			if b.OfToolUse != nil && b.OfToolUse.ID != "" {
+				hasToolCalls = true
+				break
+			}
+		}
+		if hasToolCalls {
+			c.entries = c.entries[:len(c.entries)-1]
+		} else {
+			break // assistant message without tool_calls, stop
+		}
+	}
 }
 
 // AddAssistantText appends an assistant text message.
@@ -1908,6 +1946,11 @@ func (c *ConversationContext) KeepRecentMessages(count int) {
 	// cause API error 2013.
 	keptEntries = adjustForToolPairing(c.entries[:boundaryIdx], keptEntries)
 
+	// Truncate oversized tool results in the kept tail.
+	// Matching openclacky's truncate_tool_result(): cap individual tool results
+	// at 2000 chars to prevent one huge output from dominating the tail context.
+	truncateKeptToolResults(keptEntries, 2000)
+
 	// Append the kept entries after the boundary+summary as preserved messages
 	c.entries = append(c.entries, keptEntries...)
 }
@@ -1997,6 +2040,9 @@ func (c *ConversationContext) KeepRecentMessagesAdaptive(minTokens, minTextMsgs,
 	// Adjust backwards to preserve tool_use/tool_result pairing.
 	keptEntries = adjustForToolPairing(c.entries[:boundaryIdx], keptEntries)
 
+	// Truncate oversized tool results in the kept tail.
+	truncateKeptToolResults(keptEntries, 2000)
+
 	// Update lastSummarizedIndex: the lowest index of kept entries.
 	// Entries before this index were summarized/compacted.
 	if keptStartIdx >= 0 {
@@ -2067,6 +2113,43 @@ func isTextEntry(entry *conversationEntry) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// truncateKeptToolResults caps individual tool result content at maxChars characters.
+// Matching openclacky's truncate_tool_result(): when a tool result in the kept tail
+// exceeds maxChars, its content is truncated to the first maxChars chars.
+// This prevents one enormous tool output from dominating the preserved context.
+func truncateKeptToolResults(entries []conversationEntry, maxChars int) {
+	const truncationNotice = "\n[...content truncated...]"
+	for i := range entries {
+		results, ok := entries[i].content.(ToolResultContent)
+		if !ok {
+			continue
+		}
+		for j := range results {
+			totalChars := 0
+			for _, cb := range results[j].Content {
+				if cb.OfText != nil {
+					totalChars += len(cb.OfText.Text)
+				}
+			}
+			if totalChars <= maxChars {
+				continue
+			}
+			// Truncate across all text blocks until we've removed enough chars
+			remaining := maxChars
+			for k := range results[j].Content {
+				if cb := results[j].Content[k].OfText; cb != nil {
+					if len(cb.Text) > remaining {
+						cb.Text = cb.Text[:remaining] + truncationNotice
+						remaining = 0
+						break
+					}
+					remaining -= len(cb.Text)
+				}
+			}
+		}
 	}
 }
 
