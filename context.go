@@ -1031,6 +1031,15 @@ func (c *ConversationContext) EstimatedTokens() int {
 	return int(math.Ceil(float64(rawTotal) * 4.0 / 3.0))
 }
 
+// EstimatedTokenRatio returns the estimated token count as a fraction of ctxMax.
+// Returns 0 if ctxMax <= 0. Used for turn-start fold threshold checks.
+func (c *ConversationContext) EstimatedTokenRatio(ctxMax int) float64 {
+	if ctxMax <= 0 {
+		return 0
+	}
+	return float64(c.EstimatedTokens()) / float64(ctxMax)
+}
+
 // estimateEntriesTokens estimates token count for a slice of conversation entries
 // using content-type-aware heuristic estimation. No safety margin is applied —
 // the caller applies it if needed.

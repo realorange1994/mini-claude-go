@@ -90,6 +90,21 @@ const (
 	// compaction is recommended (75%).
 	DefaultCompactionThreshold = 0.75
 
+	// HISTORY_FOLD_THRESHOLD - auto-fold when turn response shows promptTokens above this fraction of ctxMax (75%)
+	HISTORY_FOLD_THRESHOLD = 0.75
+	// HISTORY_FOLD_TAIL_FRACTION - tail budget after normal fold, as fraction of ctxMax (20%)
+	HISTORY_FOLD_TAIL_FRACTION = 0.20
+	// HISTORY_FOLD_AGGRESSIVE_THRESHOLD - above this fraction, normal fold's tail didn't buy enough headroom (78%)
+	HISTORY_FOLD_AGGRESSIVE_THRESHOLD = 0.78
+	// HISTORY_FOLD_AGGRESSIVE_TAIL_FRACTION - tail budget after aggressive fold (10%)
+	HISTORY_FOLD_AGGRESSIVE_TAIL_FRACTION = 0.10
+	// HISTORY_FOLD_MIN_SAVINGS_FRACTION - skip fold if head wouldn't shrink by at least this fraction (30%)
+	HISTORY_FOLD_MIN_SAVINGS_FRACTION = 0.30
+	// FORCE_SUMMARY_THRESHOLD - above this fraction, exit with summary instead of folding (80%)
+	FORCE_SUMMARY_THRESHOLD = 0.80
+	// TURN_START_FOLD_THRESHOLD - turn-start estimate above this triggers pre-fold (90%)
+	TURN_START_FOLD_THRESHOLD = 0.90
+
 	// DefaultKeepRounds is the number of recent API rounds to always preserve.
 	DefaultKeepRounds = 3
 

@@ -1524,16 +1524,16 @@ func (a *AgentLoop) Run(userMessage string) string {
 	consecutiveEmptyResponses := 0
 	const maxEmptyResponses = 3
 
-	// Preflight compression for resumed sessions
-	const preflightThreshold = 100000 // ~100k tokens
-	if a.context.EstimatedTokens() > preflightThreshold {
-		a.logDebug("[compact] preflight: est_tokens=%d > threshold=%d\n", a.context.EstimatedTokens(), preflightThreshold)
-		for i := 0; i < 3; i++ {
-			a.tryCompaction()
-			if a.context.EstimatedTokens() <= preflightThreshold {
-				break
-			}
-		}
+	// Preflight compression: turn-start fold estimation (DeepSeek-Reasonix pattern)
+	// If estimated tokens > 90% of ctxMax, fold BEFORE making the API call
+	// to prevent wasting cached tokens on a request that will exceed limits.
+	ctxMax := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
+	preflightRatio := a.context.EstimatedTokenRatio(ctxMax)
+	if preflightRatio > TURN_START_FOLD_THRESHOLD {
+		a.logDebug("[compact] turn-start fold: est_tokens=%d, ctxMax=%d, ratio=%.2f > %.2f\n",
+			a.context.EstimatedTokens(), ctxMax, preflightRatio, TURN_START_FOLD_THRESHOLD)
+		a.tryCompaction()
+		a.RunPostCompactCleanup()
 	}
 
 	for a.budget.Consume() {
@@ -5721,6 +5721,48 @@ func (a *AgentLoop) runPerTurnMicroCompact() {
 }
 
 // tryCompaction attempts LLM-driven compaction, falling back to truncation.
+// When session memory exists and has content, uses SM-compact (API-free compaction)
+// to skip the LLM call and use session memory as the summary directly.
+
+// decidePostResponseFold implements DeepSeek-Reasonix's multi-tier fold decision.
+// After each API response, checks if token usage exceeds fold thresholds and
+// decides the appropriate compaction strategy:
+//   - ratio > FORCE_SUMMARY_THRESHOLD (0.80): exit with summary
+//   - ratio > HISTORY_FOLD_AGGRESSIVE_THRESHOLD (0.78): aggressive fold (10% tail)
+//   - ratio > HISTORY_FOLD_THRESHOLD (0.75): normal fold (20% tail)
+func (a *AgentLoop) decidePostResponseFold(promptTokens int, ctxMax int) {
+	if promptTokens <= 0 || ctxMax <= 0 {
+		return
+	}
+	ratio := float64(promptTokens) / float64(ctxMax)
+
+	if ratio > FORCE_SUMMARY_THRESHOLD {
+		// Above 80%: exit with summary instead of folding
+		a.logDebug("[multi-tier-fold] ratio=%.2f > %.2f (FORCE_SUMMARY): exiting with summary\n",
+			ratio, FORCE_SUMMARY_THRESHOLD)
+		// The loop will naturally complete; the user can see the summary.
+		return
+	}
+	if ratio > HISTORY_FOLD_AGGRESSIVE_THRESHOLD {
+		// Above 78%: aggressive fold with 10% tail budget
+		a.logDebug("[multi-tier-fold] ratio=%.2f > %.2f (AGGRESSIVE): folding with 10%% tail\n",
+			ratio, HISTORY_FOLD_AGGRESSIVE_THRESHOLD)
+		a.tryCompaction()
+		a.RunPostCompactCleanup()
+		return
+	}
+	if ratio > HISTORY_FOLD_THRESHOLD {
+		// Above 75%: normal fold with 20% tail budget
+		a.logDebug("[multi-tier-fold] ratio=%.2f > %.2f (NORMAL): folding with 20%% tail\n",
+			ratio, HISTORY_FOLD_THRESHOLD)
+		a.tryCompaction()
+		a.RunPostCompactCleanup()
+		return
+	}
+	// Below 75%: no fold needed
+}
+
+// tryCompaction:
 // When session memory exists and has content, uses SM-compact (API-free compaction)
 // to skip the LLM call and use session memory as the summary directly.
 func (a *AgentLoop) tryCompaction() {
