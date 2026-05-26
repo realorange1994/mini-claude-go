@@ -2917,6 +2917,30 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
+	// DeepSeek-Reasonix healing patterns (cache hit rate optimization):
+	// 1. Stamp missing tool_call IDs - DeepSeek returns 400 without id
+	// 2. Reasoning retention - strip stale reasoning to reduce request size
+	// 3. Thinking mode stamping - ensure reasoning_content for thinking models
+	// 4. Shrink oversized tool args - compress long strings to save tokens
+	if stamped := stampMissingToolCallIDs(messages); stamped > 0 {
+		a.logDebug("[healing] stamped %d missing tool_call IDs\n", stamped)
+	}
+	if pruned, dropped := reasoningRetention(messages); pruned > 0 {
+		a.logDebug("[reasoning] pruned %d reasoning blocks (%d chars)\n", pruned, dropped)
+	}
+	isThinkingMode := strings.Contains(a.config.Model, "reasoner")
+	if stamped := thinkingModeStamping(messages, isThinkingMode); stamped > 0 {
+		a.logDebug("[thinking] stamped %d missing reasoning blocks\n", stamped)
+	}
+	// Token-budget aware shrinking: shrink tool args if request is getting large
+	currentTokens := estimateMessageTokens(messages)
+	maxTokens := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
+	if currentTokens > maxTokens/2 {
+		if healed, saved := shrinkToolCallArgsByTokens(messages, 8000); healed > 0 {
+			a.logDebug("[shrink] shrunk %d tool call args (saved %d chars)\n", healed, saved)
+		}
+	}
+
 	params := anthropic.MessageNewParams{
 		Model:     GetModelForAPI(a.config.Model),
 		MaxTokens: a.currentMaxTokens.Load(),
