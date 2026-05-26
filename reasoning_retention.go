@@ -238,15 +238,4 @@ func shrinkJSONLongStrings(jsonStr string, threshold int) (string, int) {
 	return string(result), saved
 }
 
-// itoa converts int to string
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var s string
-	for i > 0 {
-		s = string(rune('0'+i%10)) + s
-		i /= 10
-	}
-	return s
-}
+// itoa is defined in json_repair.go

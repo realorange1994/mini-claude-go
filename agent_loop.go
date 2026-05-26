@@ -3416,6 +3416,17 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 					if repaired != string(v.Input) {
 						_ = json.Unmarshal([]byte(repaired), &input)
 						a.logDebug("[json-repair] repaired tool arguments for %s\n", v.Name)
+					} else {
+						// DeepSeek-Reasonix pattern: truncated JSON repair with
+						// brace balancing, string closing, and dangling key filling.
+						// This catches cases where the model's output was cut off
+						// mid-argument by the API router.
+						trResult := repairTruncatedJson(string(v.Input))
+						if trResult.Changed {
+							_ = json.Unmarshal([]byte(trResult.Repaired), &input)
+							a.logDebug("[truncation-repair] repaired %s for %s (notes: %v)\n",
+								trResult.Repaired, v.Name, trResult.Notes)
+						}
 					}
 				}
 			}
