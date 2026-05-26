@@ -2952,6 +2952,14 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 		if healed, saved := shrinkToolCallArgsByTokens(messages, 8000); healed > 0 {
 			a.logDebug("[shrink] shrunk %d tool call args (saved %d chars)\n", healed, saved)
 		}
+		// DeepSeek-Reasonix pattern: shrink oversized tool results to stay within token budgets
+		if healed, saved, _ := shrinkOversizedToolResultsByTokens(messages, 8000); healed > 0 {
+			a.logDebug("[shrink] shrunk %d tool results (saved %d chars)\n", healed, saved)
+		}
+	}
+	// DeepSeek-Reasonix pattern: fix tool call pairing - drop unpaired tool_calls and stray tool results
+	if droppedCalls, droppedTools := fixToolCallPairing(messages); droppedCalls > 0 || droppedTools > 0 {
+		a.logDebug("[healing] fixed tool pairing: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
 	}
 
 	params := anthropic.MessageNewParams{
@@ -3534,6 +3542,12 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 				toolCalls = append(toolCalls, s)
 			}
 		}
+	}
+
+	// DeepSeek-Reasonix pattern: strip hallucinated tool markup from text output.
+	// Models can hallucinate DSML-style function call markup that should be stripped.
+	for i, tp := range textParts {
+		textParts[i] = stripHallucinatedToolMarkup(tp)
 	}
 
 	return toolCalls, textParts, stopReason
@@ -5751,6 +5765,7 @@ func (a *AgentLoop) tryCompaction() {
 			summaryContent := a.buildCompactSummaryMessage(preTokens, preCompactMessages, preCompactToolCalls)
 			// DeepSeek-Reasonix pattern: prepend pinned content that must survive compaction
 			if a.foldSummaryPin != nil {
+				a.foldSummaryPin.SetSystemPrompt(a.context.SystemPrompt())
 				pinPrompt := a.foldSummaryPin.BuildPinPrompt()
 				if pinPrompt != "" {
 					summaryContent = pinPrompt + "\n\n" + summaryContent

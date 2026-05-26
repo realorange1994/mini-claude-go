@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ToolListFingerprint tracks the hash of the complete tool list to detect
@@ -96,6 +97,7 @@ type FoldSummaryPin struct {
 	Constraints []string
 	// InProgressToolCall tracks tool calls that are awaiting results
 	InProgressToolCall string
+	SystemPrompt       string // caches system prompt for extracting pinned constraints
 }
 
 // NewFoldSummaryPin creates a new pin tracker.
@@ -125,26 +127,39 @@ func (p *FoldSummaryPin) SetInProgressToolCall(toolUseID string) {
 	p.InProgressToolCall = toolUseID
 }
 
+// SetSystemPrompt caches the system prompt for extracting pinned constraints during compaction.
+func (p *FoldSummaryPin) SetSystemPrompt(systemPrompt string) {
+	p.SystemPrompt = systemPrompt
+}
+
 // BuildPinPrompt generates a prompt fragment that ensures pinned content
 // survives compaction. This is prepended to the compaction summary.
 func (p *FoldSummaryPin) BuildPinPrompt() string {
-	if len(p.ActiveSkills) == 0 && len(p.Constraints) == 0 && p.InProgressToolCall == "" {
-		return ""
+	var parts []string
+
+	// Extract pinned constraints from system prompt (DeepSeek-Reasonix pattern)
+	if p.SystemPrompt != "" {
+		if constraints := extractPinnedConstraints(p.SystemPrompt); constraints != "" {
+			parts = append(parts, "[PINNED CONSTRAINTS]\n"+constraints)
+		}
 	}
 
-	result := "[PERSIST] "
 	if len(p.ActiveSkills) > 0 {
 		skillsJSON, _ := json.Marshal(p.ActiveSkills)
-		result += "active_skills=" + string(skillsJSON) + " "
+		parts = append(parts, "active_skills="+string(skillsJSON))
 	}
 	if len(p.Constraints) > 0 {
 		constraintsJSON, _ := json.Marshal(p.Constraints)
-		result += "constraints=" + string(constraintsJSON) + " "
+		parts = append(parts, "constraints="+string(constraintsJSON))
 	}
 	if p.InProgressToolCall != "" {
-		result += "in_progress_tool=" + p.InProgressToolCall + " "
+		parts = append(parts, "in_progress_tool="+p.InProgressToolCall)
 	}
-	return result
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[PERSIST] " + strings.Join(parts, " ")
 }
 
 // Clear resets all pin state.
