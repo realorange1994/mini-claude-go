@@ -385,6 +385,8 @@ type AgentLoop struct {
 	consecutiveCallTracker    *ConsecutiveCallTracker             // tracks consecutive identical tool call failures for sharper errors
 	toolListFingerprint       *ToolListFingerprint                // tracks tool list schema hash to detect cache-invalidating drift
 	foldSummaryPin            *FoldSummaryPin                    // tracks content that must survive compaction (active skills, constraints)
+	cacheMetrics             *CacheMetrics                      // tracks cache hit/miss tokens per API call
+	readTracker              *ReadTracker                       // tracks files read for read-before-edit validation
 	budgetManager            *ProactiveBudgetManager            // proactive context window budget management
 	agentOutput               io.Writer                           // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
 	drainPendingMessagesFunc  func() []string                     // called at turn boundaries to drain pending messages from parent task store
@@ -772,6 +774,8 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent.consecutiveCallTracker = NewConsecutiveCallTracker()
 	agent.toolListFingerprint = NewToolListFingerprint()
 	agent.foldSummaryPin = NewFoldSummaryPin()
+	agent.cacheMetrics = NewCacheMetrics()
+	agent.readTracker = NewReadTracker()
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 	// Fix gate to point to agent's config (not the local cfg copy)
@@ -999,6 +1003,8 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	agent.consecutiveCallTracker = NewConsecutiveCallTracker()
 	agent.toolListFingerprint = NewToolListFingerprint()
 	agent.foldSummaryPin = NewFoldSummaryPin()
+	agent.cacheMetrics = NewCacheMetrics()
+	agent.readTracker = NewReadTracker()
 
 	// Restore skill state from transcript entries so skillTracker reflects
 	// which skills were already read in this session. This ensures skills
@@ -3047,8 +3053,12 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				a.recordTokenUsageWithCache(response.Usage.InputTokens, response.Usage.OutputTokens,
 					int64(response.Usage.CacheCreationInputTokens), int64(response.Usage.CacheReadInputTokens))
 				// Per-turn cache stats for verification
-				a.logDebug("[cache] turn: input=%d cache_write=%d cache_read=%d total_cache_read=%d\n",
-					response.Usage.InputTokens, response.Usage.CacheCreationInputTokens, response.Usage.CacheReadInputTokens, a.totalCacheReadTokens.Load())
+				a.cacheMetrics.Record(int(response.Usage.InputTokens), int(response.Usage.CacheReadInputTokens),
+					int(intMax(0, int(response.Usage.InputTokens-response.Usage.CacheReadInputTokens-response.Usage.CacheCreationInputTokens))),
+					int(response.Usage.OutputTokens))
+				a.logDebug("[cache] turn: input=%d cache_write=%d cache_read=%d hit_ratio=%.1f%% total_cache_read=%d\n",
+					response.Usage.InputTokens, response.Usage.CacheCreationInputTokens, response.Usage.CacheReadInputTokens,
+					a.cacheMetrics.CacheHitRatio()*100, a.totalCacheReadTokens.Load())
 				// Detect cache break: warn if cache reuse dropped significantly from previous call
 				a.context.SetAPITokenAnchor(response.Usage.InputTokens)
 				if a.cacheBreakDetector.DetectBreak(int64(response.Usage.CacheReadInputTokens)) {
