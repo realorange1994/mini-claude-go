@@ -3052,6 +3052,96 @@ func (a *AgentLoop) reactiveCompact(targetTokens int) error {
 	return nil
 }
 
+// ─── Two-layer context overflow recovery ─────────────────────────────────────
+
+// StandardCachePreservingCompact performs Layer 1 of the two-layer overflow recovery.
+// It pulls back K=1 message from the tail, runs compaction, then re-appends the
+// pulled-back message. This preserves Anthropic's prompt cache checkpoint #A
+// (at position N-1) — the compression call only needs to re-read ~500 cold tokens
+// (the compression instruction) instead of ~50,000 cold tokens.
+//
+// Inspired by openclacky's pull_back_from_tail: 1 mechanism in
+// message_compressor_helper.rb. The key insight is that Anthropic's dual-checkpoint
+// cache (cache#A at N-1, cache#B at N) means popping exactly 1 message keeps
+// cache#A intact.
+//
+// Returns the pre-compaction token count and whether compaction was attempted
+// (returns 0, false if history was too small).
+func (a *AgentLoop) StandardCachePreservingCompact() (int, bool) {
+	if a.toolStateTracker != nil {
+		a.toolStateTracker.OnCompaction()
+	}
+
+	// Pull back K=1 message from tail
+	pulled := a.context.PullBackFromTail(1)
+	if len(pulled) == 0 {
+		a.logDebug("[standard-compact] history too small for standard compaction\n")
+		return 0, false
+	}
+
+	preTokens := a.context.EstimatedTokens()
+	a.logDebug("[standard-compact] Pulled back 1 message, running compaction (current: %d tokens, preserving cache#A)\n", preTokens)
+
+	// Run compaction. Because we popped 1 message, the prefix
+	// [system, m1..m(N-1)] still matches cache#A, so this call should
+	// get a prompt cache hit for ~95% of tokens.
+	a.tryCompaction()
+
+	// Success: re-append the pulled-back message to preserve recent progress.
+	a.context.ReAppendEntries(pulled)
+
+	postTokens := a.context.EstimatedTokens()
+	a.logDebug("[standard-compact] Complete: %d -> %d tokens (1 message preserved)\n", preTokens, postTokens)
+	return preTokens, true
+}
+
+// AggressiveHalfHistoryCompact performs Layer 2 of the two-layer overflow recovery.
+// Called when Layer 1 (standard) fails — typically when a single newly-appended
+// message is enormous (huge tool_result, pasted file, etc.) so popping K=1 didn't
+// bring the request below the window.
+//
+// Pulls back ~half the history (clamped: min 4, max 64, never more than N-2).
+// This sacrifices prompt cache (breaking both cache checkpoints) but guarantees
+// the compression call fits. It's a survival tradeoff: cache miss now to avoid
+// losing the entire conversation.
+func (a *AgentLoop) AggressiveHalfHistoryCompact() (int, bool) {
+	if a.toolStateTracker != nil {
+		a.toolStateTracker.OnCompaction()
+	}
+
+	// Calculate pull-back: half the history, clamped
+	historySize := a.context.EntryCount()
+	half := historySize / 2
+	pullBack := max(half, 4)
+	pullBack = min(pullBack, max(historySize-2, 1))
+	pullBack = min(pullBack, 64)
+
+	if pullBack <= 0 || historySize <= 2 {
+		a.logDebug("[aggressive-compact] history too small for aggressive compaction\n")
+		return 0, false
+	}
+
+	pulled := a.context.PullBackFromTail(pullBack)
+	if len(pulled) == 0 {
+		return 0, false
+	}
+
+	preTokens := a.context.EstimatedTokens()
+	a.out("[aggressive-compact] Layer 2: pulled back %d/%d messages (sacrificing prompt cache), running compaction (%d tokens)\n",
+		pullBack, historySize, preTokens)
+
+	// Run compaction with aggressively reduced history.
+	a.tryCompaction()
+
+	// Re-append the pulled-back messages.
+	a.context.ReAppendEntries(pulled)
+
+	postTokens := a.context.EstimatedTokens()
+	a.out("[aggressive-compact] Complete: %d -> %d tokens (%d messages preserved in tail)\n",
+		preTokens, postTokens, len(pulled))
+	return preTokens, true
+}
+
 // ─── Sensitive info redaction ────────────────────────────────────────────────
 
 // Precompiled regex patterns for sensitive info redaction (H-03: avoid compiling per call).

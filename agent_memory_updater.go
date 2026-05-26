@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"miniclaudecode-go/skills"
 )
 
 // runMemoryUpdate runs after a qualifying task to persist important knowledge
@@ -264,12 +263,188 @@ func (a *AgentLoop) runSkillEvolutionIntegration(taskTurns int) {
 		return
 	}
 
-	cfg := skills.TaskEvolutionConfig{
-		ReflectMinTurns:    5,
-		AutoCreateMinTurns: max(a.config.SkillEvolutionMinTurns, 12),
-		SkillsDir:          a.config.SkillLoader.WorkspaceDir(),
+	skillsUsed := a.skillTracker.ReadCount() - a.taskStartReadSkillCount
+	if skillsUsed > 0 {
+		// Scenario A: Skill was used — reflect on improvements
+		if taskTurns < 5 { // ReflectMinTurns hardcoded to 5 (matches openclacky MIN_SKILL_ITERATIONS)
+			return
+		}
+		a.runSkillReflection()
+	} else {
+		// Scenario B: No skill was used — consider auto-creating one
+		autoCreateThreshold := max(a.config.SkillEvolutionMinTurns, 12)
+		if taskTurns < autoCreateThreshold {
+			return
+		}
+		a.runSkillAutoCreation(taskTurns)
+	}
+}
+
+// runSkillReflection forks a sub-agent to analyze skills used during the task
+// and determine if improvements should be made to their SKILL.md files.
+func (a *AgentLoop) runSkillReflection() {
+	readSkillNames := a.skillTracker.GetReadSkillNames()
+	if len(readSkillNames) == 0 {
+		return
 	}
 
-	skills.RunSkillEvolution(cfg, a.skillTracker, a.taskStartReadSkillCount, taskTurns, a.out)
+	skillsDir := ""
+	if a.config.SkillLoader != nil {
+		skillsDir = a.config.SkillLoader.WorkspaceDir()
+	}
+	if skillsDir == "" {
+		return
+	}
+
+	a.out("[skill-evolution] Reflecting on used skills: %s\n", strings.Join(readSkillNames, ", "))
+
+	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages)
+	cacheParams := CaptureCacheSafeParams(
+		a.context.SystemPrompt(),
+		a.config.Model,
+		a.registry,
+		messages,
+	)
+
+	prompt := BuildSkillsReflectionPrompt(readSkillNames, a.budget.Consumed()-a.taskStartTurns)
+	if prompt == "" {
+		return
+	}
+
+	forkMessages := []anthropic.MessageParam{
+		{
+			Role:    anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: prompt}}},
+		},
+	}
+
+	canUseTool := createSkillEvolutionCanUseTool(skillsDir)
+
+	cfg := ForkedAgentConfig{
+		CacheSafeParams: cacheParams,
+		ForkMessages:    forkMessages,
+		CanUseTool:      canUseTool,
+		MaxTokens:       8192,
+		QuerySource:     "skill_reflection",
+		MaxTurns:        5,
+		Registry:        a.registry,
+		ProjectDir:      a.config.ProjectDir,
+		Client:          a.client,
+	}
+
+	_, err := RunForkedAgent(cfg)
+	if err != nil {
+		a.logDebug("[skill-evolution] reflection forked agent error: %v\n", err)
+		return
+	}
+
+	a.out("[skill-evolution] Skill reflection complete.\n")
+}
+
+// runSkillAutoCreation forks a sub-agent to analyze the complex task that just
+// completed and determine if it should be captured as a new reusable skill.
+func (a *AgentLoop) runSkillAutoCreation(taskTurns int) {
+	skillsDir := ""
+	if a.config.SkillLoader != nil {
+		skillsDir = a.config.SkillLoader.WorkspaceDir()
+	}
+	if skillsDir == "" {
+		return
+	}
+
+	a.out("[skill-evolution] Analyzing complex task (%d turns) for skill creation...\n", taskTurns)
+
+	messages := a.context.BuildMessages()
+	messages = NormalizeAPIMessages(messages)
+	cacheParams := CaptureCacheSafeParams(
+		a.context.SystemPrompt(),
+		a.config.Model,
+		a.registry,
+		messages,
+	)
+
+	prompt := BuildSkillAutoCreatePrompt(taskTurns)
+
+	forkMessages := []anthropic.MessageParam{
+		{
+			Role:    anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: prompt}}},
+		},
+	}
+
+	canUseTool := createSkillAutoCreateCanUseTool(skillsDir)
+
+	cfg := ForkedAgentConfig{
+		CacheSafeParams: cacheParams,
+		ForkMessages:    forkMessages,
+		CanUseTool:      canUseTool,
+		MaxTokens:       8192,
+		QuerySource:     "skill_auto_creation",
+		MaxTurns:        5,
+		Registry:        a.registry,
+		ProjectDir:      a.config.ProjectDir,
+		Client:          a.client,
+	}
+
+	_, err := RunForkedAgent(cfg)
+	if err != nil {
+		a.logDebug("[skill-evolution] auto-creation forked agent error: %v\n", err)
+		return
+	}
+
+	a.out("[skill-evolution] Skill auto-creation analysis complete.\n")
+}
+
+// createSkillEvolutionCanUseTool creates a CanUseToolFn for the skill reflection forked agent.
+// Only edit_file (skills dir only), read_file, and glob are allowed.
+func createSkillEvolutionCanUseTool(skillsDir string) CanUseToolFn {
+	allowed := map[string]bool{
+		"edit_file": true,
+		"read_file": true,
+		"glob":      true,
+	}
+
+	return func(toolName string, args map[string]any) (bool, string) {
+		if !allowed[toolName] {
+			return false, fmt.Sprintf("Tool %q is not available during skill reflection — only edit_file, read_file, and glob are allowed", toolName)
+		}
+		if toolName == "edit_file" {
+			if path, ok := args["file_path"].(string); ok {
+				cleanPath := filepath.Clean(path)
+				cleanDir := filepath.Clean(skillsDir)
+				if !strings.HasPrefix(cleanPath, cleanDir+string(filepath.Separator)) && cleanPath != cleanDir {
+					return false, "edit_file is only allowed in the skills directory"
+				}
+			}
+		}
+		return true, ""
+	}
+}
+
+// createSkillAutoCreateCanUseTool creates a CanUseToolFn for the skill auto-creation forked agent.
+// Only write_file (skills dir only), read_file, and glob are allowed.
+func createSkillAutoCreateCanUseTool(skillsDir string) CanUseToolFn {
+	allowed := map[string]bool{
+		"write_file": true,
+		"read_file":  true,
+		"glob":       true,
+	}
+
+	return func(toolName string, args map[string]any) (bool, string) {
+		if !allowed[toolName] {
+			return false, fmt.Sprintf("Tool %q is not available during skill auto-creation — only write_file, read_file, and glob are allowed", toolName)
+		}
+		if toolName == "write_file" {
+			if path, ok := args["file_path"].(string); ok {
+				cleanPath := filepath.Clean(path)
+				cleanDir := filepath.Clean(skillsDir)
+				if !strings.HasPrefix(cleanPath, cleanDir+string(filepath.Separator)) {
+					return false, "write_file is only allowed in the skills directory"
+				}
+			}
+		}
+		return true, ""
+	}
 }
 

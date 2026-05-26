@@ -379,6 +379,8 @@ type AgentLoop struct {
 	cancelCtx                 context.Context                     // cancellable context for async sub-agents
 	cancelFunc                context.CancelFunc                  // cancel function for async sub-agents
 	workTaskStore             *WorkTaskStore                      // tracks LLM work items (TODO list)
+	redundantCallDetector     *RedundantCallDetector              // tracks redundant tool calls
+	budgetManager            *ProactiveBudgetManager            // proactive context window budget management
 	agentOutput               io.Writer                           // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
 	drainPendingMessagesFunc  func() []string                     // called at turn boundaries to drain pending messages from parent task store
 	toolStateTracker          *ToolStateTracker                   // tracks tool state for injection into system prompt
@@ -404,6 +406,7 @@ type AgentLoop struct {
 	consecutiveStreamFailures int                                 // tracks consecutive streaming failures for non-streaming fallback
 	timeoutHintInjected       bool                                // one-shot: timeout hint injected this session (openclacky pattern)
 	truncationHintInjected    bool                                // one-shot: truncation hint injected this session (openclacky pattern)
+	budgetHint75Injected      bool                                // one-shot: 75%% budget hint injected this session (openclacky pattern)
 	inlineCompressionMode     bool                                // set during inline cache-reusing compaction (openclacky pattern)
 	toolSchemaCache           map[string]anthropic.ToolUnionParam // tool name → cached schema (avoid re-serialize)
 	toolSchemaCacheHash       uint64                              // hash of tool names for cache invalidation
@@ -423,6 +426,21 @@ type AgentLoop struct {
 	// iteration counts for skill evolution and memory updater triggers.
 	taskStartTurns            int                                 // turns consumed at task start
 	taskStartReadSkillCount   int                                 // skillTracker.ReadCount() at task start
+	// Injection queue (openclacky pattern): deferred message injection
+	// ensures correct tool_use/tool_result pairing. When read_skill or
+	// similar tools produce inline content that must be injected as an
+	// assistant message, enqueuing prevents the injection from appearing
+	// between the toolUse and its toolResult (which would break API pairing).
+	pendingInjections         []InjectionEntry                    // queue of deferred injections to flush after observe()
+}
+
+// InjectionEntry represents a pending injection to be flushed into the
+// conversation history after tool results are appended. This ensures
+// correct message ordering: tool_use → tool_result → injection.
+// Matches openclacky's @pending_injections pattern.
+type InjectionEntry struct {
+	AssistantContent string // content for the assistant message (e.g., skill instructions)
+	UserShim         string // synthetic user message to satisfy strict API alternation rules
 }
 
 // SetCronScheduler attaches a cron scheduler to the agent loop and starts it.
@@ -441,6 +459,48 @@ func (a *AgentLoop) SetCronScheduler(s *CronScheduler) {
 // EnqueueCronPrompt injects a cron prompt as a user message into the conversation.
 func (a *AgentLoop) EnqueueCronPrompt(prompt string) {
 	a.context.AddUserMessage(prompt)
+}
+
+// EnqueueInjection defers a message injection until after the current tool
+// results are appended to the conversation. This is critical for inline skill
+// loading: if we inject the skill instructions as an assistant message
+// directly in the tool's Execute(), it would appear between the toolUse block
+// and its toolResult, breaking API pairing (causing 2013 errors).
+//
+// The injection consists of:
+//   - AssistantContent: the actual content to inject (e.g., skill instructions)
+//   - UserShim: a synthetic user message to satisfy strict user/assistant
+//     alternation rules required by Anthropic/Bedrock APIs
+//
+// Matches openclacky's enqueue_injection() pattern in agent.rb:1003-1005.
+func (a *AgentLoop) EnqueueInjection(assistantContent, userShim string) {
+	a.pendingInjections = append(a.pendingInjections, InjectionEntry{
+		AssistantContent: assistantContent,
+		UserShim:         userShim,
+	})
+}
+
+// FlushPendingInjections processes all queued injections, appending them to
+// the conversation history as assistant + user message pairs. Must be called
+// AFTER tool results are added (observe step), ensuring correct message order:
+//
+//	assistant: {toolUse: read_skill}
+//	user:      {toolResult: skill content}
+//	assistant: {text: skill instructions}   ← flush injects this
+//	user:      "[SYSTEM] proceed..."        ← flush injects this shim
+//
+// Matches openclacky's flush_pending_injections() in agent.rb:1042-1049.
+func (a *AgentLoop) FlushPendingInjections() {
+	if len(a.pendingInjections) == 0 {
+		return
+	}
+	for _, entry := range a.pendingInjections {
+		a.context.AddAssistantText(entry.AssistantContent)
+		if entry.UserShim != "" {
+			a.context.AddUserMessage(entry.UserShim)
+		}
+	}
+	a.pendingInjections = a.pendingInjections[:0] // clear without realloc
 }
 
 // handle529Error processes a 529 Overloaded error. It increments the consecutive
@@ -697,6 +757,9 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	// Update compactor's max tokens based on model context window
 	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model, cfg.MaxContextTokens)
 	agent.compactor.SetMaxTokens(int(contextWindow))
+	// Initialize proactive budget manager
+	agent.budgetManager = NewProactiveBudgetManager(int(contextWindow))
+	agent.redundantCallDetector = NewRedundantCallDetector()
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 	// Fix gate to point to agent's config (not the local cfg copy)
@@ -914,6 +977,9 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	// Update compactor's max tokens based on model context window
 	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model, cfg.MaxContextTokens)
 	agent.compactor.SetMaxTokens(int(contextWindow))
+	// Initialize proactive budget manager
+	agent.budgetManager = NewProactiveBudgetManager(int(contextWindow))
+	agent.redundantCallDetector = NewRedundantCallDetector()
 
 	// Restore skill state from transcript entries so skillTracker reflects
 	// which skills were already read in this session. This ensures skills
@@ -1397,6 +1463,11 @@ func (a *AgentLoop) Run(userMessage string) string {
 	a.context.AddUserMessage(userMessage)
 	// Track change for cache break detection
 	a.cacheBreakDetector.RecordChange(CacheChangeUserMessage, 1)
+
+	// Openclacky pattern: adaptive prompting — inject task-specific instructions
+	// based on detected task type (debug/refactor/create/search). This improves
+	// output quality without modifying the system prompt or breaking cache.
+	a.context.InjectAdaptiveInstructions(userMessage)
 	if a.transcript != nil {
 		_ = a.transcript.WriteUser(userMessage)
 	}
@@ -1442,6 +1513,11 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 	for a.budget.Consume() {
 		a.lastTransition = TransitionNone // reset per-turn
+
+		// Clear redundant call detector at turn boundaries
+		if a.redundantCallDetector != nil {
+			a.redundantCallDetector.Clear()
+		}
 
 		// Per-turn micro-compact: clear old tool results before each API call.
 		// Prevents context from growing unboundedly between full compactions,
@@ -1554,6 +1630,15 @@ func (a *AgentLoop) Run(userMessage string) string {
 			})
 		}
 
+		// Openclacky pattern: proactive budget management — inject a behavioral hint
+		// when context window usage approaches thresholds, preventing hard 400 errors.
+		if a.budgetManager != nil {
+			estTokens := a.context.EstimatedTokens()
+			if hint := a.budgetManager.BudgetHint(estTokens); hint != "" {
+				a.context.AddUserMessage(hint)
+			}
+		}
+
 		// Streaming vs non-streaming decision
 		streamingExecDone := false       // set true when streaming executor handled tool calls
 		toolCallsAddedToContext := false // tracks if AddAssistantToolCalls was already called
@@ -1588,10 +1673,13 @@ func (a *AgentLoop) Run(userMessage string) string {
 					var toolResults []anthropic.ToolResultBlockParam
 					for _, sr := range streamingResults {
 						output := a.truncateOutput(sr.output)
-						toolResults = append(toolResults, anthropic.ToolResultBlockParam{
-							ToolUseID: sr.toolUseID,
-							Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: output}}},
-							IsError:   anthropic.Bool(sr.isError),
+							// Openclacky patterns: UTF-8 sanitize + TODO reminder injection
+							resultText := deepSanitizeUTF8(output).(string)
+							resultText = injectTodoReminder("", resultText, a)
+							toolResults = append(toolResults, anthropic.ToolResultBlockParam{
+								ToolUseID: sr.toolUseID,
+								Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: resultText}}},
+								IsError:   anthropic.Bool(sr.isError),
 						})
 					}
 					a.context.AddToolResults(toolResults)
@@ -1652,6 +1740,13 @@ func (a *AgentLoop) Run(userMessage string) string {
 				a.lastTransition = TransitionModelFallback
 				continue
 			}
+			// Upstream truncation: API router cut the response mid-tool_use.
+				// Retry -- the truncation hint was already injected by parseResponse.
+				if strings.Contains(errMsg, "upstream truncation") {
+					a.out("\n[WARN] Upstream truncation detected, retrying...\n")
+					a.lastTransition = TransitionTruncatedArgs
+					continue
+				}
 			if strings.Contains(errMsg, "model confused") {
 				a.out("\n[WARN] Model confused, retrying...\n")
 				// Add a hint so the model doesn't repeat the same mistake
@@ -1748,7 +1843,34 @@ func (a *AgentLoop) Run(userMessage string) string {
 					}
 				}
 
-				if a.toolStateTracker != nil {
+				// Two-layer context overflow recovery (openclacky pattern).
+				// Layer 1: Standard cache-preserving compact (pull back K=1 message,
+				//   compact, re-append). Preserves prompt cache checkpoint #A.
+				// Layer 2: Aggressive half-history compact (only if Layer 1 fails).
+				//   Pulls back ~half the history, sacrificing cache but guaranteeing fit.
+				twoLayerSucceeded := false
+				if a.config.ReactiveCompactEnabled {
+					preTokens := a.context.EstimatedTokens()
+					a.out("\n[two-layer-recovery] Layer 1: standard cache-preserving compact (%d tokens)...\n", preTokens)
+					preTwoLayer, attempted := a.StandardCachePreservingCompact()
+					if attempted && a.context.EstimatedTokens() < preTwoLayer {
+						a.consecutiveContextErrors = 0
+						a.lastTransition = TransitionContextOverflow
+						continue
+					}
+					if attempted {
+						a.out("\n[two-layer-recovery] Layer 1 insufficient, escalating to Layer 2...\n")
+						preTwoLayer2, attempted2 := a.AggressiveHalfHistoryCompact()
+						if attempted2 && a.context.EstimatedTokens() < preTwoLayer2 {
+							twoLayerSucceeded = true
+							a.consecutiveContextErrors = 0
+							a.lastTransition = TransitionContextOverflow
+							continue
+						}
+					}
+				}
+
+				if !twoLayerSucceeded && a.toolStateTracker != nil {
 					a.toolStateTracker.OnCompaction()
 				}
 				preTokens := a.context.EstimatedTokens()
@@ -1775,6 +1897,18 @@ func (a *AgentLoop) Run(userMessage string) string {
 		// Reset context error counter on successful API call
 		contextErrors = 0
 		a.consecutive2013Errors = 0
+
+		// Openclacky pattern: proactive budget management — inject one-shot hint
+		// when context window usage exceeds 75%%. This prevents hard 400 errors
+		// by nudging the LLM to be more concise before the crisis point.
+		if a.budgetManager != nil && !a.budgetHint75Injected {
+			estTokens := a.context.EstimatedTokens()
+			if a.budgetManager.ShouldProactiveCompact(estTokens) {
+			a.budgetHint75Injected = true
+				hint := a.budgetManager.BudgetHint(estTokens)
+				a.context.InjectBudgetHint(hint)
+			}
+		}
 
 		if len(textParts) > 0 {
 			finalText = strings.Join(textParts, "\n")
@@ -1947,6 +2081,12 @@ func (a *AgentLoop) Run(userMessage string) string {
 				a.context.AddUserMessage(sb.String())
 			}
 		}
+
+		// Flush pending injections: deferred assistant+user shim pairs
+		// that were enqueued during tool execution. Must happen after
+		// tool results are appended to preserve tool_use/tool_result
+		// pairing (avoids 2013 API errors).
+		a.FlushPendingInjections()
 
 		// Check for interrupt after tool execution
 		if a.IsInterrupted() {
@@ -2885,6 +3025,12 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				a.lastTransition = TransitionRefusal
 				return nil, []string{msg}, nil
 			}
+			// Detect upstream truncation: parseResponse returns a truncation hint
+			// as stopReason when tool_call args were empty/placeholder ("{}").
+			// This must be retried — matching openclacky's UpstreamTruncatedError pattern.
+			if strings.HasPrefix(stopReason, "upstream truncated") {
+				return nil, nil, fmt.Errorf("upstream truncation: %s", stopReason)
+			}
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
 			if stopReason == "max_tokens" && a.config.EscalatedMaxOutputTokens > int(a.currentMaxTokens.Load()) {
@@ -3015,6 +3161,12 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			if msg := a.handleRefusal(stopReason); msg != "" {
 				a.lastTransition = TransitionRefusal
 				return nil, []string{msg}, nil
+			}
+			// Detect upstream truncation: parseResponse returns a truncation hint
+			// as stopReason when tool_call args were empty/placeholder ("{}").
+			// This must be retried — matching openclacky's UpstreamTruncatedError pattern.
+			if strings.HasPrefix(stopReason, "upstream truncated") {
+				return nil, nil, fmt.Errorf("upstream truncation: %s", stopReason)
 			}
 			// If the model hit the max_tokens ceiling, escalate for the next request.
 			// This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
@@ -3211,17 +3363,29 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 		case anthropic.ToolUseBlock:
 			var input map[string]any
 			if len(v.Input) > 0 {
-				_ = json.Unmarshal(v.Input, &input) // ignore parse errors for unknown tools
+				if err := json.Unmarshal(v.Input, &input); err != nil {
+					// Openclacky pattern: JSON argument repair — attempt to fix
+					// common LLM mistakes (trailing commas, unquoted keys, etc.)
+					// before rejecting the tool call outright.
+					repaired := tools.RepairJSON(string(v.Input))
+					if repaired != string(v.Input) {
+						_ = json.Unmarshal([]byte(repaired), &input)
+						a.logDebug("[json-repair] repaired tool arguments for %s\n", v.Name)
+					}
+				}
 			}
 			if input == nil {
 				input = make(map[string]any)
 			}
 
-			// Detect upstream truncation: empty args mean the response was cut
-			// mid-tool_use by an API router (OpenRouter, etc.). Executing a
+			// Detect upstream truncation: empty or placeholder args mean the
+			// response was cut mid-tool_use by an API router. Executing a
 			// malformed tool call would fail and waste tokens on error-retry.
-			// Inspired by openclacky's detect_upstream_truncation!()
-			if len(v.Input) == 0 {
+			// Inspired by openclacky's detect_upstream_truncation!() and
+			// tool_call_args_truncated?(). Detects:
+			//   - nil/empty input: len(v.Input) == 0
+			//   - empty object placeholder: v.Input is "{}" (just "{}" bytes)
+			if toolCallArgsTruncated(v.Input) {
 				a.out("\n[WARN] Upstream truncation: tool %q has empty arguments\n", v.Name)
 				// Inject one-shot behavioral hint (openclacky pattern):
 				// On first truncation in a session, inject a hint telling the LLM
@@ -3266,6 +3430,29 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 		a.context.SetRedactedThinkingData(redactedData)
 	}
 	return toolCalls, textParts, stopReason
+}
+
+// toolCallArgsTruncated detects whether a tool_call's arguments were truncated
+// by the upstream API provider. This is a narrow detector that only flags
+// arguments that are completely empty — it deliberately does NOT flag partial
+// or invalid JSON, which should be handled by the ArgumentsParser path.
+//
+// Detection rules (matching openclacky's tool_call_args_truncated?):
+//   - nil/empty byte slice: raw Input is empty
+//   - empty object placeholder: input is exactly "{}"
+//
+// Cases deliberately NOT detected here:
+//   - Partial JSON (e.g. {"path": "/tmp/x") — let ArgumentsParser handle it
+//   - Invalid/non-parseable JSON — let ArgumentsParser handle it
+func toolCallArgsTruncated(input []byte) bool {
+	if len(input) == 0 {
+		return true
+	}
+	// Check for empty object placeholder "{}"
+	if len(input) == 2 && input[0] == '{' && input[1] == '}' {
+		return true
+	}
+	return false
 }
 
 func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
@@ -3335,7 +3522,7 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 		if e.denied {
 			toolResults = append(toolResults, anthropic.ToolResultBlockParam{
 				ToolUseID: toolUseID,
-				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: e.errText}}},
+				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: injectTodoReminder("", deepSanitizeUTF8(e.errText).(string), a)}}},
 				IsError:   param.NewOpt(true),
 			})
 			continue
@@ -3359,9 +3546,47 @@ func (a *AgentLoop) truncateOutput(output string) string {
 	if len(output) <= limit {
 		return output
 	}
-	// Keep first 80% and last 20%, with safe UTF-8 boundary truncation
+	// Openclacky pattern: size-aware truncation with type hints.
+	// Instead of dumb head/tail, detect output structure and preserve it:
+	//   - File-like (contains line structure): head + tail with line count marker
+	//   - JSON (starts/ends with { or [): truncate middle array/object elements
+	//   - Line-based (many newlines): head/tail with line count marker
+	//   - Raw text: fallback to head/tail truncation
 	first := limit * 4 / 5
 	last := limit - first
+
+	// Detect output type for structured truncation
+	lines := strings.Split(output, "\n")
+	totalLines := len(lines)
+	if totalLines > 10 {
+		// Line-based output: keep head+tail with line count marker
+		firstLines := int(float64(first) * 0.75)
+		lastLines := totalLines - int(float64(last)*0.75)
+		if firstLines > totalLines-5 {
+			firstLines = totalLines - 5
+		}
+		if lastLines < firstLines+5 {
+			lastLines = firstLines + 5
+		}
+
+		// Safe UTF-8 boundary for first part
+		firstStr := strings.Join(lines[:firstLines], "\n")
+		lastStr := strings.Join(lines[lastLines:], "\n")
+
+		if len(firstStr)+len(lastStr)+80 > limit {
+			// Adjust to fit within limit
+			overflow := len(firstStr) + len(lastStr) + 80 - limit
+			cut := overflow / 2
+			firstStr = safeTruncateUTF8(firstStr, len(firstStr)-cut)
+			lastStr = safeTruncateUTF8(lastStr, cut)
+		}
+
+		truncated := fmt.Sprintf("%s\n\n... [TRUNCATED: %d lines omitted] ...\n\n%s",
+			firstStr, lastLines-firstLines, lastStr)
+		return truncated
+	}
+
+	// Fallback: basic head/tail with safe UTF-8 boundary truncation
 	firstEnd := first
 	for firstEnd > 0 && (output[firstEnd]&0xc0) == 0x80 {
 		firstEnd--
@@ -3371,6 +3596,18 @@ func (a *AgentLoop) truncateOutput(output string) string {
 		lastStart++
 	}
 	return output[:firstEnd] + "\n\n... [OUTPUT TRUNCATED] ...\n\n" + output[lastStart:]
+}
+
+// safeTruncateUTF8 truncates a string to at most n bytes, respecting UTF-8 boundaries.
+func safeTruncateUTF8(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	// Walk back to find a valid UTF-8 boundary
+	for n > 0 && (s[n]&0xc0) == 0x80 {
+		n--
+	}
+	return s[:n]
 }
 
 // executeSingleToolApproved runs one tool call with permission already checked.
@@ -3660,6 +3897,35 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		}
 	}
 
+	// Record tool call for redundancy detection (after execution, so we have the result preview)
+	if a.redundantCallDetector != nil {
+		preview := result.Output
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		a.redundantCallDetector.Record(toolName, input, preview)
+	}
+
+	// Openclacky pattern: redundant tool call detection. If the LLM repeats the
+	// same call (e.g., reading the same file twice this turn), append a hint.
+	if a.redundantCallDetector != nil {
+		if hint := a.redundantCallDetector.DetectRedundancy(toolName, input); hint != "" {
+			a.logDebug("[tool] redundant call detected: %s\n", hint)
+			// Still execute (the call may be intentional) but warn
+			result.Output = hint + "\n\n" + result.Output
+		}
+	}
+
+	// Openclacky pattern: tool error self-correction hints. Instead of just
+	// returning the raw error, inject a hint that guides the LLM toward a
+	// better approach (e.g., "file not found" → "try glob to find it").
+	if result.IsError {
+		if hint := ToolErrorSelfCorrectionHint(toolName, result.Output, input); hint != "" {
+			a.logDebug("[tool] self-correction hint: %s\n", hint)
+			result.Output = hint + "\n\n" + result.Output
+		}
+	}
+
 	// Truncate long outputs
 	output := a.truncateOutput(result.Output)
 
@@ -3697,11 +3963,21 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	}
 
 	a.logDebug("[tool] completed: %s (isError=%v, output_len=%d)\n", toolName, result.IsError, len(output))
+
+	// Openclacky pattern: inject TODO reminder into tool result text.
+	// Keeps task list accurate — LLMs frequently forget to update tasks after work.
+	resultText := injectTodoReminder(toolName, output, a)
+
+	// Openclacky pattern: sanitize UTF-8 in tool result to prevent invalid bytes
+	// from reaching the API (which can cause 400 errors on some providers).
+	// Fast path: returns original string unchanged if already valid UTF-8.
+	resultText = deepSanitizeUTF8(resultText).(string)
+
 	return anthropic.ToolResultBlockParam{
 		ToolUseID: toolUseID,
-		Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: output}}},
+		Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: resultText}}},
 		IsError:   param.NewOpt(result.IsError),
-	}, output
+	}, resultText
 }
 
 // toolResultPreview extracts the most relevant part of a tool result for display.

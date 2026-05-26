@@ -174,6 +174,7 @@ const systemPromptTemplateDynamic = `
 %s
 %s
 %s
+%s
 
 ## Session-specific guidance
 - If you do not understand why the user has denied a tool call, ask them for clarification.
@@ -226,6 +227,10 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 	toolList := buildToolList(registry)
 
 	modeDesc := modeDescriptions[permissionMode]
+
+	// Agent Profile: SOUL.md / USER.md / base_prompt.md
+	profile := LoadAgentProfile()
+	agentProfileSection := profile.FormatForPrompt()
 
 	wd, _ := os.Getwd()
 	envInfo := fmt.Sprintf("%s / %s / %s", runtime.GOOS, runtime.Version(), runtime.GOARCH)
@@ -341,8 +346,8 @@ func BuildSystemPrompt(registry *tools.Registry, permissionMode, projectDir, mod
 	pathFormat := tools.GetPathFormatInfo()
 	staticPart := fmt.Sprintf(systemPromptTemplateStatic, modelName, envInfo, wd, runtime.GOOS, shellInfo, pathFormat, gitCtx, toolList)
 
-	// Build dynamic part (permission mode, project instructions, skills)
-	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection, 5)
+	// Build dynamic part (permission mode, agent profile, project instructions, skills)
+	dynamicPart := fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, agentProfileSection, skillsSection, 5)
 
 	// Combine with boundary
 	return staticPart + "\n" + SYSTEM_PROMPT_STATIC_BOUNDARY + "\n" + dynamicPart
@@ -490,6 +495,10 @@ func buildStaticPart(registry *tools.Registry, modelName string) (string, uint64
 func buildDynamicPart(permissionMode, projectDir string, skillLoader *skills.Loader, skillTracker *skills.SkillTracker, sessionMemory *SessionMemory) string {
 	modeDesc := modeDescriptions[permissionMode]
 
+	// Agent Profile: SOUL.md / USER.md / base_prompt.md
+	profile := LoadAgentProfile()
+	agentProfileSection := profile.FormatForPrompt()
+
 	projectInstructions := LoadProjectInstructions(projectDir)
 	var projectSection string
 	if projectInstructions != "" {
@@ -584,7 +593,7 @@ func buildDynamicPart(permissionMode, projectDir string, skillLoader *skills.Loa
 		}
 	}
 
-	return fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, skillsSection, 5)
+	return fmt.Sprintf(systemPromptTemplateDynamic, strings.ToUpper(permissionMode), modeDesc, projectSection, agentProfileSection, skillsSection, 5)
 }
 
 // fnvHash computes a fast FNV-1a hash of a string for content-addressable caching.

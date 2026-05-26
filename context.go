@@ -975,6 +975,14 @@ func (c *ConversationContext) SetAPITokenAnchor(inputTokens int64) {
 // Only counts entries after the most recent compact boundary — entries before the
 // boundary are not sent to the API (BuildMessages skips them), so counting them
 // would inflate the estimate and cause false compaction triggers on resume.
+// EntryCount returns the number of conversation entries in history.
+// Used by the two-layer overflow recovery to calculate pull-back amounts.
+func (c *ConversationContext) EntryCount() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.entries)
+}
+
 func (c *ConversationContext) EstimatedTokens() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -1417,6 +1425,34 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	// tool_use_id is not present in any assistant message's tool_use blocks.
 	merged = fixOrphanedToolResults(merged)
 
+	// Openclacky pattern: reasoning pad — if thinking-mode provider detected
+	// (any assistant message has reasoning_content), ensure ALL assistant
+	// ToolUseContent messages have a thinking block for structural consistency.
+	if c.reasoningPadEnabled() {
+		for i := range merged {
+			if merged[i].Role != anthropic.MessageParamRoleAssistant {
+				continue
+			}
+			hasThinking := false
+			hasToolUse := false
+			for _, block := range merged[i].Content {
+				if block.OfThinking != nil || block.OfRedactedThinking != nil {
+					hasThinking = true
+				}
+				if block.OfToolUse != nil {
+					hasToolUse = true
+				}
+			}
+			if hasToolUse && !hasThinking {
+				// Prepend empty thinking block for structural consistency
+				blocks := make([]anthropic.ContentBlockParamUnion, 1, len(merged[i].Content)+1)
+				blocks[0] = anthropic.NewThinkingBlock("", "")
+				blocks = append(blocks, merged[i].Content...)
+				merged[i].Content = blocks
+			}
+		}
+	}
+
 	return merged
 }
 
@@ -1476,6 +1512,23 @@ func (c *ConversationContext) InjectIdleReminder(idleMsg string) {
 		return
 	}
 	msg := fmt.Sprintf("%s%s", SystemInjectedPrefix, idleMsg)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, conversationEntry{
+		role:    "user",
+		content: TextContent(msg),
+	})
+}
+
+
+// InjectBudgetHint adds a proactive budget management hint as a user message
+// with the system-injected prefix.
+func (c *ConversationContext) InjectBudgetHint(hint string) {
+	if hint == "" {
+		return
+	}
+	msg := fmt.Sprintf("%s%s", SystemInjectedPrefix, hint)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1562,6 +1615,48 @@ func (c *ConversationContext) aggressiveTruncateHistory() {
 	c.entries = c.truncateWithBoundary(1, keep)
 	c.ValidateToolPairing()
 	c.FixRoleAlternation()
+}
+
+// PullBackFromTail removes the last k entries from history and returns them.
+// This is the core mechanism for two-layer context overflow recovery:
+//
+//	Layer 1 (standard, K=1): pop 1 message → preserves prompt cache checkpoint #A
+//	Layer 2 (aggressive, K=half): pop ~half the history → sacrifices cache but
+//	  guarantees the compression call fits.
+//
+// The pulled-back entries are returned so they can be re-appended after
+// compression completes. k is clamped to never remove the first entry
+// (system/initial user message).
+//
+// Matches openclacky's pull_back_from_tail mechanism in
+// message_compressor_helper.rb:175-186.
+func (c *ConversationContext) PullBackFromTail(k int) []conversationEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if k <= 0 || len(c.entries) <= 1 {
+		return nil
+	}
+
+	// Clamp: never pop more than entries-1 (preserve at least the first entry)
+	if k >= len(c.entries) {
+		k = len(c.entries) - 1
+	}
+
+	pulled := make([]conversationEntry, k)
+	copy(pulled, c.entries[len(c.entries)-k:])
+	c.entries = c.entries[:len(c.entries)-k]
+
+	return pulled
+}
+
+// ReAppendEntries re-appends previously pulled-back entries to the end of history.
+// Used after compression to restore the most recent task progress that was
+// temporarily removed for cache-preserving compaction.
+func (c *ConversationContext) ReAppendEntries(entries []conversationEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = append(c.entries, entries...)
 }
 
 // MinimumHistory drops to bare minimum - only first user message and last 2 entries.
