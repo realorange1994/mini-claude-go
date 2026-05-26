@@ -380,6 +380,8 @@ type AgentLoop struct {
 	cancelFunc                context.CancelFunc                  // cancel function for async sub-agents
 	workTaskStore             *WorkTaskStore                      // tracks LLM work items (TODO list)
 	redundantCallDetector     *RedundantCallDetector              // tracks redundant tool calls
+	stormBreaker              *StormBreaker                       // detects and suppresses repeat-loop tool call storms
+	truncatedResultSaver      *TruncatedResultSaver               // saves truncated tool output to disk for recall
 	budgetManager            *ProactiveBudgetManager            // proactive context window budget management
 	agentOutput               io.Writer                           // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
 	drainPendingMessagesFunc  func() []string                     // called at turn boundaries to drain pending messages from parent task store
@@ -760,6 +762,10 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	// Initialize proactive budget manager
 	agent.budgetManager = NewProactiveBudgetManager(int(contextWindow))
 	agent.redundantCallDetector = NewRedundantCallDetector()
+	agent.stormBreaker = NewStormBreaker()
+	if cfg.ProjectDir != "" {
+		agent.truncatedResultSaver = NewTruncatedResultSaver(cfg.ProjectDir)
+	}
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 	// Fix gate to point to agent's config (not the local cfg copy)
@@ -980,6 +986,10 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	// Initialize proactive budget manager
 	agent.budgetManager = NewProactiveBudgetManager(int(contextWindow))
 	agent.redundantCallDetector = NewRedundantCallDetector()
+	agent.stormBreaker = NewStormBreaker()
+	if cfg.ProjectDir != "" {
+		agent.truncatedResultSaver = NewTruncatedResultSaver(cfg.ProjectDir)
+	}
 
 	// Restore skill state from transcript entries so skillTracker reflects
 	// which skills were already read in this session. This ensures skills
@@ -1518,6 +1528,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 		if a.redundantCallDetector != nil {
 			a.redundantCallDetector.Clear()
 		}
+		// Reset storm breaker window at turn boundaries
+		if a.stormBreaker != nil {
+			a.stormBreaker.Reset()
+		}
 
 		// Per-turn micro-compact: clear old tool results before each API call.
 		// Prevents context from growing unboundedly between full compactions,
@@ -1673,8 +1687,15 @@ func (a *AgentLoop) Run(userMessage string) string {
 					var toolResults []anthropic.ToolResultBlockParam
 					for _, sr := range streamingResults {
 						output := a.truncateOutput(sr.output)
-							// Openclacky patterns: UTF-8 sanitize + TODO reminder injection
-							resultText := deepSanitizeUTF8(output).(string)
+						// Truncated result saver for streaming path
+						if output != sr.output && a.truncatedResultSaver != nil {
+							savedMsg := a.truncatedResultSaver.Save(sr.toolName, sr.output)
+							if savedMsg != "" {
+								output += "\n\n" + savedMsg
+							}
+						}
+						// Openclacky patterns: UTF-8 sanitize + TODO reminder injection
+						resultText := deepSanitizeUTF8(output).(string)
 							resultText = injectTodoReminder("", resultText, a)
 							toolResults = append(toolResults, anthropic.ToolResultBlockParam{
 								ToolUseID: sr.toolUseID,
@@ -3429,6 +3450,24 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 	if len(redactedData) > 0 {
 		a.context.SetRedactedThinkingData(redactedData)
 	}
+
+	// Tool call scavenge (DeepSeek-Reasonix pattern): search text content for
+	// tool calls that weren't properly structured (e.g., emitted in reasoning_content,
+	// DSML markup, or raw JSON). Without scavenge, the model's intended tool
+	// invocations are silently lost.
+	if len(textParts) > 0 {
+		scavenged := ScavengeToolCalls(textParts)
+		if len(scavenged) > 0 {
+			a.logDebug("[scavenge] recovered %d tool call(s) from text content\n", len(scavenged))
+			for _, s := range scavenged {
+				// Generate a synthetic tool_use_id for scavenged calls
+				scavengedID := fmt.Sprintf("scavenged_%s_%x", s["name"], s["input"])
+				s["id"] = scavengedID
+				toolCalls = append(toolCalls, s)
+			}
+		}
+	}
+
 	return toolCalls, textParts, stopReason
 }
 
@@ -3665,6 +3704,20 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	// Remap directory parameter name (official: directory, internal: dir)
 	tools.RemapDirParam(input)
+
+	// Storm breaker: detect and suppress repeat-loop tool call storms.
+	// If the same tool+args has been called threshold times in a row, suppress
+	// and return a hint instead of executing.
+	if a.stormBreaker != nil {
+		if hint := a.stormBreaker.Inspect(toolName, input); hint != "" {
+			a.logDebug("[storm] suppressed: %s\n", hint)
+			return anthropic.ToolResultBlockParam{
+				ToolUseID: toolUseID,
+				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: hint}}},
+				IsError:   param.NewOpt(true),
+			}, hint
+		}
+	}
 
 	// Record tool use to transcript
 	if a.transcript != nil {
@@ -3928,6 +3981,15 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	// Truncate long outputs
 	output := a.truncateOutput(result.Output)
+
+	// Truncated result saver: if output was truncated, save full content to disk
+	// so the agent can recall it later with read_file instead of re-running the tool.
+	if output != result.Output && a.truncatedResultSaver != nil {
+		savedMsg := a.truncatedResultSaver.Save(toolName, result.Output)
+		if savedMsg != "" {
+			output += "\n\n" + savedMsg
+		}
+	}
 
 	// Display timing to stderr
 	if cancelled {
