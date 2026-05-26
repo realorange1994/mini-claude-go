@@ -382,6 +382,9 @@ type AgentLoop struct {
 	redundantCallDetector     *RedundantCallDetector              // tracks redundant tool calls
 	stormBreaker              *StormBreaker                       // detects and suppresses repeat-loop tool call storms
 	truncatedResultSaver      *TruncatedResultSaver               // saves truncated tool output to disk for recall
+	consecutiveCallTracker    *ConsecutiveCallTracker             // tracks consecutive identical tool call failures for sharper errors
+	toolListFingerprint       *ToolListFingerprint                // tracks tool list schema hash to detect cache-invalidating drift
+	foldSummaryPin            *FoldSummaryPin                    // tracks content that must survive compaction (active skills, constraints)
 	budgetManager            *ProactiveBudgetManager            // proactive context window budget management
 	agentOutput               io.Writer                           // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
 	drainPendingMessagesFunc  func() []string                     // called at turn boundaries to drain pending messages from parent task store
@@ -766,6 +769,9 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	if cfg.ProjectDir != "" {
 		agent.truncatedResultSaver = NewTruncatedResultSaver(cfg.ProjectDir)
 	}
+	agent.consecutiveCallTracker = NewConsecutiveCallTracker()
+	agent.toolListFingerprint = NewToolListFingerprint()
+	agent.foldSummaryPin = NewFoldSummaryPin()
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 	// Fix gate to point to agent's config (not the local cfg copy)
@@ -990,6 +996,9 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	if cfg.ProjectDir != "" {
 		agent.truncatedResultSaver = NewTruncatedResultSaver(cfg.ProjectDir)
 	}
+	agent.consecutiveCallTracker = NewConsecutiveCallTracker()
+	agent.toolListFingerprint = NewToolListFingerprint()
+	agent.foldSummaryPin = NewFoldSummaryPin()
 
 	// Restore skill state from transcript entries so skillTracker reflects
 	// which skills were already read in this session. This ensures skills
@@ -1531,6 +1540,10 @@ func (a *AgentLoop) Run(userMessage string) string {
 		// Reset storm breaker window at turn boundaries
 		if a.stormBreaker != nil {
 			a.stormBreaker.Reset()
+		}
+		// Reset consecutive failure tracker at turn boundaries
+		if a.consecutiveCallTracker != nil {
+			a.consecutiveCallTracker.Clear()
 		}
 
 		// Per-turn micro-compact: clear old tool results before each API call.
@@ -3392,6 +3405,26 @@ func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
 	if len(toolParams) > 0 && toolParams[len(toolParams)-1].OfTool != nil {
 		toolParams[len(toolParams)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
+
+	// DeepSeek-Reasonix pattern: tool list fingerprinting for drift detection.
+	// When tools are added/removed/schemas change, the prompt prefix shifts and
+	// all cached tokens are lost. Track the fingerprint to log when this happens.
+	if a.toolListFingerprint != nil {
+		fpNames := make([]string, len(tools))
+		fpSchemas := make(map[string]string, len(tools))
+		for i, t := range tools {
+			fpNames[i] = t.Name()
+			schema := t.InputSchema()
+			if schemaBytes, err := json.Marshal(schema); err == nil {
+				fpSchemas[t.Name()] = string(schemaBytes)
+			}
+		}
+		if a.toolListFingerprint.CheckAndRecord(fpNames, fpSchemas) {
+			a.logDebug("[tool-list] drift detected: hash changed to %s (%d tools)\n",
+				a.toolListFingerprint.LastHash(), len(tools))
+		}
+	}
+
 	return toolParams
 }
 
@@ -5716,6 +5749,13 @@ func (a *AgentLoop) tryCompaction() {
 			// format. Without this, the model sees a bare "[compact: N tokens]" and
 			// re-executes historical instructions instead of continuing.
 			summaryContent := a.buildCompactSummaryMessage(preTokens, preCompactMessages, preCompactToolCalls)
+			// DeepSeek-Reasonix pattern: prepend pinned content that must survive compaction
+			if a.foldSummaryPin != nil {
+				pinPrompt := a.foldSummaryPin.BuildPinPrompt()
+				if pinPrompt != "" {
+					summaryContent = pinPrompt + "\n\n" + summaryContent
+				}
+			}
 			a.context.AddSummary(summaryContent)
 
 			if a.toolStateTracker != nil {
