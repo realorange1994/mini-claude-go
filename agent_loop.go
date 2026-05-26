@@ -1527,11 +1527,11 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// Preflight compression: turn-start fold estimation (DeepSeek-Reasonix pattern)
 	// If estimated tokens > 90% of ctxMax, fold BEFORE making the API call
 	// to prevent wasting cached tokens on a request that will exceed limits.
-	ctxMax := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
-	preflightRatio := a.context.EstimatedTokenRatio(ctxMax)
+	preflightCtxMax := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
+	preflightRatio := a.context.EstimatedTokenRatio(preflightCtxMax)
 	if preflightRatio > TURN_START_FOLD_THRESHOLD {
 		a.logDebug("[compact] turn-start fold: est_tokens=%d, ctxMax=%d, ratio=%.2f > %.2f\n",
-			a.context.EstimatedTokens(), ctxMax, preflightRatio, TURN_START_FOLD_THRESHOLD)
+			a.context.EstimatedTokens(), preflightCtxMax, preflightRatio, TURN_START_FOLD_THRESHOLD)
 		a.tryCompaction()
 		a.RunPostCompactCleanup()
 	}
@@ -3081,6 +3081,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 					a.logDebug("[cache-break-2] %s\n", reason)
 				}
 				UpdateLastAssistantMsgTime()
+				a.decidePostResponseFold(int(response.Usage.InputTokens), int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens)))
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// Register compactable tool_use IDs for cache_edits tracking.
@@ -3218,6 +3219,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 					a.logDebug("[cache-break-2] %s\n", reason)
 				}
 				UpdateLastAssistantMsgTime()
+				a.decidePostResponseFold(int(response.Usage.InputTokens), int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens)))
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response)
 			// Register compactable tool_use IDs for cache_edits tracking.
