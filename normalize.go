@@ -52,6 +52,24 @@ func NormalizeAPIMessages(messages []anthropic.MessageParam) []anthropic.Message
 	messages = smooshSystemReminders(messages)
 	messages = stripEmptyTextBlocks(messages)
 
+	// Final safety: filter out messages with empty/invalid roles or zero content.
+	// These can be created by edge cases in compaction, session resume, or
+	// message construction bugs. They cause API 400 errors and tool pairing issues.
+	// Note: we keep "system" role messages (used as boundary markers).
+	cleaned := make([]anthropic.MessageParam, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role != anthropic.MessageParamRoleUser &&
+			msg.Role != anthropic.MessageParamRoleAssistant &&
+			msg.Role != "system" { // allow system role for boundary markers
+			continue // drop messages with empty/invalid roles
+		}
+		if len(msg.Content) == 0 && msg.Role != "system" {
+			continue // drop messages with zero content blocks (except system markers)
+		}
+		cleaned = append(cleaned, msg)
+	}
+	messages = cleaned
+
 	// Existing normalizations (sort keys, whitespace)
 	result := make([]anthropic.MessageParam, len(messages))
 	for i, msg := range messages {
@@ -123,6 +141,10 @@ func hoistToolResults(messages []anthropic.MessageParam) []anthropic.MessagePara
 // EnforceRoleAlternation ensures messages alternate between user and assistant roles.
 // Consecutive same-role messages are merged. If the first message is from the assistant,
 // a synthetic user message is prepended.
+//
+// IMPORTANT: user messages containing tool_results are NOT merged with other user
+// messages, because merging them can break tool_use/tool_result pairing and cause
+// API error 2013. Tool_result messages must immediately follow their tool_use.
 func EnforceRoleAlternation(messages []anthropic.MessageParam) []anthropic.MessageParam {
 	if len(messages) == 0 {
 		return messages
@@ -152,6 +174,19 @@ func EnforceRoleAlternation(messages []anthropic.MessageParam) []anthropic.Messa
 
 		last := &result[len(result)-1]
 		if msg.Role == last.Role {
+			// Check if either message contains tool_results or tool_use — merging
+			// them can break tool_use/tool_result pairing (causes API error 2013).
+			lastHasToolResults := hasToolResultBlocks(*last)
+			msgHasToolResults := hasToolResultBlocks(msg)
+			lastHasToolUse := hasToolUseBlocks(*last)
+			msgHasToolUse := hasToolUseBlocks(msg)
+			if lastHasToolResults || msgHasToolResults || lastHasToolUse || msgHasToolUse {
+				// Don't merge: tool_result/tool_use messages must stay separate
+				// to preserve pairing with their tool_use blocks.
+				result = append(result, msg)
+				continue
+			}
+
 			// Merge consecutive same-role messages by combining content blocks.
 			last.Content = append(last.Content, msg.Content...)
 		} else {
@@ -160,6 +195,26 @@ func EnforceRoleAlternation(messages []anthropic.MessageParam) []anthropic.Messa
 	}
 
 	return result
+}
+
+// hasToolResultBlocks returns true if a message contains tool_result content blocks.
+func hasToolResultBlocks(msg anthropic.MessageParam) bool {
+	for _, block := range msg.Content {
+		if block.OfToolResult != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// hasToolUseBlocks returns true if the message contains tool_use blocks.
+func hasToolUseBlocks(msg anthropic.MessageParam) bool {
+	for _, block := range msg.Content {
+		if block.OfToolUse != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // ============================================================================

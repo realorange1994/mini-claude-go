@@ -1273,6 +1273,7 @@ func (c *ConversationContext) AddAssistantToolCalls(toolCalls []map[string]any) 
 			},
 		})
 	}
+	fmt.Fprintf(os.Stderr, "[ctx-debug] AddAssistantToolCalls: added %d tool_use blocks\n", len(blocks))
 	c.entries = append(c.entries, conversationEntry{
 		role:    "assistant",
 		content: ToolUseContent(blocks),
@@ -1334,8 +1335,14 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	}
 
 	messages := make([]anthropic.MessageParam, 0, len(entriesCopy)-startIdx)
-	for _, entry := range entriesCopy[startIdx:] {
+	for i, entry := range entriesCopy[startIdx:] {
 		msg := anthropic.MessageParam{Role: anthropic.MessageParamRole(entry.role)}
+
+		// DEBUG: Log entries with empty/invalid roles or unknown content types.
+		// This helps diagnose 2013 errors where tool_use entries are mysteriously missing.
+		if entry.role == "" {
+			fmt.Fprintf(os.Stderr, "[bm-debug] entry[%d] has EMPTY role, content type=%T\n", startIdx+i, entry.content)
+		}
 
 		switch v := entry.content.(type) {
 		case TextContent:
@@ -1418,6 +1425,16 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 			}
 		}
 
+		// Skip entries with empty/invalid roles — these cause API 400 errors.
+		// Can be created by compaction round-trips or session resume with
+		// corrupted entries. Also skip entries that produced zero content blocks.
+		if msg.Role != anthropic.MessageParamRoleUser && msg.Role != anthropic.MessageParamRoleAssistant {
+			continue
+		}
+		if len(msg.Content) == 0 {
+			continue
+		}
+
 		messages = append(messages, msg)
 	}
 
@@ -1425,9 +1442,19 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	// This handles cases where FixRoleAlternation couldn't merge due to
 	// type mismatches (e.g., ToolResultContent + TextContent both user role).
 	// The API allows a single user message to contain mixed text and tool_result blocks.
+	// IMPORTANT: Never merge messages containing tool_use blocks with other
+	// same-role messages — this can obscure the tool_use/tool_result boundary
+	// that the API strictly validates.
 	merged := make([]anthropic.MessageParam, 0, len(messages))
 	for _, msg := range messages {
 		if len(merged) > 0 && merged[len(merged)-1].Role == msg.Role {
+			// Don't merge if either message contains tool_use blocks.
+			// tool_use messages must remain separate to preserve the clear
+			// pairing boundary that the API validates.
+			if msgHasToolUseBlocks(merged[len(merged)-1]) || msgHasToolUseBlocks(msg) {
+				merged = append(merged, msg)
+				continue
+			}
 			merged[len(merged)-1].Content = append(merged[len(merged)-1].Content, msg.Content...)
 		} else {
 			merged = append(merged, msg)
@@ -3163,4 +3190,24 @@ func entryContentToText(c EntryContent) string {
 	default:
 		return ""
 	}
+}
+
+// msgHasToolResultBlocks returns true if the message contains tool_result blocks.
+func msgHasToolResultBlocks(msg anthropic.MessageParam) bool {
+	for _, block := range msg.Content {
+		if block.OfToolResult != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// msgHasToolUseBlocks returns true if the message contains tool_use blocks.
+func msgHasToolUseBlocks(msg anthropic.MessageParam) bool {
+	for _, block := range msg.Content {
+		if block.OfToolUse != nil {
+			return true
+		}
+	}
+	return false
 }

@@ -2970,8 +2970,11 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 		}
 	}
 	// DeepSeek-Reasonix pattern: fix tool call pairing - drop unpaired tool_calls and stray tool results
-	if droppedCalls, droppedTools := fixToolCallPairing(messages); droppedCalls > 0 || droppedTools > 0 {
+	if filtered, droppedCalls, droppedTools := fixToolCallPairing(messages); droppedCalls > 0 || droppedTools > 0 {
 		a.logDebug("[healing] fixed tool pairing: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
+		if filtered != nil {
+			messages = filtered
+		}
 	}
 
 	params := anthropic.MessageNewParams{
@@ -3278,7 +3281,19 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		// 2013 error: tool pairing broken -- repair and rebuild params before retry
 		if strings.Contains(errMsg, "2013") || strings.Contains(errMsg, "tool call result does not follow tool call") {
 			a.out("\n[WARN] Tool pairing error (2013) in fallback, repairing context...\n")
-			// DEBUG: dump messages that caused the error
+			// DEBUG: dump messages that caused the error to console
+			a.out("[2013-DEBUG] Dumping messages that caused the error:\n")
+			for i, msg := range params.Messages {
+				roleStr := string(msg.Role)
+				a.out("  msg[%d] role=%s blocks=%d\n", i, roleStr, len(msg.Content))
+				for j, block := range msg.Content {
+					if block.OfToolUse != nil {
+						a.out("    [%d] tool_use id=%s name=%s\n", j, block.OfToolUse.ID, block.OfToolUse.Name)
+					} else if block.OfToolResult != nil {
+						a.out("    [%d] tool_result id=%s\n", j, block.OfToolResult.ToolUseID)
+					}
+				}
+			}
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
 			// Inject a recovery hint so the model produces properly sequenced tool calls

@@ -16,7 +16,16 @@ import (
 func shrinkOversizedToolResultsByTokens(messages []anthropic.MessageParam, maxTokens int) (healedCount, tokensSaved, charsSaved int) {
 	for i := range messages {
 		msg := &messages[i]
-		if string(msg.Role) != "tool" {
+		// Tool result blocks are in user-role messages, not "tool" role.
+		// Check for OfToolResult blocks instead of checking role.
+		hasToolResult := false
+		for _, block := range msg.Content {
+			if block.OfToolResult != nil {
+				hasToolResult = true
+				break
+			}
+		}
+		if !hasToolResult {
 			continue
 		}
 
@@ -121,7 +130,13 @@ func countTokensBounded(text string) int {
 // DeepSeek returns 400 errors on either case.
 //
 // Matching DeepSeek-Reasonix's healing.ts fixToolCallPairing
-func fixToolCallPairing(messages []anthropic.MessageParam) (droppedAssistantCalls, droppedStrayTools int) {
+//
+// IMPORTANT: The Anthropic API uses role="user" for tool_result messages, NOT role="tool".
+// All tool_result blocks appear inside user-role messages. This function must check
+// for OfToolResult blocks in user-role messages, not look for a "tool" role.
+//
+// Returns the filtered messages slice (may be shorter than input).
+func fixToolCallPairing(messages []anthropic.MessageParam) (filtered []anthropic.MessageParam, droppedAssistantCalls, droppedStrayTools int) {
 	out := make([]anthropic.MessageParam, 0, len(messages))
 	i := 0
 
@@ -129,7 +144,7 @@ func fixToolCallPairing(messages []anthropic.MessageParam) (droppedAssistantCall
 		msg := messages[i]
 
 		// Check if this is an assistant message with tool_calls
-		if string(msg.Role) == "assistant" && len(msg.Content) > 0 {
+		if msg.Role == anthropic.MessageParamRoleAssistant && len(msg.Content) > 0 {
 			hasToolCalls := false
 			var toolCalls []anthropic.ToolUseBlockParam
 			for _, block := range msg.Content {
@@ -157,29 +172,43 @@ func fixToolCallPairing(messages []anthropic.MessageParam) (droppedAssistantCall
 					}
 				}
 
-				// Look for matching tool results
+				// Look for matching tool results in subsequent user-role messages.
+				// The Anthropic API puts tool_result blocks inside user-role messages,
+				// not "tool" role messages. We scan user messages that contain
+				// OfToolResult blocks until we've found all needed IDs.
 				var candidates []anthropic.MessageParam
 				j := i + 1
 				for j < len(messages) && len(needed) > 0 {
 					nextMsg := messages[j]
-					if string(nextMsg.Role) != "tool" {
+					// Tool results are in user-role messages; stop at any other role
+					// or at user messages that don't contain tool_result blocks
+					// (which are regular user text messages, not tool responses).
+					if nextMsg.Role != anthropic.MessageParamRoleUser {
 						break
 					}
-
-					// Find tool_call_id by scanning for ToolResult content
-					var toolCallID string
+					// Check if this user message contains tool_result blocks
+					hasToolResults := false
+					var matchedIDs []string
 					for _, block := range nextMsg.Content {
 						if block.OfToolResult != nil {
-							toolCallID = block.OfToolResult.ToolUseID
-							break
+							hasToolResults = true
+							if needed[block.OfToolResult.ToolUseID] {
+								matchedIDs = append(matchedIDs, block.OfToolResult.ToolUseID)
+							}
 						}
 					}
-
-					if toolCallID == "" || !needed[toolCallID] {
+					if !hasToolResults {
+						// This is a regular user text message, not a tool response — stop scanning
 						break
 					}
-
-					delete(needed, toolCallID)
+					// Accept the message if it contains any needed tool_result IDs
+					if len(matchedIDs) == 0 {
+						// Tool results present but none match our needed IDs — stop scanning
+						break
+					}
+					for _, id := range matchedIDs {
+						delete(needed, id)
+					}
 					candidates = append(candidates, nextMsg)
 					j++
 				}
@@ -201,7 +230,7 @@ func fixToolCallPairing(messages []anthropic.MessageParam) (droppedAssistantCall
 					i = j
 					continue
 				} else {
-					// Drop unpaired tool_calls and their results
+					// Drop unpaired tool_calls and their partial results
 					droppedAssistantCalls++
 					droppedStrayTools += len(candidates)
 					i = j
@@ -210,16 +239,23 @@ func fixToolCallPairing(messages []anthropic.MessageParam) (droppedAssistantCall
 			}
 		}
 
-		// Check if this is a stray tool message without matching tool_call
-		if string(msg.Role) == "tool" {
+		// Check if this is a stray user message containing tool_result blocks
+		// without a preceding assistant tool_use message.
+		if msg.Role == anthropic.MessageParamRoleUser {
+			hasToolResult := false
 			hasValidID := false
 			for _, block := range msg.Content {
-				if block.OfToolResult != nil && block.OfToolResult.ToolUseID != "" {
-					hasValidID = true
-					break
+				if block.OfToolResult != nil {
+					hasToolResult = true
+					if block.OfToolResult.ToolUseID != "" {
+						hasValidID = true
+						break
+					}
 				}
 			}
-			if !hasValidID {
+			// Only check for stray if this message contains tool_result blocks
+			// but no valid tool_use_id (completely orphaned).
+			if hasToolResult && !hasValidID {
 				droppedStrayTools++
 				i++
 				continue
@@ -230,13 +266,7 @@ func fixToolCallPairing(messages []anthropic.MessageParam) (droppedAssistantCall
 		i++
 	}
 
-	// Copy back to messages
-	copy(messages, out)
-	for i := len(out); i < len(messages); i++ {
-		messages[i] = anthropic.MessageParam{}
-	}
-
-	return droppedAssistantCalls, droppedStrayTools
+	return out, droppedAssistantCalls, droppedStrayTools
 }
 
 // extractPinnedConstraints extracts pinned constraints from system prompt
