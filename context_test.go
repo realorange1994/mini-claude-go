@@ -235,8 +235,26 @@ func TestValidateToolPairingPartialRemoval(t *testing.T) {
 	})
 
 	ctx.ValidateToolPairing()
-	if len(ctx.entries) != 3 {
-		t.Errorf("expected 3 entries (one orphaned result removed), got %d", len(ctx.entries))
+	// With the fix, orphaned results are preserved with synthetic tool_use injected.
+	// Expected: 4 entries (user + assistant tool_use + synthetic tool_use + user tool_results)
+	if len(ctx.entries) != 4 {
+		t.Errorf("expected 4 entries (orphaned result preserved with synthetic tool_use), got %d", len(ctx.entries))
+	}
+	// Verify the synthetic tool_use was injected for the orphan
+	hasSyntheticToolUse := false
+	for _, entry := range ctx.entries {
+		if entry.role == "assistant" {
+			if blocks, ok := entry.content.(ToolUseContent); ok {
+				for _, b := range blocks {
+					if b.OfToolUse != nil && b.OfToolUse.ID == "call_deleted" {
+						hasSyntheticToolUse = true
+					}
+				}
+			}
+		}
+	}
+	if !hasSyntheticToolUse {
+		t.Error("expected synthetic tool_use to be injected for orphaned result call_deleted")
 	}
 }
 

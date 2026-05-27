@@ -1038,6 +1038,29 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry, a
 		toolStateTracker: NewToolStateTracker(),          // track tool state for sub-agent
 		todoList:         tools.NewTodoList(),            // sub-agents need their own todo list to avoid nil panic
 		cachedMC:         NewCachedMicrocompactTracker(), // cache_edits tracking for sub-agent
+
+		// Critical fields that would panic if left nil:
+		notificationChan:    make(chan string, 64),
+		evictionDone:        make(chan struct{}),
+		announcedMCPServers: make(map[string]bool),
+		cacheBreakDetector:  &CacheBreakDetector{},
+		modelCapabilities:   a.modelCapabilities, // share parent's read-only cache
+		shellHooks:          HookConfig{},         // empty hooks config for sub-agents
+		betaHeadersLatched:  []string(nil),
+
+		// Non-critical but important fields (safe nil or initialized):
+		costTracker:         NewCostTracker(),
+		extractionState:     NewExtractionState(),
+		errorReporter:       NewErrorReporter(),
+		featureFlags:        NewFeatureFlagStore(),
+		telemetry:           NewTelemetryManager(true), // disabled for sub-agents
+		sonnetModel:         a.sonnetModel,             // inherit parent's sonnet model for fallback
+		agentNameRegistry:   make(map[string]string),
+		agentHandleStore:    tools.NewAgentHandleStore(),
+		workTaskStore:       NewWorkTaskStore(),
+		redundantCallDetector: NewRedundantCallDetector(),
+		stormBreaker:        NewStormBreaker(),
+		budgetManager:       NewProactiveBudgetManager(int(a.modelCapabilities.GetContextWindow(cfg.Model, cfg.MaxContextTokens))),
 	}
 	child.gate = NewPermissionGate(&child.config)
 

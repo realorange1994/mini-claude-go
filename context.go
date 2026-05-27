@@ -1684,7 +1684,10 @@ func (c *ConversationContext) MinimumHistory() {
 	if len(c.entries) <= 3 {
 		return
 	}
-	c.entries = c.truncateWithBoundary(1, 2)
+	// Keep more entries to preserve tool_use/tool_result pairing.
+	// Previous value of 2 was too aggressive and broke pairing, causing 2013.
+	// Keep 6 entries: enough to preserve at least one complete tool pair.
+	c.entries = c.truncateWithBoundary(1, 6)
 	c.ValidateToolPairing()
 	c.FixRoleAlternation()
 }
@@ -2783,18 +2786,11 @@ func (c *ConversationContext) ValidateToolPairing() {
 						orphanByIndex[i] = append(orphanByIndex[i], orphanResult{r})
 					}
 				}
-				if len(orphanByIndex[i]) > 0 && len(valid) == 0 {
-					// All results are orphaned — keep the entry, we'll inject
-					// synthetic tool_use before it in the final rebuild step
-					// Don't discard, don't set to nil
-				} else if len(valid) > 0 && len(orphanByIndex[i]) > 0 {
-					// Mixed: keep valid, drop orphans (no backfill for mixed entries)
-					c.entries[i].content = ToolResultContent(valid)
-					delete(orphanByIndex, i)
-				} else if len(valid) == 0 && len(orphanByIndex[i]) == 0 {
-					// No results at all (edge case), keep as-is
-				}
-				// If all results were valid, leave entry unchanged
+				// For mixed case (valid + orphans): keep ALL results, not just valid.
+				// The orphan injection step below will create synthetic tool_use
+				// for orphans, so the final entry needs all results to match.
+				// Previously we were dropping orphans here, causing 2013 errors.
+				_ = valid // placeholder for clarity - we don't modify entry
 			}
 		}
 	}

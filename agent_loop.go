@@ -1814,13 +1814,16 @@ func (a *AgentLoop) Run(userMessage string) string {
 				if a.toolStateTracker != nil {
 					a.toolStateTracker.OnCompaction()
 				}
-				// Escalating repair: first attempt validates entries, subsequent
-				// attempts force compaction to resolve structural pairing issues
-				// that BuildMessages() merge logic may introduce.
-				if a.consecutive2013Errors == 1 {
+				// Escalating repair: first two attempts validate entries,
+				// only call MinimumHistory() as last resort (not on every retry).
+				// Previous behavior called MinimumHistory() on every retry >1,
+				// which was too aggressive and broke more pairings than it fixed.
+				if a.consecutive2013Errors <= 2 {
+					// Gentle repair: validate and fix role alternation only
 					a.context.ValidateToolPairing()
 					a.context.FixRoleAlternation()
 				} else {
+					// Last resort: aggressive but preserve more entries than before
 					preTokens := a.context.EstimatedTokens()
 					a.context.MinimumHistory()
 					a.context.ValidateToolPairing()
