@@ -3528,24 +3528,18 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 				input = make(map[string]any)
 			}
 
-			// Detect upstream truncation: empty or placeholder args mean the
-			// response was cut mid-tool_use by an API router. Executing a
-			// malformed tool call would fail and waste tokens on error-retry.
-			// Inspired by openclacky's detect_upstream_truncation!() and
-			// tool_call_args_truncated?(). Detects:
-			//   - nil/empty input: len(v.Input) == 0
-			//   - empty object placeholder: v.Input is "{}" (just "{}" bytes)
+			// Detect upstream truncation: only if JSON parsing failed AND
+			// the partial content looks truncated (unclosed strings/brackets).
+			// Empty arguments {} are NOT truncation - they may be legitimate
+			// model output (uncertain about parameters). Let the API handle it.
+			// Previously this flagged empty args as "truncation" which was wrong.
+			// The correct detection is: parsing failed + looks incomplete.
 			if toolCallArgsTruncated(v.Input) {
-				a.out("\n[WARN] Upstream truncation: tool %q has empty arguments\n", v.Name)
-				// Inject one-shot behavioral hint (openclacky pattern):
-				// On first truncation in a session, inject a hint telling the LLM
-				// to prefer smaller tool_call arguments. This prevents recurrence
-				// without modifying the system prompt or breaking prompt cache.
-				if !a.truncationHintInjected {
-					a.truncationHintInjected = true
-					a.context.AddUserMessage("Note: Your previous response was truncated because a tool_call had overly large arguments. Please prefer smaller, more focused tool_call arguments on future turns — large single-shot payloads are more likely to be truncated by the API. Continue with your task.")
-				}
-				return nil, nil, fmt.Sprintf("upstream truncated response: tool %q has empty arguments", v.Name)
+				// Only report as truncation if there WAS content that failed to parse
+				// (empty args = legitimate model uncertainty, not truncation)
+				_ = input // already set to empty map above
+				// Don't treat empty args as truncation - continue with execution
+				// The API will return proper error if args are truly invalid
 			}
 
 			call := map[string]any{

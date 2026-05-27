@@ -1273,7 +1273,6 @@ func (c *ConversationContext) AddAssistantToolCalls(toolCalls []map[string]any) 
 			},
 		})
 	}
-	fmt.Fprintf(os.Stderr, "[ctx-debug] AddAssistantToolCalls: added %d tool_use blocks\n", len(blocks))
 	c.entries = append(c.entries, conversationEntry{
 		role:    "assistant",
 		content: ToolUseContent(blocks),
