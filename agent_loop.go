@@ -2574,6 +2574,9 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 	a.context.ValidateToolPairing()
 	a.context.FixRoleAlternation()
 
+	// Inject current time as a system-injected user message.
+	a.context.InjectTimeContext()
+
 	messages := a.context.BuildMessages()
 
 	// Inject MCP instructions delta: announce newly-connected MCP servers.
