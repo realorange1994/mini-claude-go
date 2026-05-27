@@ -1281,6 +1281,19 @@ func (c *ConversationContext) AddAssistantToolCalls(toolCalls []map[string]any) 
 	c.truncateIfNeeded()
 }
 
+// RemoveLastAssistantEntry removes the last assistant entry if it has tool_use content.
+// This is used to undo AddAssistantToolCalls when streaming results fail to arrive.
+func (c *ConversationContext) RemoveLastAssistantEntry() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) > 0 {
+		lastIdx := len(c.entries) - 1
+		if c.entries[lastIdx].role == "assistant" {
+			c.entries = c.entries[:lastIdx]
+		}
+	}
+}
+
 // AddToolResults appends tool results as a user message.
 func (c *ConversationContext) AddToolResults(results []anthropic.ToolResultBlockParam) {
 	c.mu.Lock()

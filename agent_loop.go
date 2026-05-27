@@ -1727,12 +1727,16 @@ func (a *AgentLoop) Run(userMessage string) string {
 					}
 					a.context.AddToolResults(toolResults)
 					a.cacheBreakDetector.RecordChange(CacheChangeToolResult, len(toolResults))
+				} else {
+					// Streaming executor returned no results — remove the orphaned
+					// tool_use entry we just added. Without matching tool_result,
+					// the API will reject the next request with error 2013.
+					a.context.RemoveLastAssistantEntry()
+					toolCallsAddedToContext = false
 				}
-				// Fallback: if streaming executor didn't produce results,
-				// the traditional synchronous execution path below will handle it
+			} else {
+				toolCalls, textParts, err = a.callWithNonStreamingOnly()
 			}
-		} else {
-			toolCalls, textParts, err = a.callWithNonStreamingOnly()
 		}
 
 		// Hook: PostAPICall — after each API call (success or failure)
