@@ -168,3 +168,154 @@ func (p *FoldSummaryPin) Clear() {
 	p.Constraints = nil
 	p.InProgressToolCall = ""
 }
+
+// PrefixFingerprint tracks the hash of the complete prompt prefix (system + tools + fewshots).
+// When the prefix changes (system prompt, tool schemas, or few-shot examples), the entire
+// cached prefix in the API is invalidated. By tracking the fingerprint, we can detect
+// prefix drift and log cache invalidation causes.
+//
+// DeepSeek-Reasonix pattern (memory/runtime.ts: ImmutablePrefix.fingerprint): the prefix
+// is stable across turns; only /new or tool mutations change it. Each change costs a
+// full cache miss on the next API call.
+type PrefixFingerprint struct {
+	lastHash string
+	driftDetected bool
+}
+
+// NewPrefixFingerprint creates a new prefix fingerprint tracker.
+func NewPrefixFingerprint() *PrefixFingerprint {
+	return &PrefixFingerprint{}
+}
+
+// CheckAndRecord checks if the prompt prefix has drifted since the last call.
+// Returns true if drift was detected. Records the new fingerprint.
+func (f *PrefixFingerprint) CheckAndRecord(system string, toolSchemas map[string]string, fewshots []map[string]any) bool {
+	newHash := computePrefixFingerprint(system, toolSchemas, fewshots)
+	f.driftDetected = f.lastHash != "" && f.lastHash != newHash
+	f.lastHash = newHash
+	return f.driftDetected
+}
+
+// DriftDetected returns whether drift was detected in the last CheckAndRecord call.
+func (f *PrefixFingerprint) DriftDetected() bool {
+	return f.driftDetected
+}
+
+// LastHash returns the current prefix fingerprint hash.
+func (f *PrefixFingerprint) LastHash() string {
+	return f.lastHash
+}
+
+// DriftKind classifies the type of tool-list drift for cache impact assessment.
+// Ordered by "cache cost" — identity and append are nearly free; reorder is catastrophic.
+type DriftKind string
+
+const (
+	DriftIdentity DriftKind = "identity"  // No change - same tools, same order, same content
+	DriftAppend   DriftKind = "append"    // New tools added at end, existing unchanged
+	DriftEdit     DriftKind = "edit"      // Same tool set but schemas changed
+	DriftReorder  DriftKind = "reorder"   // Same tool set but order changed - cache as bad as structural
+	DriftRemove   DriftKind = "remove"    // Tools removed - catastrophic regardless of other changes
+)
+
+// DriftReport contains the classification of tool list drift
+type DriftReport struct {
+	Kind    DriftKind
+	Added   []string
+	Removed []string
+	Edited  []string
+}
+
+// classifyToolListDrift analyzes before/after tool lists and classifies the drift.
+// This helps understand cache impact: identity and append are cheap, others cause cache misses.
+func classifyToolListDrift(before []string, after []string, beforeSchemas, afterSchemas map[string]string) DriftReport {
+	beforeSet := make(map[string]bool)
+	for _, n := range before {
+		beforeSet[n] = true
+	}
+	afterSet := make(map[string]bool)
+	for _, n := range after {
+		afterSet[n] = true
+	}
+
+	var added, removed []string
+	for _, n := range after {
+		if !beforeSet[n] {
+			added = append(added, n)
+		}
+	}
+	for _, n := range before {
+		if !afterSet[n] {
+			removed = append(removed, n)
+		}
+	}
+
+	var edited []string
+	sharedLen := min(len(before), len(after))
+	for i := 0; i < sharedLen; i++ {
+		if before[i] == after[i] && beforeSchemas[before[i]] != afterSchemas[after[i]] {
+			edited = append(edited, before[i])
+		}
+	}
+
+	// Identity: same length, same names in order, same content
+	if len(before) == len(after) && len(edited) == 0 {
+		sameOrder := true
+		for i := range before {
+			if before[i] != after[i] {
+				sameOrder = false
+				break
+			}
+		}
+		if sameOrder {
+			return DriftReport{Kind: DriftIdentity, Added: nil, Removed: nil, Edited: nil}
+		}
+	}
+
+	// Remove anywhere: catastrophic
+	if len(removed) > 0 {
+		return DriftReport{Kind: DriftRemove, Added: added, Removed: removed, Edited: nil}
+	}
+
+	// Append: every before-tool stays, new ones at end
+	if len(after) > len(before) {
+		allMatch := true
+		for i := range before {
+			if before[i] != after[i] || beforeSchemas[before[i]] != afterSchemas[after[i]] {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			return DriftReport{Kind: DriftAppend, Added: added, Removed: nil, Edited: nil}
+		}
+	}
+
+	// Same name set? Then positions or content changed
+	sameNameSet := len(beforeSet) == len(afterSet)
+	if sameNameSet {
+		for n := range beforeSet {
+			if !afterSet[n] {
+				sameNameSet = false
+				break
+			}
+		}
+		if sameNameSet {
+			positionsMatch := true
+			for i := range before {
+				if before[i] != after[i] {
+					positionsMatch = false
+					break
+				}
+			}
+			if positionsMatch {
+				return DriftReport{Kind: DriftEdit, Added: nil, Removed: nil, Edited: edited}
+			}
+			// Same set, different order - cache-wise as bad as structural change
+			return DriftReport{Kind: DriftReorder, Added: nil, Removed: nil, Edited: nil}
+		}
+	}
+
+	// Additions present but NOT clean appends - treat as reorder
+	return DriftReport{Kind: DriftReorder, Added: added, Removed: nil, Edited: nil}
+}

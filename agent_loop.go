@@ -384,6 +384,7 @@ type AgentLoop struct {
 	truncatedResultSaver      *TruncatedResultSaver               // saves truncated tool output to disk for recall
 	consecutiveCallTracker    *ConsecutiveCallTracker             // tracks consecutive identical tool call failures for sharper errors
 	toolListFingerprint       *ToolListFingerprint                // tracks tool list schema hash to detect cache-invalidating drift
+	prefixFingerprint         *PrefixFingerprint                  // tracks system+tools+fewshots hash to detect prefix cache drift
 	foldSummaryPin            *FoldSummaryPin                    // tracks content that must survive compaction (active skills, constraints)
 	cacheMetrics             *CacheMetrics                      // tracks cache hit/miss tokens per API call
 	readTracker              *ReadTracker                       // tracks files read for read-before-edit validation
@@ -773,6 +774,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	}
 	agent.consecutiveCallTracker = NewConsecutiveCallTracker()
 	agent.toolListFingerprint = NewToolListFingerprint()
+	agent.prefixFingerprint = NewPrefixFingerprint()
 	agent.foldSummaryPin = NewFoldSummaryPin()
 	agent.cacheMetrics = NewCacheMetrics()
 	agent.readTracker = NewReadTracker()
@@ -1002,6 +1004,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	}
 	agent.consecutiveCallTracker = NewConsecutiveCallTracker()
 	agent.toolListFingerprint = NewToolListFingerprint()
+	agent.prefixFingerprint = NewPrefixFingerprint()
 	agent.foldSummaryPin = NewFoldSummaryPin()
 	agent.cacheMetrics = NewCacheMetrics()
 	agent.readTracker = NewReadTracker()
@@ -3429,19 +3432,39 @@ func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
 	// DeepSeek-Reasonix pattern: tool list fingerprinting for drift detection.
 	// When tools are added/removed/schemas change, the prompt prefix shifts and
 	// all cached tokens are lost. Track the fingerprint to log when this happens.
-	if a.toolListFingerprint != nil {
-		fpNames := make([]string, len(tools))
-		fpSchemas := make(map[string]string, len(tools))
-		for i, t := range tools {
-			fpNames[i] = t.Name()
+	// DeepSeek-Reasonix pattern: fingerprint tool list + prefix to detect cache-invalidating drift
+	fpSchemas := make(map[string]string, len(tools))
+	if a.toolListFingerprint != nil || a.prefixFingerprint != nil {
+		for _, t := range tools {
 			schema := t.InputSchema()
 			if schemaBytes, err := json.Marshal(schema); err == nil {
 				fpSchemas[t.Name()] = string(schemaBytes)
 			}
 		}
+	}
+	if a.toolListFingerprint != nil {
+		fpNames := make([]string, len(tools))
+		for i, t := range tools {
+			fpNames[i] = t.Name()
+		}
 		if a.toolListFingerprint.CheckAndRecord(fpNames, fpSchemas) {
 			a.logDebug("[tool-list] drift detected: hash changed to %s (%d tools)\n",
 				a.toolListFingerprint.LastHash(), len(tools))
+		}
+	}
+
+	// DeepSeek-Reasonix pattern: prefix fingerprinting for drift detection.
+	// When system prompt, tool schemas, or fewshots change, the cached prefix
+	// is invalidated. Track this to detect cache misses from prefix drift.
+	if a.prefixFingerprint != nil {
+		sysPrompt := ""
+		if a.config.cachedPrompt != nil {
+			sysPrompt = a.config.cachedPrompt.GetOrBuild(a.registry, string(a.config.PermissionMode), "", a.config.Model, a.config.SkillLoader, a.skillTracker, a.config.SessionMemory)
+		}
+		fewshots := []map[string]any{} // fewshots from config if available
+		if a.prefixFingerprint.CheckAndRecord(sysPrompt, fpSchemas, fewshots) {
+			a.logDebug("[prefix-fingerprint] drift detected: hash changed to %s\n",
+				a.prefixFingerprint.LastHash())
 		}
 	}
 
