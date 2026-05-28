@@ -386,7 +386,20 @@ func (c *Client) requestStdio(ctx context.Context, method string, params json.Ra
 			// Reader goroutine completed (stdin close propagated)
 		case <-time.After(5 * time.Second):
 			// On Windows, closing stdin doesn't always unblock stdout reads.
-			// The reader goroutine may be stuck, but we can't wait forever.
+			// The reader goroutine may be stuck. Start a background watcher
+			// that kills the process if the goroutine doesn't exit within 5 minutes.
+			go func() {
+				select {
+				case <-done:
+					// Reader goroutine eventually completed
+				case <-time.After(5 * time.Minute):
+					// MCP server hung — reader goroutine still blocked.
+					// Kill the process to force the pipe to close.
+					if c.cmd != nil && c.cmd.Process != nil {
+						c.cmd.Process.Kill()
+					}
+				}
+			}()
 		}
 		return nil, ctx.Err()
 	case <-done:

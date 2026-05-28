@@ -747,16 +747,31 @@ Booleans: t (true), nil (false)`,
     (go:with-defer body...)  Go-style defer`,
 
 		"ffi": `Go FFI Interop (go:* functions):
-  (go:import "pkg.Func")  Import Go function/variable
-  (ffi "pkg.Func")  Alias for go:import
-  (go:list) / (go:list "pkg")  List packages/symbols
-  (go:register "pkg.name" value)  Register custom Go value
+  Getting Go values:
+    (go:import "pkg.Func")  Import Go function → returns PRIMITIVE, call to get go-val
+    (ffi "pkg.Func")        Alias for go:import (same thing)
+    ((ffi "time.Now"))      Call the primitive → returns go-val (or use funcall)
+  Important: ffi/go:import return a PRIMITIVE, not a go-val directly.
+    You MUST call them to get the actual go-val before using go:call.
+  Listing:
+    (go:list) / (go:list "pkg")  List packages/symbols
+    (go:register "pkg.name" go-val)  Register custom Go value (go-val only)
   Structs:
-    (go:new "pkg.Type")  Create zero-value struct
-    (go:field obj "Field")  Read field
-    (go:set-field obj "Field" val)  Set field
+    (go:new "pkg.Type")  Create zero-value struct → returns go-val
+    (go:field obj "Field")  Read field (exported fields only)
+    (go:set-field obj "Field" val)  Set field (exported fields only)
     (go:fields-of "pkg.Type")  List struct fields
     (go:methods-of obj)  List methods
+  Calling methods on go-val:
+    (go:call obj "MethodName" args...)  Call Go method on a go-val
+    obj MUST be a go-val (from go:new, go:make, or calling a imported function)
+  Examples:
+    ;; Get current time
+    (go:call ((ffi "time.Now")) "Format" "2006-01-02 15:04:05")
+    ;; Same result
+    (go:call ((go:import "time.Now")) "Format" "2006-01-02 15:04:05")
+    ;; Create struct and call method
+    (go:call (go:new "bytes.Buffer") "String")
   Reflection:
     (go:type-of obj)  Get Go type name
     (go:is-nil obj)  Check if Go nil
@@ -768,8 +783,7 @@ Booleans: t (true), nil (false)`,
     (go:len-of obj) / (go:cap-of obj)  Length/capacity
     (go:func-of obj "Method")  Get method as callable
     (go:type-parse "[]int")  Parse type string
-    (go:uintptr obj)  Pointer address
-    (go:search pattern)  Search symbols
+    (go:uintptr obj)  Pointer address (for ptr types)
     (go:convert val "[]byte")  Go type conversion
   Creation:
     (go:make "[]int" 10)  Create slice (default cap=8)
