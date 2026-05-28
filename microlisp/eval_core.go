@@ -2957,9 +2957,15 @@ evalLoop:
 				if e != nil {
 					return nil, fmt.Errorf("go:select: %v", e)
 				}
-				chosen, value, ok, cancelled, err := runSelectWithCancel(cases)
+				chosen, value, ok, cancelled, wouldBlock, err := runSelectWithBlockingCheck(cases)
 				if cancelled {
 					return nil, err
+				}
+				if wouldBlock {
+					return listFromSlice([]*Value{
+						vsym("would-block"),
+						vstr("go:select would block — no channel operation is ready and there's no :default clause. Add (:default) to return immediately, or use chan-try-send/chan-try-recv for non-blocking operations."),
+					}), nil
 				}
 				if !ok && cases[chosen].Dir == reflect.SelectRecv {
 					return listFromSlice([]*Value{vnum(float64(chosen)), vnil()}), nil
@@ -3018,10 +3024,30 @@ evalLoop:
 						Chan: reflect.ValueOf(activeLimits.CancelChan),
 					})
 				}
+				// Also add blocking detection timeout if enabled
+				blockTimeoutIdx2 := -1
+				if ChannelBlockTimeout > 0 {
+					timeoutCh2 := make(chan time.Time, 1)
+					go func() {
+						time.Sleep(time.Duration(ChannelBlockTimeout) * time.Millisecond)
+						select {
+						case timeoutCh2 <- time.Now():
+						default:
+						}
+					}()
+					blockTimeoutIdx2 = len(cases)
+					cases = append(cases, reflect.SelectCase{
+						Dir:  reflect.SelectRecv,
+						Chan: reflect.ValueOf(timeoutCh2),
+					})
+				}
 				defer func() { recover() }()
 				chosen, value, ok := reflect.Select(cases)
 				if chosen == cancelIdx {
 					return nil, fmt.Errorf("operation cancelled")
+				}
+				if chosen == blockTimeoutIdx2 {
+					return listFromSlice([]*Value{vsym("would-block"), vstr("chan-select-timeout: all channel operations would block")}), nil
 				}
 				if chosen == timeoutIdx {
 					return listFromSlice([]*Value{vsym("timeout")}), nil

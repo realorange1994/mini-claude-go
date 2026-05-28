@@ -161,30 +161,6 @@ func makeSelectCases(ops []*Value) ([]reflect.SelectCase, error) {
 	return cases, nil
 }
 
-// runSelectWithCancel performs reflect.Select with CancelChan integration.
-// If activeLimits.CancelChan is set, it adds a cancel case to break blocking.
-// Returns (chosenIndex, recvValue, recvOk, wasCancelled, error).
-func runSelectWithCancel(cases []reflect.SelectCase) (chosen int, value reflect.Value, ok bool, cancelled bool, err error) {
-	// Check if we have an active cancel channel to integrate
-	cancelIdx := -1
-	if limitsActive && activeLimits.CancelChan != nil {
-		cancelCase := reflect.SelectCase{
-			Dir:  reflect.SelectRecv,
-			Chan: reflect.ValueOf(activeLimits.CancelChan),
-		}
-		cancelIdx = len(cases)
-		cases = append(cases, cancelCase)
-	}
-
-	defer func() { recover() }()
-	chosen, value, ok = reflect.Select(cases)
-
-	// Check if the cancel case won
-	if chosen == cancelIdx {
-		return 0, reflect.Value{}, false, true, fmt.Errorf("operation cancelled")
-	}
-	return chosen, value, ok, false, nil
-}
 
 // -------- Channel creation --------
 
@@ -214,10 +190,74 @@ func builtinMakeChannel(args []*Value) (*Value, error) {
 	return v, nil
 }
 
-// -------- Blocking send (with CancelChan integration) --------
+// -------- Automatic blocking detection --------
 
-// chan-send: (chan-send channel value) => nil
-// Blocks until the send succeeds, the channel is closed, or CancelChan fires.
+// ChannelBlockTimeout is the duration (in milliseconds) after which a blocking
+// channel operation is considered "would block" and returns immediately
+// instead of hanging. This prevents lisp_eval from getting stuck on channel
+// operations with no matching sender/receiver.
+//
+// Set to 0 to disable (revert to pure blocking behavior).
+// Default: 3000ms (3 seconds).
+var ChannelBlockTimeout int64 = 3000
+
+// runSelectWithBlockingCheck performs reflect.Select with both CancelChan
+// integration and automatic blocking detection. If the operation would
+// block longer than ChannelBlockTimeout, it returns a "would-block" result
+// instead of hanging.
+//
+// Returns (chosenIndex, recvValue, recvOk, wasCancelled, wouldBlock, error).
+func runSelectWithBlockingCheck(cases []reflect.SelectCase) (chosen int, value reflect.Value, ok bool, cancelled bool, wouldBlock bool, err error) {
+	// Check if we have an active cancel channel to integrate
+	cancelIdx := -1
+	if limitsActive && activeLimits.CancelChan != nil {
+		cancelCase := reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(activeLimits.CancelChan),
+		}
+		cancelIdx = len(cases)
+		cases = append(cases, cancelCase)
+	}
+
+	// If blocking detection is enabled (timeout > 0), add a timeout case
+	// to detect operations that would block indefinitely.
+	blockTimeoutIdx := -1
+	if ChannelBlockTimeout > 0 {
+		timeoutCh := make(chan time.Time, 1)
+		go func() {
+			time.Sleep(time.Duration(ChannelBlockTimeout) * time.Millisecond)
+			select {
+			case timeoutCh <- time.Now():
+			default:
+			}
+		}()
+		blockTimeoutIdx = len(cases)
+		cases = append(cases, reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(timeoutCh),
+		})
+	}
+
+	defer func() { recover() }()
+	chosen, value, ok = reflect.Select(cases)
+
+	// Check if the timeout case won (operation would block)
+	if chosen == blockTimeoutIdx {
+		return 0, reflect.Value{}, false, false, true, nil
+	}
+
+	// Check if the cancel case won
+	if chosen == cancelIdx {
+		return 0, reflect.Value{}, false, true, false, fmt.Errorf("operation cancelled")
+	}
+	return chosen, value, ok, false, false, nil
+}
+
+// -------- Blocking send (with CancelChan integration and auto blocking detection) --------
+
+// chan-send: (chan-send channel value) => nil or :would-block
+// Blocks until the send succeeds, the channel is closed, CancelChan fires,
+// or ChannelBlockTimeout expires (returns :would-block).
 func builtinChanSend(args []*Value) (*Value, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("chan-send: needs channel and value")
@@ -234,17 +274,27 @@ func builtinChanSend(args []*Value) (*Value, error) {
 	cases := []reflect.SelectCase{
 		{Dir: reflect.SelectSend, Chan: lch.ch, Send: reflect.ValueOf(goVal)},
 	}
-	_, _, _, cancelled, err := runSelectWithCancel(cases)
+	_, _, _, cancelled, wouldBlock, err := runSelectWithBlockingCheck(cases)
 	if cancelled {
 		return nil, err
+	}
+	if wouldBlock {
+		// Return a descriptive result instead of hanging.
+		// The agent can use chan-try-send for non-blocking semantics,
+		// or set up a go:select with :default for immediate feedback.
+		return listFromSlice([]*Value{
+			vsym("would-block"),
+			vstr(fmt.Sprintf("chan-send to channel %d would block — no receiver ready and channel buffer is full. Use chan-try-send for non-blocking send, or set up a go:select with :default.", int64(lch.ch.Pointer()))),
+		}), nil
 	}
 	return vnil(), nil
 }
 
-// -------- Blocking recv (with CancelChan integration) --------
+// -------- Blocking recv (with CancelChan integration and auto blocking detection) --------
 
-// chan-recv: (chan-recv channel) => value
-// Blocks until a value is received, the channel is closed, or CancelChan fires.
+// chan-recv: (chan-recv channel) => value or :would-block
+// Blocks until a value is received, the channel is closed, CancelChan fires,
+// or ChannelBlockTimeout expires (returns :would-block).
 func builtinChanRecv(args []*Value) (*Value, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("chan-recv: needs a channel")
@@ -257,9 +307,16 @@ func builtinChanRecv(args []*Value) (*Value, error) {
 	cases := []reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: lch.ch},
 	}
-	_, value, ok, cancelled, err := runSelectWithCancel(cases)
+	_, value, ok, cancelled, wouldBlock, err := runSelectWithBlockingCheck(cases)
 	if cancelled {
 		return nil, err
+	}
+	if wouldBlock {
+		// Return a descriptive result instead of hanging.
+		return listFromSlice([]*Value{
+			vsym("would-block"),
+			vstr(fmt.Sprintf("chan-recv on channel %d would block — no sender ready and channel is empty. Use chan-try-recv for non-blocking receive, or set up a go:select with :default.", int64(lch.ch.Pointer()))),
+		}), nil
 	}
 	if !ok {
 		return vnil(), nil // channel closed
@@ -367,11 +424,33 @@ func builtinChanSelectTimeout(args []*Value) (*Value, error) {
 		cases = append(cases, cancelCase)
 	}
 
+	// Also add blocking detection timeout if enabled
+	blockTimeoutIdx2 := -1
+	if ChannelBlockTimeout > 0 {
+		timeoutCh2 := make(chan time.Time, 1)
+		go func() {
+			time.Sleep(time.Duration(ChannelBlockTimeout) * time.Millisecond)
+			select {
+			case timeoutCh2 <- time.Now():
+			default:
+			}
+		}()
+		blockTimeoutIdx2 = len(cases)
+		cases = append(cases, reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(timeoutCh2),
+		})
+	}
+
 	defer func() { recover() }()
 	chosen, value, ok := reflect.Select(cases)
 
 	if chosen == cancelIdx {
 		return nil, fmt.Errorf("operation cancelled")
+	}
+	if chosen == blockTimeoutIdx2 {
+		// Blocking detection timeout
+		return listFromSlice([]*Value{vsym("would-block"), vstr("chan-select-timeout: all channel operations would block")}), nil
 	}
 	if chosen == timeoutIdx {
 		return listFromSlice([]*Value{vsym("timeout")}), nil
@@ -393,8 +472,10 @@ func builtinChanSelectTimeout(args []*Value) (*Value, error) {
 
 // -------- Select (updated with CancelChan integration and :default support) --------
 
-// go:select: (go:select op1 op2 ...) => (operation-index result)
+// go:select: (go:select op1 op2 ...) => (operation-index result) or :would-block
 // Each op is (:send channel value), (:recv channel), or (:default).
+// If all ops would block and there's no :default, returns :would-block
+// after ChannelBlockTimeout instead of hanging.
 func builtinGoSelect(args []*Value) (*Value, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("go:select: need at least one operation")
@@ -405,9 +486,17 @@ func builtinGoSelect(args []*Value) (*Value, error) {
 		return nil, fmt.Errorf("go:select: %v", err)
 	}
 
-	chosen, value, ok, cancelled, err := runSelectWithCancel(cases)
+	chosen, value, ok, cancelled, wouldBlock, err := runSelectWithBlockingCheck(cases)
 	if cancelled {
 		return nil, err
+	}
+	if wouldBlock {
+		// Return a descriptive result instead of hanging.
+		// This happens when all channel ops are blocked and no :default present.
+		return listFromSlice([]*Value{
+			vsym("would-block"),
+			vstr("go:select would block — no channel operation is ready and there's no :default clause. Add (:default) to return immediately, or use chan-try-send/chan-try-recv for non-blocking operations."),
+		}), nil
 	}
 
 	if !ok && cases[chosen].Dir == reflect.SelectRecv {

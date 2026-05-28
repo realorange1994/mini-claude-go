@@ -48,7 +48,28 @@ func builtinConditionWait(args []*Value) (*Value, error) {
 	// condition-notify signal can be lost (classic lost-wakeup race).
 	cv.L = userMu
 	userMu.Lock() // must hold L when calling Wait
-	cv.Wait()     // atomically releases userMu and waits; reacquires on wake
+
+	// Use blocking detection with timeout
+	if ChannelBlockTimeout > 0 {
+		done := make(chan struct{}, 1)
+		go func() {
+			cv.Wait()
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+			return vnil(), nil
+		case <-time.After(time.Duration(ChannelBlockTimeout) * time.Millisecond):
+			// Re-acquire the lock since Wait returned but we're aborting
+			userMu.Lock()
+			return listFromSlice([]*Value{
+				vsym("would-block"),
+				vstr(fmt.Sprintf("condition-wait would block — no signal received on condition %d within timeout. Use condition-notify or condition-broadcast from another thread.", cid)),
+			}), nil
+		}
+	}
+
+	cv.Wait()
 	// userMu is held again after Wait returns
 	return vnil(), nil
 }
@@ -147,6 +168,18 @@ func builtinSleep(args []*Value) (*Value, error) {
 	}
 	secs := args[0].num
 	duration := time.Duration(secs * float64(time.Second))
+
+	// Cap sleep at blocking detection timeout to avoid hanging
+	if ChannelBlockTimeout > 0 {
+		maxDuration := time.Duration(ChannelBlockTimeout) * time.Millisecond
+		if duration > maxDuration {
+			return listFromSlice([]*Value{
+				vsym("would-block"),
+				vstr(fmt.Sprintf("sleep %.2fs exceeds blocking timeout (%dms). Use smaller sleep values or set ChannelBlockTimeout=0 to disable.", secs, ChannelBlockTimeout)),
+			}), nil
+		}
+	}
+
 	time.Sleep(duration)
 	return vnil(), nil
 }
@@ -177,6 +210,25 @@ func builtinLock(args []*Value) (*Value, error) {
 	if !ok {
 		return nil, fmt.Errorf("lock: invalid lock")
 	}
+
+	// Use blocking detection with timeout
+	if ChannelBlockTimeout > 0 {
+		done := make(chan struct{}, 1)
+		go func() {
+			mu.Lock()
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+			return vnil(), nil
+		case <-time.After(time.Duration(ChannelBlockTimeout) * time.Millisecond):
+			return listFromSlice([]*Value{
+				vsym("would-block"),
+				vstr(fmt.Sprintf("lock would block — lock %d is already held by another thread. Use chan-try-send/chan-try-recv patterns for non-blocking operations.", lid)),
+			}), nil
+		}
+	}
+
 	mu.Lock()
 	return vnil(), nil
 }
@@ -200,6 +252,31 @@ func builtinJoinThread(args []*Value) (*Value, error) {
 	if !ok {
 		return nil, fmt.Errorf("join-thread: no such thread %d", tid)
 	}
+
+	// Use blocking detection with timeout
+	if ChannelBlockTimeout > 0 {
+		done := make(chan threadResult, 1)
+		go func() {
+			tr := <-ch
+			done <- tr
+		}()
+		select {
+		case tr := <-done:
+			if tr.err != nil {
+				return nil, tr.err
+			}
+			threadChannelsMu.Lock()
+			delete(threadChannels, tid)
+			threadChannelsMu.Unlock()
+			return tr.value, nil
+		case <-time.After(time.Duration(ChannelBlockTimeout) * time.Millisecond):
+			return listFromSlice([]*Value{
+				vsym("would-block"),
+				vstr(fmt.Sprintf("join-thread would block — thread %d is still running and hasn't finished. Use go:spawn with a callback or poll with thread? to check status.", tid)),
+			}), nil
+		}
+	}
+
 	tr := <-ch
 	if tr.err != nil {
 		return nil, tr.err
