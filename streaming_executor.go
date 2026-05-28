@@ -711,6 +711,11 @@ func (e *StreamingToolExecutor) Wait(ctx context.Context, totalCalls int) []tool
 		}
 	}
 
+	// Clear tools and results to free memory — prevents unbounded growth
+	// across multiple Wait() calls within the same executor lifetime.
+	e.tools = nil
+	e.results = nil
+
 	return results
 }
 

@@ -1459,9 +1459,9 @@ func (c *Compactor) ShouldCompact(messages []anthropic.MessageParam) bool {
 	if tokens < threshold {
 		return false
 	}
-	// Cooldown: skip if tokens haven't grown 25% since last compaction
+	// Cooldown: skip if tokens haven't grown 15% since last compaction
 	if c.postCompactTokens > 0 {
-		cooldownThreshold := c.postCompactTokens + c.postCompactTokens/4
+		cooldownThreshold := c.postCompactTokens + c.postCompactTokens*3/20
 		if tokens < cooldownThreshold {
 			return false
 		}

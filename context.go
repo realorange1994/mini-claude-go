@@ -2013,10 +2013,61 @@ func (c *ConversationContext) AddCompactBoundary(trigger CompactTrigger, preComp
 	for _, opt := range opts {
 		opt(&content)
 	}
+	// Cap old compact boundary entries to prevent unbounded accumulation
+	// across many compaction cycles. Keep only the 3 most recent.
+	c.capCompactBoundaries(3)
 	c.entries = append(c.entries, conversationEntry{
 		role:    "system",
 		content: content,
 	})
+}
+
+// capCompactBoundaries removes old compact boundary entries, keeping only the
+// most recent maxCount boundaries. Also removes their associated SummaryContent,
+// AntiReplayContent, and related meta entries. Must be called with c.mu held.
+func (c *ConversationContext) capCompactBoundaries(maxCount int) {
+	if maxCount <= 0 {
+		maxCount = 3
+	}
+	// Find all compact boundary indices
+	var boundaryIdxs []int
+	for i := 0; i < len(c.entries); i++ {
+		if _, ok := c.entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdxs = append(boundaryIdxs, i)
+		}
+	}
+	// If we have too many, remove the oldest ones
+	excess := len(boundaryIdxs) - maxCount
+	if excess <= 0 {
+		return
+	}
+	// Determine which indices to remove (the oldest 'excess' boundaries)
+	// and their associated entries (summary, anti-replay, etc.)
+	remove := make(map[int]bool)
+	for i := 0; i < excess; i++ {
+		bIdx := boundaryIdxs[i]
+		remove[bIdx] = true
+		// Also remove entries immediately after the boundary until we hit
+		// a non-meta entry (SummaryContent, AntiReplayContent, etc.)
+		for j := bIdx + 1; j < len(c.entries); j++ {
+			switch c.entries[j].content.(type) {
+			case SummaryContent, AntiReplayContent, CompressedSummaryContent:
+				remove[j] = true
+			default:
+				break
+			}
+		}
+	}
+	// Build new entries slice without removed indices
+	if len(remove) > 0 {
+		newEntries := make([]conversationEntry, 0, len(c.entries)-len(remove))
+		for i, e := range c.entries {
+			if !remove[i] {
+				newEntries = append(newEntries, e)
+			}
+		}
+		c.entries = newEntries
+	}
 }
 
 // AddSummary inserts a user-role summary message after compaction.
