@@ -1741,6 +1741,9 @@ func (a *AgentLoop) Run(userMessage string) string {
 				// duplicate second API call, causing double-thinking display and wasted tokens.
 				_ = streamingExecDone // no-op for text-only streaming response
 			}
+		} else {
+			// Non-streaming mode: call API synchronously and execute tools.
+			toolCalls, textParts, err = a.callWithNonStreamingOnly()
 		}
 
 		// Hook: PostAPICall — after each API call (success or failure)
