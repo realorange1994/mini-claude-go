@@ -398,6 +398,7 @@ var builtins = []builtinDef{
 	{"sha1", builtinSHA1},
 	{"sha256", builtinSHA256},
 	{"help", builtinHelp},
+	{"HELP", builtinHelp},
 	{"ffi", builtinFFI},
 	{"ffi-register", builtinFFIRegister},
 	{"make-package", builtinMakePackage},
