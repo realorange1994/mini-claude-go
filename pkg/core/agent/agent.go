@@ -884,6 +884,34 @@ func (s *AgentSession) GetTurnCount() int {
 	return s.turnCount
 }
 
+// SetModel changes the model for future turns.
+func (s *AgentSession) SetModel(model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.config.Model = model
+}
+
+// GetModel returns the current model.
+func (s *AgentSession) GetModel() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.config.Model
+}
+
+// ClearHistory clears the conversation history, keeping the system message.
+func (s *AgentSession) ClearHistory() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Keep the first message if it's a system prompt
+	if len(s.messages) > 0 && s.messages[0].Role == "system" {
+		s.messages = s.messages[:1]
+	} else {
+		s.messages = nil
+	}
+	s.turnCount = 0
+	return nil
+}
+
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
