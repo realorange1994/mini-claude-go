@@ -1735,7 +1735,11 @@ func (a *AgentLoop) Run(userMessage string) string {
 					toolCallsAddedToContext = false
 				}
 			} else {
-				toolCalls, textParts, err = a.callWithNonStreamingOnly()
+				// Streaming succeeded with no tool calls (text-only response) or executor
+				// was nil. No second API call needed — use the streaming result directly.
+				// Previously this called callWithNonStreamingOnly() which made a redundant
+				// duplicate second API call, causing double-thinking display and wasted tokens.
+				_ = streamingExecDone // no-op for text-only streaming response
 			}
 		}
 
@@ -2725,20 +2729,20 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 				// for a complete fresh response (matching Hermes outer retry pattern).
 				a.out("  [!] Stream interrupted after text output, falling back to non-streaming...\n")
 				a.trackStreamFailure()
-				return a.callWithNonStreamingFallback(params)
+				return a.callWithNonStreamingFallback(params, true)
 			}
 		}
 
 		// Non-transient error during stream -> try non-streaming fallback
 		a.out("\n[WARN] Stream failed (%v), falling back to non-streaming...\n", err)
 		a.trackStreamFailure()
-		return a.callWithNonStreamingFallback(params)
+		return a.callWithNonStreamingFallback(params, true)
 	}
 
 	// All stream retries exhausted -> try non-streaming fallback
 	a.out("\n[WARN] Stream failed after %d attempts, falling back to non-streaming...\n", maxStreamRetries+1)
 	a.trackStreamFailure()
-	return a.callWithNonStreamingFallback(params)
+	return a.callWithNonStreamingFallback(params, true)
 }
 
 // tryStreamOnce makes a single streaming attempt and returns the result.
@@ -2920,7 +2924,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 func (a *AgentLoop) callWithNonStreamingOnly() ([]map[string]any, []string, error) {
 	a.logDebug("[api] non-streaming call: model=%s est_tokens=%d turn=%d\n",
 		GetModelForAPI(a.config.Model), a.context.EstimatedTokens(), a.budget.Consumed()+1)
-	return a.callWithNonStreamingFallback(a.buildMessageParams())
+	return a.callWithNonStreamingFallback(a.buildMessageParams(), false)
 }
 
 // buildMessageParams constructs the API request params from current context.
@@ -3099,7 +3103,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				UpdateLastAssistantMsgTime()
 				a.decidePostResponseFold(int(response.Usage.InputTokens), int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens)))
 			}
-			toolCalls, textParts, stopReason := a.parseResponse(response)
+			toolCalls, textParts, stopReason := a.parseResponse(response, false)
 			// Register compactable tool_use IDs for cache_edits tracking.
 			// Only compactable tools (read/exec/edit/grep/glob/web) are tracked.
 			for _, call := range toolCalls {
@@ -3180,7 +3184,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 
 // callWithNonStreamingFallback tries non-streaming API call with retries.
 // Mirrors Claude Code's non-streaming fallback + retry budget.
-func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewParams) ([]map[string]any, []string, error) {
+func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewParams, skipThinkingDisplay bool) ([]map[string]any, []string, error) {
 	const maxRetries = 9 // 1 attempt + 9 retries = 10 total
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -3237,7 +3241,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				UpdateLastAssistantMsgTime()
 				a.decidePostResponseFold(int(response.Usage.InputTokens), int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens)))
 			}
-			toolCalls, textParts, stopReason := a.parseResponse(response)
+			toolCalls, textParts, stopReason := a.parseResponse(response, false)
 			// Register compactable tool_use IDs for cache_edits tracking.
 			// Only compactable tools (read/exec/edit/grep/glob/web) are tracked.
 			for _, call := range toolCalls {
@@ -3303,13 +3307,18 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			}
 			a.context.ValidateToolPairing()
 			a.context.FixRoleAlternation()
-			// Inject a recovery hint so the model produces properly sequenced tool calls
-			a.context.AddUserMessage("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.")
-			// Rebuild messages from repaired entries so the fix takes effect
+			// Rebuild messages from repaired entries
 			rebuilt := a.context.BuildMessages()
 			rebuilt = NormalizeAPIMessages(rebuilt)
-			a.cachedMC.RegisterCompactableToolIDsFromMessages(rebuilt)
-			// Re-inject cache_edits after rebuild.
+			// Apply tool call pairing fix on the rebuilt messages to drop any
+			// remaining unpaired tool_use blocks that ValidateToolPairing missed.
+			if filtered, droppedCalls, droppedTools := fixToolCallPairing(rebuilt); droppedCalls > 0 || droppedTools > 0 {
+				a.logDebug("[2013-repair] dropped %d unpaired tool_calls, %d stray tools\n", droppedCalls, droppedTools)
+				if filtered != nil {
+					rebuilt = filtered
+				}
+			}
+			// Re-inject cache_edits after rebuild
 			rebuilt = a.injectCacheEdits(rebuilt)
 			params.Messages = rebuilt
 			a.consecutiveContextErrors = 0
@@ -3496,7 +3505,7 @@ func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
 	return toolParams
 }
 
-func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any, []string, string) {
+func (a *AgentLoop) parseResponse(response *anthropic.Message, skipThinkingDisplay bool) ([]map[string]any, []string, string) {
 	var toolCalls []map[string]any
 	var textParts []string
 	var thinking string
@@ -3562,8 +3571,10 @@ func (a *AgentLoop) parseResponse(response *anthropic.Message) ([]map[string]any
 		}
 	}
 
-	// Display thinking if present (matches Rust behavior)
-	if thinking != "" {
+	// Display thinking if present (matches Rust behavior).
+	// Skip when called from streaming fallback since TerminalHandler already
+	// printed thinking during the stream phase.
+	if !skipThinkingDisplay && thinking != "" {
 		lines := strings.Split(thinking, "\n")
 		preview := lines[0]
 		if len(preview) > 120 {

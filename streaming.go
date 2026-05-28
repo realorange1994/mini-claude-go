@@ -429,6 +429,7 @@ func (h *TerminalHandler) Handle(chunk StreamChunk) error {
 			}
 			fmt.Fprintf(os.Stderr, "\n[THINK] %s\n", preview)
 			h.thinkingBuf.Reset()
+			h.thinkingPrinted = true
 		}
 	case ChunkTypeText:
 		// Flush any pending tool call before printing text
