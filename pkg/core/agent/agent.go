@@ -15,19 +15,28 @@ import (
 	"miniclaudecode-go/pkg/core/extensions"
 	"miniclaudecode-go/pkg/core/session"
 	"miniclaudecode-go/pkg/core/shellexec"
+	"miniclaudecode-go/pkg/core/systemprompt"
 	"miniclaudecode-go/pkg/core/tools"
 )
 
 // AgentConfig holds agent configuration.
 type AgentConfig struct {
-	Model        string
-	Cwd          string
-	SessionId    string
-	SessionPath  string
-	MaxTurns     int
-	AutoCompact  bool
-	CompactAfter int // turns before auto-compact
-	StreamOutput bool
+	Model            string
+	Cwd              string
+	SessionId        string
+	SessionPath      string
+	MaxTurns         int
+	AutoCompact      bool
+	CompactAfter     int // turns before auto-compact
+	StreamOutput     bool
+	SystemPrompt     string       // custom system prompt (empty = auto-build)
+	AppendSystem     string       // text appended after system prompt
+	SelectedTools    []string     // tool names to include (empty = default)
+	ExtraGuidelines  []string     // additional guideline bullets
+	Skills           []string     // skill prompt fragments
+	ContextFiles     []systemprompt.ContextFile
+	EnableStreaming  bool         // use streaming LLM path
+	Timeout          time.Duration // global timeout for the entire agent session (0 = no timeout)
 }
 
 // LLMClient is the interface for LLM API calls.
@@ -41,13 +50,14 @@ type LLMClient interface {
 
 // AgentSession is the main agent session (mirrors pi's AgentSession).
 type AgentSession struct {
-	config      AgentConfig
-	session     *session.SessionManager
-	tools       *tools.Registry
-	eventRunner *extensions.ExtensionRunner
-	compactor   *compaction.Compactor
-	executor    *shellexec.Executor
-	llmClient   LLMClient
+	config       AgentConfig
+	session      *session.SessionManager
+	tools        *tools.Registry
+	eventRunner  *extensions.ExtensionRunner
+	compactor    *compaction.Compactor
+	executor     *shellexec.Executor
+	llmClient    LLMClient
+	systemPrompt string
 
 	// Message state
 	messages  []extensions.Message
@@ -88,7 +98,12 @@ func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, erro
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := func() (context.Context, context.CancelFunc) {
+		if r.config.Timeout > 0 {
+			return context.WithTimeout(context.Background(), r.config.Timeout)
+		}
+		return context.WithCancel(context.Background())
+	}()
 
 	comp := compaction.NewCompactor(model, nil)
 	exec := shellexec.New()
@@ -103,6 +118,9 @@ func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, erro
 		ctx:       ctx,
 		cancel:    cancel,
 	}
+
+	// Build system prompt
+	agent.systemPrompt = agent.buildSystemPrompt()
 
 	// Setup event runner
 	eb := eventbus.New()
@@ -225,6 +243,16 @@ func (s *AgentSession) Run(initialMessage string) error {
 	sid := sess.Id
 	s.eventRunner.EmitSessionStart(sid, sess.Path, s.config.Model)
 
+	// Inject system prompt as first message
+	if s.systemPrompt != "" {
+		s.addMessage(extensions.Message{
+			Role: extensions.RoleSystem,
+			Content: []extensions.ContentBlock{
+				extensions.TextContentBlock(s.systemPrompt),
+			},
+		})
+	}
+
 	s.addMessage(extensions.Message{
 		Role: extensions.RoleUser,
 		Content: []extensions.ContentBlock{
@@ -281,7 +309,41 @@ func (s *AgentSession) runTurn() (bool, error) {
 	s.eventRunner.EmitBeforeAgentStart(sid, s.config.Model, turnNum)
 
 	// Call LLM
-	response, err := s.callLLM(apiMsgs)
+	var response string
+	var err error
+	if s.config.EnableStreaming && s.streamCb != nil {
+		err = s.callLLMStreaming(apiMsgs)
+		// For streaming, the response is accumulated via callback.
+		// We still need to get the assistant's final text from messages.
+		if err != nil {
+			return false, err
+		}
+		// After streaming completes, we need the assistant response text.
+		// For now, treat streaming completion as a text response.
+		s.addMessage(extensions.Message{
+			Role: extensions.RoleAssistant,
+			Content: []extensions.ContentBlock{
+				extensions.TextContentBlock("(streaming complete)"),
+			},
+		})
+		s.eventRunner.EmitAgentEnd(sid, s.config.Model, turnNum, "complete", extensions.TokenUsage{}, 0, 0)
+		s.eventRunner.EmitTurnEnd(sid, turnNum, extensions.TokenUsage{}, 0, 0)
+		// Check auto-compact
+		s.mu.Lock()
+		shouldCompact := s.config.AutoCompact && s.turnCount >= s.config.CompactAfter
+		s.mu.Unlock()
+		if shouldCompact {
+			if err := s.Compact(); err != nil {
+				fmt.Printf("[agent] compact error: %v\n", err)
+			}
+			s.mu.Lock()
+			s.turnCount = 0
+			s.mu.Unlock()
+		}
+		return true, nil
+	}
+
+	response, err = s.callLLM(apiMsgs)
 	if err != nil {
 		return false, err
 	}
@@ -725,6 +787,81 @@ func (s *AgentSession) SetTools(reg *tools.Registry) {
 	s.tools = reg
 }
 
+// EnableTools enables tools by name. Unknown names are silently ignored.
+func (s *AgentSession) EnableTools(names []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, n := range names {
+		if !contains(s.config.SelectedTools, n) {
+			s.config.SelectedTools = append(s.config.SelectedTools, n)
+		}
+	}
+	// Rebuild system prompt with updated tools
+	s.systemPrompt = s.buildSystemPromptLocked()
+}
+
+// DisableTools disables tools by name.
+func (s *AgentSession) DisableTools(names []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	filtered := s.config.SelectedTools[:0]
+	disabled := make(map[string]bool)
+	for _, n := range names {
+		disabled[n] = true
+	}
+	for _, t := range s.config.SelectedTools {
+		if !disabled[t] {
+			filtered = append(filtered, t)
+		}
+	}
+	s.config.SelectedTools = filtered
+	s.systemPrompt = s.buildSystemPromptLocked()
+}
+
+// GetActiveTools returns names of currently active tools.
+func (s *AgentSession) GetActiveTools() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, len(s.config.SelectedTools))
+	copy(out, s.config.SelectedTools)
+	return out
+}
+
+// buildSystemPrompt builds the system prompt from config.
+func (s *AgentSession) buildSystemPrompt() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buildSystemPromptLocked()
+}
+
+// buildSystemPromptLocked builds system prompt; caller must hold s.mu.
+func (s *AgentSession) buildSystemPromptLocked() string {
+	// Build tool snippets from registry
+	toolSnippets := make(map[string]string)
+	for _, def := range s.tools.GetDefinitions() {
+		// Use first line of description as snippet
+		desc := def.Description
+		if idx := strings.Index(desc, "\n"); idx >= 0 {
+			desc = desc[:idx]
+		}
+		if len(desc) > 100 {
+			desc = desc[:100]
+		}
+		toolSnippets[def.Name] = desc
+	}
+
+	return systemprompt.BuildSystemPrompt(systemprompt.BuildSystemPromptOptions{
+		CustomPrompt:       s.config.SystemPrompt,
+		SelectedTools:      s.config.SelectedTools,
+		ToolSnippets:       toolSnippets,
+		PromptGuidelines:   s.config.ExtraGuidelines,
+		AppendSystemPrompt: s.config.AppendSystem,
+		Cwd:                s.config.Cwd,
+		ContextFiles:       s.config.ContextFiles,
+		Skills:             s.config.Skills,
+	})
+}
+
 // GetLastMessage returns the last assistant message text.
 func (s *AgentSession) GetLastMessage() string {
 	s.mu.RLock()
@@ -745,6 +882,15 @@ func (s *AgentSession) GetTurnCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.turnCount
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
 
 // generateToolCallId generates a unique ID for tool calls.

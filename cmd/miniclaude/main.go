@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"miniclaudecode-go/pkg/core/agent"
 )
@@ -22,6 +23,7 @@ func main() {
 	autoCompact := flag.Bool("auto-compact", false, "Enable auto-compaction")
 	sessionPath := flag.String("session-path", "", "Session storage path")
 	maxTokens := flag.Int("max-tokens", 8192, "Max tokens to generate per turn")
+	timeout := flag.Duration("timeout", 5*time.Minute, "Global timeout for the entire agent session (0 = no timeout)")
 
 	// Rearrange os.Args so flags come before positional args.
 	// Go's flag package stops parsing at the first non-flag argument,
@@ -38,7 +40,7 @@ func main() {
 				if f == nil {
 					f = flag.Lookup(strings.TrimLeft(os.Args[i], "--"))
 				}
-				if f != nil && f.DefValue == "true" || f.DefValue == "false" {
+				if f != nil && (f.DefValue == "true" || f.DefValue == "false") {
 					// Bool flag, don't consume next arg
 				} else {
 					i++
@@ -130,6 +132,7 @@ func main() {
 		CompactAfter: *compactAfter,
 		AutoCompact:  *autoCompact,
 		SessionPath:  *sessionPath,
+		Timeout:      *timeout,
 	}
 
 	runtime, err := agent.NewAgentSessionRuntime(config)

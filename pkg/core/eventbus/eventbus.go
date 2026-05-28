@@ -1,7 +1,9 @@
 package eventbus
 
 import (
+	"fmt"
 	"sync"
+	"time"
 )
 
 // Handler is a function that processes an event payload.
@@ -88,25 +90,44 @@ func (eb *EventBus) Emit(event string, payload interface{}) []error {
 // AsyncEmit fires an event to all registered handlers concurrently,
 // returning a channel that will receive the collected errors.
 // Non-blocking: returns immediately with a receive channel.
+// Note: the returned channel MUST be read to prevent goroutine leaks.
+// Use AsyncEmitWithTimeout if you cannot guarantee the channel will be read.
 func (eb *EventBus) AsyncEmit(event string, payload interface{}) <-chan []error {
+	return eb.AsyncEmitWithTimeout(event, payload, 30*time.Second)
+}
+
+// AsyncEmitWithTimeout is like AsyncEmit but the returned channel is
+// auto-closed after the timeout to prevent goroutine leaks.
+// If the handlers do not complete in time, nil errors are returned.
+func (eb *EventBus) AsyncEmitWithTimeout(event string, payload interface{}, timeout time.Duration) <-chan []error {
 	ch := make(chan []error, 1)
 	go func() {
-		eb.mu.RLock()
-		entries := make([]handlerEntry, len(eb.handlers[event]))
-		copy(entries, eb.handlers[event])
-		eb.mu.RUnlock()
+		done := make(chan []error, 1)
+		go func() {
+			eb.mu.RLock()
+			entries := make([]handlerEntry, len(eb.handlers[event]))
+			copy(entries, eb.handlers[event])
+			eb.mu.RUnlock()
 
-		if len(entries) == 0 {
-			ch <- nil
-			return
-		}
-		var errs []error
-		for _, entry := range entries {
-			if err := entry.handler(payload); err != nil {
-				errs = append(errs, err)
+			if len(entries) == 0 {
+				done <- nil
+				return
 			}
+			var errs []error
+			for _, entry := range entries {
+				if err := entry.handler(payload); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			done <- errs
+		}()
+
+		select {
+		case errs := <-done:
+			ch <- errs
+		case <-time.After(timeout):
+			ch <- []error{fmt.Errorf("async emit timed out after %v", timeout)}
 		}
-		ch <- errs
 	}()
 	return ch
 }

@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"sync"
+	"strings"
 	"miniclaudecode-go/pkg/core/extensions"
+	"miniclaudecode-go/pkg/core/tools"
 	"testing"
 )
 
@@ -64,5 +67,48 @@ func TestBuildMessages(t *testing.T) {
 	}
 	if result[1]["role"] != "assistant" {
 		t.Errorf("second message role = %v, want assistant", result[1]["role"])
+	}
+}
+
+func TestEnableDisableTools(t *testing.T) {
+	s := &AgentSession{
+		config:       AgentConfig{SelectedTools: []string{"Read", "Bash"}},
+		tools:        tools.DefaultTools(),
+		mu:           sync.RWMutex{},
+	}
+	s.systemPrompt = s.buildSystemPrompt()
+
+	s.EnableTools([]string{"Grep"})
+	active := s.GetActiveTools()
+	if !contains(active, "Grep") {
+		t.Error("Grep should be active after EnableTools")
+	}
+
+	s.DisableTools([]string{"Bash"})
+	active = s.GetActiveTools()
+	if contains(active, "Bash") {
+		t.Error("Bash should not be active after DisableTools")
+	}
+	if !contains(active, "Read") {
+		t.Error("Read should still be active")
+	}
+}
+
+func TestBuildSystemPromptIntegration(t *testing.T) {
+	s := &AgentSession{
+		config: AgentConfig{
+			Cwd:           "/test/dir",
+			SelectedTools: []string{"Read", "Bash"},
+		},
+		tools: tools.DefaultTools(),
+		mu:    sync.RWMutex{},
+	}
+	s.systemPrompt = s.buildSystemPrompt()
+	if s.systemPrompt == "" {
+		t.Error("system prompt should not be empty")
+	}
+	// The prompt should contain the cwd
+	if !strings.Contains(s.systemPrompt, "/test/dir") {
+		t.Error("system prompt should contain cwd")
 	}
 }

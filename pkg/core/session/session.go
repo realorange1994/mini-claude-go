@@ -41,7 +41,7 @@ type SessionManager struct {
 // NewSessionManager creates a session manager
 func NewSessionManager(sessionsDir string) (*SessionManager, error) {
 	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create sessions dir: %w", err)
+		return nil, fmt.Errorf("session: create sessions dir: %w", err)
 	}
 	sm := &SessionManager{
 		sessionsDir: sessionsDir,
@@ -74,7 +74,7 @@ func (sm *SessionManager) NewSession(model, cwd string) (*Session, error) {
 	// Create session directory
 	s.Path = filepath.Join(sm.sessionsDir, sessionId)
 	if err := os.MkdirAll(s.Path, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create session dir: %w", err)
+		return nil, fmt.Errorf("session: create session dir: %w", err)
 	}
 
 	// Create metadata file
@@ -119,7 +119,7 @@ func (sm *SessionManager) Fork(parentId, message string) (*Session, error) {
 
 	s.Path = filepath.Join(sm.sessionsDir, s.RootId, sessionId)
 	if err := os.MkdirAll(s.Path, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create forked session dir: %w", err)
+		return nil, fmt.Errorf("session: create forked session dir: %w", err)
 	}
 
 	// Write fork metadata
@@ -155,7 +155,7 @@ func (sm *SessionManager) AppendMessage(sessionId string, entryType string, data
 
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return fmt.Errorf("failed to marshal message: %w", err)
+		return fmt.Errorf("session: marshal message: %w", err)
 	}
 
 	entry := MessageEntry{
@@ -166,17 +166,17 @@ func (sm *SessionManager) AppendMessage(sessionId string, entryType string, data
 
 	line, err := json.Marshal(entry)
 	if err != nil {
-		return fmt.Errorf("failed to marshal entry: %w", err)
+		return fmt.Errorf("session: marshal entry: %w", err)
 	}
 
 	f, err := os.OpenFile(sm.getMessagesPath(session), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to open messages file: %w", err)
+		return fmt.Errorf("session: open messages file: %w", err)
 	}
 	defer f.Close()
 
 	if _, err := f.Write(append(line, '\n')); err != nil {
-		return fmt.Errorf("failed to write message: %w", err)
+		return fmt.Errorf("session: write message: %w", err)
 	}
 
 	session.messageCount++

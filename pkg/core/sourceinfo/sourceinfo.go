@@ -5,6 +5,50 @@ import (
 	"strings"
 )
 
+// SourceScope indicates the scope of a resource.
+type SourceScope string
+
+const (
+	ScopeUser      SourceScope = "user"
+	ScopeProject   SourceScope = "project"
+	ScopeTemporary SourceScope = "temporary"
+)
+
+// SourceOrigin indicates where a resource was installed from.
+type SourceOrigin string
+
+const (
+	OriginPackage  SourceOrigin = "package"
+	OriginTopLevel SourceOrigin = "top-level"
+)
+
+// ResourceSourceInfo tracks where a resource (skill, prompt, extension) came from.
+// Aligned to pi's source-info.ts.
+type ResourceSourceInfo struct {
+	Path    string       `json:"path"`
+	Source  string       `json:"source"`
+	Scope   SourceScope  `json:"scope"`
+	Origin  SourceOrigin `json:"origin"`
+	BaseDir string       `json:"baseDir,omitempty"`
+}
+
+// CreateSyntheticSourceInfo creates a ResourceSourceInfo from explicit options.
+func CreateSyntheticSourceInfo(path string, source string, scope SourceScope, origin SourceOrigin, baseDir string) ResourceSourceInfo {
+	if scope == "" {
+		scope = ScopeTemporary
+	}
+	if origin == "" {
+		origin = OriginTopLevel
+	}
+	return ResourceSourceInfo{
+		Path:    path,
+		Source:  source,
+		Scope:   scope,
+		Origin:  origin,
+		BaseDir: baseDir,
+	}
+}
+
 // SourceInfo holds source file location information for edit/write operations.
 // Mirrors pi's source tracking for knowing where code came from.
 type SourceInfo struct {

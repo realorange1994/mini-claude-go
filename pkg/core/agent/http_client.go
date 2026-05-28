@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"miniclaudecode-go/pkg/core/extensions"
 )
@@ -22,6 +23,8 @@ type HTTPClientConfig struct {
 	DefaultModel string
 	// MaxTokens is the maximum tokens to generate
 	MaxTokens int
+	// HTTPTimeout is the timeout for individual HTTP requests (default: 5 minutes)
+	HTTPTimeout time.Duration
 }
 
 // HTTPClient is a simple HTTP LLM client that calls Anthropic-compatible APIs.
@@ -35,10 +38,15 @@ func NewHTTPClient(config HTTPClientConfig) *HTTPClient {
 	if config.MaxTokens == 0 {
 		config.MaxTokens = 8192
 	}
+	// Default HTTP timeout: 5 minutes per request (LLM responses can be slow)
+	httpTimeout := config.HTTPTimeout
+	if httpTimeout == 0 {
+		httpTimeout = 5 * time.Minute
+	}
 	return &HTTPClient{
 		config: config,
 		http: &http.Client{
-			Timeout: 0, // no timeout for long responses
+			Timeout: httpTimeout,
 		},
 	}
 }

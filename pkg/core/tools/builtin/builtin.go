@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Tool names
@@ -62,13 +64,14 @@ func Read(path string, lineRange *[2]int) (*ReadResult, error) {
 	return &ReadResult{content: content, path: path}, nil
 }
 
-// Write writes content to a file
+// Write writes content to a file.
+// Uses 0666 so that umask determines final permissions (typically 0644).
 func Write(path string, content string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
-	return os.WriteFile(path, []byte(content), 0644)
+	return os.WriteFile(path, []byte(content), 0666)
 }
 
 // EditSpec specifies an edit operation on a file
@@ -118,7 +121,7 @@ func editReplace(e EditSpec) (string, error) {
 		content = strings.Join(newLines, "\n")
 	}
 
-	if err := os.WriteFile(e.Path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(e.Path, []byte(content), 0666); err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -143,7 +146,7 @@ func editInsert(e EditSpec) (string, error) {
 	newLines := append(lines[:e.InsertLine], append(strings.Split(e.NewString, "\n"), lines[e.InsertLine:]...)...)
 	content = strings.Join(newLines, "\n")
 
-	if err := os.WriteFile(e.Path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(e.Path, []byte(content), 0666); err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -159,21 +162,81 @@ func editDelete(e EditSpec) (string, error) {
 	})
 }
 
-// Bash executes a shell command
+// getShell returns the appropriate shell binary and argument flag for the current OS.
+// Prefers Git Bash on Windows since it properly supports background operators (&).
+func getShell() (shell string, arg string) {
+	switch runtime.GOOS {
+	case "windows":
+		gitBashPaths := []string{
+			"bash",                                             // in PATH (Git installed)
+			`C:\Program Files\Git\bin\bash.exe`,               // standard 64-bit install
+			`C:\Program Files (x86)\Git\bin\bash.exe`,         // 32-bit install
+			`C:\Program Files\Git\usr\bin\bash.exe`,           // alternate path
+		}
+		for _, p := range gitBashPaths {
+			if _, err := exec.LookPath(p); err == nil {
+				return p, "-c"
+			}
+		}
+		// Fallback to cmd.exe if no bash found
+		return "cmd.exe", "/c"
+	default:
+		return "/bin/bash", "-c"
+	}
+}
+
+// isBackgroundCommand checks if a shell command ends with a background operator (&).
+func isBackgroundCommand(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	if len(trimmed) < 2 {
+		return false
+	}
+	if trimmed[len(trimmed)-1] != '&' {
+		return false
+	}
+	// Make sure it's not && (logical AND)
+	if len(trimmed) >= 2 && trimmed[len(trimmed)-2] == '&' {
+		return false
+	}
+	return true
+}
+
+// Bash executes a shell command.
+// NOTE: shell -c invocation is intentional — this is a coding agent where
+// the LLM generates shell commands that require shell interpretation (pipes,
+// redirections, env vars, etc.). The permission system gates which commands
+// are allowed to run; the Bash tool itself is not a boundary.
 func Bash(cmd string, cwd string, timeout int) (string, error) {
-	shell := "bash"
-	args := []string{"-c", cmd}
-	if runtime.GOOS == "windows" {
-		shell = "cmd.exe"
-		args = []string{"/c", cmd}
+	if cmd == "" {
+		return "", fmt.Errorf("Bash: empty command")
 	}
 
-	execCmd := exec.Command(shell, args...)
+	// Apply timeout via context. Default to 60s if not specified.
+	if timeout <= 0 {
+		timeout = 60
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	shell, shellArg := getShell()
+	execCmd := cmd
+
+	// For background commands (ending with &), wrap in subshell so the parent
+	// shell exits immediately without waiting for the backgrounded child process.
+	// This prevents cmd.Wait() from blocking indefinitely on background processes.
+	if isBackgroundCommand(cmd) {
+		execCmd = "( " + strings.TrimSpace(cmd) + " )"
+	}
+
+	command := exec.CommandContext(ctx, shell, shellArg, execCmd)
 	if cwd != "" {
-		execCmd.Dir = cwd
+		command.Dir = cwd
 	}
 
-	out, err := execCmd.CombinedOutput()
+	out, err := command.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("command timed out after %ds: %w", timeout, ctx.Err())
+	}
 	if err != nil {
 		return string(out), err
 	}
@@ -202,9 +265,15 @@ func (m GrepMatch) LineNum() int { return m.lineNum }
 // Content returns the matching line content
 func (m GrepMatch) Content() string { return m.content }
 
-// Grep searches for a pattern in files
+// Grep searches for a pattern in files.
 func Grep(pattern string, paths []string, opts GrepOptions) ([]GrepMatch, error) {
 	var matches []GrepMatch
+
+	// Limit pattern length to prevent ReDoS (10KB max)
+	if len(pattern) > 10240 {
+		return nil, fmt.Errorf("pattern exceeds maximum length of 10240 bytes")
+	}
+
 	regex, err := regexp.Compile(pattern)
 	if err != nil {
 		// Try as literal
@@ -218,6 +287,7 @@ func Grep(pattern string, paths []string, opts GrepOptions) ([]GrepMatch, error)
 		}
 
 		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 1MB initial, 10MB max
 		lineNum := 0
 		for scanner.Scan() {
 			lineNum++
@@ -232,6 +302,10 @@ func Grep(pattern string, paths []string, opts GrepOptions) ([]GrepMatch, error)
 					return matches, nil
 				}
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			file.Close()
+			return nil, fmt.Errorf("scanning %s: %w", path, err)
 		}
 		file.Close()
 	}
@@ -287,8 +361,10 @@ type FileInfo struct {
 	Mode  string
 }
 
-// Ls lists files in a directory
+// Ls lists files in a directory.
+// Cleans the path to prevent traversal attacks.
 func Ls(dir string) ([]FileInfo, error) {
+	dir = filepath.Clean(dir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err

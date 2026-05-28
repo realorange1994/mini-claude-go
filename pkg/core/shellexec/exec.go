@@ -134,9 +134,35 @@ func buildCmd(ctx context.Context, cmd string, options *Options) *exec.Cmd {
 	return cmdObj
 }
 
+// isBackgroundCommand checks if a shell command ends with a background operator (&).
+// It distinguishes & (background) from && (logical AND) and other operators like |, >, etc.
+func isBackgroundCommand(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	if len(trimmed) < 2 {
+		return false
+	}
+	if trimmed[len(trimmed)-1] != '&' {
+		return false
+	}
+	// Make sure it's not && (logical AND)
+	if len(trimmed) >= 2 && trimmed[len(trimmed)-2] == '&' {
+		return false
+	}
+	return true
+}
+
+// wrapBackgroundCommand wraps a background command in a subshell so the parent
+// shell exits immediately instead of waiting for the backgrounded child.
+// E.g., "go run server.go &" becomes "( go run server.go & )"
+func wrapBackgroundCommand(cmd string) string {
+	return "( " + strings.TrimSpace(cmd) + " )"
+}
+
 // Execute runs a shell command and returns the result.
 // It captures stdout and stderr into buffers, spilling to a temp file if output
 // exceeds MaxOutputBeforeSpill.
+// For background commands (ending with &), the shell is wrapped in a subshell
+// so it exits immediately without waiting for backgrounded children.
 func (e *Executor) Execute(cmd string, opts ...Option) (*Result, error) {
 	var options Options
 	for _, opt := range opts {
@@ -150,7 +176,13 @@ func (e *Executor) Execute(cmd string, opts ...Option) (*Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), options.timeout)
 	defer cancel()
 
-	cmdObj := buildCmd(ctx, cmd, &options)
+	// For background commands, wrap in subshell so parent shell exits immediately.
+	execCmd := cmd
+	if isBackgroundCommand(cmd) {
+		execCmd = wrapBackgroundCommand(cmd)
+	}
+
+	cmdObj := buildCmd(ctx, execCmd, &options)
 
 	// Use spillover writers for large output
 	outW := newSpillWriter(MaxOutputBeforeSpill)

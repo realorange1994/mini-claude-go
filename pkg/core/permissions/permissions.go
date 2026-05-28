@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -64,10 +65,17 @@ func NewManager(defaultMode string) *Manager {
 	}
 }
 
-// Check checks if an action is permitted
+// Check checks if an action is permitted.
+// For invalid requests (missing type/target), returns Denied with nil error
+// rather than an error — callers should treat Denied as a definitive decision.
 func (m *Manager) Check(req Request) (PermissionDecision, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// Validate request — return Denied for invalid input rather than error
+	if req.Type == "" || req.Target == "" {
+		return DecisionDeny, nil
+	}
 
 	// Check rules first (most specific first)
 	for _, rule := range m.rules {
@@ -143,14 +151,22 @@ func matchPattern(pattern, target string) bool {
 	if pattern == target {
 		return true
 	}
-	// Simple glob matching
-	if strings.HasPrefix(pattern, "*.") {
-		ext := pattern[1:] // e.g., ".go"
-		return strings.HasSuffix(target, ext)
+	// Use filepath.Match for proper glob matching (handles *, ?, [...])
+	matched, err := filepath.Match(pattern, target)
+	if err != nil {
+		// Invalid pattern — fall back to exact match
+		return false
 	}
-	if strings.HasSuffix(pattern, "/*") {
-		prefix := pattern[:len(pattern)-1]
-		return strings.HasPrefix(target, prefix)
+	if matched {
+		return true
 	}
-	return false
+	// Also try matching with directory prefix for patterns like "*.go"
+	// filepath.Match on Windows requires the pattern to include the path separator
+	if strings.Contains(pattern, string(filepath.Separator)) {
+		return false
+	}
+	// Try matching against just the filename
+	base := filepath.Base(target)
+	matched, _ = filepath.Match(pattern, base)
+	return matched
 }
