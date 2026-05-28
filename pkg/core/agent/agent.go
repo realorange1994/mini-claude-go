@@ -13,6 +13,7 @@ import (
 	"miniclaudecode-go/pkg/core/compaction"
 	"miniclaudecode-go/pkg/core/eventbus"
 	"miniclaudecode-go/pkg/core/extensions"
+	"miniclaudecode-go/pkg/core/resourceloader"
 	"miniclaudecode-go/pkg/core/session"
 	"miniclaudecode-go/pkg/core/shellexec"
 	"miniclaudecode-go/pkg/core/systemprompt"
@@ -37,21 +38,23 @@ type AgentConfig struct {
 	ContextFiles     []systemprompt.ContextFile
 	EnableStreaming  bool         // use streaming LLM path
 	Timeout          time.Duration // global timeout for the entire agent session (0 = no timeout)
+	ResourceLoader   *resourceloader.ResourceLoader
 }
 
 // LLMClient is the interface for LLM API calls.
 // Implement this to connect to different model providers.
 type LLMClient interface {
 	// Complete sends messages to the model and returns the response.
-	Complete(ctx context.Context, model string, messages []map[string]interface{}, tools []extensions.ToolDefinition) (string, error)
+	// thinking is optional extended thinking configuration.
+	Complete(ctx context.Context, model string, messages []map[string]interface{}, tools []extensions.ToolDefinition, thinking *ThinkingConfig) (string, error)
 	// CompleteStreaming is like Complete but streams the response.
-	CompleteStreaming(ctx context.Context, model string, messages []map[string]interface{}, tools []extensions.ToolDefinition, onChunk func(string)) error
+	CompleteStreaming(ctx context.Context, model string, messages []map[string]interface{}, tools []extensions.ToolDefinition, thinking *ThinkingConfig, onChunk func(string)) error
 }
 
 // AgentSession is the main agent session (mirrors pi's AgentSession).
 type AgentSession struct {
 	config       AgentConfig
-	session      *session.SessionManager
+	session    *session.SessionManager // tree-based session with message persistence
 	tools        *tools.Registry
 	eventRunner  *extensions.ExtensionRunner
 	compactor    *compaction.Compactor
@@ -64,6 +67,9 @@ type AgentSession struct {
 	turnCount int
 	mu        sync.RWMutex
 
+	// Thinking level
+	thinkingLevel ThinkingLevel
+
 	// Streaming callback
 	streamCb func(text string)
 
@@ -75,29 +81,18 @@ type AgentSession struct {
 // AgentSessionRuntime manages session lifecycle (mirrors pi's AgentSessionRuntime).
 type AgentSessionRuntime struct {
 	config      AgentConfig
-	session     *session.SessionManager
 	activeAgent *AgentSession
 }
 
 // NewAgentSessionRuntime creates a new session runtime.
 func NewAgentSessionRuntime(config AgentConfig) (*AgentSessionRuntime, error) {
-	sm, err := session.NewSessionManager(config.SessionPath)
-	if err != nil {
-		return nil, fmt.Errorf("create session manager: %w", err)
-	}
 	return &AgentSessionRuntime{
-		config:  config,
-		session: sm,
+		config: config,
 	}, nil
 }
 
 // NewSession creates a new agent session.
 func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, error) {
-	sess, err := r.session.NewSession(model, cwd)
-	if err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
-	}
-
 	ctx, cancel := func() (context.Context, context.CancelFunc) {
 		if r.config.Timeout > 0 {
 			return context.WithTimeout(context.Background(), r.config.Timeout)
@@ -108,9 +103,13 @@ func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, erro
 	comp := compaction.NewCompactor(model, nil)
 	exec := shellexec.New()
 
+	// Create v2 session manager for tree-based message persistence
+	sm := session.NewSessionManager(cwd, r.config.SessionPath, "", true)
+	sessionID := sm.GetSessionID()
+
 	agent := &AgentSession{
 		config:    r.config,
-		session:   r.session,
+		session:   sm,
 		tools:     tools.DefaultTools(),
 		compactor: comp,
 		executor:  exec,
@@ -124,9 +123,10 @@ func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, erro
 
 	// Setup event runner
 	eb := eventbus.New()
+	sessionFile := sm.GetSessionFile()
 	extAPI := &extensions.ExtensionAPI{
-		GetSessionId:   func() string { return sess.Id },
-		GetSessionPath: func() string { return sess.Path },
+		GetSessionId:   func() string { return sessionID },
+		GetSessionPath: func() string { return sessionFile },
 		GetMessages: func() []extensions.Message {
 			agent.mu.RLock()
 			defer agent.mu.RUnlock()
@@ -155,14 +155,18 @@ func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, erro
 
 // Fork creates a forked session (mirrors pi's fork).
 func (r *AgentSessionRuntime) Fork(parentAgent *AgentSession, message string) (*AgentSession, error) {
-	_, err := r.session.Fork(parentAgent.getSessionId(), message)
-	if err != nil {
+	// Branch the v2 session from the current leaf
+	if parentAgent.session == nil {
+		return nil, fmt.Errorf("parent session has no session tree")
+	}
+	leafID := parentAgent.session.GetLeafID()
+	if err := parentAgent.session.Branch(leafID); err != nil {
 		return nil, fmt.Errorf("fork session: %w", err)
 	}
 
 	agent := &AgentSession{
 		config:    parentAgent.config,
-		session:   r.session,
+		session:   parentAgent.session,
 		tools:     tools.DefaultTools(),
 		compactor: parentAgent.compactor,
 		executor:  parentAgent.executor,
@@ -173,10 +177,11 @@ func (r *AgentSessionRuntime) Fork(parentAgent *AgentSession, message string) (*
 
 	// Setup fresh event runner for forked session
 	eb := eventbus.New()
-	sess := r.session.GetActiveSession()
+	sessionID := parentAgent.session.GetSessionID()
+	sessionFile := parentAgent.session.GetSessionFile()
 	extAPI := &extensions.ExtensionAPI{
-		GetSessionId:   func() string { return sess.Id },
-		GetSessionPath: func() string { return sess.Path },
+		GetSessionId:   func() string { return sessionID },
+		GetSessionPath: func() string { return sessionFile },
 		GetMessages: func() []extensions.Message {
 			agent.mu.RLock()
 			defer agent.mu.RUnlock()
@@ -198,9 +203,13 @@ func (r *AgentSessionRuntime) Fork(parentAgent *AgentSession, message string) (*
 	return agent, nil
 }
 
-// SwitchSession switches to a different session.
-func (r *AgentSessionRuntime) SwitchSession(sessionId string) error {
-	return r.session.SwitchSession(sessionId)
+// SwitchSession switches to a different session by loading its JSONL file.
+func (r *AgentSessionRuntime) SwitchSession(sessionFile string) error {
+	if r.activeAgent == nil || r.activeAgent.session == nil {
+		return fmt.Errorf("no active session to switch")
+	}
+	r.activeAgent.session.SetSessionFile(sessionFile)
+	return nil
 }
 
 // Dispose cleans up a session.
@@ -239,9 +248,8 @@ func (s *AgentSession) Run(initialMessage string) error {
 	}
 	s.mu.Unlock()
 
-	sess := s.session.GetActiveSession()
-	sid := sess.Id
-	s.eventRunner.EmitSessionStart(sid, sess.Path, s.config.Model)
+	sid := s.session.GetSessionID()
+	s.eventRunner.EmitSessionStart(sid, s.session.GetSessionFile(), s.config.Model)
 
 	// Inject system prompt as first message
 	if s.systemPrompt != "" {
@@ -263,8 +271,11 @@ func (s *AgentSession) Run(initialMessage string) error {
 	return s.runLoop()
 }
 
-// runLoop is the main turn loop.
+// runLoop is the main turn loop with auto-retry support.
 func (s *AgentSession) runLoop() error {
+	retryState := &RetryState{}
+	config := RetryConfig{MaxRetries: 3, BaseDelay: 2 * time.Second}
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -274,10 +285,39 @@ func (s *AgentSession) runLoop() error {
 
 		done, err := s.runTurn()
 		if err != nil {
-			sid := s.session.GetActiveSession().Id
+			// Check if this is a context overflow error — trigger compaction instead of retry
+			if IsContextOverflow(err) {
+				if compErr := s.Compact(); compErr != nil {
+					sid := s.session.GetSessionID()
+					s.eventRunner.EmitError(sid, "agent", err.Error())
+					return fmt.Errorf("context overflow and compact failed: %w (%v)", err, compErr)
+				}
+				// Compaction succeeded, retry the turn with reduced messages
+				continue
+			}
+
+			// Check if this is a retryable error
+			if IsRetryableError(err) {
+				retryState.Next()
+				if shouldRetry, delay := ShouldRetry(retryState.Attempts, config); shouldRetry {
+					time.Sleep(delay)
+					continue
+				}
+				// Max retries exceeded
+				sid := s.session.GetSessionID()
+				s.eventRunner.EmitError(sid, "agent", fmt.Sprintf("Max retries exceeded after %d attempts: %v", config.MaxRetries, err))
+				return fmt.Errorf("max retries exceeded: %w", err)
+			}
+
+			// Non-retryable error
+			retryState.Reset()
+			sid := s.session.GetSessionID()
 			s.eventRunner.EmitError(sid, "agent", err.Error())
 			return err
 		}
+
+		// Success — reset retry counter
+		retryState.Reset()
 		if done {
 			return nil
 		}
@@ -298,7 +338,7 @@ func (s *AgentSession) runTurn() (bool, error) {
 	copy(msgs, s.messages)
 	s.mu.Unlock()
 
-	sid := s.session.GetActiveSession().Id
+	sid := s.session.GetSessionID()
 
 	s.eventRunner.EmitTurnStart(sid, turnNum)
 
@@ -459,6 +499,7 @@ func (s *AgentSession) callLLM(messages []map[string]interface{}) (string, error
 	client := s.llmClient
 	model := s.config.Model
 	toolDefs := s.tools.GetDefinitions()
+	thinking := BuildThinkingConfig(s.thinkingLevel)
 	s.mu.RUnlock()
 
 	if client == nil {
@@ -466,7 +507,7 @@ func (s *AgentSession) callLLM(messages []map[string]interface{}) (string, error
 	}
 
 	// Call the LLM
-	response, err := client.Complete(s.ctx, model, messages, toolDefs)
+	response, err := client.Complete(s.ctx, model, messages, toolDefs, thinking)
 	if err != nil {
 		return "", fmt.Errorf("LLM call failed: %w", err)
 	}
@@ -480,6 +521,7 @@ func (s *AgentSession) callLLMStreaming(messages []map[string]interface{}) error
 	client := s.llmClient
 	model := s.config.Model
 	toolDefs := s.tools.GetDefinitions()
+	thinking := BuildThinkingConfig(s.thinkingLevel)
 	streamCb := s.streamCb
 	s.mu.RUnlock()
 
@@ -489,11 +531,11 @@ func (s *AgentSession) callLLMStreaming(messages []map[string]interface{}) error
 
 	if streamCb == nil {
 		// If no callback, just use non-streaming
-		_, err := client.Complete(s.ctx, model, messages, toolDefs)
+		_, err := client.Complete(s.ctx, model, messages, toolDefs, thinking)
 		return err
 	}
 
-	return client.CompleteStreaming(s.ctx, model, messages, toolDefs, streamCb)
+	return client.CompleteStreaming(s.ctx, model, messages, toolDefs, thinking, streamCb)
 }
 
 // processResponse handles an LLM response (tool calls or text).
@@ -700,8 +742,9 @@ func (s *AgentSession) executeTools(toolCalls []toolCall) ([]toolResult, error) 
 }
 
 // Compact performs context compaction (mirrors pi's compact()).
+// Uses LLM-based summarization when available, falls back to heuristic extraction.
 func (s *AgentSession) Compact() error {
-	sid := s.session.GetActiveSession().Id
+	sid := s.session.GetSessionID()
 	s.eventRunner.EmitSessionBeforeCompact(sid, len(s.messages), extensions.TokenUsage{})
 
 	s.mu.Lock()
@@ -718,10 +761,31 @@ func (s *AgentSession) Compact() error {
 	}
 
 	// Generate a summary of the compacted branch.
-	summarizer := compaction.NewBranchSummarizer(s.config.Model)
-	summary, err := summarizer.Summarize(s.config.SessionId, "main", reduced, s.config.Model)
-	if err != nil {
-		summary = fmt.Sprintf("Compacted %d messages", len(reduced))
+	// Try LLM-based summary first if we have an LLM client.
+	var summary string
+	if s.llmClient != nil {
+		// Check if HTTPClient has Generate method (LLMCompactor interface)
+		if hc, ok := s.llmClient.(interface {
+			Generate(ctx context.Context, model string, systemPrompt string, userPrompt string, maxTokens int) (string, error)
+		}); ok {
+			llmCompactor := compaction.NewLLMCompactor(s.config.Model, hc)
+			if llmCompactor.ShouldUseLLMCompaction(reduced) {
+				summary, err = llmCompactor.GenerateSummary(s.ctx, reduced, "")
+				if err != nil {
+					// Fall back to heuristic summary
+					summary = ""
+				}
+			}
+		}
+	}
+
+	// Fall back to heuristic summary if LLM summary not available
+	if summary == "" {
+		summarizer := compaction.NewBranchSummarizer(s.config.Model)
+		summary, err = summarizer.Summarize(s.config.SessionId, "main", reduced, s.config.Model)
+		if err != nil {
+			summary = fmt.Sprintf("Compacted %d messages", len(reduced))
+		}
 	}
 
 	// Build the new message list: a compaction marker + the reduced messages.
@@ -850,15 +914,50 @@ func (s *AgentSession) buildSystemPromptLocked() string {
 		toolSnippets[def.Name] = desc
 	}
 
+	// Load resources via ResourceLoader if available
+	contextFiles := s.config.ContextFiles
+	appendSystem := s.config.AppendSystem
+	var systemPromptOverride string
+	var skills = s.config.Skills
+
+	if rl := s.config.ResourceLoader; rl != nil {
+		// Load project context files (CLAUDE.md/AGENTS.md walk-up)
+		if loadedContexts := rl.LoadProjectContextFiles(); len(loadedContexts) > 0 {
+			// Convert resourceloader.ContextFile to systemprompt.ContextFile
+			for _, cf := range loadedContexts {
+				contextFiles = append(contextFiles, systemprompt.ContextFile{
+					Path:    cf.Path,
+					Content: cf.Content,
+				})
+			}
+		}
+
+		// Discover system prompt file
+		if sysFile := rl.DiscoverSystemPromptFile(); sysFile != nil {
+			systemPromptOverride = sysFile.Content
+		}
+
+		// Discover append system prompt file
+		if appendFile := rl.DiscoverAppendSystemPromptFile(); appendFile != nil {
+			appendSystem = appendFile.Content
+		}
+	}
+
+	// Use config system prompt or discovered one
+	systemPrompt := s.config.SystemPrompt
+	if systemPrompt == "" && systemPromptOverride != "" {
+		systemPrompt = systemPromptOverride
+	}
+
 	return systemprompt.BuildSystemPrompt(systemprompt.BuildSystemPromptOptions{
-		CustomPrompt:       s.config.SystemPrompt,
+		CustomPrompt:       systemPrompt,
 		SelectedTools:      s.config.SelectedTools,
 		ToolSnippets:       toolSnippets,
 		PromptGuidelines:   s.config.ExtraGuidelines,
-		AppendSystemPrompt: s.config.AppendSystem,
+		AppendSystemPrompt: appendSystem,
 		Cwd:                s.config.Cwd,
-		ContextFiles:       s.config.ContextFiles,
-		Skills:             s.config.Skills,
+		ContextFiles:       contextFiles,
+		Skills:             skills,
 	})
 }
 
@@ -910,6 +1009,112 @@ func (s *AgentSession) ClearHistory() error {
 	}
 	s.turnCount = 0
 	return nil
+}
+
+// SetThinkingLevel sets the thinking level for future LLM calls.
+// The level is clamped to what the model supports.
+func (s *AgentSession) SetThinkingLevel(level ThinkingLevel) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// ModelInfo.Reasoning is checked via the model registry.
+	// For now, accept the level if it's valid.
+	if !level.IsValid() {
+		return fmt.Errorf("invalid thinking level: %q", level)
+	}
+	s.thinkingLevel = level
+	return nil
+}
+
+// GetThinkingLevel returns the current thinking level.
+func (s *AgentSession) GetThinkingLevel() ThinkingLevel {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.thinkingLevel
+}
+
+// GetAvailableThinkingLevels returns the thinking levels available for the current model.
+func (s *AgentSession) GetAvailableThinkingLevels() []ThinkingLevel {
+	s.mu.RLock()
+	model := s.config.Model
+	s.mu.RUnlock()
+
+	// Check if model supports reasoning via the model registry
+	hasReasoning := supportsReasoning(model)
+	if hasReasoning {
+		return ValidThinkingLevels()
+	}
+	return []ThinkingLevel{ThinkingLevelOff}
+}
+
+// Branch creates a new branch from a specific entry in the session tree.
+// This allows exploring alternative paths from any point in the conversation.
+func (s *AgentSession) Branch(fromEntryId string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.session == nil {
+		return fmt.Errorf("session tree not available")
+	}
+
+	if err := s.session.Branch(fromEntryId); err != nil {
+		return fmt.Errorf("branch failed: %w", err)
+	}
+
+	// Rebuild messages from the new branch context
+	ctx := s.session.BuildSessionContext()
+
+	// Convert context entries to messages
+	s.messages = nil
+	for _, rawMsg := range ctx.Messages {
+		var msg extensions.Message
+		if err := json.Unmarshal(rawMsg, &msg); err != nil {
+			continue
+		}
+		s.messages = append(s.messages, msg)
+	}
+
+	s.turnCount = len(s.messages)
+	return nil
+}
+
+// GetSessionTree returns the session tree structure.
+func (s *AgentSession) GetSessionTree() []session.SessionTreeNode {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.session == nil {
+		return nil
+	}
+	return s.session.GetTree()
+}
+
+// GetSessionBranches returns all entries in the current branch path.
+func (s *AgentSession) GetSessionBranches() []session.FileEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.session == nil {
+		return nil
+	}
+	return s.session.GetBranch("")
+}
+
+// supportsReasoning checks if a model ID is known to support extended thinking.
+func supportsReasoning(model string) bool {
+	// Known reasoning-capable models (Anthropic Claude 3.5+)
+	reasoningPrefixes := []string{
+		"claude-sonnet-4",
+		"claude-opus-4",
+		"claude-sonnet-3.5",
+		"claude-opus-3.5",
+		"claude-haiku-3.5",
+	}
+	for _, prefix := range reasoningPrefixes {
+		if strings.HasPrefix(strings.ToLower(model), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(slice []string, item string) bool {

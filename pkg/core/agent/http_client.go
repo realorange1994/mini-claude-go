@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,224 +14,387 @@ import (
 	"miniclaudecode-go/pkg/core/extensions"
 )
 
-// HTTPClientConfig holds configuration for the HTTP LLM client.
+// HTTPClientConfig holds configuration for the HTTP-based LLM client.
 type HTTPClientConfig struct {
-	// BaseURL is the API endpoint (e.g., "https://api.anthropic.com/v1/messages")
-	BaseURL string
-	// APIKey is the authentication key
-	APIKey string
-	// DefaultModel is the model to use
+	BaseURL      string
+	APIKey       string
 	DefaultModel string
-	// MaxTokens is the maximum tokens to generate
-	MaxTokens int
-	// HTTPTimeout is the timeout for individual HTTP requests (default: 5 minutes)
-	HTTPTimeout time.Duration
+	MaxTokens    int
+	Timeout      time.Duration
 }
 
-// HTTPClient is a simple HTTP LLM client that calls Anthropic-compatible APIs.
+// HTTPClient implements LLMClient using Anthropic-compatible HTTP API.
 type HTTPClient struct {
 	config HTTPClientConfig
-	http   *http.Client
+	client *http.Client
 }
 
-// NewHTTPClient creates a new HTTP LLM client.
+// NewHTTPClient creates a new HTTP-based LLM client.
 func NewHTTPClient(config HTTPClientConfig) *HTTPClient {
-	if config.MaxTokens == 0 {
-		config.MaxTokens = 8192
-	}
-	// Default HTTP timeout: 5 minutes per request (LLM responses can be slow)
-	httpTimeout := config.HTTPTimeout
-	if httpTimeout == 0 {
-		httpTimeout = 5 * time.Minute
+	timeout := config.Timeout
+	if timeout == 0 {
+		timeout = 5 * time.Minute
 	}
 	return &HTTPClient{
 		config: config,
-		http: &http.Client{
-			Timeout: httpTimeout,
-		},
+		client: &http.Client{Timeout: timeout},
 	}
 }
 
+// apiRequest represents the JSON body sent to the Anthropic Messages API.
+type apiRequest struct {
+	Model     string                 `json:"model"`
+	MaxTokens int                    `json:"max_tokens"`
+	Messages  []map[string]interface{} `json:"messages"`
+	System    interface{}            `json:"system,omitempty"`
+	Tools     []toolDefJSON          `json:"tools,omitempty"`
+	Thinking  *ThinkingConfig        `json:"thinking,omitempty"`
+	Stream    bool                   `json:"stream,omitempty"`
+}
+
+type toolDefJSON struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	InputSchema interface{} `json:"input_schema,omitempty"`
+}
+
+// apiResponse represents the JSON response from the Anthropic Messages API.
+type apiResponse struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
+		// For tool_use content blocks
+		Name  string          `json:"name,omitempty"`
+		ID    string          `json:"id,omitempty"`
+		Input json.RawMessage `json:"input,omitempty"`
+	} `json:"content"`
+	Model      string `json:"model"`
+	StopReason string `json:"stop_reason,omitempty"`
+	Usage      struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+// apiErrorResponse represents an error response from the API.
+type apiErrorResponse struct {
+	Type  string `json:"type"`
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// APIError represents an error from the LLM API.
+type APIError struct {
+	StatusCode int
+	Type       string
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error (status %d): %s: %s", e.StatusCode, e.Type, e.Message)
+}
+
+// IsRetryable returns true if the API error can be retried.
+func (e *APIError) IsRetryable() bool {
+	switch e.StatusCode {
+	case 429, 500, 502, 503, 504:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsOverloaded returns true if the API is overloaded.
+func (e *APIError) IsOverloaded() bool {
+	return e.StatusCode == 529 || (e.StatusCode == 429 && strings.Contains(strings.ToLower(e.Message), "overloaded"))
+}
+
+// IsContextOverflow returns true if the error is due to context window overflow.
+func (e *APIError) IsContextOverflow() bool {
+	return strings.Contains(strings.ToLower(e.Message), "prompt is too long") ||
+		strings.Contains(strings.ToLower(e.Message), "context window") ||
+		strings.Contains(strings.ToLower(e.Message), "token limit") ||
+		strings.Contains(strings.ToLower(e.Message), "max_tokens")
+}
+
 // Complete sends messages to the model and returns the response.
-func (c *HTTPClient) Complete(ctx context.Context, model string, messages []map[string]interface{}, toolDefs []extensions.ToolDefinition) (string, error) {
+func (c *HTTPClient) Complete(ctx context.Context, model string, messages []map[string]interface{}, tools []extensions.ToolDefinition, thinking *ThinkingConfig) (string, error) {
 	if model == "" {
 		model = c.config.DefaultModel
 	}
 
-	// Build request body
-	body := map[string]interface{}{
-		"model":     model,
-		"max_tokens": c.config.MaxTokens,
-		"messages":  messages,
+	maxTokens := c.config.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 8192
 	}
 
-	// Add tools if available
-	if len(toolDefs) > 0 {
-		apiTools := make([]map[string]interface{}, len(toolDefs))
-		for i, def := range toolDefs {
-			apiTools[i] = map[string]interface{}{
-				"name":         def.Name,
-				"description":  def.Description,
-				"input_schema": def.InputSchema,
+	// Separate system messages from conversation messages
+	var systemContent interface{}
+	var convMessages []map[string]interface{}
+	for _, msg := range messages {
+		if role, _ := msg["role"].(string); role == "system" {
+			// Anthropic API expects system as a top-level field
+			if content, ok := msg["content"].(string); ok {
+				systemContent = content
 			}
+		} else {
+			convMessages = append(convMessages, msg)
 		}
-		body["tools"] = apiTools
 	}
 
-	reqBody, err := json.Marshal(body)
+	reqBody := apiRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		Messages:  convMessages,
+		System:    systemContent,
+		Thinking:  thinking,
+	}
+
+	// Convert tool definitions
+	if len(tools) > 0 {
+		for _, t := range tools {
+			reqBody.Tools = append(reqBody.Tools, toolDefJSON{
+				Name:        t.Name,
+				Description: t.Description,
+				InputSchema: t.InputSchema,
+			})
+		}
+	}
+
+	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", c.config.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	
-	resp, err := c.http.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("send request: %w", err)
+		return "", fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
+		return "", fmt.Errorf("failed to read response: %w", err)
 	}
-
 
 	if resp.StatusCode != http.StatusOK {
-		preview := string(respBody)
-		if len(preview) > 500 {
-			preview = preview[:500] + "..."
+		var errResp apiErrorResponse
+		_ = json.Unmarshal(respBody, &errResp)
+		return "", &APIError{
+			StatusCode: resp.StatusCode,
+			Type:       errResp.Error.Type,
+			Message:    errResp.Error.Message,
 		}
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, preview)
 	}
 
-	// Return the entire raw response JSON so parseToolCalls can parse it
-	// as a structured Anthropic response (content blocks array).
-	return string(respBody), nil
+	var result apiResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Extract text content
+	var textParts []string
+	for _, block := range result.Content {
+		if block.Type == "text" && block.Text != "" {
+			textParts = append(textParts, block.Text)
+		}
+	}
+
+	return strings.Join(textParts, "\n"), nil
 }
 
-// CompleteStreaming calls the model with streaming output.
-func (c *HTTPClient) CompleteStreaming(ctx context.Context, model string, messages []map[string]interface{}, toolDefs []extensions.ToolDefinition, onChunk func(string)) error {
+// CompleteStreaming sends messages to the model and streams the response via callback.
+func (c *HTTPClient) CompleteStreaming(ctx context.Context, model string, messages []map[string]interface{}, tools []extensions.ToolDefinition, thinking *ThinkingConfig, onChunk func(string)) error {
 	if model == "" {
 		model = c.config.DefaultModel
 	}
 
-	// Build request body
-	body := map[string]interface{}{
-		"model":     model,
-		"max_tokens": c.config.MaxTokens,
-		"messages":  messages,
-		"stream":    true,
+	maxTokens := c.config.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 8192
 	}
 
-	// Add tools
-	if len(toolDefs) > 0 {
-		apiTools := make([]map[string]interface{}, len(toolDefs))
-		for i, def := range toolDefs {
-			apiTools[i] = map[string]interface{}{
-				"name":         def.Name,
-				"description":  def.Description,
-				"input_schema": def.InputSchema,
+	// Separate system messages from conversation messages
+	var systemContent interface{}
+	var convMessages []map[string]interface{}
+	for _, msg := range messages {
+		if role, _ := msg["role"].(string); role == "system" {
+			if content, ok := msg["content"].(string); ok {
+				systemContent = content
 			}
+		} else {
+			convMessages = append(convMessages, msg)
 		}
-		body["tools"] = apiTools
 	}
 
-	reqBody, err := json.Marshal(body)
+	reqBody := apiRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		Messages:  convMessages,
+		System:    systemContent,
+		Thinking:  thinking,
+		Stream:    true,
+	}
+
+	// Convert tool definitions
+	if len(tools) > 0 {
+		for _, t := range tools {
+			reqBody.Tools = append(reqBody.Tools, toolDefJSON{
+				Name:        t.Name,
+				Description: t.Description,
+				InputSchema: t.InputSchema,
+			})
+		}
+	}
+
+	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
+		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", c.config.APIKey)
-	req.Header.Set("anthropic-version", "2024-02-15")
-	req.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
-	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send request: %w", err)
+		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, respBody)
-	}
-
-	// Read streaming response
-	reader := resp.Body
-	buf := make([]byte, 1024)
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			chunk := string(buf[:n])
-			// Parse SSE events
-			lines := strings.Split(chunk, "\n")
-			for _, line := range lines {
-				if strings.HasPrefix(line, "data: ") {
-					data := strings.TrimPrefix(line, "data: ")
-					if data == "[DONE]" {
-						return nil
-					}
-
-					// Parse JSON event
-					var event map[string]interface{}
-					if err := json.Unmarshal([]byte(data), &event); err != nil {
-						continue
-					}
-
-					// Extract text delta
-					if delta, ok := event["delta"].(map[string]interface{}); ok {
-						if text, ok := delta["text"].(string); ok {
-							onChunk(text)
-						}
-					}
-
-					// Extract tool use from streaming
-					if eventType, ok := event["type"].(string); ok {
-						if eventType == "content_block_start" {
-							if contentBlock, ok := event["content_block"].(map[string]interface{}); ok {
-								if contentBlock["type"] == "tool_use" {
-									// Tool use started
-									if text, ok := contentBlock["text"].(string); ok && text != "" {
-										onChunk(text)
-									}
-								}
-							}
-						}
-						if eventType == "content_block_delta" {
-							if delta, ok := event["delta"].(map[string]interface{}); ok {
-								if partialJSON, ok := delta["partial_json"].(string); ok && partialJSON != "" {
-									onChunk(partialJSON)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return fmt.Errorf("read stream: %w", err)
+		var errResp apiErrorResponse
+		_ = json.Unmarshal(respBody, &errResp)
+		return &APIError{
+			StatusCode: resp.StatusCode,
+			Type:       errResp.Error.Type,
+			Message:    errResp.Error.Message,
 		}
 	}
+
+	// Parse SSE stream
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var event struct {
+			Type  string `json:"type"`
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+
+		if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" && event.Delta.Text != "" {
+			if onChunk != nil {
+				onChunk(event.Delta.Text)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("stream read error: %w", err)
+	}
+
+	return nil
 }
 
-// Ensure HTTPClient implements LLMClient
-var _ LLMClient = (*HTTPClient)(nil)
+// Generate is a simplified LLM call for compaction and other utilities.
+// It sends a system + user prompt and returns the text response.
+func (c *HTTPClient) Generate(ctx context.Context, model string, systemPrompt string, userPrompt string, maxTokens int) (string, error) {
+	if model == "" {
+		model = c.config.DefaultModel
+	}
+	if maxTokens == 0 {
+		maxTokens = 4096
+	}
+
+	messages := []map[string]interface{}{
+		{"role": "user", "content": userPrompt},
+	}
+
+	reqBody := apiRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		Messages:  messages,
+		System:    systemPrompt,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.config.APIKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp apiErrorResponse
+		_ = json.Unmarshal(respBody, &errResp)
+		return "", &APIError{
+			StatusCode: resp.StatusCode,
+			Type:       errResp.Error.Type,
+			Message:    errResp.Error.Message,
+		}
+	}
+
+	var result apiResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	var textParts []string
+	for _, block := range result.Content {
+		if block.Type == "text" && block.Text != "" {
+			textParts = append(textParts, block.Text)
+		}
+	}
+
+	return strings.Join(textParts, "\n"), nil
+}
+

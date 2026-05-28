@@ -1,6 +1,7 @@
 package compaction
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -12,6 +13,57 @@ const (
 	DefaultMaxTokens     = 200000
 	DefaultContextWindow = 1000000
 )
+
+// SummarizationPrompt is the structured prompt for initial compaction summarization.
+// Aligned to TS SUMMARIZATION_PROMPT.
+const SummarizationPrompt = `You are summarizing a conversation with a coding assistant. Produce a structured summary in the following format:
+
+<summary>
+Goal: [What the user is trying to achieve]
+Constraints: [Any constraints, preferences, or rules mentioned]
+Progress:
+- Done: [Completed tasks and decisions]
+- In Progress: [Ongoing work]
+- Blocked: [Any blockers, if applicable]
+Key Decisions: [Important architectural or implementation decisions made]
+Next Steps: [What should happen next]
+Critical Context: [File paths, code snippets, or other details essential for continuing]
+</summary>
+
+Here is the conversation to summarize:
+<conversation>
+{{conversation}}
+</conversation>
+
+Be concise but thorough. Focus on actionable information. If something is not applicable, omit that section.`
+
+// UpdateSummarizationPrompt is the prompt for incremental updates to an existing summary.
+// Aligned to TS UPDATE_SUMMARIZATION_PROMPT.
+const UpdateSummarizationPrompt = `You are updating an existing conversation summary based on new messages. Merge the new information into the existing summary while preserving all important details.
+
+Here is the current summary:
+<previous-summary>
+{{previous_summary}}
+</previous-summary>
+
+Here are the new messages to incorporate:
+<conversation>
+{{conversation}}
+</conversation>
+
+Produce an updated summary in the same format:
+
+<summary>
+Goal: [Updated goal]
+Constraints: [Updated constraints]
+Progress:
+- Done: [Updated]
+- In Progress: [Updated]
+- Blocked: [Updated]
+Key Decisions: [Updated]
+Next Steps: [Updated]
+Critical Context: [Updated]
+</summary>`
 
 // TokenCounter estimates token counts for text.
 type TokenCounter struct {
@@ -396,4 +448,79 @@ func isCJK(r rune) bool {
 		(r >= 0xAC00 && r <= 0xD7AF) || // Korean hangul
 		(r >= 0x3040 && r <= 0x309F) || // Hiragana
 		(r >= 0x30A0 && r <= 0x30FF) // Katakana
+}
+
+// estimateTokens estimates tokens for a text message using chars/4 heuristic.
+// Aligned to TS estimateTokens().
+func estimateTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+	return len(text) / 4
+}
+
+// estimateContextTokens estimates total tokens for a slice of messages.
+// Uses the chars/4 heuristic for each message.
+func estimateContextTokens(messages []string) int {
+	total := 0
+	for _, msg := range messages {
+		total += estimateTokens(msg)
+	}
+	return total
+}
+
+// LLMClient is the interface for LLM-based compaction summary generation.
+// This is a minimal interface to avoid importing agent package (circular dependency).
+type LLMClient interface {
+	Generate(ctx context.Context, model string, systemPrompt string, userPrompt string, maxTokens int) (string, error)
+}
+
+// LLMCompactor generates compaction summaries using an LLM.
+// Aligned to TS compaction.generateSummary().
+type LLMCompactor struct {
+	llmClient LLMClient
+	model     string
+}
+
+// NewLLMCompactor creates a new LLM-based compactor.
+func NewLLMCompactor(model string, llmClient LLMClient) *LLMCompactor {
+	return &LLMCompactor{
+		llmClient: llmClient,
+		model:     model,
+	}
+}
+
+// GenerateSummary generates a structured summary of messages using the LLM.
+// If previousSummary is non-empty, it generates an incremental update.
+func (lc *LLMCompactor) GenerateSummary(ctx context.Context, messages []string, previousSummary string) (string, error) {
+	if lc.llmClient == nil {
+		return "", fmt.Errorf("LLM client not set")
+	}
+
+	conversation := strings.Join(messages, "\n---\n")
+
+	prompt := SummarizationPrompt
+	if previousSummary != "" {
+		prompt = UpdateSummarizationPrompt
+	}
+
+	prompt = strings.Replace(prompt, "{{conversation}}", conversation, 1)
+	if previousSummary != "" {
+		prompt = strings.Replace(prompt, "{{previous_summary}}", previousSummary, 1)
+	}
+
+	// Generate with limited tokens to avoid consuming too much of the budget
+	maxTokens := 4096
+	result, err := lc.llmClient.Generate(ctx, lc.model, "You are a coding assistant summarizer.", prompt, maxTokens)
+	if err != nil {
+		return "", fmt.Errorf("LLM compaction summary failed: %w", err)
+	}
+
+	return result, nil
+}
+
+// ShouldUseLLMCompaction determines if LLM-based compaction should be used.
+// Uses LLM compaction if the LLM client is available and messages are substantial.
+func (lc *LLMCompactor) ShouldUseLLMCompaction(messages []string) bool {
+	return lc.llmClient != nil && len(messages) > 5
 }

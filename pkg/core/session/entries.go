@@ -147,9 +147,9 @@ type ModelRef struct {
 	ModelID  string `json:"modelId"`
 }
 
-// SessionManagerV2 is the enhanced session manager aligned to pi's SessionManager.
-// It uses a single JSONL file per session (vs. directory-per-session in v1).
-type SessionManagerV2 struct {
+// SessionManager is the enhanced session manager aligned to pi's SessionManager.
+// It uses a single JSONL file per session (vs. directory-per-session in the old v1 format).
+type SessionManager struct {
 	mu              sync.RWMutex
 	sessionID       string
 	sessionFile     string
@@ -164,9 +164,9 @@ type SessionManagerV2 struct {
 	leafID          string // "" means before first entry
 }
 
-// NewSessionManagerV2 creates a new enhanced session manager.
-func NewSessionManagerV2(cwd, sessionDir string, sessionFile string, persist bool) *SessionManagerV2 {
-	sm := &SessionManagerV2{
+// NewSessionManager creates a new enhanced session manager.
+func NewSessionManager(cwd, sessionDir string, sessionFile string, persist bool) *SessionManager {
+	sm := &SessionManager{
 		sessionDir:      sessionDir,
 		cwd:             cwd,
 		persist:         persist,
@@ -183,7 +183,7 @@ func NewSessionManagerV2(cwd, sessionDir string, sessionFile string, persist boo
 }
 
 // NewSession starts a fresh session.
-func (sm *SessionManagerV2) NewSession(id string) string {
+func (sm *SessionManager) NewSession(id string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -217,7 +217,7 @@ func (sm *SessionManagerV2) NewSession(id string) string {
 }
 
 // SetSessionFile loads a session from an existing JSONL file.
-func (sm *SessionManagerV2) SetSessionFile(path string) {
+func (sm *SessionManager) SetSessionFile(path string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -240,7 +240,7 @@ func (sm *SessionManagerV2) SetSessionFile(path string) {
 }
 
 // buildIndex rebuilds the byID, labelsByID maps and finds the leaf.
-func (sm *SessionManagerV2) buildIndex() {
+func (sm *SessionManager) buildIndex() {
 	sm.byID = make(map[string]FileEntry)
 	sm.labelsByID = make(map[string]string)
 	sm.labelTimestamps = make(map[string]string)
@@ -289,7 +289,7 @@ func (sm *SessionManagerV2) buildIndex() {
 }
 
 // AppendMessage adds a message entry as a child of the current leaf.
-func (sm *SessionManagerV2) AppendMessage(message json.RawMessage) string {
+func (sm *SessionManager) AppendMessage(message json.RawMessage) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -307,7 +307,7 @@ func (sm *SessionManagerV2) AppendMessage(message json.RawMessage) string {
 }
 
 // AppendThinkingLevelChange adds a thinking level change entry.
-func (sm *SessionManagerV2) AppendThinkingLevelChange(level string) string {
+func (sm *SessionManager) AppendThinkingLevelChange(level string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -325,7 +325,7 @@ func (sm *SessionManagerV2) AppendThinkingLevelChange(level string) string {
 }
 
 // AppendModelChange adds a model change entry.
-func (sm *SessionManagerV2) AppendModelChange(provider, modelID string) string {
+func (sm *SessionManager) AppendModelChange(provider, modelID string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -344,7 +344,7 @@ func (sm *SessionManagerV2) AppendModelChange(provider, modelID string) string {
 }
 
 // AppendCompaction adds a compaction summary entry.
-func (sm *SessionManagerV2) AppendCompaction(summary string, firstKeptEntryID string, tokensBefore int, details interface{}, fromHook bool) string {
+func (sm *SessionManager) AppendCompaction(summary string, firstKeptEntryID string, tokensBefore int, details interface{}, fromHook bool) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -366,7 +366,7 @@ func (sm *SessionManagerV2) AppendCompaction(summary string, firstKeptEntryID st
 }
 
 // AppendCustomEntry adds an extension-specific data entry.
-func (sm *SessionManagerV2) AppendCustomEntry(customType string, data interface{}) string {
+func (sm *SessionManager) AppendCustomEntry(customType string, data interface{}) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -385,7 +385,7 @@ func (sm *SessionManagerV2) AppendCustomEntry(customType string, data interface{
 }
 
 // AppendSessionInfo adds a session info entry (e.g., display name).
-func (sm *SessionManagerV2) AppendSessionInfo(name string) string {
+func (sm *SessionManager) AppendSessionInfo(name string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -403,7 +403,7 @@ func (sm *SessionManagerV2) AppendSessionInfo(name string) string {
 }
 
 // AppendLabelChange sets or clears a label on an entry.
-func (sm *SessionManagerV2) AppendLabelChange(targetID string, label string) string {
+func (sm *SessionManager) AppendLabelChange(targetID string, label string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -433,14 +433,14 @@ func (sm *SessionManagerV2) AppendLabelChange(targetID string, label string) str
 	return entry.ID
 }
 
-func (sm *SessionManagerV2) appendEntryLocked(entry FileEntry) {
+func (sm *SessionManager) appendEntryLocked(entry FileEntry) {
 	sm.fileEntries = append(sm.fileEntries, entry)
 	sm.byID[entryID(entry)] = entry
 	sm.leafID = entryID(entry)
 	sm.persistEntry(entry)
 }
 
-func (sm *SessionManagerV2) persistEntry(entry FileEntry) {
+func (sm *SessionManager) persistEntry(entry FileEntry) {
 	if !sm.persist || sm.sessionFile == "" {
 		return
 	}
@@ -480,7 +480,7 @@ func (sm *SessionManagerV2) persistEntry(entry FileEntry) {
 	}
 }
 
-func (sm *SessionManagerV2) rewriteFile() {
+func (sm *SessionManager) rewriteFile() {
 	if !sm.persist || sm.sessionFile == "" {
 		return
 	}
@@ -497,14 +497,14 @@ func (sm *SessionManagerV2) rewriteFile() {
 }
 
 // GetLeafID returns the current leaf entry ID.
-func (sm *SessionManagerV2) GetLeafID() string {
+func (sm *SessionManager) GetLeafID() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.leafID
 }
 
 // GetEntry returns an entry by ID.
-func (sm *SessionManagerV2) GetEntry(id string) (FileEntry, bool) {
+func (sm *SessionManager) GetEntry(id string) (FileEntry, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	e, ok := sm.byID[id]
@@ -512,14 +512,14 @@ func (sm *SessionManagerV2) GetEntry(id string) (FileEntry, bool) {
 }
 
 // GetLabel returns the label for an entry, if any.
-func (sm *SessionManagerV2) GetLabel(id string) string {
+func (sm *SessionManager) GetLabel(id string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.labelsByID[id]
 }
 
 // GetBranch walks from an entry to the root, returning all entries in path order.
-func (sm *SessionManagerV2) GetBranch(fromID string) []FileEntry {
+func (sm *SessionManager) GetBranch(fromID string) []FileEntry {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -547,7 +547,7 @@ func (sm *SessionManagerV2) GetBranch(fromID string) []FileEntry {
 }
 
 // GetEntries returns all session entries (excludes header).
-func (sm *SessionManagerV2) GetEntries() []FileEntry {
+func (sm *SessionManager) GetEntries() []FileEntry {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -561,7 +561,7 @@ func (sm *SessionManagerV2) GetEntries() []FileEntry {
 }
 
 // GetHeader returns the session header.
-func (sm *SessionManagerV2) GetHeader() *SessionHeader {
+func (sm *SessionManager) GetHeader() *SessionHeader {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -574,28 +574,28 @@ func (sm *SessionManagerV2) GetHeader() *SessionHeader {
 }
 
 // GetSessionID returns the session ID.
-func (sm *SessionManagerV2) GetSessionID() string {
+func (sm *SessionManager) GetSessionID() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.sessionID
 }
 
 // GetSessionFile returns the session file path.
-func (sm *SessionManagerV2) GetSessionFile() string {
+func (sm *SessionManager) GetSessionFile() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.sessionFile
 }
 
 // GetCwd returns the working directory.
-func (sm *SessionManagerV2) GetCwd() string {
+func (sm *SessionManager) GetCwd() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.cwd
 }
 
 // GetTree builds the session tree structure.
-func (sm *SessionManagerV2) GetTree() []SessionTreeNode {
+func (sm *SessionManager) GetTree() []SessionTreeNode {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -649,7 +649,7 @@ func (sm *SessionManagerV2) GetTree() []SessionTreeNode {
 }
 
 // Branch moves the leaf pointer to an earlier entry.
-func (sm *SessionManagerV2) Branch(fromID string) error {
+func (sm *SessionManager) Branch(fromID string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -661,14 +661,14 @@ func (sm *SessionManagerV2) Branch(fromID string) error {
 }
 
 // ResetLeaf resets the leaf pointer to null (before first entry).
-func (sm *SessionManagerV2) ResetLeaf() {
+func (sm *SessionManager) ResetLeaf() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.leafID = ""
 }
 
 // BranchWithSummary branches and appends a branch summary.
-func (sm *SessionManagerV2) BranchWithSummary(fromID string, summary string) string {
+func (sm *SessionManager) BranchWithSummary(fromID string, summary string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -697,7 +697,7 @@ func (sm *SessionManagerV2) BranchWithSummary(fromID string, summary string) str
 }
 
 // GetSessionName returns the latest session name from session_info entries.
-func (sm *SessionManagerV2) GetSessionName() string {
+func (sm *SessionManager) GetSessionName() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -710,7 +710,7 @@ func (sm *SessionManagerV2) GetSessionName() string {
 }
 
 // GetLatestCompactionEntry returns the most recent compaction entry.
-func (sm *SessionManagerV2) GetLatestCompactionEntry() (CompactionEntry, bool) {
+func (sm *SessionManager) GetLatestCompactionEntry() (CompactionEntry, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -723,7 +723,7 @@ func (sm *SessionManagerV2) GetLatestCompactionEntry() (CompactionEntry, bool) {
 }
 
 // BuildSessionContext builds the resolved message list for the LLM.
-func (sm *SessionManagerV2) BuildSessionContext() SessionContext {
+func (sm *SessionManager) BuildSessionContext() SessionContext {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 

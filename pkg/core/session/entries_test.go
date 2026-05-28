@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-func TestNewSessionManagerV2(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "/tmp/sessions", "", true)
+func TestNewSessionManager(t *testing.T) {
+	sm := NewSessionManager("/tmp/test", "/tmp/sessions", "", true)
 	if sm == nil {
 		t.Fatal("sm should not be nil")
 	}
@@ -18,7 +18,7 @@ func TestNewSessionManagerV2(t *testing.T) {
 }
 
 func TestAppendMessage(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg := map[string]string{"role": "user", "content": "Hello"}
 	data, _ := json.Marshal(msg)
@@ -33,7 +33,7 @@ func TestAppendMessage(t *testing.T) {
 }
 
 func TestModelChange(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg := map[string]string{"role": "user", "content": "Hi"}
 	data, _ := json.Marshal(msg)
@@ -54,7 +54,7 @@ func TestModelChange(t *testing.T) {
 }
 
 func TestThinkingLevelChange(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg := map[string]string{"role": "user", "content": "Think"}
 	data, _ := json.Marshal(msg)
@@ -69,7 +69,7 @@ func TestThinkingLevelChange(t *testing.T) {
 }
 
 func TestCompaction(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg1 := map[string]string{"role": "user", "content": "First"}
 	data1, _ := json.Marshal(msg1)
@@ -93,7 +93,7 @@ func TestCompaction(t *testing.T) {
 }
 
 func TestLabelChange(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg := map[string]string{"role": "user", "content": "Hello"}
 	data, _ := json.Marshal(msg)
@@ -114,7 +114,7 @@ func TestLabelChange(t *testing.T) {
 }
 
 func TestSessionInfo(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	sm.AppendSessionInfo("My Session")
 	name := sm.GetSessionName()
@@ -131,7 +131,7 @@ func TestSessionInfo(t *testing.T) {
 }
 
 func TestBranchWithSummary(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg := map[string]string{"role": "user", "content": "Hello"}
 	data, _ := json.Marshal(msg)
@@ -147,7 +147,7 @@ func TestBranchWithSummary(t *testing.T) {
 }
 
 func TestBranch(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg1 := map[string]string{"role": "user", "content": "First"}
 	data1, _ := json.Marshal(msg1)
@@ -168,7 +168,7 @@ func TestBranch(t *testing.T) {
 }
 
 func TestGetBranch(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg1 := map[string]string{"role": "user", "content": "First"}
 	data1, _ := json.Marshal(msg1)
@@ -185,7 +185,7 @@ func TestGetBranch(t *testing.T) {
 }
 
 func TestGetTree(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg1 := map[string]string{"role": "user", "content": "First"}
 	data1, _ := json.Marshal(msg1)
@@ -205,7 +205,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	tmp := t.TempDir()
 	sessionDir := filepath.Join(tmp, "sessions")
 
-	sm := NewSessionManagerV2("/tmp/test", sessionDir, "", true)
+	sm := NewSessionManager("/tmp/test", sessionDir, "", true)
 
 	msg := map[string]string{"role": "user", "content": "Hello"}
 	data, _ := json.Marshal(msg)
@@ -229,7 +229,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	}
 
 	// Load session from file
-	sm2 := NewSessionManagerV2("/tmp/test", sessionDir, sessionFile, true)
+	sm2 := NewSessionManager("/tmp/test", sessionDir, sessionFile, true)
 	if sm2.GetSessionID() != sm.GetSessionID() {
 		t.Errorf("session ID mismatch: %q vs %q", sm2.GetSessionID(), sm.GetSessionID())
 	}
@@ -241,7 +241,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 }
 
 func TestCustomEntry(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 
 	msg := map[string]string{"role": "user", "content": "Hello"}
 	data, _ := json.Marshal(msg)
@@ -254,7 +254,7 @@ func TestCustomEntry(t *testing.T) {
 }
 
 func TestGetHeader(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 	h := sm.GetHeader()
 	if h == nil {
 		t.Fatal("header should exist")
@@ -268,7 +268,7 @@ func TestGetHeader(t *testing.T) {
 }
 
 func TestBuildSessionContext_Empty(t *testing.T) {
-	sm := NewSessionManagerV2("/tmp/test", "", "", false)
+	sm := NewSessionManager("/tmp/test", "", "", false)
 	ctx := sm.BuildSessionContext()
 	if ctx.ThinkingLevel != "off" {
 		t.Errorf("default thinking level should be off, got %q", ctx.ThinkingLevel)
