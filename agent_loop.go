@@ -2621,6 +2621,12 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 
 	cacheMessageParams(&params, a.getCacheTTL()) // Anthropic prompt caching (system_and_3)
 
+	// Pre-flight validation: filter empty messages and validate tool pairing.
+	// This catches edge cases where NormalizeAPIMessages' final safety check
+	// was bypassed (e.g., injectCacheEdits or cacheMessageParams modifying
+	// messages after normalization). Empty user messages cause API error 2013.
+	params.Messages = preflightValidateMessages(params.Messages)
+
 	// Persistent collect handler across retries (tracks partial delivery)
 	collect := NewCollectHandler()
 
@@ -2715,6 +2721,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 				messages = a.injectCacheEdits(messages)
 				params.Messages = messages
 				cacheMessageParams(&params, a.getCacheTTL()) // re-apply cache_control on rebuilt messages
+				params.Messages = preflightValidateMessages(params.Messages)
 			}
 
 			// Smart retry decision based on what was already delivered
@@ -3002,6 +3009,9 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	}
 	cacheMessageParams(&params, a.getCacheTTL()) // Anthropic prompt caching (system_and_3)
 
+	// Pre-flight validation: filter empty messages that can cause API error 2013
+	params.Messages = preflightValidateMessages(params.Messages)
+
 	// Phase 1 of cache break detection: hash current state before the API call
 	// to enable post-call diagnosis if cache_read drops >5%.
 	sysPrompt := a.context.SystemPrompt()
@@ -3047,6 +3057,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 	}
 	// NOTE: No tools set -- model can only return text
 	cacheMessageParams(&params, a.getCacheTTL()) // rolling cache for grace call
+	params.Messages = preflightValidateMessages(params.Messages)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -3323,6 +3334,8 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			}
 			// Re-inject cache_edits after rebuild
 			rebuilt = a.injectCacheEdits(rebuilt)
+			// Final pre-flight validation after all repairs
+			rebuilt = preflightValidateMessages(rebuilt)
 			params.Messages = rebuilt
 			a.consecutiveContextErrors = 0
 			continue

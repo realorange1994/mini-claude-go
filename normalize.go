@@ -372,6 +372,8 @@ func EnsureToolResultPairing(messages []anthropic.MessageParam) []anthropic.Mess
 // - Assistant messages with only empty content blocks get a placeholder.
 // - Orphaned thinking-only messages are removed.
 // - Trailing thinking blocks are removed from the last assistant message.
+// - Empty user messages (zero content blocks) are removed — these can be created
+//   by edge cases in FixRoleAlternation, EnsureToolResultPairing, or compaction.
 func FilterEmptyMessages(messages []anthropic.MessageParam) []anthropic.MessageParam {
 	if len(messages) == 0 {
 		return messages
@@ -403,6 +405,18 @@ func FilterEmptyMessages(messages []anthropic.MessageParam) []anthropic.MessageP
 				continue
 			}
 
+			result = append(result, msg)
+		} else if msg.Role == anthropic.MessageParamRoleUser {
+			// Filter empty user messages — zero content blocks cause API error 2013
+			// by breaking the tool_use/tool_result pairing chain.
+			if len(msg.Content) == 0 {
+				continue
+			}
+			// Also filter user messages that are purely whitespace/empty text blocks
+			// with no tool_results or attachments.
+			if isWhitespaceOnlyUser(msg) {
+				continue
+			}
 			result = append(result, msg)
 		} else {
 			result = append(result, msg)
@@ -499,6 +513,36 @@ func isThinkingOnlyAssistant(msg anthropic.MessageParam) bool {
 		}
 		// Any non-thinking block means it's not thinking-only
 		return false
+	}
+	return true
+}
+
+// isWhitespaceOnlyUser returns true if a user message contains only
+// whitespace-only text blocks (no tool_results, images, documents, etc).
+// Such messages serve no purpose and can cause API error 2013 by breaking
+// the tool_use/tool_result alternation chain.
+func isWhitespaceOnlyUser(msg anthropic.MessageParam) bool {
+	if msg.Role != anthropic.MessageParamRoleUser {
+		return false
+	}
+	if len(msg.Content) == 0 {
+		return true
+	}
+	for _, block := range msg.Content {
+		if block.OfToolResult != nil {
+			return false // tool_results are substantive content
+		}
+		if block.OfImage != nil || block.OfDocument != nil {
+			return false // attachments are substantive content
+		}
+		if block.OfText != nil {
+			if strings.TrimSpace(block.OfText.Text) != "" {
+				return false
+			}
+		} else {
+			// Any other block type (image, document, etc.) — treat as substantive
+			return false
+		}
 	}
 	return true
 }

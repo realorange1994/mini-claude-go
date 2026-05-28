@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -406,4 +407,32 @@ func intMax(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// preflightValidateMessages performs a final safety check on messages before
+// sending to the API. It removes empty messages (zero content blocks) and
+// validates tool_use/tool_result pairing. This catches edge cases where
+// post-normalization modifications (injectCacheEdits, cacheMessageParams)
+// create invalid message sequences that cause API error 2013.
+func preflightValidateMessages(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	cleaned := make([]anthropic.MessageParam, 0, len(messages))
+	dropped := 0
+	for _, msg := range messages {
+		// Drop messages with zero content blocks — these cause API 2013 errors
+		// by breaking the tool_use/tool_result alternation chain.
+		if len(msg.Content) == 0 {
+			dropped++
+			continue
+		}
+		// Drop messages with invalid/empty roles
+		if msg.Role != anthropic.MessageParamRoleUser && msg.Role != anthropic.MessageParamRoleAssistant {
+			dropped++
+			continue
+		}
+		cleaned = append(cleaned, msg)
+	}
+	if dropped > 0 {
+		fmt.Fprintf(os.Stderr, "[preflight] dropped %d empty/invalid messages before API call\n", dropped)
+	}
+	return cleaned
 }
