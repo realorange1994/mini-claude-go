@@ -64,6 +64,9 @@ _Step by step, what was attempted and done? Very terse summary for each step._
 	maxPreferenceEntries = 20
 	maxReferenceEntries  = 50
 	maxTestEntries       = 20
+	maxWorklogEntries    = 30
+	maxErrorEntries      = 20
+	maxResultEntries     = 15
 )
 
 // ─── MemoryEntry ─────────────────────────────────────────────────────────────
@@ -89,9 +92,57 @@ func maxEntriesForCategory(category string) int {
 		return maxReferenceEntries
 	case "test":
 		return maxTestEntries
+	case "worklog":
+		return maxWorklogEntries
+	case "error":
+		return maxErrorEntries
+	case "result":
+		return maxResultEntries
 	default:
 		return 20
 	}
+}
+
+// isWorkflowItem checks if a reference entry describes a workflow/command pattern.
+func isWorkflowItem(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "command") ||
+		strings.Contains(lower, "run ") ||
+		strings.Contains(lower, "workflow") ||
+		strings.Contains(lower, "pipeline") ||
+		strings.Contains(lower, "build") ||
+		strings.Contains(lower, "test ") ||
+		strings.Contains(lower, "deploy")
+}
+
+// isErrorRelated checks if a decision entry mentions errors or failures.
+func isErrorRelated(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "error") ||
+		strings.Contains(lower, "fail") ||
+		strings.Contains(lower, "bug") ||
+		strings.Contains(lower, "fix") ||
+		strings.Contains(lower, "wrong") ||
+		strings.Contains(lower, "issue") ||
+		strings.Contains(lower, "correction") ||
+		strings.Contains(lower, "doesn't work") ||
+		strings.Contains(lower, "does not work") ||
+		strings.Contains(lower, "broken")
+}
+
+// isArchitectureItem checks if a reference entry describes system architecture.
+func isArchitectureItem(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "architecture") ||
+		strings.Contains(lower, "component") ||
+		strings.Contains(lower, "module") ||
+		strings.Contains(lower, "struct") ||
+		strings.Contains(lower, "interface") ||
+		strings.Contains(lower, "package") ||
+		strings.Contains(lower, "system") ||
+		strings.Contains(lower, "layer") ||
+		strings.Contains(lower, "service") ||
+		strings.Contains(lower, "flow")
 }
 
 // expirationForCategory returns the TTL for entries in a given category.
@@ -564,19 +615,37 @@ func (sm *SessionMemory) formatForTemplateLocked() string {
 	}
 	sb.WriteString("\n")
 
-	// Workflow (no default category, use state items that mention commands)
+	// Workflow (use reference entries that mention commands/workflows)
 	sb.WriteString("# Workflow\n")
 	sb.WriteString("_What bash commands are usually run and in what order? How to interpret their output?_\n")
+	for _, item := range sectionContent["reference"] {
+		if isWorkflowItem(item) {
+			sb.WriteString("- " + item + "\n")
+		}
+	}
 	sb.WriteString("\n")
 
-	// Errors & Corrections (use decision entries mentioning errors)
+	// Errors & Corrections (use error entries + decision entries mentioning errors)
 	sb.WriteString("# Errors & Corrections\n")
 	sb.WriteString("_Errors encountered and how they were fixed. What did the user correct? What approaches failed?_\n")
+	for _, item := range sectionContent["error"] {
+		sb.WriteString("- " + item + "\n")
+	}
+	for _, item := range sectionContent["decision"] {
+		if isErrorRelated(item) {
+			sb.WriteString("- " + item + "\n")
+		}
+	}
 	sb.WriteString("\n")
 
-	// Codebase and System Documentation
+	// Codebase and System Documentation (use reference entries about architecture)
 	sb.WriteString("# Codebase and System Documentation\n")
 	sb.WriteString("_What are the important system components? How do they work/fit together?_\n")
+	for _, item := range sectionContent["reference"] {
+		if isArchitectureItem(item) {
+			sb.WriteString("- " + item + "\n")
+		}
+	}
 	sb.WriteString("\n")
 
 	// Learnings (use preference entries)
@@ -587,14 +656,20 @@ func (sm *SessionMemory) formatForTemplateLocked() string {
 	}
 	sb.WriteString("\n")
 
-	// Key Results
+	// Key Results (use result entries)
 	sb.WriteString("# Key Results\n")
 	sb.WriteString("_If the user asked for a specific output (answer, table, document), repeat the exact result here._\n")
+	for _, item := range sectionContent["result"] {
+		sb.WriteString("- " + item + "\n")
+	}
 	sb.WriteString("\n")
 
-	// Worklog
+	// Worklog (use worklog entries)
 	sb.WriteString("# Worklog\n")
 	sb.WriteString("_Step by step, what was attempted and done? Very terse summary for each step._\n")
+	for _, item := range sectionContent["worklog"] {
+		sb.WriteString("- " + item + "\n")
+	}
 	sb.WriteString("\n")
 
 	return sb.String()
@@ -709,9 +784,15 @@ func (sm *SessionMemory) ClearStateEntries() {
 	}
 }
 
-// SaveConclusions appends conclusion entries as state memory.
-// Called before compaction so the agent's accumulated work knowledge
-// is preserved across compaction.
+// SaveConclusions appends conclusion entries to session memory, categorizing
+// them based on content type. Called before compaction so the agent's
+// accumulated work knowledge is preserved across compaction.
+//
+// Categories:
+//   - error: contains error/fix/bug/fail/issue keywords
+//   - result: contains result/output/completed/answer/created keywords
+//   - worklog: contains action verbs describing what was done
+//   - state: everything else (task progress, current work)
 func (sm *SessionMemory) SaveConclusions(conclusions []string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -724,17 +805,20 @@ func (sm *SessionMemory) SaveConclusions(conclusions []string) {
 		if c == "" {
 			continue
 		}
-		// Check if this conclusion already exists to avoid duplicates
+		// Determine category based on content keywords
+		category := categorizeConclusion(c)
+
+		// Check if this conclusion already exists in the same category
 		exists := false
 		for _, e := range sm.entries {
-			if e.Category == "state" && e.Content == c {
+			if e.Category == category && e.Content == c {
 				exists = true
 				break
 			}
 		}
 		if !exists {
 			sm.entries = append(sm.entries, MemoryEntry{
-				Category:  "state",
+				Category:  category,
 				Content:   c,
 				Timestamp: time.Now(),
 				Source:    "auto",
@@ -742,10 +826,67 @@ func (sm *SessionMemory) SaveConclusions(conclusions []string) {
 		}
 	}
 
-	// Enforce max state entries
+	// Enforce max entries per category
 	sm.trimCategoryEntriesLocked("state")
+	sm.trimCategoryEntriesLocked("error")
+	sm.trimCategoryEntriesLocked("result")
+	sm.trimCategoryEntriesLocked("worklog")
 
 	sm.dirty = true
+}
+
+// categorizeConclusion determines which category a conclusion belongs to
+// based on its content keywords.
+func categorizeConclusion(c string) string {
+	lower := strings.ToLower(c)
+
+	// Error-related keywords -> error category
+	if strings.Contains(lower, "error") ||
+		strings.Contains(lower, "fix:") ||
+		strings.Contains(lower, "fixed") ||
+		strings.Contains(lower, "bug:") ||
+		strings.Contains(lower, "failed") ||
+		strings.Contains(lower, "failure") ||
+		strings.Contains(lower, "issue:") ||
+		strings.Contains(lower, "broken") ||
+		strings.Contains(lower, "incorrect") ||
+		strings.Contains(lower, "wrong") {
+		return "error"
+	}
+
+	// Result-related keywords -> result category
+	if strings.Contains(lower, "result:") ||
+		strings.Contains(lower, "output:") ||
+		strings.Contains(lower, "completed") ||
+		strings.Contains(lower, "created:") ||
+		strings.Contains(lower, "generated:") ||
+		strings.Contains(lower, "answer:") ||
+		strings.Contains(lower, "summary:") ||
+		strings.Contains(lower, "key finding") ||
+		strings.Contains(lower, "discovered:") {
+		return "result"
+	}
+
+	// Worklog-style entries (action verbs at start) -> worklog category
+	// These typically describe what was done in a turn
+	if strings.HasPrefix(lower, "added ") ||
+		strings.HasPrefix(lower, "created ") ||
+		strings.HasPrefix(lower, "implemented ") ||
+		strings.HasPrefix(lower, "fixed ") ||
+		strings.HasPrefix(lower, "updated ") ||
+		strings.HasPrefix(lower, "modified ") ||
+		strings.HasPrefix(lower, "removed ") ||
+		strings.HasPrefix(lower, "refactored ") ||
+		strings.HasPrefix(lower, "wrote ") ||
+		strings.HasPrefix(lower, "ran ") ||
+		strings.HasPrefix(lower, "tested ") ||
+		strings.HasPrefix(lower, "built ") ||
+		strings.HasPrefix(lower, "deployed ") {
+		return "worklog"
+	}
+
+	// Default: state category for task progress, current work, etc.
+	return "state"
 }
 
 // FlushToDisk writes memory entries to disk if dirty.

@@ -60,27 +60,38 @@ func TestSessionMemoryClearStateEntries(t *testing.T) {
 
 func TestSessionMemorySaveConclusions(t *testing.T) {
 	sm := NewSessionMemory(t.TempDir())
+	// "bug fixed" -> "error" category (contains "bug")
+	// "tests pass" -> "state" category (default, no result keywords)
 	sm.SaveConclusions([]string{"bug fixed", "tests pass"})
 
 	notes := sm.GetNotes()
 	if len(notes) != 2 {
 		t.Errorf("expected 2 conclusions, got %d", len(notes))
 	}
+	// Check that we have error and state categories
+	categories := make(map[string]bool)
 	for _, n := range notes {
-		if n.Category != "state" {
-			t.Errorf("expected state category, got %s", n.Category)
-		}
+		categories[n.Category] = true
+	}
+	if !categories["error"] {
+		t.Errorf("expected error category for 'bug fixed', got categories: %v", categories)
+	}
+	if !categories["state"] {
+		t.Errorf("expected state category for 'tests pass', got categories: %v", categories)
 	}
 }
 
 func TestSessionMemorySaveConclusionsDedup(t *testing.T) {
 	sm := NewSessionMemory(t.TempDir())
-	sm.AddNote("state", "bug fixed", "auto")
-	sm.SaveConclusions([]string{"bug fixed"}) // duplicate
+	sm.AddNote("error", "bug fixed", "auto") // categorized as error now
+	sm.SaveConclusions([]string{"bug fixed"}) // should dedup within error category
 
 	notes := sm.GetNotes()
 	if len(notes) != 1 {
 		t.Errorf("expected 1 note (dedup), got %d", len(notes))
+	}
+	if notes[0].Category != "error" {
+		t.Errorf("expected error category, got %s", notes[0].Category)
 	}
 }
 

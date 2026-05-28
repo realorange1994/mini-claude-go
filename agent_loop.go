@@ -6045,9 +6045,24 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 		structuredMeta = "\n\n## Structured context from compacted messages:\n" + structuredMeta
 	}
 
-	// Inject file content snapshot — same as the non-LLM path, ensuring the model
-	// sees actual file contents at compaction time, not just file paths.
-	fileSnapshot := a.buildPreCompactFileSnapshot(10, 5000, 50000)
+	// Write structured worklog and error entries to session memory before compaction.
+	// This populates the previously empty Worklog and Errors sections in session_memory.md
+	// with concrete entries extracted from the messages being compacted.
+	if a.config.SessionMemory != nil && structuredMeta != "" {
+		worklogEntries := extractWorklogFromStructuredMeta(structuredMeta)
+		for _, entry := range worklogEntries {
+			a.config.SessionMemory.AddNote("worklog", entry, "auto")
+		}
+		errorEntries := extractErrorsFromMessagesParams(messages)
+		for _, entry := range errorEntries {
+			a.config.SessionMemory.AddNote("error", entry, "auto")
+		}
+	}
+
+	// Inject file content snapshot — reduced size (5 files, 20K total)
+	// to avoid bloating the summary. The model can re-read files it needs
+	// after compaction via PostCompactRecovery.
+	fileSnapshot := a.buildPreCompactFileSnapshot(5, 5000, 20000)
 	if fileSnapshot != "" {
 		fileSnapshot = "\n" + fileSnapshot
 	}
