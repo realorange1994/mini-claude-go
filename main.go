@@ -643,8 +643,12 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 					}
 					continue
 				case "/branch":
-					if err := handleBranch(agent, parts[1:]); err != nil {
+					newAgent, err := handleBranch(agent, parts[1:])
+					if err != nil {
 						fmt.Printf("Branch error: %v\n", err)
+					}
+					if newAgent != agent {
+						agent = newAgent
 					}
 					continue
 				case "/errors":
@@ -1264,7 +1268,7 @@ func handleHistory(history *PromptHistory, args []string) {
 //	/branch             - Create a new branch from current transcript
 //	/branch list        - List all branches with timestamps
 //	/branch switch <name> - Switch to a branch (resume from that transcript)
-func handleBranch(agent *AgentLoop, args []string) error {
+func handleBranch(agent *AgentLoop, args []string) (*AgentLoop, error) {
 	transcriptDir := filepath.Join(".claude", "branches")
 	os.MkdirAll(transcriptDir, 0o755)
 
@@ -1276,16 +1280,16 @@ func handleBranch(agent *AgentLoop, args []string) error {
 		if _, err := os.Stat(srcFile); err == nil {
 			data, err := os.ReadFile(srcFile)
 			if err != nil {
-				return fmt.Errorf("failed to read transcript: %w", err)
+				return agent, fmt.Errorf("failed to read transcript: %w", err)
 			}
 			if err := os.WriteFile(branchFile, data, 0o644); err != nil {
-				return fmt.Errorf("failed to write branch: %w", err)
+				return agent, fmt.Errorf("failed to write branch: %w", err)
 			}
 			fmt.Printf("Created branch: %s\n", branchName)
 		} else {
 			fmt.Println("No current transcript to branch from.")
 		}
-		return nil
+		return agent, nil
 	}
 
 	subcmd := strings.ToLower(args[0])
@@ -1294,7 +1298,7 @@ func handleBranch(agent *AgentLoop, args []string) error {
 		entries, err := os.ReadDir(transcriptDir)
 		if err != nil || len(entries) == 0 {
 			fmt.Println("No branches found.")
-			return nil
+			return agent, nil
 		}
 		fmt.Println("\nBranches:")
 		now := time.Now()
@@ -1309,12 +1313,12 @@ func handleBranch(agent *AgentLoop, args []string) error {
 					i+1, name, formatAge(info.ModTime(), now), formatFileSize(int(info.Size())))
 			}
 		}
-		return nil
+		return agent, nil
 
 	case "switch", "sw", "checkout":
 		if len(args) < 2 {
 			fmt.Println("Usage: /branch switch <name>")
-			return nil
+			return agent, nil
 		}
 		branchName := args[1]
 		if !strings.HasSuffix(branchName, ".jsonl") {
@@ -1326,24 +1330,23 @@ func handleBranch(agent *AgentLoop, args []string) error {
 			branchName2 := strings.TrimSuffix(branchName, ".jsonl")
 			branchFile2 := filepath.Join(transcriptDir, branchName2+".jsonl")
 			if _, err := os.Stat(branchFile2); os.IsNotExist(err) {
-				return fmt.Errorf("branch not found: %s", args[1])
+				return agent, fmt.Errorf("branch not found: %s", args[1])
 			}
 			branchFile = branchFile2
 		}
 		// Resume from the branch transcript
 		newAgent, err := NewAgentLoopFromTranscript(agent.config, agent.registry, agent.useStream, branchFile, true)
 		if err != nil {
-			return fmt.Errorf("failed to switch branch: %w", err)
+			return agent, fmt.Errorf("failed to switch branch: %w", err)
 		}
 		agent.Close()
-		*agent = *newAgent
 		fmt.Printf("Switched to branch: %s\n", strings.TrimSuffix(filepath.Base(branchFile), ".jsonl"))
-		return nil
+		return newAgent, nil
 
 	default:
 		fmt.Printf("Unknown /branch subcommand: %s\n", subcmd)
 		fmt.Println("Usage: /branch [list|switch <name>]")
-		return nil
+		return agent, nil
 	}
 }
 
