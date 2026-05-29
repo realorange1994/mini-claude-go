@@ -21,6 +21,50 @@ const (
 	ScopeProject Scope = "project"
 )
 
+// CompactionSettings holds compaction-specific settings.
+// Aligned to TS CompactionSettings.
+type CompactionSettings struct {
+	Enabled       bool `json:"enabled,omitempty"`
+	ReserveTokens int  `json:"reserveTokens,omitempty"`
+	KeepRecentTokens int `json:"keepRecentTokens,omitempty"`
+}
+
+// BranchSummarySettings holds branch summary settings.
+type BranchSummarySettings struct {
+	ReserveTokens int  `json:"reserveTokens,omitempty"`
+	SkipPrompt    bool `json:"skipPrompt,omitempty"`
+}
+
+// RetrySettings holds retry-specific settings.
+type RetrySettings struct {
+	Enabled     bool   `json:"enabled,omitempty"`
+	MaxRetries  int    `json:"maxRetries,omitempty"`
+	BaseDelayMs int    `json:"baseDelayMs,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+}
+
+// TerminalSettings holds terminal display settings.
+type TerminalSettings struct {
+	ShowImages            bool `json:"showImages,omitempty"`
+	ImageWidthCells       int  `json:"imageWidthCells,omitempty"`
+	ClearOnShrink         bool `json:"clearOnShrink,omitempty"`
+	ShowTerminalProgress  bool `json:"showTerminalProgress,omitempty"`
+}
+
+// ImageSettings holds image handling settings.
+type ImageSettings struct {
+	AutoResize   bool `json:"autoResize,omitempty"`
+	BlockImages  bool `json:"blockImages,omitempty"`
+}
+
+// ThinkingBudgetsSettings holds token budget per thinking level.
+type ThinkingBudgetsSettings struct {
+	Minimal int `json:"minimal,omitempty"`
+	Low     int `json:"low,omitempty"`
+	Medium  int `json:"medium,omitempty"`
+	High    int `json:"high,omitempty"`
+}
+
 // Settings holds all configurable options for the coding agent.
 // Aligned to TS Settings interface with the most impactful fields.
 type Settings struct {
@@ -63,8 +107,17 @@ type Settings struct {
 	// Custom system prompt (replaces default entirely)
 	CustomSystemPrompt string `json:"customSystemPrompt,omitempty"`
 
+	// Sub-struct settings
+	Compaction       CompactionSettings       `json:"compaction,omitempty"`
+	BranchSummary    BranchSummarySettings    `json:"branchSummary,omitempty"`
+	Retry            RetrySettings            `json:"retry,omitempty"`
+	Terminal         TerminalSettings         `json:"terminal,omitempty"`
+	Image            ImageSettings            `json:"image,omitempty"`
+	ThinkingBudgets  ThinkingBudgetsSettings  `json:"thinkingBudgets,omitempty"`
+
 	// Misc
 	TelemetryEnabled *bool `json:"telemetryEnabled,omitempty"`
+	HTTPIdleTimeoutMs *int `json:"httpIdleTimeoutMs,omitempty"`
 }
 
 // SettingsManager manages global and project-scoped settings.
@@ -294,6 +347,69 @@ func mergeSettings(global, project *Settings) Settings {
 	if project.CustomSystemPrompt != "" {
 		result.CustomSystemPrompt = project.CustomSystemPrompt
 	}
+	// Sub-struct settings: merge field by field
+	if project.Compaction.Enabled {
+		result.Compaction.Enabled = project.Compaction.Enabled
+	}
+	if project.Compaction.ReserveTokens != 0 {
+		result.Compaction.ReserveTokens = project.Compaction.ReserveTokens
+	}
+	if project.Compaction.KeepRecentTokens != 0 {
+		result.Compaction.KeepRecentTokens = project.Compaction.KeepRecentTokens
+	}
+	if project.BranchSummary.ReserveTokens != 0 {
+		result.BranchSummary.ReserveTokens = project.BranchSummary.ReserveTokens
+	}
+	if project.BranchSummary.SkipPrompt {
+		result.BranchSummary.SkipPrompt = project.BranchSummary.SkipPrompt
+	}
+	if project.Retry.Enabled {
+		result.Retry.Enabled = project.Retry.Enabled
+	}
+	if project.Retry.MaxRetries != 0 {
+		result.Retry.MaxRetries = project.Retry.MaxRetries
+	}
+	if project.Retry.BaseDelayMs != 0 {
+		result.Retry.BaseDelayMs = project.Retry.BaseDelayMs
+	}
+	if project.Retry.Provider != "" {
+		result.Retry.Provider = project.Retry.Provider
+	}
+	if project.Terminal.ShowImages {
+		result.Terminal.ShowImages = project.Terminal.ShowImages
+	}
+	if project.Terminal.ImageWidthCells != 0 {
+		result.Terminal.ImageWidthCells = project.Terminal.ImageWidthCells
+	}
+	if project.Terminal.ClearOnShrink {
+		result.Terminal.ClearOnShrink = project.Terminal.ClearOnShrink
+	}
+	if project.Terminal.ShowTerminalProgress {
+		result.Terminal.ShowTerminalProgress = project.Terminal.ShowTerminalProgress
+	}
+	if project.Image.AutoResize {
+		result.Image.AutoResize = project.Image.AutoResize
+	}
+	if project.Image.BlockImages {
+		result.Image.BlockImages = project.Image.BlockImages
+	}
+	if project.ThinkingBudgets.Minimal != 0 {
+		result.ThinkingBudgets.Minimal = project.ThinkingBudgets.Minimal
+	}
+	if project.ThinkingBudgets.Low != 0 {
+		result.ThinkingBudgets.Low = project.ThinkingBudgets.Low
+	}
+	if project.ThinkingBudgets.Medium != 0 {
+		result.ThinkingBudgets.Medium = project.ThinkingBudgets.Medium
+	}
+	if project.ThinkingBudgets.High != 0 {
+		result.ThinkingBudgets.High = project.ThinkingBudgets.High
+	}
+	if project.HTTPIdleTimeoutMs != nil {
+		result.HTTPIdleTimeoutMs = project.HTTPIdleTimeoutMs
+	}
+
+	// Misc
 	if project.TelemetryEnabled != nil {
 		result.TelemetryEnabled = project.TelemetryEnabled
 	}
