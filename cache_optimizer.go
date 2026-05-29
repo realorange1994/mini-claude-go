@@ -417,6 +417,7 @@ func intMax(a, b int) int {
 func preflightValidateMessages(messages []anthropic.MessageParam) []anthropic.MessageParam {
 	cleaned := make([]anthropic.MessageParam, 0, len(messages))
 	dropped := 0
+	merged := 0
 	for i, msg := range messages {
 		// Drop messages with zero content blocks — these cause API 2013 errors
 		// by breaking the tool_use/tool_result alternation chain.
@@ -431,21 +432,22 @@ func preflightValidateMessages(messages []anthropic.MessageParam) []anthropic.Me
 			fmt.Fprintf(os.Stderr, "[preflight] DROP msg[%d] invalid role=%s\n", i, msg.Role)
 			continue
 		}
-		// Check for role alternation violations: drop messages that break alternation
-		// This catches issues where injectCacheEdits or other post-norm changes create
-		// consecutive same-role messages that weren't caught by NormalizeAPIMessages.
+		// Enforce strict role alternation: merge consecutive same-role messages.
+		// The Anthropic API REQUIRES strict user/assistant alternation. Even
+		// messages containing tool blocks must be merged — the API allows
+		// multiple tool_use blocks in one assistant message and mixed
+		// text+tool_result blocks in one user message.
 		if len(cleaned) > 0 && cleaned[len(cleaned)-1].Role == msg.Role {
-			// Merge same-role messages (append content to last)
 			lastIdx := len(cleaned) - 1
 			cleaned[lastIdx].Content = append(cleaned[lastIdx].Content, msg.Content...)
-			fmt.Fprintf(os.Stderr, "[preflight] MERGE msg[%d] role=%s into msg[%d] (alternation violation)\n",
-				i, msg.Role, lastIdx)
+			merged++
 			continue
 		}
 		cleaned = append(cleaned, msg)
 	}
-	if dropped > 0 {
-		fmt.Fprintf(os.Stderr, "[preflight] dropped %d empty/invalid messages before API call\n", dropped)
+	if dropped > 0 || merged > 0 {
+		fmt.Fprintf(os.Stderr, "[preflight] stats: dropped=%d merged=%d in=%d out=%d\n",
+			dropped, merged, len(messages), len(cleaned))
 	}
 	return cleaned
 }

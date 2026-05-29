@@ -2592,6 +2592,40 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
+	// DeepSeek-Reasonix healing patterns (cache hit rate optimization):
+	// These are also applied in buildMessageParams (non-streaming path).
+	// Must apply here BEFORE injectCacheEdits/cacheMessageParams to ensure
+	// message integrity — missing these causes API error 2013 in streaming.
+	if stamped := stampMissingToolCallIDs(messages); stamped > 0 {
+		a.logDebug("[healing] stamped %d missing tool_call IDs\n", stamped)
+	}
+	if pruned, dropped := reasoningRetention(messages); pruned > 0 {
+		a.logDebug("[reasoning] pruned %d reasoning blocks (%d chars)\n", pruned, dropped)
+	}
+	isThinkingMode := strings.Contains(a.config.Model, "reasoner")
+	if stamped := thinkingModeStamping(messages, isThinkingMode); stamped > 0 {
+		a.logDebug("[thinking] stamped %d missing reasoning blocks\n", stamped)
+	}
+	// Token-budget aware shrinking: shrink tool args if request is getting large
+	currentTokens := estimateMessageTokens(messages)
+	maxTokens := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
+	if currentTokens > maxTokens/2 {
+		if healed, saved := shrinkToolCallArgsByTokens(messages, 8000); healed > 0 {
+			a.logDebug("[shrink] shrunk %d tool call args (saved %d chars)\n", healed, saved)
+		}
+		// DeepSeek-Reasonix pattern: shrink oversized tool results to stay within token budgets
+		if healed, saved, _ := shrinkOversizedToolResultsByTokens(messages, 8000); healed > 0 {
+			a.logDebug("[shrink] shrunk %d tool results (saved %d chars)\n", healed, saved)
+		}
+	}
+	// DeepSeek-Reasonix pattern: fix tool call pairing - drop unpaired tool_calls and stray tool results
+	if filtered, droppedCalls, droppedTools := fixToolCallPairing(messages); droppedCalls > 0 || droppedTools > 0 {
+		a.logDebug("[healing] fixed tool pairing: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
+		if filtered != nil {
+			messages = filtered
+		}
+	}
+
 	// Pre-populate the cached MC tracker with compactable tool IDs from the
 	// current conversation context. This ensures the tracker knows about tools
 	// registered in earlier turns, enabling cache_edits to delete them.
@@ -3340,6 +3374,16 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 						a.out("    [%d] tool_use id=%s name=%s\n", j, block.OfToolUse.ID, block.OfToolUse.Name)
 					} else if block.OfToolResult != nil {
 						a.out("    [%d] tool_result id=%s\n", j, block.OfToolResult.ToolUseID)
+					} else if block.OfText != nil {
+						text := block.OfText.Text
+						if len(text) > 60 {
+							text = text[:60] + "..."
+						}
+						a.out("    [%d] text: %q\n", j, text)
+					} else if block.OfThinking != nil {
+						a.out("    [%d] thinking\n", j)
+					} else {
+						a.out("    [%d] other\n", j)
 					}
 				}
 			}
