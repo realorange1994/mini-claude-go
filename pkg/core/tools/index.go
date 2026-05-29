@@ -1,11 +1,18 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"miniclaudecode-go/pkg/core/extensions"
+	"miniclaudecode-go/pkg/core/tools/bashtool"
 	"miniclaudecode-go/pkg/core/tools/builtin"
+	"miniclaudecode-go/pkg/core/tools/findtool"
+	"miniclaudecode-go/pkg/core/tools/greptool"
+	"miniclaudecode-go/pkg/core/tools/readtool"
+	"miniclaudecode-go/pkg/core/tools/writetool"
 )
 
 // ToolHandler is a function that executes a tool
@@ -98,11 +105,18 @@ func (t *Tool) GetOperation(name string) interface{} {
 	return t.Operations[name]
 }
 
-// DefaultTools returns the default built-in tools with handlers wired
+// getCwd returns the current working directory.
+func getCwd() string {
+	cwd, _ := os.Getwd()
+	return cwd
+}
+
+// DefaultTools returns the default built-in tools with handlers wired.
+// Uses the new aligned implementations for Read, Write, Grep, Find, and Bash.
 func DefaultTools() *Registry {
 	reg := NewRegistry()
 
-	// Read tool handler
+	// Read tool handler — uses new readtool package
 	reg.Register("Read", extensions.ToolDefinition{
 		Name:        "Read",
 		Description: "Read the contents of a file. Use this to view files before editing or to read configuration files, source code, or documentation.",
@@ -111,12 +125,15 @@ func DefaultTools() *Registry {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "The path to the file to read",
+					"description": "Path to the file to read (relative or absolute)",
 				},
-				"lineRange": map[string]interface{}{
-					"type":        "array",
-					"description": "Optional line range to read [start, end] (0-indexed)",
-					"items":       map[string]interface{}{"type": "integer"},
+				"offset": map[string]interface{}{
+					"type":        "integer",
+					"description": "Line number to start reading from (1-indexed)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of lines to read",
 				},
 			},
 			"required": []string{"path"},
@@ -126,23 +143,22 @@ func DefaultTools() *Registry {
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'path' parameter")
 		}
-		var lineRange *[2]int
-		if lr, ok := input["lineRange"].([]interface{}); ok && len(lr) == 2 {
-			start := intOf(lr[0])
-			end := intOf(lr[1])
-			lineRange = &[2]int{start, end}
+
+		ri := readtool.ReadInput{
+			Path:   path,
+			Offset: intOf(input["offset"]),
+			Limit:  intOf(input["limit"]),
 		}
-		result, err := builtin.Read(path, lineRange)
+
+		result, err := readtool.Execute(ri, getCwd(), readtool.LocalReadOperations{}, true, true)
 		if err != nil {
 			return "", err
 		}
-		if result.Truncated() {
-			return result.Success() + "\n[truncated]", nil
-		}
-		return result.Success(), nil
+
+		return readtool.FormatReadOutput(result), nil
 	})
 
-	// Write tool handler
+	// Write tool handler — uses new writetool package
 	reg.Register("Write", extensions.ToolDefinition{
 		Name:        "Write",
 		Description: "Write content to a file. This will create the file if it doesn't exist or overwrite if it does. Use for creating new files or making significant changes.",
@@ -169,13 +185,25 @@ func DefaultTools() *Registry {
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'content' parameter")
 		}
-		if err := builtin.Write(path, content); err != nil {
+
+		result, err := writetool.Execute(writetool.WriteInput{
+			Path:    path,
+			Content: content,
+		}, getCwd(), writetool.LocalWriteOperations{})
+		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Wrote %d bytes to %s", len(content), path), nil
+
+		if result.Created {
+			return fmt.Sprintf("Created new file %s with %d bytes", result.Path, result.BytesWritten), nil
+		}
+		if result.Diff == "" {
+			return fmt.Sprintf("No changes to %s (content unchanged)", result.Path), nil
+		}
+		return fmt.Sprintf("Updated %s (%d bytes):\n%s", result.Path, result.BytesWritten, result.Diff), nil
 	})
 
-	// Edit tool handler
+	// Edit tool handler — uses builtin + editdiff
 	reg.Register("Edit", extensions.ToolDefinition{
 		Name:        "Edit",
 		Description: "Make targeted edits to a file. Supports three modes: replace (replace old_string with new_string), insert (insert new_string at line), and delete (remove content).",
@@ -231,7 +259,7 @@ func DefaultTools() *Registry {
 		return builtin.Edit(spec)
 	})
 
-	// Bash tool handler
+	// Bash tool handler — uses new bashtool package
 	reg.Register("Bash", extensions.ToolDefinition{
 		Name:        "Bash",
 		Description: "Execute a shell command. Use for running git commands, npm scripts, running tests, or any command-line operations.",
@@ -246,6 +274,10 @@ func DefaultTools() *Registry {
 					"type":        "string",
 					"description": "Optional working directory for the command",
 				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Timeout in seconds (default: 120)",
+				},
 			},
 			"required": []string{"command"},
 		},
@@ -254,18 +286,30 @@ func DefaultTools() *Registry {
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'command' parameter")
 		}
-		cwd := stringOf(input["cwd"])
-		timeout := 300 // default 5 minutes
-		if t, ok := input["timeout"].(float64); ok {
-			timeout = int(t)
+
+		ctx := context.Background()
+		ri := bashtool.BashInput{
+			Command: cmd,
+			CWD:     stringOf(input["cwd"]),
+			Timeout: intOf(input["timeout"]),
 		}
-		return builtin.Bash(cmd, cwd, timeout)
+
+		if ri.CWD == "" {
+			ri.CWD = getCwd()
+		}
+
+		result, err := bashtool.Execute(ctx, ri, bashtool.LocalBashOperations{})
+		if err != nil {
+			return "", err
+		}
+
+		return bashtool.FormatBashOutput(result), nil
 	})
 
-	// Grep tool handler
+	// Grep tool handler — uses new greptool package with ripgrep
 	reg.Register("Grep", extensions.ToolDefinition{
 		Name:        "Grep",
-		Description: "Search for a pattern in files. Use to find function definitions, TODO comments, or any text pattern across your codebase.",
+		Description: "Search for a pattern in files using ripgrep. Use to find function definitions, TODO comments, or any text pattern across your codebase.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -286,6 +330,14 @@ func DefaultTools() *Registry {
 					"type":        "boolean",
 					"description": "Whether the search should be case sensitive",
 				},
+				"context": map[string]interface{}{
+					"type":        "integer",
+					"description": "Number of context lines before and after matches",
+				},
+				"glob": map[string]interface{}{
+					"type":        "string",
+					"description": "Glob filter for file names (e.g., *.go)",
+				},
 			},
 			"required": []string{"pattern"},
 		},
@@ -303,45 +355,31 @@ func DefaultTools() *Registry {
 				}
 			}
 		}
-		if len(paths) == 0 {
-			paths = []string{"."}
+
+		ri := greptool.GrepInput{
+			Pattern:       pattern,
+			Paths:         paths,
+			MaxResults:    intOf(input["max_results"]),
+			CaseSensitive: boolOf(input["case_sensitive"]),
+			ContextLines:  intOf(input["context"]),
+			Glob:          stringOf(input["glob"]),
 		}
 
-		maxResults := 100
-		if m, ok := input["max_results"].(float64); ok {
-			maxResults = int(m)
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), greptool.GrepTimeout)
+		defer cancel()
 
-		caseSensitive := false
-		if c, ok := input["case_sensitive"].(bool); ok {
-			caseSensitive = c
-		}
-
-		opts := builtin.GrepOptions{
-			MaxResults:    maxResults,
-			CaseSensitive: caseSensitive,
-		}
-
-		matches, err := builtin.Grep(pattern, paths, opts)
+		result, err := greptool.ExecuteWithFallback(ctx, ri, getCwd())
 		if err != nil {
 			return "", err
 		}
 
-		if len(matches) == 0 {
-			return "No matches found", nil
-		}
-
-		result := fmt.Sprintf("Found %d matches:\n", len(matches))
-		for _, m := range matches {
-			result += fmt.Sprintf("%s:%d: %s\n", m.Path(), m.LineNum(), m.Content())
-		}
-		return result, nil
+		return greptool.FormatGrepOutput(result), nil
 	})
 
-	// Find tool handler
+	// Find tool handler — uses new findtool package
 	reg.Register("Find", extensions.ToolDefinition{
 		Name:        "Find",
-		Description: "Find files matching a pattern. Use to locate files by name pattern.",
+		Description: "Find files matching a pattern using fd (or Go fallback). Use to locate files by name pattern.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -351,7 +389,7 @@ func DefaultTools() *Registry {
 				},
 				"pattern": map[string]interface{}{
 					"type":        "string",
-					"description": "Regular expression pattern for file names",
+					"description": "Regex or glob pattern for file names",
 				},
 				"max_depth": map[string]interface{}{
 					"type":        "integer",
@@ -363,26 +401,24 @@ func DefaultTools() *Registry {
 	}, func(input map[string]interface{}) (string, error) {
 		dir := stringOf(input["dir"])
 		if dir == "" {
-			dir = "."
-		}
-		pattern, ok := input["pattern"].(string)
-		if !ok {
-			return "", fmt.Errorf("missing or invalid 'pattern' parameter")
-		}
-		maxDepth := 10
-		if d, ok := input["max_depth"].(float64); ok {
-			maxDepth = int(d)
+			dir = getCwd()
 		}
 
-		results, err := builtin.Find(dir, pattern, maxDepth)
+		ri := findtool.FindInput{
+			Dir:      dir,
+			Pattern:  stringOf(input["pattern"]),
+			MaxDepth: intOf(input["max_depth"]),
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), findtool.FindTimeout)
+		defer cancel()
+
+		result, err := findtool.Execute(ctx, ri, dir, findtool.LocalFindOperations{})
 		if err != nil {
 			return "", err
 		}
 
-		if len(results) == 0 {
-			return "No files found", nil
-		}
-		return fmt.Sprintf("Found %d files:\n%s", len(results), joinLines(results)), nil
+		return findtool.FormatFindOutput(result), nil
 	})
 
 	// Glob tool handler
@@ -410,7 +446,7 @@ func DefaultTools() *Registry {
 		}
 		cwd := stringOf(input["cwd"])
 		if cwd == "" {
-			cwd = "."
+			cwd = getCwd()
 		}
 
 		results, err := builtin.Glob(cwd, pattern)
@@ -455,9 +491,9 @@ func DefaultTools() *Registry {
 
 		result := fmt.Sprintf("Total %d items:\n", len(files))
 		for _, f := range files {
-			icon := "📄"
+			icon := "[file]"
 			if f.IsDir {
-				icon = "📁"
+				icon = "[dir]"
 			}
 			result += fmt.Sprintf("%s %s\n", icon, f.Name)
 		}
@@ -482,6 +518,13 @@ func intOf(v interface{}) int {
 	return 0
 }
 
+func boolOf(v interface{}) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return false
+}
+
 func joinLines(items []string) string {
 	result := ""
 	for i, item := range items {
@@ -496,10 +539,6 @@ func joinLines(items []string) string {
 // ParseToolCalls parses tool use blocks from an LLM response (JSON format)
 // Returns list of tool calls: []map[string]interface{}{"id": "...", "name": "...", "input": {...}}
 func ParseToolCalls(response string) ([]map[string]interface{}, error) {
-	// Try to extract JSON array of tool calls from response
-	// This is a simple implementation - real impl would use proper JSON parsing
-
-	// Look for tool_use blocks in the response
 	var toolCalls []map[string]interface{}
 
 	// Simple JSON detection - look for array structure
@@ -550,7 +589,7 @@ func ParseToolCalls(response string) ([]map[string]interface{}, error) {
 // BuildToolResult creates a tool result message
 func BuildToolResult(toolCallId, content string, isError bool) map[string]interface{} {
 	return map[string]interface{}{
-		"type": "tool_result",
+		"type":        "tool_result",
 		"tool_use_id": toolCallId,
 		"content":     content,
 		"is_error":    isError,
