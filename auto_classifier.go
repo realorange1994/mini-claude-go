@@ -44,6 +44,13 @@ type AutoModeClassifier struct {
 	// disabled. Every toolChoiceRetryInterval calls we re-probe with
 	// tool_choice to support auto-upgrade if the upstream API changes.
 	toolChoiceDisabledCount int
+
+	// recentlyAllowed tracks recently allowed decisions for a given
+	// tool+directory. When the same tool is called again in the same
+	// directory within a short window, the result is auto-reused without
+	// another LLM call. This prevents redundant classifier calls when
+	// writing multiple files to the same directory.
+	recentlyAllowed map[string]time.Time
 }
 
 // toolChoiceRetryInterval is how many classifier calls (with tool_choice
@@ -81,7 +88,10 @@ type cacheEntry struct {
 	expiresAt time.Time
 }
 
-const cacheTTL = 5 * time.Minute
+const (
+	cacheTTL           = 5 * time.Minute
+	recentlyAllowedTTL = 30 * time.Second // batch shortcut window
+)
 
 // AUTO_MODE_SAFE_TOOLS are tools that are always allowed in auto mode
 // without needing classifier evaluation. These are all read-only or
@@ -624,10 +634,11 @@ func NewAutoModeClassifier(apiKey, baseURL, model string) *AutoModeClassifier {
 	client := anthropic.NewClient(opts...)
 
 	return &AutoModeClassifier{
-		client:  client,
-		model:   model,
-		cache:   make(map[string]cacheEntry),
-		enabled: true,
+		client:          client,
+		model:           model,
+		cache:           make(map[string]cacheEntry),
+		enabled:         true,
+		recentlyAllowed: make(map[string]time.Time),
 	}
 }
 
@@ -640,6 +651,7 @@ func (c *AutoModeClassifier) ClearCache() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cache = make(map[string]cacheEntry)
+	c.recentlyAllowed = make(map[string]time.Time)
 }
 
 // SetClaudeMd sets the project CLAUDE.md content to be included in classifier
@@ -686,11 +698,24 @@ func (c *AutoModeClassifier) Classify(
 		return result
 	}
 
+	// Batch shortcut: if the same tool in the same directory was recently
+	// allowed (within 30 seconds), auto-allow without another LLM call.
+	// This prevents 10 independent classifier calls when writing 10 files
+	// to the same directory — the first call decides, the rest reuse it.
+	if c.isRecentlyAllowed(toolName, toolInput) {
+		return ClassifierResult{Allow: true, Reason: "recently allowed (batch shortcut)"}
+	}
+
 	// Call classifier LLM
 	result := c.callClassifier(toolName, toolInput, transcript)
 
 	// Cache the result
 	c.setCached(cacheKey, result)
+
+	// Track recently allowed decisions for batch shortcut
+	if result.Allow {
+		c.recordAllowed(toolName, toolInput)
+	}
 
 	return result
 }
@@ -1237,17 +1262,45 @@ func formatActionForClassifier(toolName string, input map[string]any) string {
 		}
 	case "write_file":
 		path, _ := input["file_path"].(string)
-		return fmt.Sprintf("Tool: write_file\nPath: %s", path)
+		action := fmt.Sprintf("Tool: write_file\nPath: %s", path)
+		// Include content snippet so classifier can distinguish legitimate
+		// code (Go imports, function defs) from risky writes (curl|bash,
+		// shell scripts, base64 blobs).
+		if content, ok := input["content"].(string); ok && content != "" {
+			snippet := content
+			if len(snippet) > 300 {
+				snippet = snippet[:300] + "..."
+			}
+			action += fmt.Sprintf("\nContent snippet: %s", snippet)
+		}
+		return action
 	case "edit_file":
 		path, _ := input["file_path"].(string)
 		oldStr, _ := input["old_string"].(string)
 		if len(oldStr) > 100 {
 			oldStr = oldStr[:100] + "..."
 		}
-		return fmt.Sprintf("Tool: edit_file\nPath: %s\nReplacing: %s", path, oldStr)
+		action := fmt.Sprintf("Tool: edit_file\nPath: %s\nReplacing: %s", path, oldStr)
+		// Include content snippet so classifier can verify the replacement is legitimate
+		if newContent, ok := input["new_string"].(string); ok && newContent != "" {
+			snippet := newContent
+			if len(snippet) > 300 {
+				snippet = snippet[:300] + "..."
+			}
+			action += fmt.Sprintf("\nContent snippet: %s", snippet)
+		}
+		return action
 	case "multi_edit":
 		path, _ := input["file_path"].(string)
-		return fmt.Sprintf("Tool: multi_edit\nPath: %s", path)
+		action := fmt.Sprintf("Tool: multi_edit\nPath: %s", path)
+		if content, ok := input["content"].(string); ok && content != "" {
+			snippet := content
+			if len(snippet) > 300 {
+				snippet = snippet[:300] + "..."
+			}
+			action += fmt.Sprintf("\nContent snippet: %s", snippet)
+		}
+		return action
 	case "fileops":
 		op, _ := input["operation"].(string)
 		path, _ := input["path"].(string)
@@ -1300,21 +1353,25 @@ func (c *AutoModeClassifier) cacheKey(toolName string, input map[string]any) str
 			return "git:" + op
 		}
 	}
-	// For file tools (write_file, edit_file, multi_edit), cache by tool+file_path
+	// For file tools (write_file, edit_file, multi_edit), cache by tool+parentDir.
+	// Writes to the same directory are likely similar operations — cache key
+	// reuses the classifier result across files in the same directory,
+	// avoiding redundant API calls when writing multiple files to the same dir.
 	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
 		if path, ok := input["file_path"].(string); ok {
-			return toolName + ":" + path
+			parentDir := filepath.Dir(path)
+			return toolName + ":" + parentDir
 		}
 	}
-	// For fileops, cache by tool+operation+path
+	// For fileops, cache by tool+operation+parentDir (same rationale as file tools)
 	if toolName == "fileops" {
 		op, _ := input["operation"].(string)
 		path, _ := input["path"].(string)
-		return "fileops:" + op + ":" + path
+		return "fileops:" + op + ":" + filepath.Dir(path)
 	}
-	// For other file ops, cache by tool+path
+	// For other file ops, cache by tool+parentDir
 	if path, ok := input["path"].(string); ok {
-		return toolName + ":" + path
+		return toolName + ":" + filepath.Dir(path)
 	}
 	// Generic: tool name only (coarser caching)
 	return toolName
@@ -1337,6 +1394,64 @@ func (c *AutoModeClassifier) setCached(key string, result ClassifierResult) {
 		result:    result,
 		expiresAt: time.Now().Add(cacheTTL),
 	}
+}
+
+// isRecentlyAllowed checks if the same tool+directory was allowed within
+// recentlyAllowedTTL. Returns true for a cache hit.
+func (c *AutoModeClassifier) isRecentlyAllowed(toolName string, input map[string]any) bool {
+	key := c.recentlyAllowedKey(toolName, input)
+	if key == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, ok := c.recentlyAllowed[key]
+	if !ok {
+		return false
+	}
+	return time.Since(ts) < recentlyAllowedTTL
+}
+
+// recordAllowed records that a tool call was allowed, so subsequent calls
+// to the same tool+directory within recentlyAllowedTTL can be auto-allowed.
+func (c *AutoModeClassifier) recordAllowed(toolName string, input map[string]any) {
+	key := c.recentlyAllowedKey(toolName, input)
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recentlyAllowed[key] = time.Now()
+}
+
+// recentlyAllowedKey generates a directory-level key for the batch shortcut.
+// Returns empty string if the tool doesn't have a resolvable directory.
+func (c *AutoModeClassifier) recentlyAllowedKey(toolName string, input map[string]any) string {
+	switch toolName {
+	case "write_file", "edit_file", "multi_edit":
+		if path, ok := input["file_path"].(string); ok && path != "" {
+			return toolName + ":" + filepath.Dir(path)
+		}
+	case "fileops":
+		op, _ := input["operation"].(string)
+		path, _ := input["path"].(string)
+		if path != "" {
+			return "fileops:" + op + ":" + filepath.Dir(path)
+		}
+	case "exec":
+		if cmd, ok := input["command"].(string); ok && cmd != "" {
+			// For exec, cache by command prefix (same as cacheKey)
+			if len(cmd) > 100 {
+				cmd = cmd[:100]
+			}
+			return "exec:" + cmd
+		}
+	}
+	// For other tools, fall back to the parent directory of any "path" field
+	if path, ok := input["path"].(string); ok && path != "" {
+		return toolName + ":" + filepath.Dir(path)
+	}
+	return ""
 }
 
 // ClassifierStageMetrics tracks telemetry for a single classifier stage.
