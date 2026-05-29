@@ -2568,6 +2568,45 @@ func sliceContains(slice []string, val string) bool {
 	return false
 }
 
+// applyMessageHealing applies all DeepSeek-Reasonix healing patterns to messages.
+// This is used in both streaming and non-streaming paths to ensure message integrity.
+// Returns the (potentially modified) messages slice.
+func (a *AgentLoop) applyMessageHealing(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	// Stamp missing tool_call IDs - DeepSeek returns 400 without id
+	if stamped := stampMissingToolCallIDs(messages); stamped > 0 {
+		a.logDebug("[healing] stamped %d missing tool_call IDs\n", stamped)
+	}
+	// Reasoning retention - strip stale reasoning to reduce request size
+	if pruned, dropped := reasoningRetention(messages); pruned > 0 {
+		a.logDebug("[reasoning] pruned %d reasoning blocks (%d chars)\n", pruned, dropped)
+	}
+	// Thinking mode stamping - ensure reasoning_content for thinking models
+	isThinkingMode := strings.Contains(a.config.Model, "reasoner")
+	if stamped := thinkingModeStamping(messages, isThinkingMode); stamped > 0 {
+		a.logDebug("[thinking] stamped %d missing reasoning blocks\n", stamped)
+	}
+	// Token-budget aware shrinking: shrink tool args if request is getting large
+	currentTokens := estimateMessageTokens(messages)
+	maxTokens := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
+	if currentTokens > maxTokens/2 {
+		if healed, saved := shrinkToolCallArgsByTokens(messages, 8000); healed > 0 {
+			a.logDebug("[shrink] shrunk %d tool call args (saved %d chars)\n", healed, saved)
+		}
+		// DeepSeek-Reasonix pattern: shrink oversized tool results to stay within token budgets
+		if healed, saved, _ := shrinkOversizedToolResultsByTokens(messages, 8000); healed > 0 {
+			a.logDebug("[shrink] shrunk %d tool results (saved %d chars)\n", healed, saved)
+		}
+	}
+	// DeepSeek-Reasonix pattern: fix tool call pairing - drop unpaired tool_calls and stray tool results
+	if filtered, droppedCalls, droppedTools := fixToolCallPairing(messages); droppedCalls > 0 || droppedTools > 0 {
+		a.logDebug("[healing] fixed tool pairing: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
+		if filtered != nil {
+			messages = filtered
+		}
+	}
+	return messages
+}
+
 func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, executor *StreamingToolExecutor) ([]map[string]any, []string, error) {
 	const maxStreamRetries = 9 // 1 attempt + 9 retries = 10 total
 
@@ -2592,39 +2631,9 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
-	// DeepSeek-Reasonix healing patterns (cache hit rate optimization):
-	// These are also applied in buildMessageParams (non-streaming path).
-	// Must apply here BEFORE injectCacheEdits/cacheMessageParams to ensure
-	// message integrity — missing these causes API error 2013 in streaming.
-	if stamped := stampMissingToolCallIDs(messages); stamped > 0 {
-		a.logDebug("[healing] stamped %d missing tool_call IDs\n", stamped)
-	}
-	if pruned, dropped := reasoningRetention(messages); pruned > 0 {
-		a.logDebug("[reasoning] pruned %d reasoning blocks (%d chars)\n", pruned, dropped)
-	}
-	isThinkingMode := strings.Contains(a.config.Model, "reasoner")
-	if stamped := thinkingModeStamping(messages, isThinkingMode); stamped > 0 {
-		a.logDebug("[thinking] stamped %d missing reasoning blocks\n", stamped)
-	}
-	// Token-budget aware shrinking: shrink tool args if request is getting large
-	currentTokens := estimateMessageTokens(messages)
-	maxTokens := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
-	if currentTokens > maxTokens/2 {
-		if healed, saved := shrinkToolCallArgsByTokens(messages, 8000); healed > 0 {
-			a.logDebug("[shrink] shrunk %d tool call args (saved %d chars)\n", healed, saved)
-		}
-		// DeepSeek-Reasonix pattern: shrink oversized tool results to stay within token budgets
-		if healed, saved, _ := shrinkOversizedToolResultsByTokens(messages, 8000); healed > 0 {
-			a.logDebug("[shrink] shrunk %d tool results (saved %d chars)\n", healed, saved)
-		}
-	}
-	// DeepSeek-Reasonix pattern: fix tool call pairing - drop unpaired tool_calls and stray tool results
-	if filtered, droppedCalls, droppedTools := fixToolCallPairing(messages); droppedCalls > 0 || droppedTools > 0 {
-		a.logDebug("[healing] fixed tool pairing: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
-		if filtered != nil {
-			messages = filtered
-		}
-	}
+	// Apply all healing patterns before injectCacheEdits/cacheMessageParams.
+	// Missing these causes API error 2013 in streaming mode.
+	messages = a.applyMessageHealing(messages)
 
 	// Pre-populate the cached MC tracker with compactable tool IDs from the
 	// current conversation context. This ensures the tracker knows about tools
@@ -2655,11 +2664,20 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 
 	cacheMessageParams(&params, a.getCacheTTL()) // Anthropic prompt caching (system_and_3)
 
-	// Pre-flight validation: filter empty messages and validate tool pairing.
-	// This catches edge cases where NormalizeAPIMessages' final safety check
-	// was bypassed (e.g., injectCacheEdits or cacheMessageParams modifying
-	// messages after normalization). Empty user messages cause API error 2013.
+	// Pre-flight validation: filter empty messages, enforce role alternation,
+	// and fix tool pairing. Running in this order is critical:
+	// 1) preflightValidateMessages drops empty messages and merges same-role
+	// 2) fixToolCallPairing then cleans up orphaned tool_use/tool_result pairs
+	//    left behind by dropped empty messages
+	// Without step 2, dropping an empty user message that contained tool_result
+	// blocks leaves its matching assistant tool_use orphaned → API error 2013.
 	params.Messages = preflightValidateMessages(params.Messages)
+	if filtered, droppedCalls, droppedTools := fixToolCallPairing(params.Messages); droppedCalls > 0 || droppedTools > 0 {
+		a.logDebug("[preflight-fix] tool pairing: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
+		if filtered != nil {
+			params.Messages = filtered
+		}
+	}
 
 	// Persistent collect handler across retries (tracks partial delivery)
 	collect := NewCollectHandler()
@@ -2751,11 +2769,18 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 				a.context.AddUserMessage("[SYSTEM] The previous response timed out. This usually means the model was trying to produce too much output. Please adapt:\n- Break the task into multiple smaller steps with separate tool calls\n- For long files: first create a skeleton with `write`, then fill sections individually\n- Keep each single tool-call argument well under ~500 lines\n- Do NOT attempt to output the entire deliverable in one response")
 				messages = a.context.BuildMessages()
 				messages = NormalizeAPIMessages(messages)
+				messages = a.applyMessageHealing(messages)
 				a.cachedMC.RegisterCompactableToolIDsFromMessages(messages)
 				messages = a.injectCacheEdits(messages)
 				params.Messages = messages
 				cacheMessageParams(&params, a.getCacheTTL()) // re-apply cache_control on rebuilt messages
 				params.Messages = preflightValidateMessages(params.Messages)
+				if filtered, droppedCalls, droppedTools := fixToolCallPairing(params.Messages); droppedCalls > 0 || droppedTools > 0 {
+					a.logDebug("[preflight-fix] timeout retry: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
+					if filtered != nil {
+						params.Messages = filtered
+					}
+				}
 			}
 
 			// Smart retry decision based on what was already delivered
@@ -3005,40 +3030,8 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 
-	// DeepSeek-Reasonix healing patterns (cache hit rate optimization):
-	// 1. Stamp missing tool_call IDs - DeepSeek returns 400 without id
-	// 2. Reasoning retention - strip stale reasoning to reduce request size
-	// 3. Thinking mode stamping - ensure reasoning_content for thinking models
-	// 4. Shrink oversized tool args - compress long strings to save tokens
-	if stamped := stampMissingToolCallIDs(messages); stamped > 0 {
-		a.logDebug("[healing] stamped %d missing tool_call IDs\n", stamped)
-	}
-	if pruned, dropped := reasoningRetention(messages); pruned > 0 {
-		a.logDebug("[reasoning] pruned %d reasoning blocks (%d chars)\n", pruned, dropped)
-	}
-	isThinkingMode := strings.Contains(a.config.Model, "reasoner")
-	if stamped := thinkingModeStamping(messages, isThinkingMode); stamped > 0 {
-		a.logDebug("[thinking] stamped %d missing reasoning blocks\n", stamped)
-	}
-	// Token-budget aware shrinking: shrink tool args if request is getting large
-	currentTokens := estimateMessageTokens(messages)
-	maxTokens := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
-	if currentTokens > maxTokens/2 {
-		if healed, saved := shrinkToolCallArgsByTokens(messages, 8000); healed > 0 {
-			a.logDebug("[shrink] shrunk %d tool call args (saved %d chars)\n", healed, saved)
-		}
-		// DeepSeek-Reasonix pattern: shrink oversized tool results to stay within token budgets
-		if healed, saved, _ := shrinkOversizedToolResultsByTokens(messages, 8000); healed > 0 {
-			a.logDebug("[shrink] shrunk %d tool results (saved %d chars)\n", healed, saved)
-		}
-	}
-	// DeepSeek-Reasonix pattern: fix tool call pairing - drop unpaired tool_calls and stray tool results
-	if filtered, droppedCalls, droppedTools := fixToolCallPairing(messages); droppedCalls > 0 || droppedTools > 0 {
-		a.logDebug("[healing] fixed tool pairing: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
-		if filtered != nil {
-			messages = filtered
-		}
-	}
+	// Apply all healing patterns to ensure message integrity.
+	messages = a.applyMessageHealing(messages)
 
 	params := anthropic.MessageNewParams{
 		Model:     GetModelForAPI(a.config.Model),
@@ -3051,10 +3044,14 @@ func (a *AgentLoop) buildMessageParams() anthropic.MessageNewParams {
 	}
 	cacheMessageParams(&params, a.getCacheTTL()) // Anthropic prompt caching (system_and_3)
 
-	// Pre-flight validation: filter empty messages that can cause API error 2013
+	// Pre-flight validation + tool pairing fix after cacheMessageParams
 	params.Messages = preflightValidateMessages(params.Messages)
-
-	// Phase 1 of cache break detection: hash current state before the API call
+	if filtered, droppedCalls, droppedTools := fixToolCallPairing(params.Messages); droppedCalls > 0 || droppedTools > 0 {
+		a.logDebug("[preflight-fix] dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
+		if filtered != nil {
+			params.Messages = filtered
+		}
+	}
 	// to enable post-call diagnosis if cache_read drops >5%.
 	sysPrompt := a.context.SystemPrompt()
 	toolNames := make([]string, len(toolParams))
@@ -3099,7 +3096,14 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 	}
 	// NOTE: No tools set -- model can only return text
 	cacheMessageParams(&params, a.getCacheTTL()) // rolling cache for grace call
+	// Pre-flight + tool pairing fix (same as streaming path)
 	params.Messages = preflightValidateMessages(params.Messages)
+	if filtered, droppedCalls, droppedTools := fixToolCallPairing(params.Messages); droppedCalls > 0 || droppedTools > 0 {
+		a.logDebug("[preflight-fix] grace call: dropped %d unpaired calls, %d stray tools\n", droppedCalls, droppedTools)
+		if filtered != nil {
+			params.Messages = filtered
+		}
+	}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -3392,14 +3396,8 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			// Rebuild messages from repaired entries
 			rebuilt := a.context.BuildMessages()
 			rebuilt = NormalizeAPIMessages(rebuilt)
-			// Apply tool call pairing fix on the rebuilt messages to drop any
-			// remaining unpaired tool_use blocks that ValidateToolPairing missed.
-			if filtered, droppedCalls, droppedTools := fixToolCallPairing(rebuilt); droppedCalls > 0 || droppedTools > 0 {
-				a.logDebug("[2013-repair] dropped %d unpaired tool_calls, %d stray tools\n", droppedCalls, droppedTools)
-				if filtered != nil {
-					rebuilt = filtered
-				}
-			}
+			// Apply full healing (stamp IDs, fix pairing, shrink, etc.)
+			rebuilt = a.applyMessageHealing(rebuilt)
 			// Re-inject cache_edits after rebuild
 			rebuilt = a.injectCacheEdits(rebuilt)
 			// Final pre-flight validation after all repairs
