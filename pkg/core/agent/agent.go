@@ -459,44 +459,31 @@ func (s *AgentSession) runTurn() (bool, error) {
 	// Emit before agent start
 	s.eventRunner.EmitBeforeAgentStart(sid, s.config.Model, turnNum)
 
-	// Call LLM
+	// Call LLM — always use non-streaming Complete() so we get the full
+	// response (including tool_use blocks) for processResponse() to parse.
+	// If a stream callback is set, we emit text chunks as they become available.
 	var response string
 	var err error
-	if s.config.EnableStreaming && s.streamCb != nil {
-		err = s.callLLMStreaming(apiMsgs)
-		// For streaming, the response is accumulated via callback.
-		// We still need to get the assistant's final text from messages.
-		if err != nil {
-			return false, err
-		}
-		// After streaming completes, we need the assistant response text.
-		// For now, treat streaming completion as a text response.
-		s.addMessage(extensions.Message{
-			Role: extensions.RoleAssistant,
-			Content: []extensions.ContentBlock{
-				extensions.TextContentBlock("(streaming complete)"),
-			},
-		})
-		s.eventRunner.EmitAgentEnd(sid, s.config.Model, turnNum, "complete", extensions.TokenUsage{}, 0, 0)
-		s.eventRunner.EmitTurnEnd(sid, turnNum, extensions.TokenUsage{}, 0, 0)
-		// Check auto-compact
-		s.mu.Lock()
-		shouldCompact := s.config.AutoCompact && s.turnCount >= s.config.CompactAfter
-		s.mu.Unlock()
-		if shouldCompact {
-			if err := s.Compact(); err != nil {
-				fmt.Printf("[agent] compact error: %v\n", err)
-			}
-			s.mu.Lock()
-			s.turnCount = 0
-			s.mu.Unlock()
-		}
-		return true, nil
-	}
-
 	response, err = s.callLLM(apiMsgs)
 	if err != nil {
 		return false, err
+	}
+
+	// Stream text parts to callback before processing (so user sees output in real time)
+	if s.streamCb != nil {
+		var apiResp struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal([]byte(response), &apiResp) == nil {
+			for _, block := range apiResp.Content {
+				if block.Type == "text" && block.Text != "" {
+					s.streamCb(block.Text)
+				}
+			}
+		}
 	}
 
 	// Process response (tool calls or text)
@@ -690,8 +677,11 @@ func (s *AgentSession) processResponse(response string) (bool, error) {
 
 	// Execute tool calls if any
 	if len(toolCalls) > 0 {
-		// Build content blocks for the assistant message (all tool_use blocks)
-		contentBlocks := make([]extensions.ContentBlock, 0, len(toolCalls))
+		// Build content blocks for the assistant message (text + tool_use blocks)
+		contentBlocks := make([]extensions.ContentBlock, 0, len(textParts)+len(toolCalls))
+		for _, txt := range textParts {
+			contentBlocks = append(contentBlocks, extensions.TextContentBlock(txt))
+		}
 		for _, tc := range toolCalls {
 			contentBlocks = append(contentBlocks, extensions.ContentBlock{
 				Type:      "tool_use",
@@ -732,10 +722,6 @@ func (s *AgentSession) processResponse(response string) (bool, error) {
 
 	// No tool calls — text-only response, print and stop
 	assistantText := strings.Join(textParts, "\n")
-	if assistantText == "" {
-		// Fallback: treat raw response as text
-		assistantText = response
-	}
 
 	s.addMessage(extensions.Message{
 		Role: extensions.RoleAssistant,

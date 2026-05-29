@@ -205,15 +205,13 @@ func (c *HTTPClient) Complete(ctx context.Context, model string, messages []map[
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Extract text content
-	var textParts []string
-	for _, block := range result.Content {
-		if block.Type == "text" && block.Text != "" {
-			textParts = append(textParts, block.Text)
-		}
+	// Return the full response JSON so processResponse() can parse tool_use blocks.
+	// We reconstruct it with the same structure as the API returned.
+	respJSON, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal response: %w", err)
 	}
-
-	return strings.Join(textParts, "\n"), nil
+	return string(respJSON), nil
 }
 
 // CompleteStreaming sends messages to the model and streams the response via callback.
