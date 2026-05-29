@@ -352,8 +352,12 @@ func (s *AgentSession) Run(initialMessage string) error {
 	sid := s.session.GetSessionID()
 	s.eventRunner.EmitSessionStart(sid, s.session.GetSessionFile(), s.config.Model)
 
-	// Inject system prompt as first message
-	if s.systemPrompt != "" {
+	// Inject system prompt only on first Run() call (when messages is empty)
+	s.mu.Lock()
+	isFirstRun := len(s.messages) == 0
+	s.mu.Unlock()
+
+	if isFirstRun && s.systemPrompt != "" {
 		s.addMessage(extensions.Message{
 			Role: extensions.RoleSystem,
 			Content: []extensions.ContentBlock{
