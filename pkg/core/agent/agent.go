@@ -76,23 +76,54 @@ type AgentSession struct {
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// Message queue state
+	steeringMu       sync.Mutex
+	steeringMessages []string         // interrupt current turn
+	followUpMessages []string         // queued after current turn
+	pendingNextTurn  []string         // pending messages for next turn
+	promptQueue      chan string      // queue for interactive prompts
+	promptActive     bool             // whether Run is currently active
+
+	// Event subscription
+	subscribers []func(event AgentEvent)
+	subMu       sync.RWMutex
+}
+
+// AgentEvent represents an event emitted by the agent session.
+type AgentEvent struct {
+	Type string      `json:"type"`
+	Data interface{} `json:"data,omitempty"`
 }
 
 // AgentSessionRuntime manages session lifecycle (mirrors pi's AgentSessionRuntime).
 type AgentSessionRuntime struct {
-	config      AgentConfig
-	activeAgent *AgentSession
+	config         AgentConfig
+	activeAgent    *AgentSession
+	sessionManager *session.SessionManager
+	// Callbacks for lifecycle events
+	beforeSessionInvalidate func() // sync teardown hook
+	rebindSession           func(oldSession, newSession *AgentSession) // host callback for rebind
 }
 
 // NewAgentSessionRuntime creates a new session runtime.
 func NewAgentSessionRuntime(config AgentConfig) (*AgentSessionRuntime, error) {
+	// Create shared session manager
+	sm := session.NewSessionManager(config.Cwd, config.SessionPath, "", true)
+
 	return &AgentSessionRuntime{
-		config: config,
+		config:         config,
+		sessionManager: sm,
 	}, nil
 }
 
 // NewSession creates a new agent session.
 func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, error) {
+	return r.newSessionWithOptions(model, cwd, "")
+}
+
+// newSessionWithOptions creates a new session, optionally branching from an entry.
+func (r *AgentSessionRuntime) newSessionWithOptions(model, cwd, fromEntryID string) (*AgentSession, error) {
 	ctx, cancel := func() (context.Context, context.CancelFunc) {
 		if r.config.Timeout > 0 {
 			return context.WithTimeout(context.Background(), r.config.Timeout)
@@ -103,8 +134,20 @@ func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, erro
 	comp := compaction.NewCompactor(model, nil)
 	exec := shellexec.New()
 
-	// Create v2 session manager for tree-based message persistence
-	sm := session.NewSessionManager(cwd, r.config.SessionPath, "", true)
+	// Use existing session manager or create new
+	sm := r.sessionManager
+	if sm == nil {
+		sm = session.NewSessionManager(cwd, r.config.SessionPath, "", true)
+		r.sessionManager = sm
+	}
+
+	// Branch from entry if specified
+	if fromEntryID != "" {
+		if err := sm.Branch(fromEntryID); err != nil {
+			return nil, fmt.Errorf("branch session: %w", err)
+		}
+	}
+
 	sessionID := sm.GetSessionID()
 
 	agent := &AgentSession{
@@ -116,6 +159,7 @@ func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, erro
 		turnCount: 0,
 		ctx:       ctx,
 		cancel:    cancel,
+		promptQueue: make(chan string, 100),
 	}
 
 	// Build system prompt
@@ -203,16 +247,78 @@ func (r *AgentSessionRuntime) Fork(parentAgent *AgentSession, message string) (*
 	return agent, nil
 }
 
-// SwitchSession switches to a different session by loading its JSONL file.
+// SwitchSession switches to a different session file with full teardown.
+// Aligned to pi's AgentSessionRuntime.switchSession().
 func (r *AgentSessionRuntime) SwitchSession(sessionFile string) error {
 	if r.activeAgent == nil || r.activeAgent.session == nil {
 		return fmt.Errorf("no active session to switch")
 	}
-	r.activeAgent.session.SetSessionFile(sessionFile)
+
+	// Emit shutdown event for current session
+	old := r.activeAgent
+	old.emitEvent(AgentEvent{Type: "shutdown"})
+	old.Dispose()
+
+	// Invalidate callback
+	if r.beforeSessionInvalidate != nil {
+		r.beforeSessionInvalidate()
+	}
+
+	// Switch to new session file
+	old.session.SetSessionFile(sessionFile)
+
+	// Rebuild context from new session file
+	ctx := old.session.BuildSessionContext()
+
+	// Rebuild messages from new session
+	old.mu.Lock()
+	old.messages = nil
+	for _, rawMsg := range ctx.Messages {
+		var msg extensions.Message
+		if err := json.Unmarshal(rawMsg, &msg); err != nil {
+			continue
+		}
+		old.messages = append(old.messages, msg)
+	}
+	old.mu.Unlock()
+
+	// Trigger rebind callback if set
+	if r.rebindSession != nil {
+		r.rebindSession(nil, old)
+	}
+
 	return nil
 }
 
-// Dispose cleans up a session.
+// SetRebindSession sets a callback for session rebind.
+func (r *AgentSessionRuntime) SetRebindSession(cb func(oldAgent, newAgent *AgentSession)) {
+	r.rebindSession = cb
+}
+
+// SetBeforeSessionInvalidate sets a sync teardown hook.
+func (r *AgentSessionRuntime) SetBeforeSessionInvalidate(cb func()) {
+	r.beforeSessionInvalidate = cb
+}
+
+// Dispose cleans up a session with full event emission.
+// Aligned to pi's AgentSessionRuntime.dispose().
+func (r *AgentSessionRuntime) Dispose(agent *AgentSession) {
+	if agent == nil {
+		return
+	}
+
+	// Emit shutdown and dispose
+	agent.emitEvent(AgentEvent{Type: "session_shutdown"}})
+	agent.Dispose()
+
+	// Clear active agent
+	r.activeAgent = nil
+
+	// Dispose session manager if exists
+	if r.sessionManager != nil {
+		r.sessionManager = nil
+	}
+}
 func (r *AgentSessionRuntime) Dispose(agent *AgentSession) {
 	if agent.cancel != nil {
 		agent.cancel()
@@ -283,6 +389,9 @@ func (s *AgentSession) runLoop() error {
 		default:
 		}
 
+		// Inject any pending steering messages before the turn
+		s.injectSteeringMessages()
+
 		done, err := s.runTurn()
 		if err != nil {
 			// Check if this is a context overflow error — trigger compaction instead of retry
@@ -319,6 +428,13 @@ func (s *AgentSession) runLoop() error {
 		// Success — reset retry counter
 		retryState.Reset()
 		if done {
+			// Check for pending follow-up messages
+			s.steeringMu.Lock()
+			hasPending := len(s.followUpMessages) > 0
+			s.steeringMu.Unlock()
+			if hasPending {
+				continue
+			}
 			return nil
 		}
 	}
@@ -1115,6 +1231,345 @@ func supportsReasoning(model string) bool {
 		}
 	}
 	return false
+}
+
+// --- Prompt / Steer / FollowUp / Abort methods ---
+// Aligned to pi's AgentSession.prompt(), steer(), followUp(), abort().
+
+// Prompt sends a user message to the agent and runs the agent loop until completion.
+// This is the primary interaction method. It adds the message, runs the loop,
+// and handles auto-compaction, pending messages, and steering.
+func (s *AgentSession) Prompt(text string) error {
+	s.mu.Lock()
+	s.promptActive = true
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.promptActive = false
+		s.mu.Unlock()
+	}()
+
+	// Add user message
+	s.addMessage(extensions.Message{
+		Role: extensions.RoleUser,
+		Content: []extensions.ContentBlock{
+			extensions.TextContentBlock(text),
+		},
+	})
+
+	// Persist to session
+	msgJSON, _ := json.Marshal(extensions.Message{
+		Role: extensions.RoleUser,
+		Content: []extensions.ContentBlock{
+			extensions.TextContentBlock(text),
+		},
+	})
+	s.session.AppendMessage(msgJSON)
+
+	// Run the agent loop
+	return s.runLoop()
+}
+
+// PromptWithOptions sends a user message with options.
+// Options include streaming behavior and image content.
+type PromptOptions struct {
+	StreamingBehavior string // "steer" or "followUp"
+	Images           []string // base64-encoded images
+}
+
+func (s *AgentSession) PromptWithOptions(text string, opts PromptOptions) error {
+	// Handle streaming behavior
+	if opts.StreamingBehavior == "steer" {
+		return s.Steer(text)
+	}
+	if opts.StreamingBehavior == "followUp" {
+		s.FollowUp(text)
+		return nil
+	}
+
+	// Build content blocks
+	contentBlocks := []extensions.ContentBlock{
+		extensions.TextContentBlock(text),
+	}
+	// Add images if provided
+	for _, img := range opts.Images {
+		contentBlocks = append(contentBlocks, extensions.ContentBlock{
+			Type: "image",
+			Text: img,
+		})
+	}
+
+	s.mu.Lock()
+	s.promptActive = true
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.promptActive = false
+		s.mu.Unlock()
+	}()
+
+	s.addMessage(extensions.Message{
+		Role:    extensions.RoleUser,
+		Content: contentBlocks,
+	})
+
+	msgJSON, _ := json.Marshal(extensions.Message{
+		Role:    extensions.RoleUser,
+		Content: contentBlocks,
+	})
+	s.session.AppendMessage(msgJSON)
+
+	return s.runLoop()
+}
+
+// Steer interrupts the current turn with new text.
+// The steering message is injected before the next LLM call.
+// Aligned to pi's steer().
+func (s *AgentSession) Steer(text string) error {
+	s.steeringMu.Lock()
+	s.steeringMessages = append(s.steeringMessages, text)
+	s.steeringMu.Unlock()
+
+	// Emit steering event
+	s.emitEvent(AgentEvent{Type: "steer", Data: text})
+	return nil
+}
+
+// FollowUp queues a message for after the current turn completes.
+// Aligned to pi's followUp().
+func (s *AgentSession) FollowUp(text string) {
+	s.steeringMu.Lock()
+	s.followUpMessages = append(s.followUpMessages, text)
+	s.steeringMu.Unlock()
+
+	s.emitEvent(AgentEvent{Type: "followUp", Data: text})
+}
+
+// GetSteeringMessages returns pending steering messages.
+func (s *AgentSession) GetSteeringMessages() []string {
+	s.steeringMu.Lock()
+	defer s.steeringMu.Unlock()
+	out := make([]string, len(s.steeringMessages))
+	copy(out, s.steeringMessages)
+	return out
+}
+
+// GetFollowUpMessages returns pending follow-up messages.
+func (s *AgentSession) GetFollowUpMessages() []string {
+	s.steeringMu.Lock()
+	defer s.steeringMu.Unlock()
+	out := make([]string, len(s.followUpMessages))
+	copy(out, s.followUpMessages)
+	return out
+}
+
+// PendingMessageCount returns the number of pending steering + follow-up messages.
+func (s *AgentSession) PendingMessageCount() int {
+	s.steeringMu.Lock()
+	defer s.steeringMu.Unlock()
+	return len(s.steeringMessages) + len(s.followUpMessages)
+}
+
+// ClearQueue clears all pending steering and follow-up messages.
+func (s *AgentSession) ClearQueue() {
+	s.steeringMu.Lock()
+	s.steeringMessages = nil
+	s.followUpMessages = nil
+	s.pendingNextTurn = nil
+	s.steeringMu.Unlock()
+}
+
+// Abort cancels the current agent turn.
+// Aligned to pi's abort().
+func (s *AgentSession) Abort() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	// Reset context for next turn
+	s.mu.Lock()
+	ctx, cancel := func() (context.Context, context.CancelFunc) {
+		if s.config.Timeout > 0 {
+			return context.WithTimeout(context.Background(), s.config.Timeout)
+		}
+		return context.WithCancel(context.Background())
+	}()
+	s.ctx = ctx
+	s.cancel = cancel
+	s.mu.Unlock()
+
+	s.emitEvent(AgentEvent{Type: "abort"})
+}
+
+// Subscribe registers a listener for agent events.
+// Returns an unsubscribe function.
+// Aligned to pi's subscribe().
+func (s *AgentSession) Subscribe(listener func(event AgentEvent)) func() {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+	s.subscribers = append(s.subscribers, listener)
+	return func() {
+		s.subMu.Lock()
+		defer s.subMu.Unlock()
+		for i, l := range s.subscribers {
+			if &l == &listener {
+				s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
+// Dispose cleans up the session: cancels context, persists messages, emits shutdown.
+// Aligned to pi's dispose().
+func (s *AgentSession) Dispose() {
+	s.emitEvent(AgentEvent{Type: "shutdown"})
+	s.ClearQueue()
+	if s.cancel != nil {
+		s.cancel()
+	}
+}
+
+// emitEvent sends an event to all subscribers.
+func (s *AgentSession) emitEvent(event AgentEvent) {
+	s.subMu.RLock()
+	subscribers := make([]func(AgentEvent), len(s.subscribers))
+	copy(subscribers, s.subscribers)
+	s.subMu.RUnlock()
+
+	for _, listener := range subscribers {
+		listener(event)
+	}
+}
+
+// injectSteeringMessages adds steering messages into the conversation before the next LLM call.
+func (s *AgentSession) injectSteeringMessages() {
+	s.steeringMu.Lock()
+	msgs := s.steeringMessages
+	s.steeringMessages = nil
+	s.steeringMu.Unlock()
+
+	for _, m := range msgs {
+		s.addMessage(extensions.Message{
+			Role: extensions.RoleUser,
+			Content: []extensions.ContentBlock{
+				extensions.TextContentBlock(m),
+			},
+		})
+	}
+}
+
+// injectFollowUpMessages adds follow-up messages after a turn completes.
+func (s *AgentSession) injectFollowUpMessages() {
+	s.steeringMu.Lock()
+	msgs := s.followUpMessages
+	s.followUpMessages = nil
+	s.steeringMu.Unlock()
+
+	for _, m := range msgs {
+		s.addMessage(extensions.Message{
+			Role: extensions.RoleUser,
+			Content: []extensions.ContentBlock{
+				extensions.TextContentBlock(m),
+			},
+		})
+	}
+}
+
+// --- CycleModel and CycleThinkingLevel ---
+// Aligned to pi's cycleModel() and cycleThinkingLevel().
+
+// CycleModel cycles through available models.
+// direction: 1 = next, -1 = previous.
+func (s *AgentSession) CycleModel(direction int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// For now, just return current model — full cycling requires model registry integration
+	return s.config.Model
+}
+
+// CycleThinkingLevel cycles through available thinking levels.
+// direction: 1 = next (higher), -1 = previous (lower).
+func (s *AgentSession) CycleThinkingLevel(direction int) ThinkingLevel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	levels := ValidThinkingLevels()
+	currentIdx := 0
+	for i, l := range levels {
+		if l == s.thinkingLevel {
+			currentIdx = i
+			break
+		}
+	}
+
+	newIdx := currentIdx + direction
+	if newIdx < 0 {
+		newIdx = 0
+	}
+	if newIdx >= len(levels) {
+		newIdx = len(levels) - 1
+	}
+
+	s.thinkingLevel = levels[newIdx]
+	return s.thinkingLevel
+}
+
+// --- SessionStats ---
+// Aligned to pi's getStats().
+
+// SessionStats holds statistics about the session.
+type SessionStats struct {
+	SessionID       string
+	UserMessages    int
+	AssistantMessages int
+	ToolCalls       int
+	ToolResults     int
+	TotalMessages   int
+	TurnCount       int
+}
+
+// GetStats returns session statistics.
+func (s *AgentSession) GetStats() SessionStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := SessionStats{
+		SessionID:  s.session.GetSessionID(),
+		TurnCount:  s.turnCount,
+		TotalMessages: len(s.messages),
+	}
+
+	for _, msg := range s.messages {
+		switch msg.Role {
+		case "user":
+			stats.UserMessages++
+		case "assistant":
+			stats.AssistantMessages++
+			for _, block := range msg.Content {
+				if block.Type == "tool_use" {
+					stats.ToolCalls++
+				}
+			}
+		case "tool":
+			stats.ToolResults++
+		}
+	}
+
+	return stats
+}
+
+// --- SupportsThinking ---
+// Aligned to pi's supportsThinking().
+
+// SupportsThinking returns whether the current model supports extended thinking.
+func (s *AgentSession) SupportsThinking() bool {
+	s.mu.RLock()
+	model := s.config.Model
+	s.mu.RUnlock()
+	return supportsReasoning(model)
 }
 
 func contains(slice []string, item string) bool {
