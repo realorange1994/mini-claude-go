@@ -2794,6 +2794,14 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 	if thinkOpt := a.thinkingClearOption(); thinkOpt != nil {
 		streamOpts = append(streamOpts, thinkOpt)
 	}
+
+	// DEBUG: dump messages right before streaming API call
+	for i, msg := range params.Messages {
+		if len(msg.Content) == 0 {
+			a.logDebug("[stream-api] msg[%d] role=%s blocks=0 (EMPTY)\n", i, msg.Role)
+		}
+	}
+
 	stream := a.client.Messages.NewStreaming(ctx, params, streamOpts...)
 	if err := adapter.Process(stream, cancel); err != nil {
 		a.lastDeltasState = adapter.DeltasState() // record what was streamed before error
@@ -3075,6 +3083,14 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 		if thinkOpt := a.thinkingClearOption(); thinkOpt != nil {
 			opts = append(opts, thinkOpt)
 		}
+
+		// DEBUG: dump messages right before API call to diagnose 2013 errors
+		for i, msg := range params.Messages {
+			if len(msg.Content) == 0 {
+				a.out("[api-send] msg[%d] role=%s blocks=0 (EMPTY!)\n", i, msg.Role)
+			}
+		}
+
 		response, err := a.client.Messages.New(ctx, params, opts...)
 		cancel()
 
@@ -3220,6 +3236,14 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 		if thinkOpt := a.thinkingClearOption(); thinkOpt != nil {
 			opts = append(opts, thinkOpt)
 		}
+
+		// DEBUG: dump messages right before API call to diagnose 2013 errors
+		for i, msg := range params.Messages {
+			if len(msg.Content) == 0 {
+				a.out("[api-send] msg[%d] role=%s blocks=0 (EMPTY!)\n", i, msg.Role)
+			}
+		}
+
 		response, err := a.client.Messages.New(ctx, params, opts...)
 		cancel()
 
