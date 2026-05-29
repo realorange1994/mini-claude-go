@@ -85,19 +85,23 @@ func getShell() (shell string, arg string) {
 	}
 }
 
-// isBackgroundCommand checks if a shell command ends with a background operator.
+// isBackgroundCommand checks if a shell command runs in the background.
+// Detects Unix-style "cmd &" and Windows-style "start" / "start /B" commands.
 func isBackgroundCommand(cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
 	if len(trimmed) < 2 {
 		return false
 	}
-	if trimmed[len(trimmed)-1] != '&' {
-		return false
+	// Unix: command ending with & (but not &&)
+	if trimmed[len(trimmed)-1] == '&' && trimmed[len(trimmed)-2] != '&' {
+		return true
 	}
-	if trimmed[len(trimmed)-2] == '&' {
-		return false // && (logical AND)
+	// Windows: start or start /B
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "start ") || strings.HasPrefix(lower, "start\t") {
+		return true
 	}
-	return true
+	return false
 }
 
 // Execute performs the Bash operation.
@@ -135,9 +139,19 @@ func executeLocalCommand(ctx context.Context, cmd, cwd string, env map[string]st
 	shell, shellArg := getShell()
 	execCmd := cmd
 
-	// For background commands, wrap in subshell
+	// For background commands, handle platform differences
 	if isBackgroundCommand(cmd) {
-		execCmd = "( " + strings.TrimSpace(cmd) + " )"
+		trimmed := strings.TrimSpace(cmd)
+		lower := strings.ToLower(trimmed)
+		if runtime.GOOS == "windows" && (strings.HasPrefix(lower, "start ") || strings.HasPrefix(lower, "start\t")) {
+			// Windows start command: use cmd.exe directly and return immediately
+			shell = "cmd.exe"
+			shellArg = "/c"
+			execCmd = trimmed
+		} else {
+			// Unix-style & backgrounding: wrap in subshell
+			execCmd = "( " + strings.TrimSpace(cmd) + " )"
+		}
 	}
 
 	command := exec.CommandContext(ctx, shell, shellArg, execCmd)
@@ -169,6 +183,21 @@ func executeLocalCommand(ctx context.Context, cmd, cwd string, env map[string]st
 
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start command: %w", err)
+	}
+
+	// For background commands, return immediately after starting.
+	if isBackgroundCommand(cmd) {
+		pid := command.Process.Pid
+		durationMs := time.Since(start).Milliseconds()
+		stdoutPipe.Close()
+		stderrPipe.Close()
+		return &BashResult{
+			Stdout: fmt.Sprintf("[Background process started, PID: %d]", pid),
+			Details: BashDetails{
+				DurationMs: durationMs,
+				ExitCode:   0,
+			},
+		}, nil
 	}
 
 	// Stream stdout and stderr concurrently
