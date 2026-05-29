@@ -47,7 +47,7 @@ func TestExecute(t *testing.T) {
 	// Test Read tool execution
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
-	os.WriteFile(testFile, []byte("hello world"), 0644)
+	os.WriteFile(testFile, []byte("hello world\n"), 0644)
 
 	result, err := reg.Execute("Read", map[string]interface{}{
 		"path": testFile,
@@ -55,8 +55,8 @@ func TestExecute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read tool error: %v", err)
 	}
-	if result != "hello world" {
-		t.Errorf("Read result = %q, want %q", result, "hello world")
+	if result != "hello world\n" {
+		t.Errorf("Read result = %q, want %q", result, "hello world\n")
 	}
 }
 
@@ -78,15 +78,16 @@ func TestExecute_WriteAndRead(t *testing.T) {
 		t.Error("Write tool returned empty result")
 	}
 
-	// Read back
+	// Read back — write without newline, read adds one
 	readResult, err := reg.Execute("Read", map[string]interface{}{
 		"path": testFile,
 	})
 	if err != nil {
 		t.Fatalf("Read tool error: %v", err)
 	}
-	if readResult != "test content for write and read" {
-		t.Errorf("Read result = %q, want %q", readResult, "test content for write and read")
+	expected := "test content for write and read\n"
+	if readResult != expected {
+		t.Errorf("Read result = %q, want %q", readResult, expected)
 	}
 }
 
