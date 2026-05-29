@@ -524,3 +524,339 @@ func (lc *LLMCompactor) GenerateSummary(ctx context.Context, messages []string, 
 func (lc *LLMCompactor) ShouldUseLLMCompaction(messages []string) bool {
 	return lc.llmClient != nil && len(messages) > 5
 }
+
+// ---------------------------------------------------------------------------
+// TS-aligned compaction: cut points, preparation, and compact()
+// ---------------------------------------------------------------------------
+
+const (
+	// ESTIMATED_IMAGE_CHARS is the estimated token cost per image block.
+	ESTIMATED_IMAGE_CHARS = 4800
+
+	// TURN_PREFIX_SUMMARIZATION_PROMPT is used when splitting a mid-turn.
+	TURN_PREFIX_SUMMARIZATION_PROMPT = `Summarize the early part of this conversation turn (before it was interrupted by context limits). Focus on:
+
+- Original Request: What the user asked for
+- Early Progress: What was accomplished before the split
+- Context for Suffix: What the next part of the turn needs to know
+
+Keep it concise. Preserve exact file paths and error messages.`
+)
+
+// CompactionSettings holds runtime configuration for compaction.
+// Aligned to TS CompactionSettings.
+type CompactionSettings struct {
+	Enabled        bool
+	ReserveTokens  int
+	KeepRecentTokens int
+}
+
+// DefaultCompactionSettings is the default configuration.
+var DefaultCompactionSettings = CompactionSettings{
+	Enabled:        true,
+	ReserveTokens:  16384,
+	KeepRecentTokens: 20000,
+}
+
+// CompactionResult is returned by Compact().
+type CompactionResult struct {
+	Summary          string
+	FirstKeptEntryID string
+	TokensBefore     int
+	ReadFiles        []string
+	ModifiedFiles    []string
+}
+
+// CutPointResult is returned by FindCutPoint().
+type CutPointResult struct {
+	FirstKeptEntryIndex int
+	TurnStartIndex      int
+	IsSplitTurn         bool
+}
+
+// FileOperations tracks read/modified files across compaction.
+type FileOperations struct {
+	ReadFiles    []string
+	ModifiedFiles []string
+}
+
+// CompactionPreparation holds prepared data for the main compaction.
+type CompactionPreparation struct {
+	FirstKeptEntryID  string
+	MessagesToSummarize []string
+	TurnPrefixMessages  []string
+	IsSplitTurn         bool
+	TokensBefore        int
+	PreviousSummary     string
+	FileOps             FileOperations
+	Settings            CompactionSettings
+}
+
+// SessionEntryType represents the type of a session entry.
+type SessionEntryType string
+
+const (
+	EntryTypeMessage       SessionEntryType = "message"
+	EntryTypeCustomMessage SessionEntryType = "custom_message"
+	EntryTypeBranchSummary SessionEntryType = "branch_summary"
+	EntryTypeCompaction    SessionEntryType = "compaction"
+	EntryTypeBashExecution SessionEntryType = "bash_execution"
+	EntryTypeToolResult    SessionEntryType = "tool_result"
+	EntryTypeSettings      SessionEntryType = "settings_change"
+)
+
+// SessionEntry represents a session entry for compaction purposes.
+type SessionEntry struct {
+	ID       string
+	Type     SessionEntryType
+	Content  string   // extracted text content
+	Messages []string // for message entries, the raw messages
+	Details  map[string]any
+}
+
+// extractFileOperations collects read/modified files from messages and previous compaction details.
+func extractFileOps(entries []SessionEntry, prevCompactionIdx int) FileOperations {
+	readSet := make(map[string]bool)
+	modSet := make(map[string]bool)
+
+	// Collect from previous compaction details
+	for i := prevCompactionIdx; i < len(entries); i++ {
+		if entries[i].Details != nil {
+			if rf, ok := entries[i].Details["readFiles"].([]string); ok {
+				for _, f := range rf {
+					readSet[f] = true
+				}
+			}
+			if mf, ok := entries[i].Details["modifiedFiles"].([]string); ok {
+				for _, f := range mf {
+					modSet[f] = true
+				}
+			}
+		}
+	}
+
+	// Collect from tool calls in messages
+	for _, e := range entries {
+		for _, msg := range e.Messages {
+			files := extractFileReferences([]string{msg})
+			for _, f := range files {
+				// Heuristic: files in tool results are "read", files in tool calls are "modified"
+				if e.Type == EntryTypeToolResult {
+					readSet[f] = true
+				} else if e.Type == EntryTypeMessage {
+					modSet[f] = true
+				}
+			}
+		}
+	}
+
+	readFiles := make([]string, 0, len(readSet))
+	for f := range readSet {
+		readFiles = append(readFiles, f)
+	}
+	modFiles := make([]string, 0, len(modSet))
+	for f := range modSet {
+		modFiles = append(modFiles, f)
+	}
+
+	return FileOperations{ReadFiles: readFiles, ModifiedFiles: modFiles}
+}
+
+// findValidCutPoints returns indices of entries that are valid cut points.
+// Never cuts at toolResult entries.
+func findValidCutPoints(entries []SessionEntry, startIndex, endIndex int) []int {
+	var cuts []int
+	for i := startIndex; i < endIndex; i++ {
+		switch entries[i].Type {
+		case EntryTypeMessage, EntryTypeCustomMessage, EntryTypeBranchSummary,
+			EntryTypeCompaction, EntryTypeBashExecution:
+			cuts = append(cuts, i)
+		// tool_result is NOT a valid cut point
+		}
+	}
+	return cuts
+}
+
+// findTurnStartIndex walks backwards from entryIndex to find the user/bash/branch/custom
+// message that started the current turn.
+func findTurnStartIndex(entries []SessionEntry, entryIndex, startIndex int) int {
+	for i := entryIndex; i >= startIndex; i-- {
+		switch entries[i].Type {
+		case EntryTypeMessage:
+			return i
+		case EntryTypeBashExecution, EntryTypeBranchSummary, EntryTypeCustomMessage:
+			return i
+		}
+	}
+	return startIndex
+}
+
+// FindCutPoint finds where to cut the conversation for compaction.
+// Aligned to TS findCutPoint().
+func FindCutPoint(entries []SessionEntry, startIndex, endIndex int, keepRecentTokens int) CutPointResult {
+	validCuts := findValidCutPoints(entries, startIndex, endIndex)
+	cutSet := make(map[int]bool)
+	for _, c := range validCuts {
+		cutSet[c] = true
+	}
+
+	// Walk backwards accumulating tokens
+	accumulated := 0
+	cutIdx := endIndex - 1
+
+	for i := endIndex - 1; i >= startIndex; i-- {
+		accumulated += estimateTokens(entries[i].Content)
+		if accumulated > keepRecentTokens {
+			// Find closest valid cut point at or after this position
+			for j := i; j < endIndex; j++ {
+				if cutSet[j] {
+					cutIdx = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	// Walk backwards from cutIdx to include non-message entries
+	firstKept := cutIdx
+	for i := cutIdx - 1; i >= startIndex; i-- {
+		if entries[i].Type == EntryTypeCompaction {
+			break
+		}
+		// Include settings, bash, etc. until we hit a message
+		if entries[i].Type == EntryTypeMessage || entries[i].Type == EntryTypeBashExecution ||
+			entries[i].Type == EntryTypeBranchSummary || entries[i].Type == EntryTypeCustomMessage {
+			break
+		}
+		firstKept = i
+	}
+
+	// Determine if this is a split turn
+	isSplitTurn := false
+	turnStartIdx := firstKept
+
+	if firstKept < endIndex {
+		// If the cut entry is not a user message, we're splitting a turn
+		if entries[firstKept].Type != EntryTypeMessage {
+			isSplitTurn = true
+			turnStartIdx = findTurnStartIndex(entries, firstKept, startIndex)
+		}
+	}
+
+	return CutPointResult{
+		FirstKeptEntryIndex: firstKept,
+		TurnStartIndex:      turnStartIdx,
+		IsSplitTurn:         isSplitTurn,
+	}
+}
+
+// estimateContextTokensWithUsage finds the last assistant usage and estimates
+// base tokens + trailing message tokens.
+func estimateContextTokensWithUsage(entries []SessionEntry) (tokens, usageTokens, trailingTokens, lastUsageIdx int) {
+	lastUsageIdx = -1
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type == EntryTypeMessage && entries[i].Details != nil {
+			if usage, ok := entries[i].Details["usage"].(map[string]any); ok {
+				if totalTokens, ok := usage["totalTokens"].(float64); ok {
+					tokens = int(totalTokens)
+					lastUsageIdx = i
+					break
+				}
+			}
+		}
+	}
+	usageTokens = tokens
+
+	// Estimate trailing messages after last usage
+	if lastUsageIdx >= 0 {
+		for i := lastUsageIdx + 1; i < len(entries); i++ {
+			trailingTokens += estimateTokens(entries[i].Content)
+		}
+		tokens += trailingTokens
+	}
+	return
+}
+
+// ShouldCompact checks if context tokens exceed the compaction threshold.
+func ShouldCompact(contextTokens int, contextWindow int, settings CompactionSettings) bool {
+	return contextTokens > contextWindow-settings.ReserveTokens
+}
+
+// PrepareCompaction prepares data for the main compaction.
+// Returns nil if the last entry is already a compaction or migration is needed.
+func PrepareCompaction(entries []SessionEntry, settings CompactionSettings) *CompactionPreparation {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Find previous compaction entry
+	prevCompactionIdx := -1
+	var previousSummary string
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type == EntryTypeCompaction {
+			prevCompactionIdx = i
+			if s, ok := entries[i].Details["summary"].(string); ok {
+				previousSummary = s
+			}
+			break
+		}
+	}
+
+	// If the last entry is already a compaction, no need to compact
+	if len(entries) > 0 && entries[len(entries)-1].Type == EntryTypeCompaction {
+		return nil
+	}
+
+	boundaryStart := 0
+	if prevCompactionIdx >= 0 {
+		boundaryStart = prevCompactionIdx + 1
+	}
+	boundaryEnd := len(entries)
+
+	if boundaryStart >= boundaryEnd {
+		return nil
+	}
+
+	// Compute tokens before compaction
+	tokensBefore, _, _, _ := estimateContextTokensWithUsage(entries)
+
+	// Find cut point
+	cutResult := FindCutPoint(entries, boundaryStart, boundaryEnd, settings.KeepRecentTokens)
+
+	// Collect messages to summarize
+	var messagesToSummarize []string
+	for i := boundaryStart; i < cutResult.FirstKeptEntryIndex; i++ {
+		messagesToSummarize = append(messagesToSummarize, entries[i].Messages...)
+	}
+
+	// If splitting a turn, collect turn prefix messages
+	var turnPrefixMessages []string
+	if cutResult.IsSplitTurn {
+		for i := cutResult.TurnStartIndex; i < cutResult.FirstKeptEntryIndex; i++ {
+			turnPrefixMessages = append(turnPrefixMessages, entries[i].Messages...)
+		}
+	}
+
+	// Extract file operations
+	fileOps := extractFileOps(entries, prevCompactionIdx)
+
+	return &CompactionPreparation{
+		FirstKeptEntryID:    entries[cutResult.FirstKeptEntryIndex].ID,
+		MessagesToSummarize: messagesToSummarize,
+		TurnPrefixMessages:  turnPrefixMessages,
+		IsSplitTurn:         cutResult.IsSplitTurn,
+		TokensBefore:        tokensBefore,
+		PreviousSummary:     previousSummary,
+		FileOps:             fileOps,
+		Settings:            settings,
+	}
+}
+
+// formatFileList formats a list of files into a compact string.
+func formatFileList(files []string) string {
+	if len(files) == 0 {
+		return "(none)"
+	}
+	return strings.Join(files, ", ")
+}

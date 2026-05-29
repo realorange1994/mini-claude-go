@@ -308,7 +308,7 @@ func (r *AgentSessionRuntime) Dispose(agent *AgentSession) {
 	}
 
 	// Emit shutdown and dispose
-	agent.emitEvent(AgentEvent{Type: "session_shutdown"}})
+	agent.emitEvent(AgentEvent{Type: "session_shutdown"})
 	agent.Dispose()
 
 	// Clear active agent
@@ -317,11 +317,6 @@ func (r *AgentSessionRuntime) Dispose(agent *AgentSession) {
 	// Dispose session manager if exists
 	if r.sessionManager != nil {
 		r.sessionManager = nil
-	}
-}
-func (r *AgentSessionRuntime) Dispose(agent *AgentSession) {
-	if agent.cancel != nil {
-		agent.cancel()
 	}
 }
 

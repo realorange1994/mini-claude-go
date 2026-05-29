@@ -125,11 +125,16 @@ func (m *ToolResultMessage) IsError() bool { return m.isError }
 
 // BashExecutionMessage is a custom message type for bash execution results.
 type BashExecutionMessage struct {
-	command  string
-	stdout   string
-	stderr   string
-	exitCode int
-	duration time.Duration
+	command            string
+	stdout             string
+	stderr             string
+	exitCode           int
+	duration           time.Duration
+	cancelled          bool
+	truncated          bool
+	fullOutputPath     string
+	excludeFromContext bool // !! prefix
+	timestamp          int64
 }
 
 // NewBashExecutionMessage creates a new BashExecutionMessage.
@@ -168,6 +173,36 @@ func (m *BashExecutionMessage) SetDuration(d time.Duration) { m.duration = d }
 // IsSuccess returns true if the exit code is 0.
 func (m *BashExecutionMessage) IsSuccess() bool { return m.exitCode == 0 }
 
+// Cancelled returns whether the command was cancelled.
+func (m *BashExecutionMessage) Cancelled() bool { return m.cancelled }
+
+// SetCancelled sets whether the command was cancelled.
+func (m *BashExecutionMessage) SetCancelled(v bool) { m.cancelled = v }
+
+// Truncated returns whether the output was truncated.
+func (m *BashExecutionMessage) Truncated() bool { return m.truncated }
+
+// SetTruncated sets whether the output was truncated.
+func (m *BashExecutionMessage) SetTruncated(v bool) { m.truncated = v }
+
+// FullOutputPath returns the path to the full output file.
+func (m *BashExecutionMessage) FullOutputPath() string { return m.fullOutputPath }
+
+// SetFullOutputPath sets the path to the full output file.
+func (m *BashExecutionMessage) SetFullOutputPath(v string) { m.fullOutputPath = v }
+
+// ExcludeFromContext returns whether this message should be excluded from LLM context.
+func (m *BashExecutionMessage) ExcludeFromContext() bool { return m.excludeFromContext }
+
+// SetExcludeFromContext sets whether to exclude from LLM context.
+func (m *BashExecutionMessage) SetExcludeFromContext(v bool) { m.excludeFromContext = v }
+
+// Timestamp returns the Unix timestamp.
+func (m *BashExecutionMessage) GetTimestamp() int64 { return m.timestamp }
+
+// SetTimestamp sets the Unix timestamp.
+func (m *BashExecutionMessage) SetTimestamp(v int64) { m.timestamp = v }
+
 // FormattedOutput returns a human-readable summary of the execution.
 func (m *BashExecutionMessage) FormattedOutput() string {
 	out := fmt.Sprintf("$ %s\n", m.command)
@@ -189,9 +224,13 @@ func (m *BashExecutionMessage) FormattedOutput() string {
 
 // CustomMessage is a user-defined custom message with arbitrary data.
 type CustomMessage struct {
-	name    string
-	content string
-	data    map[string]interface{}
+	name       string
+	content    string
+	data       map[string]interface{}
+	customType string
+	display    bool
+	details    interface{}
+	timestamp  int64
 }
 
 // NewCustomMessage creates a new CustomMessage.
@@ -213,6 +252,30 @@ func (m *CustomMessage) SetData(key string, value interface{}) {
 	m.data[key] = value
 }
 
+// CustomType returns the custom message type identifier.
+func (m *CustomMessage) CustomType() string { return m.customType }
+
+// SetCustomType sets the custom message type identifier.
+func (m *CustomMessage) SetCustomType(v string) { m.customType = v }
+
+// Display returns whether this message should be displayed.
+func (m *CustomMessage) Display() bool { return m.display }
+
+// SetDisplay sets whether this message should be displayed.
+func (m *CustomMessage) SetDisplay(v bool) { m.display = v }
+
+// Details returns the custom message details.
+func (m *CustomMessage) Details() interface{} { return m.details }
+
+// SetDetails sets the custom message details.
+func (m *CustomMessage) SetDetails(v interface{}) { m.details = v }
+
+// GetTimestamp returns the Unix timestamp.
+func (m *CustomMessage) GetTimestamp() int64 { return m.timestamp }
+
+// SetTimestamp sets the Unix timestamp.
+func (m *CustomMessage) SetTimestamp(v int64) { m.timestamp = v }
+
 // ---------------------------------------------------------------------------
 // BranchSummaryMessage — summary of a branch session
 // ---------------------------------------------------------------------------
@@ -222,6 +285,7 @@ type BranchSummaryMessage struct {
 	branchId  string
 	summary   string
 	model     string
+	fromId    string
 	timestamp int64
 }
 
@@ -250,16 +314,23 @@ func (m *BranchSummaryMessage) Model() string { return m.model }
 // Timestamp returns the Unix timestamp.
 func (m *BranchSummaryMessage) Timestamp() int64 { return m.timestamp }
 
+// FromId returns the source entry ID for the branch.
+func (m *BranchSummaryMessage) FromId() string { return m.fromId }
+
+// SetFromId sets the source entry ID for the branch.
+func (m *BranchSummaryMessage) SetFromId(v string) { m.fromId = v }
+
 // ---------------------------------------------------------------------------
 // CompactionSummaryMessage — summary after context compaction
 // ---------------------------------------------------------------------------
 
 // CompactionSummaryMessage holds a summary after context compaction.
 type CompactionSummaryMessage struct {
-	summary    string
-	model      string
-	tokenCount int
-	timestamp  int64
+	summary      string
+	model        string
+	tokenCount   int
+	tokensBefore int
+	timestamp    int64
 }
 
 // NewCompactionSummaryMessage creates a new CompactionSummaryMessage.
@@ -286,6 +357,12 @@ func (m *CompactionSummaryMessage) TokenCount() int { return m.tokenCount }
 
 // Timestamp returns the Unix timestamp.
 func (m *CompactionSummaryMessage) Timestamp() int64 { return m.timestamp }
+
+// TokensBefore returns the token count before compaction.
+func (m *CompactionSummaryMessage) TokensBefore() int { return m.tokensBefore }
+
+// SetTokensBefore sets the token count before compaction.
+func (m *CompactionSummaryMessage) SetTokensBefore(v int) { m.tokensBefore = v }
 
 // ---------------------------------------------------------------------------
 // MessageBuilder — helps construct messages for API calls
