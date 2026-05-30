@@ -925,6 +925,8 @@ type ConversationContext struct {
 	// the delta for entries added since. Matching upstream's tokenCountWithEstimation().
 	apiTokenAnchor   int64 // exact input_tokens from last API response
 	apiAnchorEntries int   // number of entries in context when anchor was recorded
+	anchorEpoch      int   // epoch when anchor was recorded; stale if != compactionEpoch
+	compactionEpoch  int   // increments each time compaction rewrites the message list
 	// toolResultReplacements maps tool_use_id -> replacement text to apply during
 	// BuildMessages() serialization. Populated by MicroCompactEntries() and
 	// enforceToolResultBudget(). This keeps original entries stable for KV cache
@@ -959,6 +961,20 @@ func (c *ConversationContext) SetAPITokenAnchor(inputTokens int64) {
 	defer c.mu.Unlock()
 	c.apiTokenAnchor = inputTokens
 	c.apiAnchorEntries = len(c.entries)
+	c.anchorEpoch = c.compactionEpoch
+}
+
+// InvalidateAnchors clears the API token anchor after compaction rewrites the
+// message list. Without this, the anchor's apiAnchorEntries index becomes
+// numerically coincident but semantically invalid — it points to a different
+// message than when it was recorded, causing EstimatedTokens() to compute a
+// wrong delta and the cache optimizer to place cache_control markers at the
+// wrong positions. The anchor will be recalculated from scratch on the next
+// API call via SetAPITokenAnchor.
+func (c *ConversationContext) InvalidateAnchors() {
+	c.apiTokenAnchor = 0
+	c.apiAnchorEntries = 0
+	c.anchorEpoch = 0
 }
 
 // EstimatedTokens returns a hybrid token estimate using API anchor + incremental
@@ -1002,10 +1018,13 @@ func (c *ConversationContext) EstimatedTokens() int {
 	}
 
 	// Hybrid estimation: use API anchor if available and valid
-	if c.apiTokenAnchor > 0 && c.apiAnchorEntries > 0 {
+	if c.apiTokenAnchor > 0 && c.apiAnchorEntries > 0 && c.anchorEpoch == c.compactionEpoch {
 		// The anchor was recorded when there were apiAnchorEntries entries.
-		// If compaction happened after the anchor, the anchor is stale — fall
-		// through to full estimation.
+		// The epoch check ensures the anchor predates any compaction that
+		// rewrote the message list — if compaction occurred after the anchor
+		// was set, the index is numerically coincident but semantically wrong
+		// (points to a different message), so we must fall through to full
+		// estimation. The old range check is kept as a secondary guard.
 		if c.apiAnchorEntries >= startIdx && c.apiAnchorEntries <= len(c.entries) {
 			// Count how many entries exist after the anchor point
 			deltaStart := c.apiAnchorEntries
@@ -1937,6 +1956,11 @@ func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage
 }
 
 // compactionMessagesToEntries converts compacted messages back to conversation entries.
+// CRITICAL: When JSON deserialization fails for tool_use/tool_result blocks, the
+// original pairing metadata (ToolUseID, ToolName) must be preserved by constructing
+// proper ToolUseContent/ToolResultContent instead of silently degrading to TextContent.
+// Silently degrading to TextContent breaks tool_use/tool_result pairing, causing
+// API error 2013 or the model losing awareness of tool calls.
 func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]string) []conversationEntry {
 	entries := make([]conversationEntry, 0, len(msgs))
 
@@ -1951,11 +1975,33 @@ func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]
 				})
 				continue
 			}
-			// Fallback: treat as text
-			entries = append(entries, conversationEntry{
-				role:    msg.Role,
-				content: TextContent(msg.Content),
-			})
+			// Deserialization failed — preserve the pairing by constructing a
+			// minimal ToolUseContent with the tool_use_id and name from the
+			// CompactionMessage. Never degrade to TextContent; that breaks
+			// tool_use/tool_result pairing permanently.
+			if msg.ToolUseID != "" || msg.ToolName != "" {
+				blocks := []anthropic.ContentBlockParamUnion{
+					{OfToolUse: &anthropic.ToolUseBlockParam{
+						ID:    msg.ToolUseID,
+						Name:  msg.ToolName,
+						Input: map[string]any{},
+					}},
+				}
+				entries = append(entries, conversationEntry{
+					role:    msg.Role,
+					content: ToolUseContent(blocks),
+				})
+				if msg.ToolName != "" {
+					toolNames[key] = msg.ToolName
+				}
+			} else {
+				// Last resort: content looks like tool_use JSON but has no
+				// extractable metadata. Keep as text rather than dropping entirely.
+				entries = append(entries, conversationEntry{
+					role:    msg.Role,
+					content: TextContent(msg.Content),
+				})
+			}
 		} else if isToolResultJSON(msg.Content) {
 			// Reconstruct tool result blocks
 			if results, err := deserializeToolResultBlocks(msg.Content); err == nil {
@@ -1965,10 +2011,58 @@ func compactionMessagesToEntries(msgs []CompactionMessage, toolNames map[string]
 				})
 				continue
 			}
-			// Fallback: treat as text
+			// Deserialization failed — preserve the tool_use_id pairing by
+			// constructing a minimal ToolResultContent. The tool_use_id is
+			// stored in msg.ToolUseID from the serialization step.
+			if msg.ToolUseID != "" {
+				results := []anthropic.ToolResultBlockParam{
+					{ToolUseID: msg.ToolUseID, Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "[tool result content recovered from compacted message]"}},
+					}},
+				}
+				entries = append(entries, conversationEntry{
+					role:    msg.Role,
+					content: ToolResultContent(results),
+				})
+			} else {
+				// Last resort: no pairing info available.
+				entries = append(entries, conversationEntry{
+					role:    msg.Role,
+					content: TextContent(msg.Content),
+				})
+			}
+		} else if msg.Role == "assistant" && msg.ToolUseID != "" {
+			// This is a tool_use message whose content was cleared by
+			// SelectiveCompact (or whose JSON round-trip failed but metadata
+			// was preserved). Reconstruct proper ToolUseContent instead of
+			// degrading to TextContent, which would break tool pairing.
+			blocks := []anthropic.ContentBlockParamUnion{
+				{OfToolUse: &anthropic.ToolUseBlockParam{
+					ID:    msg.ToolUseID,
+					Name:  msg.ToolName,
+					Input: map[string]any{},
+				}},
+			}
 			entries = append(entries, conversationEntry{
 				role:    msg.Role,
-				content: TextContent(msg.Content),
+				content: ToolUseContent(blocks),
+			})
+			if msg.ToolName != "" {
+				toolNames[key] = msg.ToolName
+			}
+		} else if msg.Role == "user" && msg.ToolUseID != "" {
+			// This is a tool_result message whose content was cleared by
+			// SelectiveCompact (or whose JSON round-trip failed but tool_use_id
+			// was preserved). Reconstruct proper ToolResultContent to maintain
+			// the tool_use/tool_result pairing.
+			results := []anthropic.ToolResultBlockParam{
+				{ToolUseID: msg.ToolUseID, Content: []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: "[tool result compacted]"}},
+				}},
+			}
+			entries = append(entries, conversationEntry{
+				role:    msg.Role,
+				content: ToolResultContent(results),
 			})
 		} else {
 			// Regular text message or omission marker
