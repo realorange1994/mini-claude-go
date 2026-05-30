@@ -127,6 +127,14 @@ func normalizeContentToArray(msg map[string]any) {
 				{"type": "text", "text": v},
 			}
 		}
+	case []any:
+		// Safety: empty arrays in message content would cause preflight DROP.
+		// This can happen after JSON round-trip when tool_result content is lost.
+		if len(v) == 0 {
+			msg["content"] = []map[string]any{
+				{"type": "text", "text": "<!-- system-injected -->[ERROR: Message content was lost during processing. The expected tool result could not be preserved. Please retry the operation if needed.]"},
+			}
+		}
 	}
 }
 

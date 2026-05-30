@@ -2625,15 +2625,33 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 
 	messages := a.context.BuildMessages()
 
+	// DIAG: trace empty messages through the pipeline
+	diagEmptyMsgs := func(stage string, msgs []anthropic.MessageParam) {
+		for i, msg := range msgs {
+			if len(msg.Content) == 0 {
+				fmt.Fprintf(os.Stderr, "[pipe-diag] %s: msg[%d] role=%s blocks=0 (EMPTY)\n", stage, i, msg.Role)
+			}
+			for j, b := range msg.Content {
+				if b.OfToolResult != nil && len(b.OfToolResult.Content) == 0 {
+					fmt.Fprintf(os.Stderr, "[pipe-diag] %s: msg[%d] block[%d] tool_result id=%s content=EMPTY\n", stage, i, j, b.OfToolResult.ToolUseID)
+				}
+			}
+		}
+	}
+	diagEmptyMsgs("BuildMessages", messages)
+
 	// Inject MCP instructions delta: announce newly-connected MCP servers.
 	// This is cache-friendly — only new servers produce new content blocks.
 	messages = a.injectMCPInstructionsDelta(messages)
+	diagEmptyMsgs("injectMCP", messages)
 
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
+	diagEmptyMsgs("Normalize", messages)
 
 	// Apply all healing patterns before injectCacheEdits/cacheMessageParams.
 	// Missing these causes API error 2013 in streaming mode.
 	messages = a.applyMessageHealing(messages)
+	diagEmptyMsgs("healing", messages)
 
 	// Pre-populate the cached MC tracker with compactable tool IDs from the
 	// current conversation context. This ensures the tracker knows about tools
@@ -2643,6 +2661,7 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 	// Inject cache_edits block if the cached microcompact tracker has deletions pending.
 	// This deletes old tool results server-side while preserving the prompt cache.
 	messages = a.injectCacheEdits(messages)
+	diagEmptyMsgs("injectCacheEdits", messages)
 
 	a.logDebug("[api] streaming call: model=%s msgs=%d est_tokens=%d turn=%d\n",
 		GetModelForAPI(a.config.Model), len(messages), a.context.EstimatedTokens(), a.budget.Consumed()+1)
