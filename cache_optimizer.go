@@ -340,12 +340,14 @@ func stripHallucinatedToolMarkup(content string) string {
 	}
 
 	// Handle [TOOL_CALL]...[/TOOL_CALL] (case-insensitive)
+	// Fixed: only call ToLower once per loop iteration
 	for {
-		idx := strings.Index(strings.ToLower(result), "[tool_call]")
+		lower := strings.ToLower(result)
+		idx := strings.Index(lower, "[tool_call]")
 		if idx < 0 {
 			break
 		}
-		endIdx := strings.Index(strings.ToLower(result[idx:]), "[/tool_call]")
+		endIdx := strings.Index(lower[idx:], "[/tool_call]")
 		if endIdx < 0 {
 			break
 		}
