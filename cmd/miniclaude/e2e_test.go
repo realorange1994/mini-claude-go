@@ -12,7 +12,6 @@ import (
 	"miniclaudecode-go/pkg/core/agent"
 	"miniclaudecode-go/pkg/core/extensions"
 	"miniclaudecode-go/pkg/core/tools"
-	"miniclaudecode-go/pkg/core/tools/builtin"
 )
 
 // ---------------------------------------------------------------------------
@@ -58,7 +57,7 @@ func TestAgentE2E_ReadAndBash(t *testing.T) {
 	// 1. Create a temp working directory with a test file
 	tmpDir := t.TempDir()
 	testFile := tmpDir + "/hello.txt"
-	if err := builtin.Write(testFile, "Hello from agent test!"); err != nil {
+	if err := os.WriteFile(testFile, []byte("Hello from agent test!"), 0644); err != nil {
 		t.Fatalf("setup write: %v", err)
 	}
 
@@ -108,7 +107,7 @@ func TestAgentE2E_ReadAndBash(t *testing.T) {
 			},
 			"required": []string{"command"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		cmd := ""
 		if c, ok := input["command"].(string); ok {
 			cmd = c
@@ -240,7 +239,7 @@ func TestAgentE2E_MaxTurnsLimit(t *testing.T) {
 			},
 			"required": []string{"command"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		cmd := ""
 		if c, ok := input["command"].(string); ok {
 			cmd = c

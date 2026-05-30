@@ -369,6 +369,26 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 		}
 	}()
 
+	// Check if stdin has data (piped input) and process it before entering REPL.
+	if stat, _ := os.Stdin.Stat(); stat.Mode()&os.ModeCharDevice == 0 {
+		scanner := bufio.NewScanner(os.Stdin)
+		var lines []string
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		piped := strings.TrimSpace(strings.Join(lines, " "))
+		if piped != "" {
+			if err := sess.Run(piped); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if last := sess.GetLastMessage(); last != "" && !stream {
+				fmt.Println(last)
+			}
+			return
+		}
+	}
+
 	// Ensure console is in correct mode before starting REPL.
 	repl.EnsureConsoleInputMode()
 
@@ -376,11 +396,15 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 		repl.EnsureConsoleInputMode()
 		fmt.Fprintf(os.Stderr, "> ")
 
-		// Read input - using simple ReadLine that works reliably on Windows
+		// Read input - using bufio.Scanner for reliable line reading
 		line, err := repl.ReadLine()
 
 		if err != nil {
-			// Ctrl+C causes Scanln to return EOF - just continue the loop
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(os.Stderr)
+				return // stdin closed (pipe), exit cleanly
+			}
+			// Ctrl+C causes Scanln to return other errors - just continue the loop
 			// SetConsoleCtrlHandler prevents process termination
 			fmt.Fprintln(os.Stderr) // newline after interrupt message
 			continue

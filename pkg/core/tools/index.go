@@ -15,8 +15,8 @@ import (
 	"miniclaudecode-go/pkg/core/tools/writetool"
 )
 
-// ToolHandler is a function that executes a tool
-type ToolHandler func(input map[string]interface{}) (string, error)
+// ToolHandler is a function that executes a tool with context support.
+type ToolHandler func(ctx context.Context, input map[string]interface{}) (string, error)
 
 // ProcessLogger is a callback for logging tool execution events.
 type ProcessLogger func(stage string, info map[string]string)
@@ -83,8 +83,9 @@ func (r *Registry) GetDefinitions() []extensions.ToolDefinition {
 	return defs
 }
 
-// Execute runs a tool by name with the given input
-func (r *Registry) Execute(name string, input map[string]interface{}) (string, error) {
+// Execute runs a tool by name with the given input.
+// The ctx parameter is used for cancellation (Ctrl+C) and per-turn timeout.
+func (r *Registry) Execute(ctx context.Context, name string, input map[string]interface{}) (string, error) {
 	tool := r.Get(name)
 	if tool == nil {
 		return "", fmt.Errorf("tool not found: %s", name)
@@ -158,7 +159,7 @@ func (r *Registry) Execute(name string, input map[string]interface{}) (string, e
 		r.logger("start", info)
 	}
 
-	result, err := tool.Handler(input)
+	result, err := tool.Handler(ctx, input)
 
 	// Log tool execution end (only on error)
 	if r.logger != nil && err != nil {
@@ -232,7 +233,7 @@ func DefaultTools() *Registry {
 			},
 			"required": []string{"path"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		path, ok := input["path"].(string)
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'path' parameter")
@@ -270,7 +271,7 @@ func DefaultTools() *Registry {
 			},
 			"required": []string{"path", "content"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		path, ok := input["path"].(string)
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'path' parameter")
@@ -331,7 +332,7 @@ func DefaultTools() *Registry {
 			},
 			"required": []string{"path"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		path, ok := input["path"].(string)
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'path' parameter")
@@ -375,13 +376,12 @@ func DefaultTools() *Registry {
 			},
 			"required": []string{"command"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		cmd, ok := input["command"].(string)
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'command' parameter")
 		}
 
-		ctx := context.Background()
 		ri := bashtool.BashInput{
 			Command: cmd,
 			CWD:     stringOf(input["cwd"]),
@@ -435,7 +435,7 @@ func DefaultTools() *Registry {
 			},
 			"required": []string{"pattern"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		pattern, ok := input["pattern"].(string)
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'pattern' parameter")
@@ -459,10 +459,10 @@ func DefaultTools() *Registry {
 			Glob:          stringOf(input["glob"]),
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), greptool.GrepTimeout)
+		gctx, cancel := context.WithTimeout(ctx, greptool.GrepTimeout)
 		defer cancel()
 
-		result, err := greptool.ExecuteWithFallback(ctx, ri, getCwd())
+		result, err := greptool.ExecuteWithFallback(gctx, ri, getCwd())
 		if err != nil {
 			return "", err
 		}
@@ -492,7 +492,7 @@ func DefaultTools() *Registry {
 			},
 			"required": []string{"pattern"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		dir := stringOf(input["dir"])
 		if dir == "" {
 			dir = getCwd()
@@ -504,10 +504,10 @@ func DefaultTools() *Registry {
 			MaxDepth: intOf(input["max_depth"]),
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), findtool.FindTimeout)
+		fctx, cancel := context.WithTimeout(ctx, findtool.FindTimeout)
 		defer cancel()
 
-		result, err := findtool.Execute(ctx, ri, dir, findtool.LocalFindOperations{})
+		result, err := findtool.Execute(fctx, ri, dir, findtool.LocalFindOperations{})
 		if err != nil {
 			return "", err
 		}
@@ -533,7 +533,7 @@ func DefaultTools() *Registry {
 			},
 			"required": []string{"pattern"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		pattern, ok := input["pattern"].(string)
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'pattern' parameter")
@@ -568,7 +568,7 @@ func DefaultTools() *Registry {
 			},
 			"required": []string{"path"},
 		},
-	}, func(input map[string]interface{}) (string, error) {
+	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		path := stringOf(input["path"])
 		if path == "" {
 			path = "."

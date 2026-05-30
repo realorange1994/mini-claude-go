@@ -864,12 +864,18 @@ func (s *AgentSession) parseToolCalls(response string) ([]toolCall, bool) {
 }
 
 // executeTools runs tool calls and returns their results.
+// Uses the turn context so tools can be cancelled by Ctrl+C.
 func (s *AgentSession) executeTools(toolCalls []toolCall) ([]toolResult, error) {
 	results := make([]toolResult, 0, len(toolCalls))
 
+	// Get the turn context for cancellation support
+	s.mu.RLock()
+	turnCtx := s.turnCtx
+	s.mu.RUnlock()
+
 	for _, tc := range toolCalls {
-		// Execute the tool using the registry
-		result, err := s.tools.Execute(tc.name, tc.input)
+		// Execute the tool using the registry with turn context
+		result, err := s.tools.Execute(turnCtx, tc.name, tc.input)
 		if err != nil {
 			results = append(results, toolResult{
 				toolCallId: tc.id,

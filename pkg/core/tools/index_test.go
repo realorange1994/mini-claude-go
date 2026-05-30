@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,7 +50,7 @@ func TestExecute(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "test.txt")
 	os.WriteFile(testFile, []byte("hello world\n"), 0644)
 
-	result, err := reg.Execute("Read", map[string]interface{}{
+	result, err := reg.Execute(context.Background(), "Read", map[string]interface{}{
 		"path": testFile,
 	})
 	if err != nil {
@@ -67,7 +68,7 @@ func TestExecute_WriteAndRead(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "test2.txt")
 
 	// Write
-	writeResult, err := reg.Execute("Write", map[string]interface{}{
+	writeResult, err := reg.Execute(context.Background(), "Write", map[string]interface{}{
 		"path":    testFile,
 		"content": "test content for write and read",
 	})
@@ -79,7 +80,7 @@ func TestExecute_WriteAndRead(t *testing.T) {
 	}
 
 	// Read back — write without newline, read adds one
-	readResult, err := reg.Execute("Read", map[string]interface{}{
+	readResult, err := reg.Execute(context.Background(), "Read", map[string]interface{}{
 		"path": testFile,
 	})
 	if err != nil {
@@ -98,7 +99,7 @@ func TestExecute_Ls(t *testing.T) {
 	os.Mkdir(filepath.Join(tmpDir, "subdir"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("test"), 0644)
 
-	result, err := reg.Execute("Ls", map[string]interface{}{
+	result, err := reg.Execute(context.Background(), "Ls", map[string]interface{}{
 		"path": tmpDir,
 	})
 	if err != nil {
@@ -116,7 +117,7 @@ func TestExecute_Grep(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "search_test.txt")
 	os.WriteFile(testFile, []byte("hello world\nfoo bar\nhello test"), 0644)
 
-	result, err := reg.Execute("Grep", map[string]interface{}{
+	result, err := reg.Execute(context.Background(), "Grep", map[string]interface{}{
 		"pattern": "hello",
 		"paths":   []interface{}{testFile},
 	})
@@ -135,7 +136,7 @@ func TestExecute_Glob(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "test.go"), []byte("package main"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("hello"), 0644)
 
-	result, err := reg.Execute("Glob", map[string]interface{}{
+	result, err := reg.Execute(context.Background(), "Glob", map[string]interface{}{
 		"pattern": "*.go",
 		"cwd":     tmpDir,
 	})
@@ -150,7 +151,7 @@ func TestExecute_Glob(t *testing.T) {
 func TestExecute_NonExistentTool(t *testing.T) {
 	reg := DefaultTools()
 
-	_, err := reg.Execute("NonExistent", map[string]interface{}{})
+	_, err := reg.Execute(context.Background(), "NonExistent", map[string]interface{}{})
 	if err == nil {
 		t.Fatal("Expected error for non-existent tool, got nil")
 	}
