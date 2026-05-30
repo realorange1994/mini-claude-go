@@ -18,9 +18,13 @@ import (
 // ToolHandler is a function that executes a tool
 type ToolHandler func(input map[string]interface{}) (string, error)
 
+// ProcessLogger is a callback for logging tool execution events.
+type ProcessLogger func(stage string, info map[string]string)
+
 // Registry manages available tools
 type Registry struct {
-	tools map[string]*Tool
+	tools  map[string]*Tool
+	logger ProcessLogger
 }
 
 // Tool represents a registered tool
@@ -35,6 +39,11 @@ func NewRegistry() *Registry {
 	return &Registry{
 		tools: make(map[string]*Tool),
 	}
+}
+
+// SetLogger sets the process logger for tool execution logging.
+func (r *Registry) SetLogger(logger ProcessLogger) {
+	r.logger = logger
 }
 
 // Register registers a tool with the registry
@@ -83,7 +92,99 @@ func (r *Registry) Execute(name string, input map[string]interface{}) (string, e
 	if tool.Handler == nil {
 		return "", fmt.Errorf("tool handler not implemented: %s", name)
 	}
-	return tool.Handler(input)
+
+	// Log tool execution start
+	if r.logger != nil {
+		info := map[string]string{"tool": name}
+		// Extract key parameters for display
+		switch name {
+		case "Bash":
+			if cmd, ok := input["command"].(string); ok {
+				info["command"] = truncateForLog(cmd, 200)
+			}
+			if cwd, ok := input["cwd"].(string); ok && cwd != "" {
+				info["cwd"] = cwd
+			}
+		case "Read":
+			if p, ok := input["path"].(string); ok {
+				info["path"] = p
+			}
+			if offset := intOf(input["offset"]); offset > 0 {
+				info["offset"] = fmt.Sprintf("%d", offset)
+			}
+			if limit := intOf(input["limit"]); limit > 0 {
+				info["limit"] = fmt.Sprintf("%d", limit)
+			}
+		case "Write":
+			if p, ok := input["path"].(string); ok {
+				info["path"] = p
+			}
+			if c, ok := input["content"].(string); ok {
+				info["contentLen"] = fmt.Sprintf("%d", len(c))
+			}
+		case "Edit":
+			if p, ok := input["path"].(string); ok {
+				info["path"] = p
+			}
+			if old, ok := input["old_string"].(string); ok && old != "" {
+				info["old"] = truncateForLog(old, 80)
+			}
+			if nw, ok := input["new_string"].(string); ok && nw != "" {
+				info["new"] = truncateForLog(nw, 80)
+			}
+		case "Grep":
+			if p, ok := input["pattern"].(string); ok {
+				info["pattern"] = truncateForLog(p, 100)
+			}
+			if g, ok := input["glob"].(string); ok && g != "" {
+				info["glob"] = g
+			}
+		case "Glob":
+			if p, ok := input["pattern"].(string); ok {
+				info["pattern"] = p
+			}
+		case "Find":
+			if p, ok := input["pattern"].(string); ok {
+				info["pattern"] = p
+			}
+			if d, ok := input["dir"].(string); ok && d != "" {
+				info["dir"] = d
+			}
+		case "Ls":
+			if p, ok := input["path"].(string); ok && p != "" {
+				info["path"] = p
+			}
+		}
+		r.logger("start", info)
+	}
+
+	result, err := tool.Handler(input)
+
+	// Log tool execution end
+	if r.logger != nil {
+		info := map[string]string{
+			"tool":   name,
+			"status": "success",
+		}
+		if err != nil {
+			info["status"] = "error"
+			info["error"] = truncateForLog(err.Error(), 200)
+		}
+		if len(result) > 0 {
+			info["resultLen"] = fmt.Sprintf("%d", len(result))
+		}
+		r.logger("end", info)
+	}
+
+	return result, err
+}
+
+// truncateForLog truncates a string for log display.
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // ToInfo converts a tool definition to structured info
