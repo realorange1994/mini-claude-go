@@ -101,6 +101,8 @@ func isSystemInjectedSDK(msg *anthropic.MessageParam) bool {
 // on each API call so the KV cache stays warm during active sessions. Without
 // this, a 5-minute idle between turns can evict the entire cached prefix.
 func (a *AgentLoop) getCacheTTL() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	now := time.Now()
 
 	// If we have a TTL lock that hasn't expired, keep using "1h"

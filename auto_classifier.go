@@ -1430,13 +1430,13 @@ func (c *AutoModeClassifier) recentlyAllowedKey(toolName string, input map[strin
 	switch toolName {
 	case "write_file", "edit_file", "multi_edit":
 		if path, ok := input["file_path"].(string); ok && path != "" {
-			return toolName + ":" + filepath.Dir(path)
+			return toolName + ":" + filepath.ToSlash(filepath.Dir(path))
 		}
 	case "fileops":
 		op, _ := input["operation"].(string)
 		path, _ := input["path"].(string)
 		if path != "" {
-			return "fileops:" + op + ":" + filepath.Dir(path)
+			return "fileops:" + op + ":" + filepath.ToSlash(filepath.Dir(path))
 		}
 	case "exec":
 		if cmd, ok := input["command"].(string); ok && cmd != "" {
@@ -1449,7 +1449,7 @@ func (c *AutoModeClassifier) recentlyAllowedKey(toolName string, input map[strin
 	}
 	// For other tools, fall back to the parent directory of any "path" field
 	if path, ok := input["path"].(string); ok && path != "" {
-		return toolName + ":" + filepath.Dir(path)
+		return toolName + ":" + filepath.ToSlash(filepath.Dir(path))
 	}
 	return ""
 }
