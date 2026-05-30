@@ -80,10 +80,16 @@ func adaptiveTaskInstructions(mode string) string {
 
 // InjectAdaptiveInstructions detects the task mode from the latest user message
 // and injects mode-specific instructions into the conversation context.
+// Injected with SystemInjectedPrefix so cache break detection can skip it.
 func (c *ConversationContext) InjectAdaptiveInstructions(latestUserMessage string) {
 	mode := detectTaskMode(latestUserMessage)
 	instructions := adaptiveTaskInstructions(mode)
 	if instructions != "" {
-		c.AddUserMessage("[Task mode: " + mode + "] " + instructions)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.entries = append(c.entries, conversationEntry{
+			role:    "user",
+			content: TextContent(SystemInjectedPrefix + "[Task mode: " + mode + "] " + instructions),
+		})
 	}
 }
