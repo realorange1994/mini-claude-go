@@ -356,7 +356,7 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 	// Double-press-to-exit is handled in InstallCtrlCHandler callback.
 	// SetInterruptHandler is called after the double-press check, so it just handles the interrupt.
 	repl.SetInterruptHandler(func() {
-		fmt.Fprint(os.Stderr, "\r\x1b[2K[Interrupted. Press Ctrl+C again within 1.5s to exit.]\n")
+		fmt.Fprintln(os.Stderr, "[Interrupted. Press Ctrl+C again within 1.5s to exit.]")
 		interruptFn()
 	})
 
@@ -375,15 +375,15 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 			if runtime.GOOS != "windows" && sig == os.Interrupt {
 				// Check for double Ctrl+C (within 1.5s) to exit on Unix
 				if repl.CheckDoubleInterrupt() {
-					fmt.Fprint(os.Stderr, "\r\x1b[2K[Exiting...]\n")
+					fmt.Fprintln(os.Stderr, "[Exiting...]")
 					os.Exit(0)
 				}
 			}
 			if sig == syscall.SIGTERM {
-				fmt.Fprint(os.Stderr, "\r\x1b[2K[Received SIGTERM, exiting...]\n")
+				fmt.Fprintln(os.Stderr, "[Received SIGTERM, exiting...]")
 				os.Exit(0)
 			}
-			fmt.Fprint(os.Stderr, "\r\x1b[2K[Interrupted. Press Ctrl+C again within 1.5s to exit.]\n")
+			fmt.Fprintln(os.Stderr, "[Interrupted. Press Ctrl+C again within 1.5s to exit.]")
 			interruptFn()
 		}
 	}()
@@ -422,8 +422,8 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 				fmt.Fprintln(os.Stderr)
 				return // stdin closed (pipe), exit cleanly
 			}
-			// Ctrl+C: clear the "> " prompt and print newline
-			fmt.Fprint(os.Stderr, "\r\x1b[2K\n")
+			// Ctrl+C: print newline and continue
+			fmt.Fprintln(os.Stderr)
 			continue
 		}
 

@@ -36,7 +36,8 @@ const (
 // interruptHandler is set by the REPL to handle Ctrl+C.
 var interruptHandler atomic.Pointer[func()]
 
-var lastInterrupt atomic.Int64 // timestamp of last Ctrl+C for double-press exit detection
+var lastInterrupt atomic.Int64    // timestamp of last Ctrl+C for double-press exit detection
+var interruptPending atomic.Int64 // set when Ctrl+C is pending (ReadLine should return canceled)
 
 // initLastInterrupt ensures the atomic is properly initialized.
 func init() {
@@ -56,6 +57,8 @@ func InstallCtrlCHandler() {
 				os.Exit(0)
 			}
 			lastInterrupt.Store(now)
+			// Signal ReadLine to return canceled
+			interruptPending.Store(1)
 			// Call the interrupt handler
 			if fn := interruptHandler.Load(); fn != nil {
 				(*fn)()
@@ -102,6 +105,9 @@ func EnsureConsoleInputMode() {
 // ReadLine reads a line from stdin using Windows API ReadFile directly.
 // This allows Ctrl+C to be handled via SetConsoleCtrlHandler.
 func ReadLine() (string, error) {
+	// Clear any pending interrupt flag at start
+	interruptPending.Store(0)
+	
 	// Get console input handle
 	h, _, _ := procGetStdHandle.Call(uintptr(0xFFFFFFF6)) // STD_INPUT_HANDLE
 	if h == 0 {
@@ -114,6 +120,12 @@ func ReadLine() (string, error) {
 	for {
 		// Wait for input with 100ms timeout to allow Ctrl+C handler to run
 		ret, _, _ := procWaitForSingleObject.Call(h, 100)
+		
+		// Check if Ctrl+C was pressed (interruptPending flag set by handler)
+		if interruptPending.Load() == 1 {
+			interruptPending.Store(0)
+			return string(buf), context.Canceled
+		}
 		
 		if ret == 0 { // _WAIT_OBJECT_0 - input available
 			var bytesRead uint32
