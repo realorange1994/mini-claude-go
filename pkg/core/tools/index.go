@@ -160,20 +160,13 @@ func (r *Registry) Execute(name string, input map[string]interface{}) (string, e
 
 	result, err := tool.Handler(input)
 
-	// Log tool execution end
-	if r.logger != nil {
+	// Log tool execution end (only on error)
+	if r.logger != nil && err != nil {
 		info := map[string]string{
-			"tool":   name,
-			"status": "success",
+			"tool":  name,
+			"error": truncateForLog(err.Error(), 200),
 		}
-		if err != nil {
-			info["status"] = "error"
-			info["error"] = truncateForLog(err.Error(), 200)
-		}
-		if len(result) > 0 {
-			info["resultLen"] = fmt.Sprintf("%d", len(result))
-		}
-		r.logger("end", info)
+		r.logger("error", info)
 	}
 
 	return result, err

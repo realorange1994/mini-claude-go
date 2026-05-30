@@ -149,16 +149,10 @@ func (r *AgentSessionRuntime) newSessionWithOptions(model, cwd, fromEntryID stri
 				}
 			}
 			fmt.Fprintln(os.Stderr)
-		} else if stage == "end" {
-			status, _ := info["status"]
+		} else if stage == "error" {
 			toolName, _ := info["tool"]
-			fmt.Fprintf(os.Stderr, "[%s %s]", toolName, status)
-			for k, v := range info {
-				if k != "tool" && k != "status" {
-					fmt.Fprintf(os.Stderr, " %s=%s", k, v)
-				}
-			}
-			fmt.Fprintln(os.Stderr)
+			errMsg, _ := info["error"]
+			fmt.Fprintf(os.Stderr, "[%s error] %s\n", toolName, errMsg)
 		}
 	}
 
