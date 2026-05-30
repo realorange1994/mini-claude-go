@@ -31,13 +31,11 @@ type HTTPClient struct {
 
 // NewHTTPClient creates a new HTTP-based LLM client.
 func NewHTTPClient(config HTTPClientConfig) *HTTPClient {
-	timeout := config.Timeout
-	if timeout == 0 {
-		timeout = 5 * time.Minute
-	}
+	// No http.Client timeout — per-turn context deadlines control request duration.
+	// The http.Client.Timeout is a hard cap that would bypass the per-turn timeout.
 	return &HTTPClient{
 		config: config,
-		client: &http.Client{Timeout: timeout},
+		client: &http.Client{}, // no timeout here
 	}
 }
 

@@ -677,6 +677,7 @@ func (s *AgentSession) callLLMStreaming(messages []map[string]interface{}) error
 	toolDefs := s.tools.GetDefinitions()
 	thinking := BuildThinkingConfig(s.thinkingLevel)
 	streamCb := s.streamCb
+	turnCtx := s.turnCtx
 	s.mu.RUnlock()
 
 	if client == nil {
@@ -685,11 +686,11 @@ func (s *AgentSession) callLLMStreaming(messages []map[string]interface{}) error
 
 	if streamCb == nil {
 		// If no callback, just use non-streaming
-		_, err := client.Complete(s.ctx, model, messages, toolDefs, thinking)
+		_, err := client.Complete(turnCtx, model, messages, toolDefs, thinking)
 		return err
 	}
 
-	return client.CompleteStreaming(s.ctx, model, messages, toolDefs, thinking, streamCb)
+	return client.CompleteStreaming(turnCtx, model, messages, toolDefs, thinking, streamCb)
 }
 
 // processResponse handles an LLM response (tool calls or text).
@@ -923,7 +924,10 @@ func (s *AgentSession) Compact() error {
 		}); ok {
 			llmCompactor := compaction.NewLLMCompactor(s.config.Model, hc)
 			if llmCompactor.ShouldUseLLMCompaction(reduced) {
-				summary, err = llmCompactor.GenerateSummary(s.ctx, reduced, "")
+				// Compaction LLM call gets its own timeout (not per-turn)
+				cmpCtx, cmpCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				summary, err = llmCompactor.GenerateSummary(cmpCtx, reduced, "")
+				cmpCancel()
 				if err != nil {
 					// Fall back to heuristic summary
 					summary = ""
@@ -1432,17 +1436,14 @@ func (s *AgentSession) ClearQueue() {
 // Abort cancels the current agent turn.
 // Aligned to pi's abort().
 func (s *AgentSession) Abort() {
-	if s.cancel != nil {
-		s.cancel()
-	}
-	// Reset context for next turn
+	// Cancel turn context if active
 	s.mu.Lock()
-	ctx, cancel := func() (context.Context, context.CancelFunc) {
-		if s.config.Timeout > 0 {
-			return context.WithTimeout(context.Background(), s.config.Timeout)
-		}
-		return context.WithCancel(context.Background())
-	}()
+	if s.turnCancel != nil {
+		s.turnCancel()
+		s.turnCancel = nil
+	}
+	// Session context is always background (no timeout)
+	ctx, cancel := context.WithCancel(context.Background())
 	s.ctx = ctx
 	s.cancel = cancel
 	s.mu.Unlock()
