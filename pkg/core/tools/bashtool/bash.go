@@ -93,11 +93,11 @@ func (LocalBashOperations) Execute(ctx context.Context, cmd string, cwd string, 
 func getShell() (shell string, arg string) {
 	switch runtime.GOOS {
 	case "windows":
-		// Try Git Bash first
+		// Try Git Bash by absolute path only, no generic "bash" fallback (which is WSL launcher)
 		candidates := []string{
-			"bash",
 			`C:\Program Files\Git\bin\bash.exe`,
 			`C:\Program Files (x86)\Git\bin\bash.exe`,
+			`C:\Program Files\Git\usr\bin\bash.exe`,
 		}
 		for _, p := range candidates {
 			if _, err := exec.LookPath(p); err == nil {
