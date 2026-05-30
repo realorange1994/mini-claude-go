@@ -127,10 +127,10 @@ func (r *Registry) Execute(name string, input map[string]interface{}) (string, e
 				info["path"] = p
 			}
 			if old, ok := input["old_string"].(string); ok && old != "" {
-				info["old"] = truncateForLog(old, 80)
+				info["oldLen"] = fmt.Sprintf("%d", len(old))
 			}
 			if nw, ok := input["new_string"].(string); ok && nw != "" {
-				info["new"] = truncateForLog(nw, 80)
+				info["newLen"] = fmt.Sprintf("%d", len(nw))
 			}
 		case "Grep":
 			if p, ok := input["pattern"].(string); ok {
