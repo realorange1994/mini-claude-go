@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"math"
 	"regexp"
 	"strings"
@@ -54,6 +56,11 @@ var nonRetryablePatterns = []*regexp.Regexp{
 // Returns false for context overflow and billing errors.
 func IsRetryableError(err error) bool {
 	if err == nil {
+		return false
+	}
+
+	// Per-turn timeout is NOT retryable — same parameters will just time out again.
+	if errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 
