@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	mathrand "math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -291,7 +292,12 @@ func (ts *TaskStore) RegisterBashBgTask(agentID, description, outputFile string)
 func generateBashTaskID() string {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: use math/rand for non-cryptographic uniqueness
+		for i := range b {
+			b[i] = byte(mathrand.IntN(256))
+		}
+	}
 	result := make([]byte, 8)
 	for i := range 8 {
 		result[i] = chars[int(b[i])%len(chars)]

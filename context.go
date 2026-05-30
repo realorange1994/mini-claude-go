@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	mathrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,7 +21,12 @@ import (
 // specific compaction events.
 func generateUUID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: use math/rand for non-cryptographic uniqueness
+		for i := range b {
+			b[i] = byte(mathrand.IntN(256))
+		}
+	}
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

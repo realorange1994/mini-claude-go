@@ -819,15 +819,53 @@ func extractHTMLContent(html string) string {
 	spaceRe := regexp.MustCompile(`  +`)
 	text = spaceRe.ReplaceAllString(text, " ")
 
-	// Decode common HTML entities
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&quot;", "\"")
-	text = strings.ReplaceAll(text, "&#39;", "'")
-	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	// Decode common HTML entities (manual decode for compatibility)
+	text = decodeHTMLEntities(text)
 
 	return strings.TrimSpace(text)
+}
+
+// decodeHTMLEntities decodes common HTML entities.
+// Handles all named entities, decimal codes (&#NNN;), and hex codes (&#xNNN;).
+func decodeHTMLEntities(s string) string {
+	// Named entities
+	named := map[string]string{
+		"&amp;":  "&",
+		"&lt;":   "<",
+		"&gt;":   ">",
+		"&quot;":  "\"",
+		"&apos;": "'",
+		"&#39;":  "'",
+		"&nbsp;": " ",
+		"&ndash;": "–",
+		"&mdash;": "—",
+		"&copy;":  "©",
+		"&reg;":   "®",
+		"&trade;": "™",
+	}
+	for k, v := range named {
+		s = strings.ReplaceAll(s, k, v)
+	}
+	// Decimal numeric entities: &#NNN;
+	s = decodeNumericEntities(s, `&#(\d+);`, func(match string) string {
+		var code int
+		fmt.Sscanf(match[2:len(match)-1], "%d", &code)
+		return string(rune(code))
+	})
+	// Hex numeric entities: &#xNNN;
+	s = decodeNumericEntities(s, `&#x([0-9a-fA-F]+);`, func(match string) string {
+		var code int
+		hs := match[3 : len(match)-1]
+		fmt.Sscanf("0x"+hs, "%x", &code)
+		return string(rune(code))
+	})
+	return s
+}
+
+// decodeNumericEntities decodes numeric HTML entities using a regex pattern.
+func decodeNumericEntities(s, pattern string, decoder func(string) string) string {
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllStringFunc(s, decoder)
 }
 
 // extractHTMLTitle extracts the <title> from HTML.
