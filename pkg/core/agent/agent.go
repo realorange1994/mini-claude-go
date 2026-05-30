@@ -130,12 +130,9 @@ func (r *AgentSessionRuntime) NewSession(model, cwd string) (*AgentSession, erro
 
 // newSessionWithOptions creates a new session, optionally branching from an entry.
 func (r *AgentSessionRuntime) newSessionWithOptions(model, cwd, fromEntryID string) (*AgentSession, error) {
-	ctx, cancel := func() (context.Context, context.CancelFunc) {
-		if r.config.Timeout > 0 {
-			return context.WithTimeout(context.Background(), r.config.Timeout)
-		}
-		return context.WithCancel(context.Background())
-	}()
+	// Use background context for session - timeouts are handled per-turn,
+	// not at session level (which would cause REPL to expire during idle).
+	ctx, cancel := context.WithCancel(context.Background())
 
 	comp := compaction.NewCompactor(model, nil)
 	exec := shellexec.New()
