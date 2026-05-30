@@ -354,7 +354,7 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 	// On Windows, SetConsoleCtrlHandler catches Ctrl+C and calls SetInterruptHandler directly.
 	// On non-Windows, we rely on signal.Notify for SIGINT.
 	repl.SetInterruptHandler(func() {
-		fmt.Fprintln(os.Stderr, "\n[Interrupted. Press Ctrl+C again within 1.5s to exit.]")
+		fmt.Fprint(os.Stderr, "\r\x1b[2K[Interrupted. Press Ctrl+C again within 1.5s to exit.]\n")
 		interruptFn()
 	})
 
@@ -364,7 +364,7 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 
 	go func() {
 		for range sigCh {
-			fmt.Fprintln(os.Stderr, "\n[Interrupted. Press Ctrl+C again within 1.5s to exit.]")
+			fmt.Fprint(os.Stderr, "\r\x1b[2K[Interrupted. Press Ctrl+C again within 1.5s to exit.]\n")
 			interruptFn()
 		}
 	}()
@@ -404,9 +404,8 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 				fmt.Fprintln(os.Stderr)
 				return // stdin closed (pipe), exit cleanly
 			}
-			// Ctrl+C causes Scanln to return other errors - just continue the loop
-			// SetConsoleCtrlHandler prevents process termination
-			fmt.Fprintln(os.Stderr) // newline after interrupt message
+			// Ctrl+C: clear the "> " prompt and print newline
+			fmt.Fprint(os.Stderr, "\r\x1b[2K\n")
 			continue
 		}
 
