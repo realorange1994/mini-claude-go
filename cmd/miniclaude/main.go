@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"miniclaudecode-go/pkg/core/agent"
 	"miniclaudecode-go/pkg/core/repl"
@@ -117,6 +118,7 @@ func main() {
 	autoCompact := flag.Bool("auto-compact", false, "Enable auto-compaction")
 	sessionPath := flag.String("session-path", "", "Session storage path")
 	maxTokens := flag.Int("max-tokens", 8192, "Max tokens to generate per turn")
+	timeout := flag.Duration("turn-timeout", 0, "Per-turn timeout for LLM calls (0 = no timeout)")
 	systemPrompt := flag.String("system-prompt", "", "Custom system prompt (overrides config file)")
 
 	// Rearrange os.Args so flags come before positional args.
@@ -242,6 +244,14 @@ func main() {
 		maxTokensVal = 8192
 	}
 
+	// ── Resolve per-turn timeout: flag > config ───────────────────────────
+	timeoutVal := *timeout
+	if timeoutVal == 0 && cfg.Timeout != "" {
+		if d, err := time.ParseDuration(cfg.Timeout); err == nil {
+			timeoutVal = d
+		}
+	}
+
 	// ── Resolve streaming: flag > config ───────────────────────────────
 	streamVal := *stream || cfg.Stream
 
@@ -269,6 +279,7 @@ func main() {
 		CompactAfter: *compactAfter,
 		AutoCompact:  autoCompactVal,
 		SessionPath:  sessPath,
+		Timeout:      timeoutVal,
 	}
 
 	runtime2, err := agent.NewAgentSessionRuntime(config)

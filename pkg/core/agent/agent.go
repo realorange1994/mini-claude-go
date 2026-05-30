@@ -39,7 +39,7 @@ type AgentConfig struct {
 	Skills           []string     // skill prompt fragments
 	ContextFiles     []systemprompt.ContextFile
 	EnableStreaming  bool         // use streaming LLM path
-	Timeout          time.Duration // global timeout for the entire agent session (0 = no timeout)
+	Timeout          time.Duration // per-turn timeout for LLM calls (0 = no timeout)
 	ResourceLoader   *resourceloader.ResourceLoader
 }
 
@@ -500,8 +500,13 @@ func (s *AgentSession) runTurn() (bool, error) {
 	s.eventRunner.EmitBeforeAgentStart(sid, s.config.Model, turnNum)
 
 	// Create a cancellable context for this turn (allows Ctrl+C to interrupt)
+	// and apply per-turn timeout to prevent hanging LLM calls.
 	s.mu.Lock()
-	s.turnCtx, s.turnCancel = context.WithCancel(s.ctx)
+	if s.config.Timeout > 0 {
+		s.turnCtx, s.turnCancel = context.WithTimeout(s.ctx, s.config.Timeout)
+	} else {
+		s.turnCtx, s.turnCancel = context.WithCancel(s.ctx)
+	}
 	s.mu.Unlock()
 
 	// Call LLM — always use non-streaming Complete() so we get the full
