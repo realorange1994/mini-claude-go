@@ -1359,7 +1359,7 @@ func (c *AutoModeClassifier) cacheKey(toolName string, input map[string]any) str
 	// avoiding redundant API calls when writing multiple files to the same dir.
 	if toolName == "write_file" || toolName == "edit_file" || toolName == "multi_edit" {
 		if path, ok := input["file_path"].(string); ok {
-			parentDir := filepath.Dir(path)
+			parentDir := filepath.ToSlash(filepath.Dir(path))
 			return toolName + ":" + parentDir
 		}
 	}
@@ -1367,11 +1367,11 @@ func (c *AutoModeClassifier) cacheKey(toolName string, input map[string]any) str
 	if toolName == "fileops" {
 		op, _ := input["operation"].(string)
 		path, _ := input["path"].(string)
-		return "fileops:" + op + ":" + filepath.Dir(path)
+		return "fileops:" + op + ":" + filepath.ToSlash(filepath.Dir(path))
 	}
 	// For other file ops, cache by tool+parentDir
 	if path, ok := input["path"].(string); ok {
-		return toolName + ":" + filepath.Dir(path)
+		return toolName + ":" + filepath.ToSlash(filepath.Dir(path))
 	}
 	// Generic: tool name only (coarser caching)
 	return toolName

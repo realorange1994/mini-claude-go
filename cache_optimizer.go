@@ -355,18 +355,17 @@ func stripHallucinatedToolMarkup(content string) string {
 		result = result[:start] + result[endTag:]
 	}
 
-	// Handle [TOOL_CALL]...[/TOOL_CALL]
+	// Handle [TOOL_CALL]...[/TOOL_CALL] (case-insensitive)
 	for {
-		start := strings.Index(result, "[TOOL_CALL]")
-		if start < 0 {
+		idx := strings.Index(strings.ToLower(result), "[tool_call]")
+		if idx < 0 {
 			break
 		}
-		end := strings.Index(result[start:], "[/TOOL_CALL]")
-		if end < 0 {
+		endIdx := strings.Index(strings.ToLower(result[idx:]), "[/tool_call]")
+		if endIdx < 0 {
 			break
 		}
-		end = start + end + len("[/TOOL_CALL]")
-		result = result[:start] + result[end:]
+		result = result[:idx] + result[idx+endIdx+len("[/tool_call]"):]
 	}
 
 	// Handle <function_call>...</function_call>

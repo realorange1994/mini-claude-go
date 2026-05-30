@@ -134,8 +134,9 @@ func TestFileopsCacheKey(t *testing.T) {
 
 	input := map[string]any{"operation": "read", "path": "/some/path"}
 	key := c.cacheKey("fileops", input)
-	if key != "fileops:read:/some/path" {
-		t.Errorf("cacheKey for fileops: got %q, want %q", key, "fileops:read:/some/path")
+	// cacheKey uses filepath.Dir, so key contains parent directory
+	if key != "fileops:read:/some" {
+		t.Errorf("cacheKey for fileops: got %q, want %q", key, "fileops:read:/some")
 	}
 }
 
@@ -335,10 +336,10 @@ func TestCacheKeyGeneration(t *testing.T) {
 		t.Errorf("cacheKey for exec: got %q, want %q", key1, "exec:ls -la")
 	}
 
-	// file ops should be cached by tool+path
+	// file ops should be cached by tool+directory
 	key2 := c.cacheKey("write_file", map[string]any{"file_path": "/tmp/test.txt"})
-	if key2 != "write_file:/tmp/test.txt" {
-		t.Errorf("cacheKey for write_file: got %q, want %q", key2, "write_file:/tmp/test.txt")
+	if key2 != "write_file:/tmp" {
+		t.Errorf("cacheKey for write_file: got %q, want %q", key2, "write_file:/tmp")
 	}
 
 	// Generic: tool name only
