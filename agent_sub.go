@@ -935,6 +935,7 @@ func (a *AgentLoop) runChildAgentSync(
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
+		defer close(stopMonitor) // FIX: ensure goroutine cleanup on all exit paths
 		for {
 			select {
 			case <-stopMonitor:
