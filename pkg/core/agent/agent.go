@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -76,6 +77,10 @@ type AgentSession struct {
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// Turn context — derived from ctx, used per-turn for Ctrl+C interruption
+	turnCtx    context.Context
+	turnCancel context.CancelFunc
 
 	// Message queue state
 	steeringMu       sync.Mutex
@@ -393,6 +398,11 @@ func (s *AgentSession) runLoop() error {
 
 		done, err := s.runTurn()
 		if err != nil {
+			// Context canceled (e.g., Ctrl+C) — return without emitting error event
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+
 			// Check if this is a context overflow error — trigger compaction instead of retry
 			if IsContextOverflow(err) {
 				if compErr := s.Compact(); compErr != nil {
@@ -463,12 +473,17 @@ func (s *AgentSession) runTurn() (bool, error) {
 	// Emit before agent start
 	s.eventRunner.EmitBeforeAgentStart(sid, s.config.Model, turnNum)
 
+	// Create a cancellable context for this turn (allows Ctrl+C to interrupt)
+	s.mu.Lock()
+	s.turnCtx, s.turnCancel = context.WithCancel(s.ctx)
+	s.mu.Unlock()
+
 	// Call LLM — always use non-streaming Complete() so we get the full
 	// response (including tool_use blocks) for processResponse() to parse.
 	// If a stream callback is set, we emit text chunks as they become available.
 	var response string
 	var err error
-	response, err = s.callLLM(apiMsgs)
+	response, err = s.callLLM(s.turnCtx, apiMsgs)
 	if err != nil {
 		return false, err
 	}
@@ -492,6 +507,12 @@ func (s *AgentSession) runTurn() (bool, error) {
 
 	// Process response (tool calls or text)
 	stop, err := s.processResponse(response)
+
+	// Clear turn cancel after the turn completes
+	s.mu.Lock()
+	s.turnCancel = nil
+	s.mu.Unlock()
+
 	if err != nil {
 		return false, err
 	}
@@ -596,7 +617,7 @@ func (s *AgentSession) buildMessages(msgs []extensions.Message) []map[string]int
 }
 
 // callLLM invokes the language model using the configured LLM client.
-func (s *AgentSession) callLLM(messages []map[string]interface{}) (string, error) {
+func (s *AgentSession) callLLM(ctx context.Context, messages []map[string]interface{}) (string, error) {
 	s.mu.RLock()
 	client := s.llmClient
 	model := s.config.Model
@@ -608,8 +629,8 @@ func (s *AgentSession) callLLM(messages []map[string]interface{}) (string, error
 		return "", fmt.Errorf("LLM client not configured: call SetLLMClient first")
 	}
 
-	// Call the LLM
-	response, err := client.Complete(s.ctx, model, messages, toolDefs, thinking)
+	// Call the LLM with the turn context so it can be cancelled by Ctrl+C
+	response, err := client.Complete(ctx, model, messages, toolDefs, thinking)
 	if err != nil {
 		return "", fmt.Errorf("LLM call failed: %w", err)
 	}
@@ -1063,6 +1084,17 @@ func (s *AgentSession) buildSystemPromptLocked() string {
 }
 
 // GetLastMessage returns the last assistant message text.
+// CancelCurrentTurn cancels the current LLM call or tool execution.
+// Called by the REPL's Ctrl+C handler.
+func (s *AgentSession) CancelCurrentTurn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnCancel != nil {
+		s.turnCancel()
+		s.turnCancel = nil
+	}
+}
+
 func (s *AgentSession) GetLastMessage() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

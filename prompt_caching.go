@@ -113,8 +113,14 @@ func normalizeContentToArray(msg map[string]any) {
 
 	switch v := content.(type) {
 	case string:
+		// Preserve empty string as a text block with empty content, not an empty array.
+		// An empty array causes preflight validation to DROP the message with
+		// "blocks=0 (EMPTY)", which triggers API error 2013 (tool_use/tool_result mismatch).
+		// By keeping a text block, we ensure the message structure is preserved.
 		if v == "" {
-			msg["content"] = []map[string]any{}
+			msg["content"] = []map[string]any{
+				{"type": "text", "text": ""},
+			}
 		} else {
 			msg["content"] = []map[string]any{
 				{"type": "text", "text": v},
@@ -128,8 +134,11 @@ func normalizeContentToArray(msg map[string]any) {
 // When a tool_result has content: [{text: "foo", cache_control: ...}],
 // the shape is [{text, cache_control}] instead of "foo". This shape flip
 // destroys cache_read hit rate because the cached prefix changes every turn.
-// After hoisting, the block becomes: {type: "tool_result", content: "foo", cache_control: ...}.
-// Inspired by openclacky's cache_control hoisting in message_format/anthropic.rb.
+// After hoisting, the block becomes: {type: "tool_result", content: [{text: "foo"}], cache_control: ...}.
+// IMPORTANT: content is kept as array format (not flattened to string) to
+// prevent data loss during JSON round-trips in cacheMessageParams. Flattening
+// to string caused preflight DROP of empty user messages (tool_result content
+// lost in mapsToMessageParam deserialization).
 func hoistToolResultCache(msg map[string]any) {
 	content, exists := msg["content"]
 	if !exists {
@@ -168,12 +177,18 @@ func hoistToolResultCache(msg map[string]any) {
 			continue
 		}
 
-		// Hoist: extract cache_control to tool_result level
-		// Flatten content to just the text string
+		// Hoist: extract cache_control to tool_result level.
+		// Keep content as array format [{type: "text", text: "..."}] instead of
+		// flattening to string. This preserves the tool_result structure through
+		// the JSON round-trip in cacheMessageParams (messageParamToMaps →
+		// ApplyPromptCaching → mapsToMessageParam), preventing content loss that
+		// caused preflight DROP of empty user messages.
 		if text, ok := innerBlock["text"].(string); ok {
-			block["content"] = text
-			block["cache_control"] = cacheCtrl
 			delete(innerBlock, "cache_control")
+			block["cache_control"] = cacheCtrl
+			block["content"] = []map[string]any{
+				{"type": "text", "text": text},
+			}
 			arr[i] = block
 		}
 	}

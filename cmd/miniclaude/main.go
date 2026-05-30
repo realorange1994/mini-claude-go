@@ -2,18 +2,23 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"miniclaudecode-go/pkg/core/agent"
+	"miniclaudecode-go/pkg/core/repl"
 )
 
 // config mirrors the ~/.miniclaude/config.json structure.
@@ -209,7 +214,13 @@ func main() {
 	}
 	// Ensure URL ends with /v1/messages for Anthropic-compatible APIs
 	if !strings.HasSuffix(url, "/v1/messages") {
-		url = strings.TrimSuffix(url, "/") + "/v1/messages"
+		if strings.HasSuffix(url, "/v1/") {
+			url = url + "messages"
+		} else if strings.HasSuffix(url, "/v1") {
+			url = url + "/messages"
+		} else {
+			url = strings.TrimSuffix(url, "/") + "/v1/messages"
+		}
 	}
 
 	// ── Resolve model: flag > env > config > default ───────────────────
@@ -315,25 +326,63 @@ func main() {
 	runREPL(sess, streamVal, modelVal, cwd)
 }
 
-// runREPL starts an interactive read-eval-print loop.
+// runREPL starts an interactive read-eval-print loop with Ctrl+C signal handling.
 func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string) {
 	fmt.Fprintf(os.Stderr, "miniClaude Code — model %s — cwd %s\n", modelVal, cwd)
-	fmt.Fprintf(os.Stderr, "Type your message, /help for commands, /exit or Ctrl+D to quit.\n\n")
+	fmt.Fprintf(os.Stderr, "Type your message, /help for commands, /exit or Ctrl+D to quit.\n")
+	fmt.Fprintf(os.Stderr, "Ctrl+C to interrupt, double Ctrl+C within 1.5s to exit.\n\n")
 
-	reader := bufio.NewReader(os.Stdin)
 	history := newREPLHistory()
+	var inputCancelFn context.CancelFunc // set before reading, nil during agent run
+
+	// Install Ctrl+C handler (Windows: SetConsoleCtrlHandler, non-Windows: no-op).
+	// Must be called from main(), not init(), because Go runtime registers its own
+	// handler during initialization which would override ours.
+	repl.InstallCtrlCHandler()
+
+	// Interrupt callback — called by SetConsoleCtrlHandler (Windows) and signal handler (SIGTERM).
+	// Note: double-press detection is handled in the SetConsoleCtrlHandler callback itself.
+	interruptFn := func() {
+		// Cancel input context if reading
+		if inputCancelFn != nil {
+			inputCancelFn()
+		}
+		// Cancel current agent turn
+		sess.CancelCurrentTurn()
+	}
+
+	// On Windows, SetConsoleCtrlHandler catches Ctrl+C and calls SetInterruptHandler directly.
+	// On non-Windows, we rely on signal.Notify for SIGINT.
+	repl.SetInterruptHandler(func() {
+		fmt.Fprintln(os.Stderr, "\n[Interrupted. Press Ctrl+C again within 1.5s to exit.]")
+		interruptFn()
+	})
+
+	// Signal channel for SIGTERM only (for non-Windows or external signals).
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+
+	go func() {
+		for range sigCh {
+			fmt.Fprintln(os.Stderr, "\n[Interrupted. Press Ctrl+C again within 1.5s to exit.]")
+			interruptFn()
+		}
+	}()
+
+	// Ensure console is in correct mode before starting REPL.
+	repl.EnsureConsoleInputMode()
 
 	for {
-		// Prompt
+		repl.EnsureConsoleInputMode()
 		fmt.Fprintf(os.Stderr, "> ")
 
-		line, err := reader.ReadString('\n')
+		// Read input - using simple ReadLine that works reliably on Windows
+		line, err := repl.ReadLine()
+
 		if err != nil {
-			if err == io.EOF {
-				fmt.Fprintln(os.Stderr, "\nGoodbye!")
-				return
-			}
-			fmt.Fprintf(os.Stderr, "Input error: %v\n", err)
+			// Ctrl+C causes Scanln to return EOF - just continue the loop
+			// SetConsoleCtrlHandler prevents process termination
+			fmt.Fprintln(os.Stderr) // newline after interrupt message
 			continue
 		}
 
@@ -344,7 +393,7 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 
 		// Handle slash commands
 		if strings.HasPrefix(line, "/") {
-			if handleSlashCommand(line, sess, reader, stream, &history, cwd) {
+			if handleSlashCommand(line, sess, nil, stream, &history, cwd) {
 				return // exit
 			}
 			continue
@@ -355,7 +404,11 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 
 		// Run agent
 		if err := sess.Run(line); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if errors.Is(err, context.Canceled) {
+				fmt.Fprintln(os.Stderr, "[Turn interrupted.]")
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 			continue
 		}
 
