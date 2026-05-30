@@ -923,6 +923,9 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 
 	gate := NewPermissionGate(&cfg)
 
+	// Generate session ID for tool result store (needed before rebuildContextFromTranscript)
+	sessionID := time.Now().Format("20060102-150405")
+
 	// Read transcript and rebuild context
 	tr := transcript.NewReader(transcriptPath)
 	entries, err := tr.ReadAll()
@@ -930,7 +933,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
 
-	convCtx := rebuildContextFromTranscript(entries, cfg)
+	convCtx := rebuildContextFromTranscript(entries, cfg, sessionID)
 
 	maxTurns := cfg.MaxTurns
 	if maxTurns <= 0 {
@@ -1133,10 +1136,10 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 // It groups consecutive tool_use and tool_result entries correctly:
 // - Multiple consecutive tool_use entries become one assistant message
 // - Multiple consecutive tool_result entries become one user message
-func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config) *ConversationContext {
+func rebuildContextFromTranscript(entries []transcript.Entry, cfg Config, sessionID string) *ConversationContext {
 	ctx := NewConversationContext(cfg)
 	if cfg.ProjectDir != "" {
-		store := NewToolResultStore(cfg.ProjectDir, "") // sessionID not available in this path
+		store := NewToolResultStore(cfg.ProjectDir, sessionID)
 		ctx.SetToolResultStore(store)
 		ctx.SetContentReplacementState(NewContentReplacementState())
 	}
