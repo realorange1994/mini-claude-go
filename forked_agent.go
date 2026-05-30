@@ -412,18 +412,34 @@ func CaptureCacheSafeParams(systemPrompt string, model string, registry *tools.R
 // will continue the conversation from its own last position, so we protect the
 // parent's last KV page by shifting our breakpoint to the second-to-last message.
 func applyForkedAgentCaching(params *anthropic.MessageNewParams) {
-	// Convert messages to maps for caching
-	msgMaps := messageParamToMaps(params.Messages)
-
-	// Apply caching with SkipCacheWrite for fire-and-forget forked agents
-	cacheCfg := CacheBreakpointConfig{
-		MaxBreakpoints: 1,
-		SkipCacheWrite: true,
+	if params.Messages == nil || len(params.Messages) == 0 {
+		return
 	}
-	msgMaps = ApplyPromptCachingWithConfig(msgMaps, "5m", cacheCfg)
 
-	// Convert back to MessageParam
-	params.Messages = mapsToMessageParam(msgMaps)
+	cacheCtrl := anthropic.CacheControlEphemeralParam{Type: "ephemeral", TTL: "5m"}
+
+	messages := params.Messages
+
+	// Find breakpoint index (second-to-last for SkipCacheWrite)
+	breakpointIdx := len(messages) - 2
+	if breakpointIdx < 0 {
+		breakpointIdx = len(messages) - 1
+	}
+
+	// Place cache_control on the breakpoint message
+	if breakpointIdx >= 0 && breakpointIdx < len(messages) {
+		msg := &messages[breakpointIdx]
+		if len(msg.Content) > 0 {
+			lastIdx := len(msg.Content) - 1
+			if msg.Content[lastIdx].OfToolResult != nil {
+				msg.Content[lastIdx].OfToolResult.CacheControl = cacheCtrl
+			} else if msg.Content[lastIdx].OfText != nil {
+				msg.Content[lastIdx].OfText.CacheControl = cacheCtrl
+			}
+		}
+	}
+
+	params.Messages = messages
 
 	// Apply cache_control to system prompt
 	if len(params.System) > 0 {

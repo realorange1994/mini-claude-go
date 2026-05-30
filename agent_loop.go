@@ -4975,58 +4975,44 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 // deletes old tool results server-side while preserving the prompt cache.
 // Returns messages unchanged if no cache edits are pending.
 func (a *AgentLoop) injectCacheEdits(messages []anthropic.MessageParam) []anthropic.MessageParam {
-	cacheEdits, deletedCount := a.cachedMC.GetCacheEditsBlock()
-	if cacheEdits == nil {
+	cacheEditsMap, deletedCount := a.cachedMC.GetCacheEditsBlock()
+	if cacheEditsMap == nil {
 		return messages
 	}
 
-	// Track the number of tool results deleted by cache_edits.
-	// This is the closest proxy to upstream's cache_deleted_input_tokens,
-	// which the Go SDK doesn't expose.
 	if deletedCount > 0 {
 		a.totalCacheEditsDeletions.Add(int64(deletedCount))
 		a.logDebug("[cache] cache_edits: deleted=%d total_deletions=%d\n", deletedCount, a.totalCacheEditsDeletions.Load())
 	}
 
-	// Serialize messages to JSON for manipulation
-	raw, err := json.Marshal(messages)
+	// Marshal to JSON bytes, then unmarshal as ContentBlockParamUnion.
+	// This creates a raw content block that the SDK will serialize correctly.
+	cacheEditsJSON, err := json.Marshal(cacheEditsMap)
 	if err != nil {
 		return messages
 	}
 
-	var msgsJSON []map[string]any
-	if err := json.Unmarshal(raw, &msgsJSON); err != nil {
+	var cacheEditsBlock anthropic.ContentBlockParamUnion
+	if err := json.Unmarshal(cacheEditsJSON, &cacheEditsBlock); err != nil {
+		fmt.Fprintf(os.Stderr, "[injectCacheEdits] unmarshal failed: %v\n", err)
 		return messages
 	}
 
-	// Find the last user message and inject the cache_edits block
-	for i := len(msgsJSON) - 1; i >= 0; i-- {
-		if msgsJSON[i]["role"] == "user" {
-			content, ok := msgsJSON[i]["content"].([]any)
-			if !ok {
-				// Content might be a string, convert to array
-				if s, ok2 := msgsJSON[i]["content"].(string); ok2 {
-					content = []any{map[string]any{"type": "text", "text": s}}
-				} else {
-					continue
-				}
-			}
-			msgsJSON[i]["content"] = append(content, cacheEdits)
+	// Find last user message and append cache_edits block
+	found := false
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == anthropic.MessageParamRoleUser {
+			messages[i].Content = append(messages[i].Content, cacheEditsBlock)
+			found = true
 			break
 		}
 	}
 
-	// Reserialize back to messages
-	raw, err = json.Marshal(msgsJSON)
-	if err != nil {
-		return messages
+	if !found {
+		fmt.Fprintf(os.Stderr, "[injectCacheEdits] WARNING: no user message found\n")
 	}
 
-	var newMessages []anthropic.MessageParam
-	if err := json.Unmarshal(raw, &newMessages); err != nil {
-		return messages
-	}
-	return newMessages
+	return messages
 }
 
 // RunPostCompactCleanup clears caches and tracking state after compaction.

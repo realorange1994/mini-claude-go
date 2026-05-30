@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,358 +42,54 @@ const (
 	MaxCacheBreakpoints = 2
 )
 
-// ApplyPromptCaching applies Anthropic's optimal caching strategy to API messages.
-// Places 2 cache_control breakpoints using a rolling strategy (matching OpenClacky):
-//   - Turn N: marks messages[-2] and messages[-1]; server caches prefix up to [-1]
-//   - Turn N+1: messages[-2] is Turn N's last message (still marked) → cache READ hit
-//
-// Auto-injected content (marked with SystemInjectedPrefix) is skipped for breakpoint
-// placement, preventing variable attachment/summary content from becoming cache
-// breakpoints that change every turn.
-func ApplyPromptCaching(messages []map[string]any, ttl string) []map[string]any {
-	return ApplyPromptCachingWithConfig(messages, ttl, DefaultCacheBreakpointConfig())
+// cacheMessageParams applies prompt caching using SDK types directly,
+// avoiding JSON round-trip that can cause SDK unmarshaler to drop tool_result blocks.
+func cacheMessageParams(params *anthropic.MessageNewParams, ttl string) {
+	if params.Messages == nil || len(params.Messages) == 0 {
+		return
+	}
+
+	var cacheCtrl anthropic.CacheControlEphemeralParam
+	switch ttl {
+	case "1h":
+		cacheCtrl = anthropic.CacheControlEphemeralParam{Type: "ephemeral", TTL: "1h"}
+	default:
+		cacheCtrl = anthropic.CacheControlEphemeralParam{Type: "ephemeral", TTL: "5m"}
+	}
+
+	// Find the breakpoint index (last non-system-injected message)
+	breakpointIdx := len(params.Messages) - 1
+	for i := len(params.Messages) - 1; i >= 0; i-- {
+		msg := &params.Messages[i]
+		if (msg.Role == anthropic.MessageParamRoleUser || msg.Role == anthropic.MessageParamRoleAssistant) &&
+			!isSystemInjectedSDK(msg) {
+			breakpointIdx = i
+			break
+		}
+	}
+
+	if breakpointIdx >= 0 && breakpointIdx < len(params.Messages) {
+		msg := &params.Messages[breakpointIdx]
+		if len(msg.Content) == 0 {
+			return
+		}
+		lastIdx := len(msg.Content) - 1
+
+		if msg.Content[lastIdx].OfToolResult != nil {
+			msg.Content[lastIdx].OfToolResult.CacheControl = cacheCtrl
+		} else if msg.Content[lastIdx].OfText != nil {
+			msg.Content[lastIdx].OfText.CacheControl = cacheCtrl
+		}
+	}
 }
 
-// isSystemInjected checks if a message's content starts with the SystemInjectedPrefix
-// marker, indicating it was auto-injected (session memory, file recovery, etc.)
-// and should be skipped for cache breakpoint placement.
-func isSystemInjected(msg map[string]any) bool {
-	content, exists := msg["content"]
-	if !exists {
-		return false
-	}
-	// String content
-	if s, ok := content.(string); ok {
-		return strings.HasPrefix(s, SystemInjectedPrefix)
-	}
-	// Array content — check first text block
-	if arr, ok := content.([]any); ok && len(arr) > 0 {
-		if m, ok := arr[0].(map[string]any); ok {
-			if text, ok := m["text"].(string); ok {
-				return strings.HasPrefix(text, SystemInjectedPrefix)
-			}
+func isSystemInjectedSDK(msg *anthropic.MessageParam) bool {
+	for _, block := range msg.Content {
+		if block.OfText != nil && strings.Contains(block.OfText.Text, "<!-- system-injected -->") {
+			return true
 		}
 	}
 	return false
-}
-
-// stripSystemInjected removes the SystemInjectedPrefix from a message's content.
-// The prefix is only used internally for breakpoint placement decisions and should
-// not be sent to the API.
-func stripSystemInjected(msg map[string]any) {
-	content, exists := msg["content"]
-	if !exists {
-		return
-	}
-	// String content
-	if s, ok := content.(string); ok {
-		msg["content"] = strings.TrimPrefix(s, SystemInjectedPrefix)
-		return
-	}
-	// Array content — strip from first text block
-	if arr, ok := content.([]any); ok && len(arr) > 0 {
-		if m, ok := arr[0].(map[string]any); ok {
-			if text, ok := m["text"].(string); ok {
-				m["text"] = strings.TrimPrefix(text, SystemInjectedPrefix)
-			}
-		}
-	}
-}
-
-// normalizeContentToArray converts string content to array format
-// [{"type":"text","text":"..."}] so that applyCacheMarker never needs
-// to mutate the content structure. This prevents the string↔array flip
-// that breaks the KV cache prefix when breakpoints shift between turns.
-func normalizeContentToArray(msg map[string]any) {
-	content, ok := msg["content"]
-	if !ok {
-		return
-	}
-
-	switch v := content.(type) {
-	case string:
-		// Preserve empty string as a text block with error message, not an empty array.
-		// An empty array causes preflight validation to DROP the message with
-		// "blocks=0 (EMPTY)", which triggers API error 2013 (tool_use/tool_result mismatch).
-		// By injecting an error message, we ensure the LLM knows the tool output was lost.
-		const toolResultLostError = "<!-- system-injected -->[ERROR: Tool call result content was lost during prompt caching message processing. The original tool output could not be preserved. Please retry the operation if needed.]"
-		if v == "" {
-			msg["content"] = []map[string]any{
-				{"type": "text", "text": toolResultLostError},
-			}
-		} else {
-			msg["content"] = []map[string]any{
-				{"type": "text", "text": v},
-			}
-		}
-	case []any:
-		// Safety: empty arrays in message content would cause preflight DROP.
-		// This can happen after JSON round-trip when tool_result content is lost.
-		if len(v) == 0 {
-			msg["content"] = []map[string]any{
-				{"type": "text", "text": "<!-- system-injected -->[ERROR: Message content was lost during processing. The expected tool result could not be preserved. Please retry the operation if needed.]"},
-			}
-		}
-	}
-}
-
-// hoistToolResultCache detects tool_result blocks where cache_control was
-// placed on the inner text block and hoists it to the tool_result level.
-// When a tool_result has content: [{text: "foo", cache_control: ...}],
-// the shape is [{text, cache_control}] instead of "foo". This shape flip
-// destroys cache_read hit rate because the cached prefix changes every turn.
-// After hoisting, the block becomes: {type: "tool_result", content: [{text: "foo"}], cache_control: ...}.
-// IMPORTANT: content is kept as array format (not flattened to string) to
-// prevent data loss during JSON round-trips in cacheMessageParams. Flattening
-// to string caused preflight DROP of empty user messages (tool_result content
-// lost in mapsToMessageParam deserialization).
-func hoistToolResultCache(msg map[string]any) {
-	content, exists := msg["content"]
-	if !exists {
-		return
-	}
-	arr, ok := content.([]any)
-	if !ok || len(arr) == 0 {
-		return
-	}
-
-	for i, elem := range arr {
-		block, ok := elem.(map[string]any)
-		if !ok {
-			continue
-		}
-		// Only handle tool_result blocks
-		if block["type"] != "tool_result" {
-			continue
-		}
-
-		// Check if content is a single-element array with cache_control
-		inner, hasInner := block["content"]
-		if !hasInner {
-			continue
-		}
-		innerArr, ok := inner.([]any)
-		if !ok || len(innerArr) != 1 {
-			continue
-		}
-		innerBlock, ok := innerArr[0].(map[string]any)
-		if !ok {
-			continue
-		}
-		cacheCtrl, hasCache := innerBlock["cache_control"]
-		if !hasCache {
-			continue
-		}
-
-		// Hoist: extract cache_control to tool_result level.
-		// Keep content as array format [{type: "text", text: "..."}] instead of
-		// flattening to string. This preserves the tool_result structure through
-		// the JSON round-trip in cacheMessageParams (messageParamToMaps →
-		// ApplyPromptCaching → mapsToMessageParam), preventing content loss that
-		// caused preflight DROP of empty user messages.
-		if text, ok := innerBlock["text"].(string); ok {
-			delete(innerBlock, "cache_control")
-			block["cache_control"] = cacheCtrl
-			block["content"] = []map[string]any{
-				{"type": "text", "text": text},
-			}
-			arr[i] = block
-		}
-	}
-}
-
-// ApplyPromptCachingWithConfig applies prompt caching with explicit config.
-// This is the main entry point for cache breakpoint placement.
-func ApplyPromptCachingWithConfig(messages []map[string]any, ttl string, cfg CacheBreakpointConfig) []map[string]any {
-	if len(messages) == 0 {
-		return messages
-	}
-
-	result := deepCopyMessages(messages)
-	marker := map[string]any{"type": "ephemeral"}
-	if ttl == "1h" {
-		marker = map[string]any{"type": "ephemeral", "ttl": "1h"}
-	}
-
-	maxBP := cfg.MaxBreakpoints
-	if maxBP <= 0 {
-		maxBP = MaxCacheBreakpoints
-	}
-
-	// Identify system-injected messages BEFORE stripping their prefix.
-	// isSystemInjected relies on the prefix being present, so we must
-	// collect injected indices before stripSystemInjected removes them.
-	injectedIndices := make(map[int]bool)
-	for i := range result {
-		if isSystemInjected(result[i]) {
-			injectedIndices[i] = true
-		}
-	}
-
-	// Strip system-injected prefixes from all messages (they're internal markers,
-	// not for the API). Do this before placing breakpoints so the API never sees them.
-	for i := range result {
-		stripSystemInjected(result[i])
-	}
-
-	// Cache-control hoisting: for tool_result blocks that have cache_control
-	// on their inner text block, hoist the marker to the tool_result level
-	// itself and flatten the content to a string. This prevents the content
-	// shape from flipping between "string" and [{text, cache_control}] across
-	// turns, which destroys cache_read hit rate because the cached prefix changes.
-	// Inspired by openclacky's cache_control hoisting in message_format/anthropic.rb.
-	for i := range result {
-		hoistToolResultCache(result[i])
-	}
-
-	// Normalize all string content to array format BEFORE placing breakpoints.
-	// This is critical for cache prefix stability: applyCacheMarker converts
-	// string content to array format when adding cache_control, but when the
-	// breakpoint moves away from a message on the next turn, the content
-	// reverts to string format. This format flip (string ↔ array) changes
-	// the JSON structure of previously-cached messages, breaking the KV cache
-	// prefix. By normalizing upfront, all messages always have array content,
-	// so adding/removing cache_control never changes the content structure.
-	for i := range result {
-		normalizeContentToArray(result[i])
-	}
-
-	// Collect candidate indices for breakpoint placement, using pre-collected
-	// injected indices (must use pre-collected set since stripSystemInjected
-	// already removed the prefixes).
-	candidates := make([]int, 0, len(result))
-	for i := range result {
-		if !injectedIndices[i] {
-			candidates = append(candidates, i)
-		}
-	}
-
-	if len(candidates) == 0 {
-		// All messages are system-injected; fall back to last message
-		candidates = []int{len(result) - 1}
-	}
-
-	// Place cache_control on exactly ONE message (the last non-injected),
-	// matching upstream Claude Code's single-marker strategy. Mycro's
-	// turn-to-turn eviction frees KV pages at any cached prefix position
-	// NOT in cache_store_int_token_boundaries. With multiple markers,
-	// each creates a separate cache segment — any segment evicted breaks
-	// the entire prefix. With one marker, there's a single contiguous
-	// cached prefix that's far more resilient to LRU eviction.
-	// SkipCacheWrite: shift marker to second-to-last (last shared-prefix
-	// point) so the write is a no-op merge on mycro.
-	markerIndex := len(candidates) - 1
-	if cfg.SkipCacheWrite && len(candidates) >= 2 {
-		markerIndex = len(candidates) - 2
-	}
-	if markerIndex >= 0 {
-		applyCacheMarker(result[candidates[markerIndex]], marker)
-	}
-
-	// Also place cache_control on the system prompt block (first message if
-	// system role). This is separate from the message-level marker — the
-	// system prompt is typically the largest static prefix, and caching it
-	// independently ensures it survives even when the conversation history
-	// is evicted.
-	if role, _ := result[0]["role"].(string); role == "system" {
-		applyCacheMarker(result[0], marker)
-	}
-
-	return result
-}
-
-// applyCacheMarker adds cache_control to a single message, handling all formats.
-// For tool_result blocks that are cached, uses cache_reference instead of
-// tool_use_id, matching the upstream API field name.
-func applyCacheMarker(msg map[string]any, marker map[string]any) {
-	role, _ := msg["role"].(string)
-
-	// tool role: cache_control goes at message level
-	if role == "tool" {
-		msg["cache_control"] = marker
-		// Do NOT delete tool_use_id — the API requires it for tool_result pairing.
-		// cache_reference is an additional field for cache tracking, not a replacement.
-		return
-	}
-
-	content, exists := msg["content"]
-	if !exists {
-		msg["cache_control"] = marker
-		return
-	}
-
-	// Empty string content
-	if s, ok := content.(string); ok && s == "" {
-		msg["cache_control"] = marker
-		return
-	}
-
-	// String content -> convert to array format
-	if s, ok := content.(string); ok {
-		msg["content"] = []map[string]any{
-			{
-				"type":          "text",
-				"text":          s,
-				"cache_control": marker,
-			},
-		}
-		return
-	}
-
-	// Array content -> add cache_control to last block.
-	// Cache-control hoisting: if the last block is a tool_result,
-	// place cache_control on the tool_result block itself (not any
-	// nested text block). This prevents the content shape from
-	// flipping between "string" and [{text, cache_control}] depending
-	// on whether this message is the current cache breakpoint. Shape
-	// mutation destroys cache_read hit rate because the cached prefix
-	// changes every turn. Inspired by openclacky's cache_control hoisting.
-	// Handle both []any (from JSON round-trip) and []map[string]any (from
-	// normalizeContentToArray).
-	switch arr := content.(type) {
-	case []any:
-		if len(arr) > 0 {
-			if m, ok := arr[len(arr)-1].(map[string]any); ok {
-				m["cache_control"] = marker
-			}
-		}
-	case []map[string]any:
-		if len(arr) > 0 {
-			arr[len(arr)-1]["cache_control"] = marker
-		}
-	}
-}
-
-// deepCopyMessages does a deep copy via JSON marshal/unmarshal.
-// Returns the original slice on marshal failure (avoiding nil/empty results).
-func deepCopyMessages(messages []map[string]any) []map[string]any {
-	data, err := json.Marshal(messages)
-	if err != nil {
-		return messages
-	}
-	var result []map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		return messages
-	}
-	return result
-}
-
-// cacheMessageParams converts []anthropic.MessageParam to []map[string]any,
-// applies prompt caching, and converts back.
-func cacheMessageParams(params *anthropic.MessageNewParams, ttl string) {
-	// Convert messages to maps
-	msgMaps := messageParamToMaps(params.Messages)
-
-	msgMaps = ApplyPromptCaching(msgMaps, ttl)
-
-	// Add cache_reference to tool_result blocks that are within the cached prefix.
-	// This tells the Anthropic server "this tool_result is already cached" and
-	// maintains KV cache continuity across turns, matching upstream Claude Code's
-	// approach (claude.ts:3267-3294).
-	addCacheReference(msgMaps)
-
-	// Convert back to MessageParam
-	params.Messages = mapsToMessageParam(msgMaps)
 }
 
 // getCacheTTL determines the cache TTL based on session activity.
@@ -424,114 +119,6 @@ func (a *AgentLoop) getCacheTTL() string {
 	// from now. This ensures the KV cache survives the gap between turns.
 	a.ttlLockedUntil = now.Add(10 * time.Minute)
 	return "1h"
-}
-
-// addCacheReference adds cache_reference to tool_result blocks that are strictly
-// before the cache_control marker. The API requires cache_reference to appear
-// "before or on" the last cache_control — we use strict "before" for stability.
-func addCacheReference(messages []map[string]any) {
-	// Find the last message containing a cache_control marker
-	lastCCIdx := -1
-	for i := range messages {
-		msg := messages[i]
-		if cc, ok := msg["cache_control"]; ok && cc != nil {
-			lastCCIdx = i
-			continue
-		}
-		if _, hasCC := getLastBlockContent(msg["content"]); hasCC {
-			lastCCIdx = i
-		}
-	}
-	if lastCCIdx < 0 {
-		return
-	}
-
-	// Add cache_reference to tool_result blocks before the marker
-	for i := 0; i < lastCCIdx; i++ {
-		msg := messages[i]
-		role, _ := msg["role"].(string)
-		if role != "user" {
-			continue
-		}
-		content := msg["content"]
-		if content == nil {
-			continue
-		}
-
-		// Handle both []map[string]any and []any (from JSON round-trip)
-		switch blocks := content.(type) {
-		case []map[string]any:
-			for j, block := range blocks {
-				if blockType, _ := block["type"].(string); blockType == "tool_result" {
-					if toolUseID, ok := block["tool_use_id"].(string); ok && toolUseID != "" {
-						block["cache_reference"] = toolUseID
-						blocks[j] = block
-					}
-				}
-			}
-			msg["content"] = blocks
-		case []any:
-			for j, block := range blocks {
-				if bm, ok := block.(map[string]any); ok {
-					if blockType, _ := bm["type"].(string); blockType == "tool_result" {
-						if toolUseID, ok := bm["tool_use_id"].(string); ok && toolUseID != "" {
-							bm["cache_reference"] = toolUseID
-							blocks[j] = bm
-						}
-					}
-				}
-			}
-			msg["content"] = blocks
-		}
-	}
-}
-
-// getLastBlockContent returns the last content block's cache_control status.
-// Handles both []map[string]any and []any content types.
-func getLastBlockContent(content any) (any, bool) {
-	switch blocks := content.(type) {
-	case []map[string]any:
-		if len(blocks) > 0 {
-			return blocks[len(blocks)-1], blocks[len(blocks)-1]["cache_control"] != nil
-		}
-	case []any:
-		if len(blocks) > 0 {
-			if bm, ok := blocks[len(blocks)-1].(map[string]any); ok {
-				return bm, bm["cache_control"] != nil
-			}
-		}
-	}
-	return nil, false
-}
-
-// messageParamToMaps converts SDK message params to map representation.
-func messageParamToMaps(msgs []anthropic.MessageParam) []map[string]any {
-	data, err := json.Marshal(msgs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] prompt_caching: marshal failed: %v\n", err)
-		return nil
-	}
-	var result []map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] prompt_caching: unmarshal failed: %v\n", err)
-		return nil
-	}
-	return result
-}
-
-// mapsToMessageParam converts maps back to SDK message params.
-func mapsToMessageParam(msgs []map[string]any) []anthropic.MessageParam {
-	data, err := json.Marshal(msgs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] prompt_caching: marshal failed: %v\n", err)
-		return nil
-	}
-	var result []anthropic.MessageParam
-	if err := json.Unmarshal(data, &result); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] prompt_caching: unmarshal failed: %v\n", err)
-		return nil
-	}
-	return result
 }
 
 // FormatCachedSystemPrompt wraps the system prompt text for Anthropic caching.
