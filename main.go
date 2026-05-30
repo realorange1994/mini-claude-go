@@ -482,6 +482,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
+				cmd == "/tasks" ||
 				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/errors" || cmd == "/feature" || cmd == "/settings" || cmd == "/telemetry" ||
 				cmd == "/status" || cmd == "/model" || cmd == "/idlecompact" ||
 				cmd == "/save" || cmd == "/load" || cmd == "/sessions"
@@ -568,6 +569,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 						fmt.Println("  Development:")
 						fmt.Println("    /tools          -- List available tools (by category)")
 						fmt.Println("    /agents         -- Manage background agents")
+						fmt.Println("    /tasks          -- View background tasks")
 						fmt.Println("    /history        -- Show recent prompts")
 						fmt.Println("  Configuration:")
 						fmt.Println("    /mode           -- Switch permission mode (ask|auto|bypass|plan)")
@@ -630,6 +632,9 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 					continue
 				case "/agents":
 					handleAgentsCommand(agent, parts[1:])
+					continue
+				case "/tasks":
+					handleTasksCommand(agent, parts[1:])
 					continue
 				case "/doctor":
 					runDoctor(agent)
@@ -1042,6 +1047,162 @@ func handleAgentsCommand(agent *AgentLoop, args []string) {
 	}
 }
 
+// handleTasksCommand handles the /tasks slash command.
+// Supports:
+//
+//	/tasks          - List all background tasks
+//	/tasks list     - Same as above
+//	/tasks show <id> - Show details of a specific task
+//	/tasks stop <id> - Kill a running task
+//	/tasks message <id> <msg> - Send a message to a running task
+//	/tasks help     - Show usage
+func handleTasksCommand(agent *AgentLoop, args []string) {
+	if agent.agentTaskStore == nil {
+		fmt.Println("No task store available.")
+		return
+	}
+
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+
+	subcmd := strings.ToLower(args[0])
+
+	switch subcmd {
+	case "list", "":
+		tasks := agent.agentTaskStore.List()
+		if len(tasks) == 0 {
+			fmt.Println("No tasks found.")
+			return
+		}
+		fmt.Println()
+		fmt.Println("Background Tasks:")
+		fmt.Printf("  %-10s %-12s %-30s %-15s %s\n", "ID", "Status", "Description", "Model", "Started")
+		fmt.Println("  " + strings.Repeat("-", 80))
+		for _, t := range tasks {
+			desc := t.Description
+			if len(desc) > 28 {
+				desc = desc[:25] + "..."
+			}
+			model := t.Model
+			if model == "" {
+				model = "-"
+			}
+			fmt.Printf("  %-10s %-12s %-30s %-15s %s\n",
+				t.ID, t.Status, desc, model,
+				t.StartTime.Format("15:04:05"))
+		}
+		fmt.Printf("\n  %d task(s) total\n", len(tasks))
+
+	case "show":
+		if len(args) < 2 {
+			fmt.Println("Usage: /tasks show <id>")
+			return
+		}
+		taskID := args[1]
+		task := agent.agentTaskStore.Get(taskID)
+		if task == nil {
+			fmt.Printf("Task %s not found.\n", taskID)
+			return
+		}
+		fmt.Printf("\nTask: %s\n", task.ID)
+		fmt.Printf("  Status:        %s\n", task.Status)
+		fmt.Printf("  Type:          %s\n", task.Type)
+		fmt.Printf("  Description:   %s\n", task.Description)
+		fmt.Printf("  SubagentType:  %s\n", task.SubagentType)
+		fmt.Printf("  Model:         %s\n", task.Model)
+		fmt.Printf("  Prompt:        %s\n", truncateString(task.Prompt, 100))
+		fmt.Printf("  Started:       %s\n", task.StartTime.Format(time.RFC3339))
+		if !task.EndTime.IsZero() {
+			fmt.Printf("  Ended:         %s\n", task.EndTime.Format(time.RFC3339))
+			fmt.Printf("  Duration:      %s\n", task.EndTime.Sub(task.StartTime).Round(time.Second))
+		}
+		if task.ToolsUsed > 0 {
+			fmt.Printf("  Tools Used:    %d\n", task.ToolsUsed)
+		}
+		if task.DurationMs > 0 {
+			fmt.Printf("  Duration (ms): %d\n", task.DurationMs)
+		}
+		if task.TranscriptPath != "" {
+			fmt.Printf("  Transcript:    %s\n", task.TranscriptPath)
+		}
+		// Show tool stats
+		readCount, searchCount, bashCount, editCount, toolsUsed, tokenCount := task.GetToolStats()
+		if toolsUsed > 0 {
+			fmt.Printf("  Tool Stats:    read:%d search:%d bash:%d edit:%d total:%d\n",
+				readCount, searchCount, bashCount, editCount, toolsUsed)
+		}
+		if tokenCount > 0 {
+			fmt.Printf("  Tokens:        %d\n", tokenCount)
+		}
+		// Show output
+		output := task.GetOutput()
+		if output != "" {
+			lines := strings.Split(output, "\n")
+			maxLines := 50
+			if len(lines) > maxLines {
+				skipped := len(lines) - maxLines
+				fmt.Printf("\n  Output (last %d of %d lines):\n", maxLines, len(lines))
+				fmt.Printf("  ... (%d earlier lines omitted) ...\n", skipped)
+				lines = lines[len(lines)-maxLines:]
+			} else {
+				fmt.Printf("\n  Output (%d lines):\n", len(lines))
+			}
+			for _, line := range lines {
+				fmt.Println("  " + line)
+			}
+		} else {
+			fmt.Println("\n  Output: (none yet)")
+		}
+
+	case "stop":
+		if len(args) < 2 {
+			fmt.Println("Usage: /tasks stop <id>")
+			return
+		}
+		taskID := args[1]
+		task := agent.agentTaskStore.Get(taskID)
+		if task == nil {
+			fmt.Printf("Task %s not found.\n", taskID)
+			return
+		}
+		if task.IsTerminal() {
+			fmt.Printf("Task %s is not running (status: %s)\n", taskID, task.Status)
+			return
+		}
+		if agent.agentTaskStore.Kill(taskID) {
+			fmt.Printf("Task %s has been killed.\n", taskID)
+		} else {
+			fmt.Printf("Failed to kill task %s.\n", taskID)
+		}
+
+	case "message":
+		if len(args) < 3 {
+			fmt.Println("Usage: /tasks message <id> <msg>")
+			return
+		}
+		taskID := args[1]
+		msg := strings.Join(args[2:], " ")
+		if agent.agentTaskStore.AddPendingMessage(taskID, msg) {
+			fmt.Printf("Message sent to task %s.\n", taskID)
+		} else {
+			fmt.Printf("Task %s not found or not running.\n", taskID)
+		}
+
+	case "help":
+		fmt.Println("Tasks commands:")
+		fmt.Println("  /tasks              -- List all background tasks")
+		fmt.Println("  /tasks show <id>    -- Show details and output of a task")
+		fmt.Println("  /tasks stop <id>    -- Kill a running task")
+		fmt.Println("  /tasks message <id> <msg> -- Send a message to a running task")
+		fmt.Println("  /tasks help         -- Show this help")
+
+	default:
+		fmt.Printf("Unknown /tasks subcommand: %s\n", subcmd)
+		fmt.Println("Use /tasks help for usage information.")
+	}
+}
+
 // truncateString truncates a string to maxLen characters, adding "..." if truncated.
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
@@ -1392,6 +1553,7 @@ func showDetailedHelp(cmd string) {
 		"/branch":         "Create a conversation branch at the current point.\nUsage: /branch [list|switch <name>]",
 		"/tools":          "List all available tools, grouped by category (file, search, exec, git, agent, code, MCP).\nUsage: /tools",
 		"/agents":         "Manage background agents.\nUsage: /agents [list|show <id>|stop <id>|help]",
+		"/tasks":          "View background tasks.\nUsage: /tasks [list|show <id>|stop <id>|message <id> <msg>|help]",
 		"/history":        "Show recent prompts from the session history.\nUsage: /history [N|clear]",
 		"/mode":           "Switch permission mode.\nUsage: /mode [ask|auto|bypass|plan]",
 		"/settings":       "View and modify settings from multiple sources.\nUsage: /settings [sources|get <key>|set <key> <value>]",
