@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -200,14 +201,10 @@ func (ts *TaskStore) AllTasks() []*TaskState {
 	for _, t := range ts.tasks {
 		tasks = append(tasks, t)
 	}
-	// Sort by StartTime
-	for i := 0; i < len(tasks)-1; i++ {
-		for j := i + 1; j < len(tasks); j++ {
-			if tasks[j].StartTime.Before(tasks[i].StartTime) {
-				tasks[i], tasks[j] = tasks[j], tasks[i]
-			}
-		}
-	}
+	// Sort by StartTime (oldest first)
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].StartTime.Before(tasks[j].StartTime)
+	})
 	return tasks
 }
 
