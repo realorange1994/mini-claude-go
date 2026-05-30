@@ -20,6 +20,7 @@ import (
 	"miniclaudecode-go/pkg/core/shellexec"
 	"miniclaudecode-go/pkg/core/systemprompt"
 	"miniclaudecode-go/pkg/core/tools"
+	"miniclaudecode-go/pkg/core/tools/bashtool"
 )
 
 // AgentConfig holds agent configuration.
@@ -142,7 +143,7 @@ func (r *AgentSessionRuntime) newSessionWithOptions(model, cwd, fromEntryID stri
 
 	// Set up process logger for shell execution — prints to stderr but
 	// truncated to avoid flooding the terminal with large outputs.
-	exec.SetLogger(func(stage string, info map[string]string) {
+	processLogFn := func(stage string, info map[string]string) {
 		if stage == "start" {
 			cmd, _ := info["command"]
 			cwd, _ := info["cwd"]
@@ -162,7 +163,9 @@ func (r *AgentSessionRuntime) newSessionWithOptions(model, cwd, fromEntryID stri
 			}
 			fmt.Fprintln(os.Stderr)
 		}
-	})
+	}
+	exec.SetLogger(processLogFn)
+	bashtool.SetProcessLogger(processLogFn)
 
 	// Use existing session manager or create new
 	sm := r.sessionManager

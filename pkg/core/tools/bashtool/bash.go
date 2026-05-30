@@ -57,6 +57,31 @@ type BashOperations interface {
 	Execute(ctx context.Context, cmd string, cwd string, env map[string]string) (*BashResult, error)
 }
 
+// ProcessLogger is a callback for logging process execution events.
+type ProcessLogger func(stage string, info map[string]string)
+
+var processLogger ProcessLogger
+
+// SetProcessLogger sets the global process logger for bashtool.
+func SetProcessLogger(logger ProcessLogger) {
+	processLogger = logger
+}
+
+// logProcess emits a log event if a logger is configured.
+func logProcess(stage string, info map[string]string) {
+	if processLogger != nil {
+		processLogger(stage, info)
+	}
+}
+
+// truncateForDisplay truncates a string for display purposes.
+func truncateForDisplay(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // LocalBashOperations implements BashOperations for local execution.
 type LocalBashOperations struct{}
 
@@ -153,6 +178,13 @@ func executeLocalCommand(ctx context.Context, cmd, cwd string, env map[string]st
 			execCmd = "( " + strings.TrimSpace(cmd) + " )"
 		}
 	}
+
+	// Log command start
+	logProcess("start", map[string]string{
+		"shell":   shell,
+		"command": truncateForDisplay(cmd, 200),
+		"cwd":     cwd,
+	})
 
 	command := exec.CommandContext(ctx, shell, shellArg, execCmd)
 	command.Dir = cwd
@@ -257,6 +289,22 @@ func executeLocalCommand(ctx context.Context, cmd, cwd string, env map[string]st
 			result.Error = waitErr.Error()
 		}
 	}
+
+	// Log command end
+	status := "success"
+	if result.Details.ExitCode != 0 {
+		status = "error"
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		status = "timeout"
+	}
+	logProcess("end", map[string]string{
+		"status":    status,
+		"exitCode":  fmt.Sprintf("%d", result.Details.ExitCode),
+		"duration":  (time.Duration(durationMs) * time.Millisecond).Round(time.Millisecond).String(),
+		"outputLen": fmt.Sprintf("%d", len(result.Stdout)),
+		"output":    truncateForDisplay(result.Stdout, 500),
+	})
 
 	return result, nil
 }
