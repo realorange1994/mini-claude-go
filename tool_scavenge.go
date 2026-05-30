@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -32,6 +34,7 @@ func ScavengeToolCalls(textParts []string) []map[string]any {
 	// Cap input to prevent polynomial-redos on pathological text
 	const maxInput = 100_000
 	if len(fullText) > maxInput {
+		fmt.Fprintf(os.Stderr, "[scavenge] Input truncated from %d to %d chars (tool calls in truncated portion will be missed)\n", len(fullText), maxInput)
 		fullText = fullText[:maxInput]
 	}
 
