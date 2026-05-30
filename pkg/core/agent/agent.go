@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -138,6 +139,30 @@ func (r *AgentSessionRuntime) newSessionWithOptions(model, cwd, fromEntryID stri
 
 	comp := compaction.NewCompactor(model, nil)
 	exec := shellexec.New()
+
+	// Set up process logger for shell execution — prints to stderr but
+	// truncated to avoid flooding the terminal with large outputs.
+	exec.SetLogger(func(stage string, info map[string]string) {
+		if stage == "start" {
+			cmd, _ := info["command"]
+			cwd, _ := info["cwd"]
+			fmt.Fprintf(os.Stderr, "\n[Bash] %s", cmd)
+			if cwd != "" {
+				fmt.Fprintf(os.Stderr, "  (cwd: %s)", cwd)
+			}
+			fmt.Fprintln(os.Stderr)
+		} else if stage == "end" {
+			status, _ := info["status"]
+			exitCode, _ := info["exitCode"]
+			duration, _ := info["duration"]
+			output, _ := info["output"]
+			fmt.Fprintf(os.Stderr, "[Bash %s] exit=%s, took=%s", status, exitCode, duration)
+			if output != "" {
+				fmt.Fprintf(os.Stderr, ", output: %s", output)
+			}
+			fmt.Fprintln(os.Stderr)
+		}
+	})
 
 	// Use existing session manager or create new
 	sm := r.sessionManager

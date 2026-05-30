@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -19,6 +20,9 @@ const (
 
 	// MaxOutputBeforeSpill is the maximum output size before spilling to a temp file.
 	MaxOutputBeforeSpill = 5 * 1024 * 1024 // 5MB
+
+	// MaxDisplayOutput is the maximum output length shown in process logs.
+	MaxDisplayOutput = 500
 )
 
 // Result represents the result of a shell execution.
@@ -87,11 +91,36 @@ func WithTimeout(d time.Duration) Option { return func(o *Options) { o.timeout =
 // WithStdin sets stdin input.
 func WithStdin(s string) Option { return func(o *Options) { o.stdin = s } }
 
+// ProcessLogger is a callback for logging process execution events.
+type ProcessLogger func(stage string, info map[string]string)
+
 // Executor handles shell command execution.
-type Executor struct{}
+type Executor struct {
+	logger ProcessLogger
+}
 
 // New creates a new shell executor.
 func New() *Executor { return &Executor{} }
+
+// SetLogger sets the process logger callback.
+func (e *Executor) SetLogger(logger ProcessLogger) {
+	e.logger = logger
+}
+
+// log emits a log event if a logger is configured.
+func (e *Executor) log(stage string, info map[string]string) {
+	if e.logger != nil {
+		e.logger(stage, info)
+	}
+}
+
+// truncateForDisplay truncates a string for display purposes.
+func truncateForDisplay(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
 
 // getShell returns the appropriate shell binary and argument flag for the current OS.
 func getShell() (shell string, arg string) {
@@ -230,6 +259,15 @@ func (e *Executor) ExecuteStreaming(cmd string, streamCb func(line string, isStd
 		options.timeout = DefaultTimeout * time.Second
 	}
 
+	// Log command start
+	shell, _ := getShell()
+	e.log("start", map[string]string{
+		"shell":   shell,
+		"command": truncateForDisplay(cmd, 200),
+		"cwd":     options.cwd,
+		"timeout": options.timeout.String(),
+	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), options.timeout)
 	defer cancel()
 
@@ -300,6 +338,22 @@ func (e *Executor) ExecuteStreaming(cmd string, streamCb func(line string, isStd
 	} else if waitErr != nil && ctx.Err() == nil {
 		result.exitCode = 1
 	}
+
+	// Log command end
+	status := "success"
+	if result.exitCode != 0 {
+		status = "error"
+	}
+	if result.timedOut {
+		status = "timeout"
+	}
+	e.log("end", map[string]string{
+		"status":    status,
+		"exitCode":  fmt.Sprintf("%d", result.exitCode),
+		"duration":  duration.Round(time.Millisecond).String(),
+		"outputLen": fmt.Sprintf("%d", len(result.stdout)),
+		"output":    truncateForDisplay(result.stdout, MaxDisplayOutput),
+	})
 
 	return result, nil
 }
