@@ -113,13 +113,14 @@ func normalizeContentToArray(msg map[string]any) {
 
 	switch v := content.(type) {
 	case string:
-		// Preserve empty string as a text block with empty content, not an empty array.
+		// Preserve empty string as a text block with error message, not an empty array.
 		// An empty array causes preflight validation to DROP the message with
 		// "blocks=0 (EMPTY)", which triggers API error 2013 (tool_use/tool_result mismatch).
-		// By keeping a text block, we ensure the message structure is preserved.
+		// By injecting an error message, we ensure the LLM knows the tool output was lost.
+		const toolResultLostError = "<!-- system-injected -->[ERROR: Tool call result content was lost during prompt caching message processing. The original tool output could not be preserved. Please retry the operation if needed.]"
 		if v == "" {
 			msg["content"] = []map[string]any{
-				{"type": "text", "text": ""},
+				{"type": "text", "text": toolResultLostError},
 			}
 		} else {
 			msg["content"] = []map[string]any{
