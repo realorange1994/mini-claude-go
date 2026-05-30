@@ -1671,6 +1671,7 @@ func (c *ConversationContext) TruncateHistory() {
 	c.entries = c.truncateWithBoundary(1, keep)
 	c.ValidateToolPairing()
 	c.FixRoleAlternation()
+	c.InvalidateAnchors()
 }
 
 // AggressiveTruncateHistory drops more aggressively - keeps only first and last 5.
@@ -1690,6 +1691,7 @@ func (c *ConversationContext) aggressiveTruncateHistory() {
 	c.entries = c.truncateWithBoundary(1, keep)
 	c.ValidateToolPairing()
 	c.FixRoleAlternation()
+	c.InvalidateAnchors()
 }
 
 // PullBackFromTail removes the last k entries from history and returns them.
@@ -1748,6 +1750,7 @@ func (c *ConversationContext) MinimumHistory() {
 	c.entries = c.truncateWithBoundary(1, 6)
 	c.ValidateToolPairing()
 	c.FixRoleAlternation()
+	c.InvalidateAnchors()
 }
 
 // truncateWithBoundary performs a naive truncation but preserves the compaction
@@ -1817,6 +1820,7 @@ func (c *ConversationContext) CompactContext() bool {
 		c.entries = compactionMessagesToEntries(result.Messages, toolNames)
 		c.ValidateToolPairing()
 		c.FixRoleAlternation()
+		c.InvalidateAnchors()
 		fmt.Fprintf(os.Stderr, "\n  [compact] %s\n", result.Summary())
 		return true
 	}
@@ -1827,6 +1831,7 @@ func (c *ConversationContext) CompactContext() bool {
 		c.entries = compactionMessagesToEntries(smart.Messages, toolNames)
 		c.ValidateToolPairing()
 		c.FixRoleAlternation()
+		c.InvalidateAnchors()
 		fmt.Fprintf(os.Stderr, "\n  [compact] SmartCompact: %d turns collapsed\n", smart.CollapsedTurns)
 		return true
 	}
@@ -1840,6 +1845,7 @@ func (c *ConversationContext) CompactContext() bool {
 		c.entries = compactionMessagesToEntries(flat, toolNames)
 		c.ValidateToolPairing()
 		c.FixRoleAlternation()
+		c.InvalidateAnchors()
 		fmt.Fprintf(os.Stderr, "\n  [compact] SelectiveCompact: %d rounds cleared, saved ~%d tokens\n", sel.Compacted, sel.Saved)
 		return true
 	}

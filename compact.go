@@ -29,16 +29,31 @@ import (
 
 // ─── Token estimation ────────────────────────────────────────────────────────
 
-// CharsPerToken is the heuristic ratio of characters to tokens.
-// Claude and similar models average ~3.5-4.5 chars/token; 4 is a good midpoint.
-const CharsPerToken = 4
-
-// EstimateTokens returns an approximate token count for the given text.
-func EstimateTokens(text string) int {
+// estimateTokens provides a unified token count estimate for text.
+// Uses ~4 chars per token for ASCII/Latin, ~1 token per CJK character.
+// This is the canonical token estimation function used across the codebase.
+func estimateTokens(text string) int {
 	if text == "" {
 		return 0
 	}
-	return int(math.Ceil(float64(len(text)) / CharsPerToken))
+	// Count CJK characters (roughly 1 token per character)
+	cjkCount := 0
+	for _, r := range text {
+		if (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
+			(r >= 0x3040 && r <= 0x309F) || // Hiragana
+			(r >= 0x30A0 && r <= 0x30FF) { // Katakana
+			cjkCount++
+		}
+	}
+	// Non-CJK chars: ~4 chars per token
+	nonCJK := len(text) - cjkCount
+	return (nonCJK / 4) + cjkCount
+}
+
+// EstimateTokens returns an approximate token count for the given text.
+// Kept for backwards compatibility; new code should use estimateTokens().
+func EstimateTokens(text string) int {
+	return estimateTokens(text)
 }
 
 // EstimateContentTokens estimates tokens based on content type.
@@ -2584,7 +2599,7 @@ func (c *ConversationContext) estimateEntriesTokens(entries []conversationEntry)
 
 // entriesToSummaryText converts entries to a readable summary string.
 // For text entries, includes the content (truncated if long).
-// For tool entries, includes a one-line description.
+// For tool entries, includes the tool name, key arguments, and result preview.
 func entriesToSummaryText(entries []conversationEntry) string {
 	var sb strings.Builder
 	turnCount := 0
@@ -2597,16 +2612,16 @@ func entriesToSummaryText(entries []conversationEntry) string {
 			text := string(v)
 			if entry.role == "user" {
 				turnCount++
-				// Include user message content (truncated)
+				// Include full user message for short ones, first 500 chars for long
 				preview := text
-				if len(preview) > 200 {
-					preview = preview[:200] + "..."
+				if len(preview) > 500 {
+					preview = preview[:500] + "..."
 				}
 				sb.WriteString(fmt.Sprintf("User: %s\n", preview))
 			} else if entry.role == "assistant" {
 				preview := text
-				if len(preview) > 200 {
-					preview = preview[:200] + "..."
+				if len(preview) > 500 {
+					preview = preview[:500] + "..."
 				}
 				sb.WriteString(fmt.Sprintf("Assistant: %s\n", preview))
 			}
@@ -2615,13 +2630,18 @@ func entriesToSummaryText(entries []conversationEntry) string {
 				if b.OfToolUse != nil {
 					toolCallCount++
 					name := b.OfToolUse.Name
-					// Extract file paths from tool arguments
+					// Extract key arguments from tool input
+					argSummary := extractToolCallArgs(name, b.OfToolUse.Input)
+					sb.WriteString(fmt.Sprintf("[tool call: %s%s]\n", name, argSummary))
+					// Track files mentioned
 					if m, ok := b.OfToolUse.Input.(map[string]any); ok {
 						if path, ok := m["path"].(string); ok {
 							filesMentioned[path] = true
 						}
+						if path, ok := m["file_path"].(string); ok {
+							filesMentioned[path] = true
+						}
 					}
-					sb.WriteString(fmt.Sprintf("[tool call: %s]\n", name))
 				}
 			}
 		case ToolResultContent:
@@ -2629,13 +2649,18 @@ func entriesToSummaryText(entries []conversationEntry) string {
 				for _, cb := range r.Content {
 					if cb.OfText != nil {
 						text := cb.OfText.Text
-						// Extract key info from tool result
-						lines := strings.Count(text, "\n")
+						isError := r.IsError.Valid() && r.IsError.Value
+						// Include first 200 chars of actual content
 						preview := text
-						if len(preview) > 100 {
-							preview = preview[:100] + "..."
+						if len(preview) > 200 {
+							preview = preview[:200] + "..."
 						}
-						sb.WriteString(fmt.Sprintf("[tool result: %d lines] %s\n", lines+1, preview))
+						lines := strings.Count(text, "\n")
+						status := ""
+						if isError {
+							status = " (ERROR) "
+						}
+						sb.WriteString(fmt.Sprintf("[tool result%s%d lines] %s\n", status, lines+1, preview))
 					}
 				}
 			}
@@ -2655,6 +2680,57 @@ func entriesToSummaryText(entries []conversationEntry) string {
 	summary.WriteString("---\n")
 	summary.WriteString(sb.String())
 	return summary.String()
+}
+
+// extractToolCallArgs builds a brief argument summary string for a tool call.
+// Returns a string like " path=/foo/bar.go" or " command='go build'" that can
+// be appended to the tool name in a summary line. Returns empty string if no
+// useful arguments are found.
+func extractToolCallArgs(toolName string, input any) string {
+	m, ok := input.(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	// Priority-ordered argument keys that carry the most useful context.
+	// Different tools use different key names for similar concepts.
+	keyOrder := []string{
+		// File paths (most important for understanding what was operated on)
+		"file_path", "path", "filePath",
+		// Commands (critical for exec/bash tools)
+		"command", "cmd",
+		// Search/query patterns
+		"query", "pattern", "search_string", "regex",
+		// Edit content identifiers
+		"old_string", "new_string", "oldText", "newText",
+		// Other useful context
+		"symbol", "function_name", "class_name",
+	}
+
+	var parts []string
+	for _, key := range keyOrder {
+		val, exists := m[key]
+		if !exists {
+			continue
+		}
+		s, ok := val.(string)
+		if !ok || s == "" {
+			continue
+		}
+		// Truncate long values
+		display := s
+		if len(display) > 120 {
+			display = display[:120] + "..."
+		}
+		// Replace newlines for single-line display
+		display = strings.ReplaceAll(display, "\n", "\\n")
+		parts = append(parts, fmt.Sprintf("%s=%s", key, display))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, ", ")
 }
 
 // entriesToSummaryTextForMessagesParams generates structured metadata from []anthropic.MessageParam.
@@ -2977,31 +3053,54 @@ func summarizeToolResult(text string) string {
 	if text == "" {
 		return ""
 	}
-	// For Bash tool results, extract the exit code info
+	// For Bash tool results, extract exit code and output preview
 	if strings.Contains(text, "Exit code:") {
-		// Extract first meaningful line and exit code
 		lines := strings.Split(text, "\n")
+		// Find exit code line
+		var exitCode string
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "Exit code:") {
+				exitCode = strings.TrimSpace(strings.TrimPrefix(line, "Exit code:"))
+				break
+			}
+		}
+		// Get first non-empty output line
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if line != "" && !strings.HasPrefix(line, "Exit code:") {
 				preview := line
-				if len(preview) > 100 {
-					preview = preview[:100] + "..."
+				if len(preview) > 150 {
+					preview = preview[:150] + "..."
+				}
+				if exitCode != "" && exitCode != "0" {
+					return fmt.Sprintf("exit=%s, %s", exitCode, preview)
 				}
 				return preview
 			}
 		}
+		if exitCode != "" {
+			return fmt.Sprintf("exit=%s", exitCode)
+		}
 		return "Command executed"
 	}
-	// For file read results
-	if strings.Contains(text, "Successfully read") {
-		return "File read successfully"
+	// For file read results — preserve line count, snippet
+	if strings.Contains(text, "Successfully read") || strings.Contains(text, "Read file") {
+		// Extract line/byte info if present
+		if idx := strings.Index(text, "lines"); idx >= 0 {
+			end := idx + 20
+			if end > len(text) {
+				end = len(text)
+			}
+			snippet := text[:end]
+			return snippet
+		}
+		return "File read"
 	}
-	// For grep results
-	if strings.Contains(text, "matching") || strings.Contains(text, "matches") {
-		// Extract match count if available
+	// For grep/search results — preserve match count
+	if strings.Contains(text, "matching") || strings.Contains(text, "matches") || strings.Contains(text, "match") {
 		if idx := strings.Index(text, "match"); idx >= 0 {
-			end := idx + 7
+			end := idx + 30
 			if end > len(text) {
 				end = len(text)
 			}
@@ -3009,20 +3108,28 @@ func summarizeToolResult(text string) string {
 		}
 		return "Found matches"
 	}
-	// For write/edit success
+	// For write/edit results — preserve target info
 	if strings.Contains(text, "successfully") {
-		return "Operation completed successfully"
+		// Try to extract file path or target
+		if idx := strings.Index(text, ".go"); idx >= 0 {
+			start := idx - 40
+			if start < 0 {
+				start = 0
+			}
+			return text[start : idx+3]
+		}
+		return "Operation completed"
 	}
 	// For TodoWrite results
 	if strings.Contains(text, "Todos updated") {
 		return "Todo list updated"
 	}
-	// Default: first non-empty line
+	// Default: first non-empty line (with generous preview)
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "Tool") && !strings.HasPrefix(line, "Result") {
-			if len(line) > 150 {
-				return line[:150] + "..."
+			if len(line) > 200 {
+				return line[:200] + "..."
 			}
 			return line
 		}

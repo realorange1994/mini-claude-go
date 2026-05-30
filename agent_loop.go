@@ -420,7 +420,7 @@ type AgentLoop struct {
 	toolSchemaCacheHash       uint64                              // hash of tool names for cache invalidation
 	thinkingClearLatched      bool                                // once set (>1h idle), stays true for session — clears thinking via context_management
 	lastApiCompletionTime     time.Time                           // timestamp of last successful API call (for thinking latch)
-	ttlLockedUntil           time.Time                           // TTL lock: cache stays valid until this time (session-stable locking)
+	ttlLockedUntilUnix       int64                               // TTL lock: unix timestamp cache stays valid until (atomic, session-stable locking)
 	announcedMCPServers       map[string]bool                     // servers whose instructions have been announced this session (delta tracking)
 	betaHeadersLatched        []string                            // once set, stays same for session — prevents mid-session header churn
 	errorReporter             *ErrorReporter                      // captures error events for analysis

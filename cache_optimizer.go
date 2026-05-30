@@ -105,26 +105,10 @@ func truncateForTokens(text string, maxTokens int) string {
 	return truncated + "\n\n[... tool output truncated for token budget; use Read to get full content]"
 }
 
-// countTokensBounded provides a bounded token count estimate.
-// Uses simple heuristic: ~4 chars per token for English, ~2 for CJK.
+// countTokensBounded is an alias for estimateTokens for backwards compatibility.
+// Deprecated: use estimateTokens from compact.go instead.
 func countTokensBounded(text string) int {
-	if len(text) == 0 {
-		return 0
-	}
-
-	// Count CJK characters (roughly 1 token per character)
-	cjkCount := 0
-	for _, r := range text {
-		if (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
-			(r >= 0x3040 && r <= 0x309F) || // Hiragana
-			(r >= 0x30A0 && r <= 0x30FF) { // Katakana
-			cjkCount++
-		}
-	}
-
-	// Non-CJK chars: ~4 chars per token
-	nonCJK := len(text) - cjkCount
-	return (nonCJK / 4) + cjkCount
+	return estimateTokens(text)
 }
 
 // fixToolCallPairing drops both unpaired assistant.tool_calls and stray tool messages.

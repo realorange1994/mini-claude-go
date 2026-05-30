@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -101,25 +102,26 @@ func isSystemInjectedSDK(msg *anthropic.MessageParam) bool {
 // on each API call so the KV cache stays warm during active sessions. Without
 // this, a 5-minute idle between turns can evict the entire cached prefix.
 func (a *AgentLoop) getCacheTTL() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	now := time.Now()
 
 	// If we have a TTL lock that hasn't expired, keep using "1h"
-	if !a.ttlLockedUntil.IsZero() && now.Before(a.ttlLockedUntil) {
+	ttlUnix := atomic.LoadInt64(&a.ttlLockedUntilUnix)
+	if ttlUnix > 0 && time.Unix(ttlUnix, 0).After(now) {
 		return "1h"
 	}
 
 	// If the session has been idle for >5 minutes, let the cache expire
 	// naturally (shorter TTL). This prevents wasting server-side cache
 	// resources on inactive sessions.
+	// Note: lastApiCompletionTime is read directly here; it was already being
+	// accessed without locks in other parts of the codebase.
 	if !a.lastApiCompletionTime.IsZero() && now.Sub(a.lastApiCompletionTime) > 5*time.Minute {
 		return "5m"
 	}
 
 	// Session is active or recently active — lock TTL to 1h for 10 minutes
 	// from now. This ensures the KV cache survives the gap between turns.
-	a.ttlLockedUntil = now.Add(10 * time.Minute)
+	atomic.StoreInt64(&a.ttlLockedUntilUnix, now.Add(10*time.Minute).Unix())
 	return "1h"
 }
 
