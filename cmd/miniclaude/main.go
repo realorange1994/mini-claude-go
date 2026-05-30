@@ -352,40 +352,58 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 	}
 
 	// On Windows, SetConsoleCtrlHandler catches Ctrl+C and calls SetInterruptHandler directly.
-	// On non-Windows, we rely on signal.Notify for SIGINT.
+	// On Windows, SetConsoleCtrlHandler handles Ctrl+C via SetInterruptHandler.
+	// Double-press-to-exit is handled in InstallCtrlCHandler callback.
+	// SetInterruptHandler is called after the double-press check, so it just handles the interrupt.
 	repl.SetInterruptHandler(func() {
-		fmt.Fprintln(os.Stderr, "\n[Interrupted. Press Ctrl+C again within 1.5s to exit.]")
+		fmt.Fprint(os.Stderr, "\r\x1b[2K[Interrupted. Press Ctrl+C again within 1.5s to exit.]\n")
 		interruptFn()
 	})
 
-	// Signal channel for SIGTERM only (for non-Windows or external signals).
+	// Signal channel for SIGINT (non-Windows) and SIGTERM.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM)
+	if runtime.GOOS == "windows" {
+		// On Windows, only handle SIGTERM (Ctrl+C is handled by SetConsoleCtrlHandler)
+		signal.Notify(sigCh, syscall.SIGTERM)
+	} else {
+		// On Unix, handle both SIGINT (Ctrl+C) and SIGTERM
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	}
 
 	go func() {
-		for range sigCh {
-			fmt.Fprintln(os.Stderr, "\n[Interrupted. Press Ctrl+C again within 1.5s to exit.]")
+		for sig := range sigCh {
+			if runtime.GOOS != "windows" && sig == os.Interrupt {
+				// Check for double Ctrl+C (within 1.5s) to exit on Unix
+				if repl.CheckDoubleInterrupt() {
+					fmt.Fprint(os.Stderr, "\r\x1b[2K[Exiting...]\n")
+					os.Exit(0)
+				}
+			}
+			if sig == syscall.SIGTERM {
+				fmt.Fprint(os.Stderr, "\r\x1b[2K[Received SIGTERM, exiting...]\n")
+				os.Exit(0)
+			}
+			fmt.Fprint(os.Stderr, "\r\x1b[2K[Interrupted. Press Ctrl+C again within 1.5s to exit.]\n")
 			interruptFn()
 		}
 	}()
 
 	// Check if stdin has data (piped input) and process it before entering REPL.
+	// Using io.ReadAll for reliability (bufio.Scanner has 64KB line limit).
 	if stat, _ := os.Stdin.Stat(); stat.Mode()&os.ModeCharDevice == 0 {
-		scanner := bufio.NewScanner(os.Stdin)
-		var lines []string
-		for scanner.Scan() {
-			lines = append(lines, scanner.Text())
-		}
-		piped := strings.TrimSpace(strings.Join(lines, " "))
-		if piped != "" {
-			if err := sess.Run(piped); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+		data, err := io.ReadAll(os.Stdin)
+		if err == nil && len(data) > 0 {
+			piped := strings.TrimSpace(string(data))
+			if piped != "" {
+				if err := sess.Run(piped); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if last := sess.GetLastMessage(); last != "" && !stream {
+					fmt.Println(last)
+				}
+				return
 			}
-			if last := sess.GetLastMessage(); last != "" && !stream {
-				fmt.Println(last)
-			}
-			return
 		}
 	}
 
@@ -404,9 +422,8 @@ func runREPL(sess *agent.AgentSession, stream bool, modelVal string, cwd string)
 				fmt.Fprintln(os.Stderr)
 				return // stdin closed (pipe), exit cleanly
 			}
-			// Ctrl+C causes Scanln to return other errors - just continue the loop
-			// SetConsoleCtrlHandler prevents process termination
-			fmt.Fprintln(os.Stderr) // newline after interrupt message
+			// Ctrl+C: clear the "> " prompt and print newline
+			fmt.Fprint(os.Stderr, "\r\x1b[2K\n")
 			continue
 		}
 
