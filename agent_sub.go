@@ -1053,7 +1053,6 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry, a
 		costTracker:         NewCostTracker(),
 		extractionState:     NewExtractionState(),
 		errorReporter:       NewErrorReporter(),
-		featureFlags:        NewFeatureFlagStore(),
 		telemetry:           NewTelemetryManager(true), // disabled for sub-agents
 		sonnetModel:         a.sonnetModel,             // inherit parent's sonnet model for fallback
 		agentNameRegistry:   make(map[string]string),

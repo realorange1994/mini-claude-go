@@ -476,7 +476,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
 				cmd == "/tasks" ||
-				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/feature" ||
+				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" ||
 				cmd == "/status" || cmd == "/model"
 
 			if !isKnownCmd {
@@ -566,7 +566,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 						fmt.Println("    /history        -- Show recent prompts")
 						fmt.Println("  Configuration:")
 						fmt.Println("    /mode           -- Switch permission mode (ask|auto|bypass|plan)")
-						fmt.Println("    /feature        -- Manage feature flags (list/enable/disable)")
 						fmt.Println("  Operations:")
 						fmt.Println("    /doctor         -- Run installation diagnostics")
 						fmt.Println("    /cleanup        -- Remove stale session files")
@@ -627,9 +626,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 					if newAgent != agent {
 						agent = newAgent
 					}
-					continue
-				case "/feature":
-					handleFeature(agent, parts[1:])
 					continue
 				case "/status":
 					handleStatus(agent)
@@ -1466,7 +1462,6 @@ func showDetailedHelp(cmd string) {
 		"/tasks":          "View background tasks.\nUsage: /tasks [list|show <id>|stop <id>|message <id> <msg>|help]",
 		"/history":        "Show recent prompts from the session history.\nUsage: /history [N|clear]",
 		"/mode":           "Switch permission mode.\nUsage: /mode [ask|auto|bypass|plan]",
-		"/feature":        "Manage feature flags.\nUsage: /feature [list|enable <name>|disable <name>]",
 		"/doctor":         "Run installation diagnostics: API key, base URL, tools (rg/python/node/git),\nMCP servers, skills, transcripts, CLAUDE.md files.\nUsage: /doctor",
 		"/cleanup":        "Remove stale session files older than cutoff days.\nUsage: /cleanup [days]",
 		"/quit":           "Exit the interactive session.\nAliases: /exit, /q",

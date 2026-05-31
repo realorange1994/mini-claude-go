@@ -424,7 +424,6 @@ type AgentLoop struct {
 	announcedMCPServers       map[string]bool                     // servers whose instructions have been announced this session (delta tracking)
 	betaHeadersLatched        []string                            // once set, stays same for session — prevents mid-session header churn
 	errorReporter             *ErrorReporter                      // captures error events for analysis
-	featureFlags              *FeatureFlagStore                   // feature flag store
 	lastTransition            LoopTransitionReason                // reason for the most recent loop continue
 	telemetry                 *TelemetryManager                   // telemetry event tracking
 	cronScheduler             *CronScheduler                      // cron task scheduler (started after agent setup)
@@ -751,7 +750,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		shellHooks:          LoadAllHooks(cfg.ProjectDir),
 		sonnetModel:         getDefaultSonnetModel(),
 		errorReporter:       NewErrorReporter(),
-		featureFlags:        NewFeatureFlagStore(),
 		announcedMCPServers: make(map[string]bool),
 		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 	}
@@ -984,7 +982,6 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		hooks:               cfg.Hooks,
 		shellHooks:          LoadAllHooks(cfg.ProjectDir),
 		errorReporter:       NewErrorReporter(),
-		featureFlags:        NewFeatureFlagStore(),
 		announcedMCPServers: make(map[string]bool),
 		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 	}
