@@ -8,9 +8,11 @@ import (
 
 	"miniclaudecode-go/pkg/core/extensions"
 	"miniclaudecode-go/pkg/core/tools/bashtool"
-	"miniclaudecode-go/pkg/core/tools/builtin"
+	"miniclaudecode-go/pkg/core/tools/edittool"
 	"miniclaudecode-go/pkg/core/tools/findtool"
+	"miniclaudecode-go/pkg/core/tools/globtool"
 	"miniclaudecode-go/pkg/core/tools/greptool"
+	"miniclaudecode-go/pkg/core/tools/lstool"
 	"miniclaudecode-go/pkg/core/tools/readtool"
 	"miniclaudecode-go/pkg/core/tools/writetool"
 )
@@ -97,7 +99,6 @@ func (r *Registry) Execute(ctx context.Context, name string, input map[string]in
 	// Log tool execution start
 	if r.logger != nil {
 		info := map[string]string{"tool": name}
-		// Extract key parameters for display
 		switch name {
 		case "Bash":
 			if cmd, ok := input["command"].(string); ok {
@@ -207,11 +208,10 @@ func getCwd() string {
 }
 
 // DefaultTools returns the default built-in tools with handlers wired.
-// Uses the new aligned implementations for Read, Write, Grep, Find, and Bash.
+// Aligned to pi's tools/index.ts — each tool uses its dedicated package.
 func DefaultTools() *Registry {
 	reg := NewRegistry()
 
-	// Read tool handler — uses new readtool package
 	reg.Register("Read", extensions.ToolDefinition{
 		Name:        "Read",
 		Description: "Read the contents of a file. Use this to view files before editing or to read configuration files, source code, or documentation.",
@@ -238,22 +238,18 @@ func DefaultTools() *Registry {
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'path' parameter")
 		}
-
 		ri := readtool.ReadInput{
 			Path:   path,
 			Offset: intOf(input["offset"]),
 			Limit:  intOf(input["limit"]),
 		}
-
 		result, err := readtool.Execute(ri, getCwd(), readtool.LocalReadOperations{}, true, true)
 		if err != nil {
 			return "", err
 		}
-
 		return readtool.FormatReadOutput(result), nil
 	})
 
-	// Write tool handler — uses new writetool package
 	reg.Register("Write", extensions.ToolDefinition{
 		Name:        "Write",
 		Description: "Write content to a file. This will create the file if it doesn't exist or overwrite if it does. Use for creating new files or making significant changes.",
@@ -280,7 +276,6 @@ func DefaultTools() *Registry {
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'content' parameter")
 		}
-
 		result, err := writetool.Execute(writetool.WriteInput{
 			Path:    path,
 			Content: content,
@@ -288,7 +283,6 @@ func DefaultTools() *Registry {
 		if err != nil {
 			return "", err
 		}
-
 		if result.Created {
 			return fmt.Sprintf("Created new file %s with %d bytes", result.Path, result.BytesWritten), nil
 		}
@@ -298,7 +292,6 @@ func DefaultTools() *Registry {
 		return fmt.Sprintf("Updated %s (%d bytes):\n%s", result.Path, result.BytesWritten, result.Diff), nil
 	})
 
-	// Edit tool handler — uses builtin + editdiff
 	reg.Register("Edit", extensions.ToolDefinition{
 		Name:        "Edit",
 		Description: "Make targeted edits to a file. Supports three modes: replace (replace old_string with new_string), insert (insert new_string at line), and delete (remove content).",
@@ -333,28 +326,25 @@ func DefaultTools() *Registry {
 			"required": []string{"path"},
 		},
 	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
-		path, ok := input["path"].(string)
-		if !ok {
-			return "", fmt.Errorf("missing or invalid 'path' parameter")
-		}
-		editType := "replace"
+		editType := edittool.EditReplace
 		if t, ok := input["type"].(string); ok {
-			editType = t
+			editType = edittool.EditType(t)
 		}
-
-		spec := builtin.EditSpec{
+		result, err := edittool.Execute(edittool.EditInput{
 			Type:       editType,
-			Path:       path,
+			Path:       stringOf(input["path"]),
 			OldString:  stringOf(input["old_string"]),
 			NewString:  stringOf(input["new_string"]),
 			InsertLine: intOf(input["insert_line"]),
 			StartLine:  intOf(input["start_line"]),
 			EndLine:    intOf(input["end_line"]),
+		}, getCwd(), edittool.LocalEditOperations{})
+		if err != nil {
+			return "", err
 		}
-		return builtin.Edit(spec)
+		return edittool.FormatEditOutput(result), nil
 	})
 
-	// Bash tool handler — uses new bashtool package
 	reg.Register("Bash", extensions.ToolDefinition{
 		Name:        "Bash",
 		Description: "Execute a shell command. Use for running git commands, npm scripts, running tests, or any command-line operations.",
@@ -381,26 +371,21 @@ func DefaultTools() *Registry {
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'command' parameter")
 		}
-
 		ri := bashtool.BashInput{
 			Command: cmd,
 			CWD:     stringOf(input["cwd"]),
 			Timeout: intOf(input["timeout"]),
 		}
-
 		if ri.CWD == "" {
 			ri.CWD = getCwd()
 		}
-
 		result, err := bashtool.Execute(ctx, ri, bashtool.LocalBashOperations{})
 		if err != nil {
 			return "", err
 		}
-
 		return bashtool.FormatBashOutput(result), nil
 	})
 
-	// Grep tool handler — uses new greptool package with ripgrep
 	reg.Register("Grep", extensions.ToolDefinition{
 		Name:        "Grep",
 		Description: "Search for a pattern in files using ripgrep. Use to find function definitions, TODO comments, or any text pattern across your codebase.",
@@ -440,7 +425,6 @@ func DefaultTools() *Registry {
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'pattern' parameter")
 		}
-
 		var paths []string
 		if p, ok := input["paths"].([]interface{}); ok {
 			for _, v := range p {
@@ -449,7 +433,6 @@ func DefaultTools() *Registry {
 				}
 			}
 		}
-
 		ri := greptool.GrepInput{
 			Pattern:       pattern,
 			Paths:         paths,
@@ -458,19 +441,15 @@ func DefaultTools() *Registry {
 			ContextLines:  intOf(input["context"]),
 			Glob:          stringOf(input["glob"]),
 		}
-
 		gctx, cancel := context.WithTimeout(ctx, greptool.GrepTimeout)
 		defer cancel()
-
 		result, err := greptool.ExecuteWithFallback(gctx, ri, getCwd())
 		if err != nil {
 			return "", err
 		}
-
 		return greptool.FormatGrepOutput(result), nil
 	})
 
-	// Find tool handler — uses new findtool package
 	reg.Register("Find", extensions.ToolDefinition{
 		Name:        "Find",
 		Description: "Find files matching a pattern using fd (or Go fallback). Use to locate files by name pattern.",
@@ -497,25 +476,20 @@ func DefaultTools() *Registry {
 		if dir == "" {
 			dir = getCwd()
 		}
-
 		ri := findtool.FindInput{
 			Dir:      dir,
 			Pattern:  stringOf(input["pattern"]),
 			MaxDepth: intOf(input["max_depth"]),
 		}
-
 		fctx, cancel := context.WithTimeout(ctx, findtool.FindTimeout)
 		defer cancel()
-
 		result, err := findtool.Execute(fctx, ri, dir, findtool.LocalFindOperations{})
 		if err != nil {
 			return "", err
 		}
-
 		return findtool.FormatFindOutput(result), nil
 	})
 
-	// Glob tool handler
 	reg.Register("Glob", extensions.ToolDefinition{
 		Name:        "Glob",
 		Description: "Find files matching a glob pattern. Use for quick file searches using wildcards.",
@@ -542,56 +516,49 @@ func DefaultTools() *Registry {
 		if cwd == "" {
 			cwd = getCwd()
 		}
-
-		results, err := builtin.Glob(cwd, pattern)
+		result, err := globtool.Execute(globtool.GlobInput{
+			Pattern: pattern,
+			Cwd:     cwd,
+		}, cwd, globtool.LocalGlobOperations{})
 		if err != nil {
 			return "", err
 		}
-
-		if len(results) == 0 {
+		if len(result.Matches) == 0 {
 			return "No files found", nil
 		}
-		return fmt.Sprintf("Found %d files:\n%s", len(results), joinLines(results)), nil
+		return globtool.FormatGlobOutput(result), nil
 	})
 
-	// Ls tool handler
 	reg.Register("Ls", extensions.ToolDefinition{
 		Name:        "Ls",
-		Description: "List files and directories in a path. Use to explore directory structure.",
+		Description: "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "Directory path to list",
+					"description": "Directory path to list (default: current directory)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of entries to return (default: 500)",
 				},
 			},
-			"required": []string{"path"},
+			"required": []string{},
 		},
 	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		path := stringOf(input["path"])
 		if path == "" {
 			path = "."
 		}
-
-		files, err := builtin.Ls(path)
+		result, err := lstool.Execute(lstool.LsInput{
+			Path:  path,
+			Limit: intOf(input["limit"]),
+		}, getCwd(), lstool.LocalLsOperations{})
 		if err != nil {
 			return "", err
 		}
-
-		if len(files) == 0 {
-			return "Empty directory", nil
-		}
-
-		result := fmt.Sprintf("Total %d items:\n", len(files))
-		for _, f := range files {
-			icon := "[file]"
-			if f.IsDir {
-				icon = "[dir]"
-			}
-			result += fmt.Sprintf("%s %s\n", icon, f.Name)
-		}
-		return result, nil
+		return result.Output, nil
 	})
 
 	return reg
@@ -619,23 +586,10 @@ func boolOf(v interface{}) bool {
 	return false
 }
 
-func joinLines(items []string) string {
-	result := ""
-	for i, item := range items {
-		if i > 0 {
-			result += "\n"
-		}
-		result += item
-	}
-	return result
-}
-
 // ParseToolCalls parses tool use blocks from an LLM response (JSON format)
-// Returns list of tool calls: []map[string]interface{}{"id": "...", "name": "...", "input": {...}}
 func ParseToolCalls(response string) ([]map[string]interface{}, error) {
 	var toolCalls []map[string]interface{}
 
-	// Simple JSON detection - look for array structure
 	start := -1
 	depth := 0
 	inString := false
@@ -672,7 +626,6 @@ func ParseToolCalls(response string) ([]map[string]interface{}, error) {
 		}
 	}
 
-	// Fallback: try to parse the whole response if it looks like JSON
 	if err := json.Unmarshal([]byte(response), &toolCalls); err == nil {
 		return toolCalls, nil
 	}

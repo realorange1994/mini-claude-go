@@ -476,11 +476,12 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
 				cmd == "/tasks" ||
-				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/errors" || cmd == "/feature" || cmd == "/settings" || cmd == "/telemetry" ||
+				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/feature" ||
 				cmd == "/status" || cmd == "/model"
 
 			if !isKnownCmd {
-				// Not a recognized command -- treat as normal prompt
+				fmt.Fprintf(os.Stderr, "Unknown command: %s. Type /help for available commands.\n", cmd)
+				continue
 			} else {
 				switch cmd {
 				case "/quit", "/exit", "/q":

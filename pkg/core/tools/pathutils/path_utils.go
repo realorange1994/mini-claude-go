@@ -3,6 +3,7 @@
 package pathutils
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,6 +107,18 @@ func ResolveWritePath(path, cwd string) string {
 		path = filepath.Join(cwd, path)
 	}
 	return filepath.Clean(path)
+}
+
+// ValidatePath ensures a path is within the given base directory (prevents directory traversal).
+func ValidatePath(path, baseDir string) error {
+	rel, err := filepath.Rel(baseDir, path)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("path %q is outside of base directory %q", path, baseDir)
+	}
+	return nil
 }
 
 // WalkUpProjects walks up from cwd to find the project root.
