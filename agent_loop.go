@@ -2300,6 +2300,10 @@ func (a *AgentLoop) ForceCompact() {
 				a.toolStateTracker.MarkFileFresh(path)
 			}
 		}
+		if a.transcript != nil {
+			_ = a.transcript.WriteCompact("manual", preTokens)
+			_ = a.transcript.WriteSummary(summaryContent)
+		}
 		return
 	}
 
@@ -2332,7 +2336,11 @@ func (a *AgentLoop) ForceCompact() {
 				a.toolStateTracker.MarkFileFresh(path)
 			}
 		}
-		fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
+				if a.transcript != nil {
+			_ = a.transcript.WriteCompact("manual-truncation", preTokens)
+			_ = a.transcript.WriteSummary(summaryContent)
+		}
+fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
 	} else {
 		fmt.Printf("[compact] No compaction needed (%d entries)\n", before)
 	}
@@ -2400,6 +2408,10 @@ func (a *AgentLoop) ForcePartialCompact(direction string, pivotIndex int) {
 	fmt.Printf("[partial-compact: %s] %d entries summarized, %d kept, ~%d tokens saved\n",
 		dir, result.MessagesSummarized, result.MessagesKept, result.TokensSaved)
 
+	if a.transcript != nil {
+		_ = a.transcript.WriteCompact("manual-partial", 0)
+		_ = a.transcript.WriteSummary(result.Summary)
+	}
 	// Mark all tracked items as stale (partial compact still removes tool results).
 	if a.toolStateTracker != nil {
 		a.toolStateTracker.OnCompaction()
