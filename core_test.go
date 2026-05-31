@@ -1784,29 +1784,6 @@ func TestEstimateMessageTokensEmpty(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// NewCachedMicrocompactTracker — compact.go:2843
-// ---------------------------------------------------------------------------
-
-func TestNewCachedMicrocompactTracker(t *testing.T) {
-	tracker := NewCachedMicrocompactTracker()
-	if tracker == nil {
-		t.Fatal("expected non-nil tracker")
-	}
-	if tracker.maxTools != 10 {
-		t.Errorf("expected maxTools=10, got %d", tracker.maxTools)
-	}
-	if tracker.keepRecent != 5 {
-		t.Errorf("expected keepRecent=5, got %d", tracker.keepRecent)
-	}
-	if tracker.registeredTools == nil {
-		t.Error("registeredTools should be initialized")
-	}
-	if tracker.deletedRefs == nil {
-		t.Error("deletedRefs should be initialized")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // ConversationContext-based functions — agent_loop.go:3263+
 // These use private fields (entries, mu) so we test with NewConversationContext
 // ---------------------------------------------------------------------------

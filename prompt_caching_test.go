@@ -3,8 +3,6 @@ package main
 import (
 	"strings"
 	"testing"
-
-	"github.com/anthropics/anthropic-sdk-go"
 )
 
 func TestFormatCachedSystemPrompt(t *testing.T) {
@@ -221,82 +219,6 @@ func TestCacheChangeWeights(t *testing.T) {
 		if w < tt.minWeight {
 			t.Errorf("weight for %s should be >= %d, got %d", tt.category, tt.minWeight, w)
 		}
-	}
-}
-
-func TestApplyPinnedCacheEditsReal(t *testing.T) {
-	// Create messages with tool_result blocks
-	msgs := []anthropic.MessageParam{
-		{
-			Role: anthropic.MessageParamRoleUser,
-			Content: []anthropic.ContentBlockParamUnion{
-				{
-					OfToolResult: &anthropic.ToolResultBlockParam{
-						ToolUseID: "toolu_123",
-						Content: []anthropic.ToolResultBlockParamContentUnion{
-							{OfText: &anthropic.TextBlockParam{Text: "file content"}},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	edits := []PinnedCacheEdit{
-		{ToolUseID: "toolu_123", Position: 0, Content: "file content"},
-	}
-
-	result := ApplyPinnedCacheEdits(msgs, edits)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(result))
-	}
-
-	// Verify cache_control was added
-	block := result[0].Content[0]
-	if block.OfToolResult == nil {
-		t.Fatal("expected tool_result block")
-	}
-	// The cache_control should be set (Type field should be "ephemeral")
-	cc := block.OfToolResult.CacheControl
-	// CacheControlEphemeralParam has a constant Type field set to "ephemeral"
-	// when constructed via NewCacheControlEphemeralParam()
-	// We can verify it was set by checking that the zero-value was replaced
-	// (the Type field is a constant that defaults to "ephemeral")
-	if cc.Type == "" {
-		t.Error("expected cache_control Type to be set on pinned tool_result")
-	}
-}
-
-func TestApplyPinnedCacheEditsEmpty(t *testing.T) {
-	// Empty edits or messages should return unchanged
-	msgs := []anthropic.MessageParam{{Role: anthropic.MessageParamRoleUser}}
-
-	result := ApplyPinnedCacheEdits(msgs, nil)
-	if len(result) != 1 {
-		t.Error("empty edits should return messages unchanged")
-	}
-
-	result = ApplyPinnedCacheEdits(nil, []PinnedCacheEdit{{ToolUseID: "x", Position: 0}})
-	if result != nil {
-		t.Error("nil messages with edits should return nil")
-	}
-}
-
-func TestPinnedCacheEditStruct(t *testing.T) {
-	// Verify PinnedCacheEdit struct fields
-	edit := PinnedCacheEdit{
-		ToolUseID: "toolu_123",
-		Position:  5,
-		Content:   "cached content",
-	}
-	if edit.ToolUseID != "toolu_123" {
-		t.Errorf("expected ToolUseID='toolu_123', got %v", edit.ToolUseID)
-	}
-	if edit.Position != 5 {
-		t.Errorf("expected Position=5, got %d", edit.Position)
-	}
-	if edit.Content != "cached content" {
-		t.Errorf("expected Content='cached content', got %v", edit.Content)
 	}
 }
 

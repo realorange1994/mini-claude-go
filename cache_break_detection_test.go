@@ -248,13 +248,13 @@ func TestCheckResponseForCacheBreak_NoBreak(t *testing.T) {
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 
 	// First response — establishes baseline
-	isBreak, _ := CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	isBreak, _ := CheckResponseForCacheBreak(10000, 5000, nil, false)
 	if isBreak {
 		t.Error("first response should not be a cache break")
 	}
 
 	// Second response — small drop (<5%)
-	isBreak, _ = CheckResponseForCacheBreak(9600, 5000, nil, false, false)
+	isBreak, _ = CheckResponseForCacheBreak(9600, 5000, nil, false)
 	if isBreak {
 		t.Error("small drop should not be a cache break")
 	}
@@ -266,10 +266,10 @@ func TestCheckResponseForCacheBreak_Break(t *testing.T) {
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 
 	// First response — establishes baseline
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// Second response — big drop (>5% AND >2000 tokens)
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Error("big drop should be a cache break")
 	}
@@ -282,9 +282,9 @@ func TestCheckResponseForCacheBreak_BreakReasonIncludesDrop(t *testing.T) {
 	ResetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}
@@ -301,11 +301,11 @@ func TestCheckResponseForCacheBreak_BoundaryExactly5Percent(t *testing.T) {
 	ResetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// Exactly 5% drop: 9500 = 10000 * 0.95 — should NOT be a break
 	// (condition is: cache_read >= 95% → NOT a break)
-	isBreak, _ := CheckResponseForCacheBreak(9500, 5000, nil, false, false)
+	isBreak, _ := CheckResponseForCacheBreak(9500, 5000, nil, false)
 	if isBreak {
 		t.Error("exactly 5% drop should not be a cache break")
 	}
@@ -315,11 +315,11 @@ func TestCheckResponseForCacheBreak_DropAbove5PercentBelowThreshold(t *testing.T
 	ResetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
-	CheckResponseForCacheBreak(5000, 2000, nil, false, false)
+	CheckResponseForCacheBreak(5000, 2000, nil, false)
 
 	// 15% drop but only 750 tokens — below the 2000 threshold
 	// 4250 = 5000 * 0.85 → 15% drop, but 750 < 2000
-	isBreak, _ := CheckResponseForCacheBreak(4250, 2000, nil, false, false)
+	isBreak, _ := CheckResponseForCacheBreak(4250, 2000, nil, false)
 	if isBreak {
 		t.Error("drop below 2000 token threshold should not be a cache break")
 	}
@@ -329,25 +329,12 @@ func TestCheckResponseForCacheBreak_CompactionReset(t *testing.T) {
 	ResetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// Big drop but compaction just occurred — should not flag as break
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, true)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, true)
 	if isBreak {
 		t.Errorf("compaction should prevent cache break detection, got: %s", reason)
-	}
-}
-
-func TestCheckResponseForCacheBreak_CacheDeletion(t *testing.T) {
-	ResetCacheBreakTracker()
-
-	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
-
-	// Big drop but cache deletion pending — should not flag as break
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, true, false)
-	if isBreak {
-		t.Errorf("cache deletion should prevent cache break detection, got: %s", reason)
 	}
 }
 
@@ -355,11 +342,11 @@ func TestCheckResponseForCacheBreak_TTLDetection(t *testing.T) {
 	ResetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// Big drop, no pending changes, long time gap → TTL expiry
 	gap := 6 * time.Minute
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, &gap, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, &gap, false)
 	if !isBreak {
 		t.Error("should detect cache break")
 	}
@@ -376,10 +363,10 @@ func TestCheckResponseForCacheBreak_TTLGreaterThan1Hour(t *testing.T) {
 	ResetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	gap := 90 * time.Minute
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, &gap, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, &gap, false)
 	if !isBreak {
 		t.Fatal("expected cache break for >1h gap")
 	}
@@ -392,11 +379,11 @@ func TestCheckResponseForCacheBreak_ServerSideEviction(t *testing.T) {
 	ResetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// Short gap (1 min), no changes → likely server-side eviction
 	gap := 1 * time.Minute
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, &gap, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, &gap, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}
@@ -417,10 +404,10 @@ func TestCheckResponseForCacheBreak_WithPendingChanges(t *testing.T) {
 		t.Fatal("expected pending changes")
 	}
 
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// Third call — big drop with pending changes
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Error("should detect cache break")
 	}
@@ -435,9 +422,9 @@ func TestCheckResponseForCacheBreak_WithModelChangePending(t *testing.T) {
 	RecordPromptState("system", nil, nil, "claude-sonnet-4-6", false)
 	RecordPromptState("system", nil, nil, "claude-opus-4-6", false)
 
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}
@@ -470,9 +457,9 @@ func TestCheckResponseForCacheBreak_WithToolChangePending(t *testing.T) {
 	RecordPromptState("system", tools1, names1, "model", false)
 	RecordPromptState("system", tools2, names2, "model", false)
 
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}
@@ -487,9 +474,9 @@ func TestCheckResponseForCacheBreak_WithFastModeChangePending(t *testing.T) {
 	RecordPromptState("system", nil, nil, "model", false)
 	RecordPromptState("system", nil, nil, "model", true)
 
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}
@@ -509,9 +496,9 @@ func TestCheckResponseForCacheBreak_MultipleReasons(t *testing.T) {
 	RecordPromptState("system v1", tools, names, "model-a", false)
 	RecordPromptState("system v2", nil, nil, "model-b", true)
 
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}
@@ -540,17 +527,17 @@ func TestCheckResponseForCacheBreak_PendingChangesClearedAfterBreak(t *testing.T
 	RecordPromptState("system v1", nil, nil, "model", false)
 	RecordPromptState("system v2", nil, nil, "model", false)
 
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// First break — should include reason
-	isBreak1, reason1 := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak1, reason1 := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak1 {
 		t.Fatal("expected cache break")
 	}
 
 	// Second break — pending changes were cleared, so reason should be different
 	// (no more "system prompt changed" since it was already consumed)
-	isBreak2, reason2 := CheckResponseForCacheBreak(4000, 2000, nil, false, false)
+	isBreak2, reason2 := CheckResponseForCacheBreak(4000, 2000, nil, false)
 	if !isBreak2 {
 		t.Fatal("expected second cache break")
 	}
@@ -570,9 +557,9 @@ func TestCheckResponseForCacheBreak_DropIncludesCharInfo(t *testing.T) {
 	RecordPromptState("short", tools, names, "model", false)
 	RecordPromptState("this is a much longer system prompt with extra text", nil, nil, "model", false)
 
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}
@@ -586,12 +573,12 @@ func TestCheckResponseForCacheBreak_DropIncludesCharInfo(t *testing.T) {
 func TestResetCacheBreakTracker(t *testing.T) {
 	ResetCacheBreakTracker()
 	RecordPromptState("system prompt", nil, nil, "model1", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	ResetCacheBreakTracker()
 
 	// After reset, should act like first call
-	isBreak, _ := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, _ := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if isBreak {
 		t.Error("after reset, first check should not detect break")
 	}
@@ -644,7 +631,7 @@ func TestGetCacheBreakSnapshot_IncludesTokenCount(t *testing.T) {
 	ResetCacheBreakTracker()
 
 	RecordPromptState("system", nil, nil, "model", false)
-	CheckResponseForCacheBreak(12345, 5000, nil, false, false)
+	CheckResponseForCacheBreak(12345, 5000, nil, false)
 
 	snapshot := GetCacheBreakSnapshot()
 	if snapshot.CacheReadTokens == nil {
@@ -723,11 +710,11 @@ func TestIntegration_Ph1SystemChange_Ph2Explains(t *testing.T) {
 
 	// Turn 1: baseline
 	RecordPromptState("system v1", nil, nil, "model", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// Turn 2: system changed AND big drop — same turn
 	RecordPromptState("system v2", nil, nil, "model", false)
-	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(7000, 3000, nil, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}
@@ -741,15 +728,15 @@ func TestIntegration_Ph1NoChange_Ph2ServerSide(t *testing.T) {
 
 	// Turn 1: baseline
 	RecordPromptState("system", nil, nil, "model", false)
-	CheckResponseForCacheBreak(10000, 5000, nil, false, false)
+	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
 	// Turn 2: no change
 	RecordPromptState("system", nil, nil, "model", false)
-	CheckResponseForCacheBreak(9900, 5000, nil, false, false)
+	CheckResponseForCacheBreak(9900, 5000, nil, false)
 
 	// Turn 3: big drop but no pending changes → server-side
 	gap := 2 * time.Minute
-	isBreak, reason := CheckResponseForCacheBreak(6000, 3000, &gap, false, false)
+	isBreak, reason := CheckResponseForCacheBreak(6000, 3000, &gap, false)
 	if !isBreak {
 		t.Fatal("expected cache break")
 	}

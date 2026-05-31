@@ -177,7 +177,6 @@ func CheckResponseForCacheBreak(
 	cacheReadTokens int64,
 	cacheCreationTokens int64,
 	timeSinceLastAssistantMsg *time.Duration,
-	cacheDeletionsPending bool,
 	compactionJustOccurred bool,
 ) (bool, string) {
 	state := globalCacheBreakTracker
@@ -190,14 +189,6 @@ func CheckResponseForCacheBreak(
 
 	prevCacheRead := *state.prevCacheReadTokens
 	state.prevCacheReadTokens = &cacheReadTokens
-
-	// Cache deletions via cached microcompact intentionally reduce the cached prefix.
-	// The drop is expected — reset baseline.
-	if cacheDeletionsPending {
-		// Expected drop, not a break
-		state.pendingChanges = nil
-		return false, "cache deletion (expected)"
-	}
 
 	// Compaction legitimately reduces message count.
 	if compactionJustOccurred {
@@ -292,13 +283,6 @@ func buildCacheBreakExplanation(
 // ResetCacheBreakTracker resets the tracker (e.g., after /clear or new session).
 func ResetCacheBreakTracker() {
 	globalCacheBreakTracker = &CacheBreakTracker{}
-}
-
-// NotifyCacheDeletion flags that cache_edits deletions were sent.
-// The next API response will have lower cache_read_tokens — that's expected.
-func NotifyCacheDeletion() {
-	// This would set a flag that CheckResponseForCacheBreak checks.
-	// For simplicity, the caller passes cacheDeletionsPending=true.
 }
 
 // UpdateLastAssistantMsgTime records when the last assistant message was received.

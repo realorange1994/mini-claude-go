@@ -399,10 +399,8 @@ type AgentLoop struct {
 	lastAPIOutputTokens       atomic.Int64                        // exact output tokens from the most recent API response
 	totalCacheCreationTokens  atomic.Int64                        // cumulative cache_creation_input_tokens
 	totalCacheReadTokens      atomic.Int64                        // cumulative cache_read_input_tokens
-	totalCacheEditsDeletions  atomic.Int64                        // cumulative tool results deleted by cache_edits (proxy for cache_deleted_input_tokens)
 	costTracker               *CostTracker                        // per-model USD cost tracking with session persistence
 	cacheBreakDetector        *CacheBreakDetector                 // detects KV cache breaks between API calls
-	cachedMC                  *CachedMicrocompactTracker          // cache_edits tracking
 	extractionState           *ExtractionState                    // session memory extraction threshold tracking
 	sonnetModel               string                              // fallback model for 529 overload (defaults to claude-sonnet-4-20250514)
 	hooks                     *HookManager                        // compact pre/post hook handlers
@@ -742,7 +740,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		agentOutput:         os.Stderr,
 		toolStateTracker:    NewToolStateTracker(),
 		todoList:            tools.NewTodoList(),
-		cachedMC:            NewCachedMicrocompactTracker(),
 		costTracker:         NewCostTracker(),
 		cacheBreakDetector:  &CacheBreakDetector{},
 		extractionState:     NewExtractionState(),
@@ -975,7 +972,6 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		agentOutput:         os.Stderr,
 		toolStateTracker:    NewToolStateTracker(),
 		todoList:            tools.NewTodoList(),
-		cachedMC:            NewCachedMicrocompactTracker(),
 		costTracker:         NewCostTracker(),
 		cacheBreakDetector:  &CacheBreakDetector{},
 		extractionState:     NewExtractionState(),
@@ -1326,7 +1322,6 @@ func (a *AgentLoop) fireStopHook(reason string, turnsUsed int, interrupted bool)
 		"last_api_input_tokens":       a.lastAPIInputTokens.Load(),
 		"total_cache_creation_tokens": a.totalCacheCreationTokens.Load(),
 		"total_cache_read_tokens":     a.totalCacheReadTokens.Load(),
-		"total_cache_edits_deletions": a.totalCacheEditsDeletions.Load(),
 		"remaining_token_budget":      a.RemainingTokenBudget(),
 	})
 }
@@ -2660,20 +2655,10 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 	messages = NormalizeAPIMessages(messages) // KV cache reuse
 	diagEmptyMsgs("Normalize", messages)
 
-	// Apply all healing patterns before injectCacheEdits/cacheMessageParams.
+	// Apply all healing patterns before cacheMessageParams.
 	// Missing these causes API error 2013 in streaming mode.
 	messages = a.applyMessageHealing(messages)
 	diagEmptyMsgs("healing", messages)
-
-	// Pre-populate the cached MC tracker with compactable tool IDs from the
-	// current conversation context. This ensures the tracker knows about tools
-	// registered in earlier turns, enabling cache_edits to delete them.
-	a.cachedMC.RegisterCompactableToolIDsFromMessages(messages)
-
-	// Inject cache_edits block if the cached microcompact tracker has deletions pending.
-	// This deletes old tool results server-side while preserving the prompt cache.
-	messages = a.injectCacheEdits(messages)
-	diagEmptyMsgs("injectCacheEdits", messages)
 
 	a.logDebug("[api] streaming call: model=%s msgs=%d est_tokens=%d turn=%d\n",
 		GetModelForAPI(a.config.Model), len(messages), a.context.EstimatedTokens(), a.budget.Consumed()+1)
@@ -2801,8 +2786,6 @@ func (a *AgentLoop) callWithRetryAndFallbackStreaming(toolCallDoneCh chan int, e
 				messages = a.context.BuildMessages()
 				messages = NormalizeAPIMessages(messages)
 				messages = a.applyMessageHealing(messages)
-				a.cachedMC.RegisterCompactableToolIDsFromMessages(messages)
-				messages = a.injectCacheEdits(messages)
 				params.Messages = messages
 				cacheMessageParams(&params, a.getCacheTTL()) // re-apply cache_control on rebuilt messages
 				params.Messages = preflightValidateMessages(params.Messages)
@@ -2936,9 +2919,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 
 		// Phase 2 of two-phase cache break detection: check response for cache break and explain why
 		gap := TimeSinceLastAssistantMsg()
-		// Check if cache_edits deletions are pending (from cached microcompact tracker)
-		cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
-		isBreak, reason := CheckResponseForCacheBreak(int64(collect.Usage.CacheReadTokens), int64(collect.Usage.CacheWriteTokens), gap, cacheDeletionsPending, false)
+		isBreak, reason := CheckResponseForCacheBreak(int64(collect.Usage.CacheReadTokens), int64(collect.Usage.CacheWriteTokens), gap, false)
 		if isBreak {
 			a.logDebug("[cache-break-2] %s\n", reason)
 		}
@@ -3194,8 +3175,7 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 
 				// Phase 2 of two-phase cache break detection
 				gap := TimeSinceLastAssistantMsg()
-				cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
-				isBreak, reason := CheckResponseForCacheBreak(int64(response.Usage.CacheReadInputTokens), int64(response.Usage.CacheCreationInputTokens), gap, cacheDeletionsPending, false)
+				isBreak, reason := CheckResponseForCacheBreak(int64(response.Usage.CacheReadInputTokens), int64(response.Usage.CacheCreationInputTokens), gap, false)
 				if isBreak {
 					a.logDebug("[cache-break-2] %s\n", reason)
 				}
@@ -3203,19 +3183,6 @@ func (a *AgentLoop) callWithNonStreamingNoTools() ([]map[string]any, []string, e
 				a.decidePostResponseFold(int(response.Usage.InputTokens), int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens)))
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response, false)
-			// Register compactable tool_use IDs for cache_edits tracking.
-			// Only compactable tools (read/exec/edit/grep/glob/web) are tracked.
-			for _, call := range toolCalls {
-				if id, ok := call["id"].(string); ok {
-					if name, ok := call["name"].(string); ok {
-						a.cachedMC.RegisterCompactableToolUse(id, name)
-					} else {
-						a.cachedMC.RegisterToolUse(id)
-					}
-				}
-			}
-			// Mark that cache_edits were included in this API call (prevents double-send).
-			a.cachedMC.MarkSentToAPI()
 			// Detect content policy refusal (stop_reason: "refusal").
 			if msg := a.handleRefusal(stopReason); msg != "" {
 				a.lastTransition = TransitionRefusal
@@ -3340,8 +3307,7 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 
 				// Phase 2 of two-phase cache break detection
 				gap := TimeSinceLastAssistantMsg()
-				cacheDeletionsPending := a.cachedMC.HasPendingDeletions()
-				isBreak, reason := CheckResponseForCacheBreak(int64(response.Usage.CacheReadInputTokens), int64(response.Usage.CacheCreationInputTokens), gap, cacheDeletionsPending, false)
+				isBreak, reason := CheckResponseForCacheBreak(int64(response.Usage.CacheReadInputTokens), int64(response.Usage.CacheCreationInputTokens), gap, false)
 				if isBreak {
 					a.logDebug("[cache-break-2] %s\n", reason)
 				}
@@ -3349,19 +3315,6 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 				a.decidePostResponseFold(int(response.Usage.InputTokens), int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens)))
 			}
 			toolCalls, textParts, stopReason := a.parseResponse(response, false)
-			// Register compactable tool_use IDs for cache_edits tracking.
-			// Only compactable tools (read/exec/edit/grep/glob/web) are tracked.
-			for _, call := range toolCalls {
-				if id, ok := call["id"].(string); ok {
-					if name, ok := call["name"].(string); ok {
-						a.cachedMC.RegisterCompactableToolUse(id, name)
-					} else {
-						a.cachedMC.RegisterToolUse(id)
-					}
-				}
-			}
-			// Mark that cache_edits were included in this API call (prevents double-send).
-			a.cachedMC.MarkSentToAPI()
 			// Detect content policy refusal (stop_reason: "refusal").
 			if msg := a.handleRefusal(stopReason); msg != "" {
 				a.lastTransition = TransitionRefusal
@@ -3429,8 +3382,6 @@ func (a *AgentLoop) callWithNonStreamingFallback(params anthropic.MessageNewPara
 			rebuilt = NormalizeAPIMessages(rebuilt)
 			// Apply full healing (stamp IDs, fix pairing, shrink, etc.)
 			rebuilt = a.applyMessageHealing(rebuilt)
-			// Re-inject cache_edits after rebuild
-			rebuilt = a.injectCacheEdits(rebuilt)
 			// Final pre-flight validation after all repairs
 			rebuilt = preflightValidateMessages(rebuilt)
 			params.Messages = rebuilt
@@ -4982,51 +4933,6 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 	return recoveredPaths
 }
 
-// injectCacheEdits injects a cache_edits content block into the last user message
-// if the cached microcompact tracker has pending deletions. The cache_edits block
-// deletes old tool results server-side while preserving the prompt cache.
-// Returns messages unchanged if no cache edits are pending.
-func (a *AgentLoop) injectCacheEdits(messages []anthropic.MessageParam) []anthropic.MessageParam {
-	cacheEditsMap, deletedCount := a.cachedMC.GetCacheEditsBlock()
-	if cacheEditsMap == nil {
-		return messages
-	}
-
-	if deletedCount > 0 {
-		a.totalCacheEditsDeletions.Add(int64(deletedCount))
-		a.logDebug("[cache] cache_edits: deleted=%d total_deletions=%d\n", deletedCount, a.totalCacheEditsDeletions.Load())
-	}
-
-	// Marshal to JSON bytes, then unmarshal as ContentBlockParamUnion.
-	// This creates a raw content block that the SDK will serialize correctly.
-	cacheEditsJSON, err := json.Marshal(cacheEditsMap)
-	if err != nil {
-		return messages
-	}
-
-	var cacheEditsBlock anthropic.ContentBlockParamUnion
-	if err := json.Unmarshal(cacheEditsJSON, &cacheEditsBlock); err != nil {
-		fmt.Fprintf(os.Stderr, "[injectCacheEdits] unmarshal failed: %v\n", err)
-		return messages
-	}
-
-	// Find last user message and append cache_edits block
-	found := false
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == anthropic.MessageParamRoleUser {
-			messages[i].Content = append(messages[i].Content, cacheEditsBlock)
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		fmt.Fprintf(os.Stderr, "[injectCacheEdits] WARNING: no user message found\n")
-	}
-
-	return messages
-}
-
 // RunPostCompactCleanup clears caches and tracking state after compaction.
 // Call this after PostCompactRecovery in every compaction path.
 // This prevents stale references (e.g. file history pointing to deleted messages,
@@ -5065,9 +4971,6 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 		a.toolStateTracker.ClearConclusions()
 	}
 
-	// Reset cached microcompact tracker — clear all registered tool IDs
-	// and deleted refs. After compaction, tool results are rebuilt from scratch.
-	a.cachedMC.Reset()
 
 	// Classifier and permission state — stale decisions may reference
 	// compacted messages, so clear them to force re-evaluation.
@@ -5846,21 +5749,8 @@ func (a *AgentLoop) runPerTurnMicroCompact() {
 		return
 	}
 
-	// Phase 1: Try cached micro-compact (cache_edits API path).
-	// This is the preferred approach — it deletes tool results server-side
-	// while preserving the cached prefix, matching upstream's cached MC.
-	// injectCacheEdits() is called later in the API call path to actually
-	// inject the block, but we need to check here if deletions are pending
-	// to avoid the destructive local MC path.
-	if a.cachedMC != nil && a.cachedMC.HasPendingDeletions() {
-		a.logDebug("\n[per-turn-micro-compact] Cached MC has pending deletions, using cache_edits path\n")
-		return
-	}
-
-	// Phase 2: Fall back to local content-replacement when cached MC is
-	// not applicable (below threshold, or after a full compaction reset).
-	// This DOES break the prompt cache, but only fires when cached MC
-	// can't help (e.g., fewer than 10 compactable tool results accumulated).
+	// Fall back to local content-replacement for micro-compact.
+	// This breaks the prompt cache but is the only available path now.
 	keepRecent := a.config.MicroCompactKeepRecent
 	if keepRecent <= 0 {
 		keepRecent = 5
@@ -5868,9 +5758,6 @@ func (a *AgentLoop) runPerTurnMicroCompact() {
 	cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
 	if cleared > 0 {
 		a.logDebug("\n[per-turn-micro-compact] Local MC: cleared %d old tool results\n", cleared)
-		// Local MC mutates message content, invalidating the server cache.
-		// Reset cached MC state to prevent stale cache_edit attempts.
-		a.cachedMC.ResetForTimeBasedMC()
 	}
 }
 
@@ -5933,11 +5820,6 @@ func (a *AgentLoop) tryCompaction() {
 		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
 		if cleared > 0 {
 			a.logDebug("\n[micro-compact] Cleared %d old tool results\n", cleared)
-			// Time-based microcompact content-clears tool results and invalidates the
-			// server prompt cache. The cached MC state would reference non-existent
-			// server entries, so reset it to prevent stale cache_edit attempts.
-			// This matches upstream's resetMicrocompactState() after time-based MC.
-			a.cachedMC.ResetForTimeBasedMC()
 			// NOTE: do NOT call toolStateTracker.OnCompaction() here.
 			// Micro-compact clears OLD tool results (beyond keepRecent threshold) by
 			// replacing their text with placeholders. This is lightweight text replacement,

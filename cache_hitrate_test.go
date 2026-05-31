@@ -122,9 +122,9 @@ func (ms *MockAnthropicServer) extractCacheMetrics(req map[string]any, turnNum i
 	}
 
 	// Estimate tokens from JSON byte size (rough: 4 chars ≈ 1 token)
-	systemTokens := estimateTokens(req, "system")
-	toolsTokens := estimateTokens(req, "tools")
-	messageTokens := estimateTokens(req, "messages")
+	systemTokens := estimateFieldTokens(req, "system")
+	toolsTokens := estimateFieldTokens(req, "tools")
+	messageTokens := estimateFieldTokens(req, "messages")
 	totalInput := systemTokens + toolsTokens + messageTokens
 
 	if turnNum == 1 {
@@ -163,7 +163,7 @@ func (ms *MockAnthropicServer) extractCacheMetrics(req map[string]any, turnNum i
 	return metrics
 }
 
-func estimateTokens(req map[string]any, field string) int64 {
+func estimateFieldTokens(req map[string]any, field string) int64 {
 	data, ok := req[field]
 	if !ok {
 		return 0

@@ -26,14 +26,12 @@ func handleStatus(agent *AgentLoop) {
 	outputTokens := agent.totalOutputTokens.Load()
 	cacheCreation := agent.totalCacheCreationTokens.Load()
 	cacheRead := agent.totalCacheReadTokens.Load()
-	cacheDeleted := agent.totalCacheEditsDeletions.Load()
 
 	fmt.Printf("Input Tokens:    %s\n", formatTokenCount(inputTokens))
 	fmt.Printf("Output Tokens:   %s\n", formatTokenCount(outputTokens))
-	fmt.Printf("Cache Creation:  %s  Cache Read: %s  Cache Deleted: %s\n",
+	fmt.Printf("Cache Creation:  %s  Cache Read: %s\n",
 		formatTokenCount(cacheCreation),
-		formatTokenCount(cacheRead),
-		formatTokenCount(cacheDeleted))
+		formatTokenCount(cacheRead))
 
 	// Cache hit rate
 	totalCacheTokens := cacheCreation + cacheRead

@@ -1037,8 +1037,7 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry, a
 		taskStore:        NewTaskStore(),                 // track background bash tasks spawned by this sub-agent
 		agentOutput:      io.Discard,                     // default: discard output; background agents override with taskOutputWriter
 		toolStateTracker: NewToolStateTracker(),          // track tool state for sub-agent
-		todoList:         tools.NewTodoList(),            // sub-agents need their own todo list to avoid nil panic
-		cachedMC:         NewCachedMicrocompactTracker(), // cache_edits tracking for sub-agent
+		todoList:         tools.NewTodoList(), // sub-agents need their own todo list to avoid nil panic
 
 		// Critical fields that would panic if left nil:
 		notificationChan:    make(chan string, 64),
