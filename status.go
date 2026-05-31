@@ -50,7 +50,10 @@ func handleStatus(agent *AgentLoop) {
 	}
 
 	// Turns
-	turns := agent.budget.Consumed()
+	var turns int
+	if agent.budget != nil {
+		turns = agent.budget.Consumed()
+	}
 	fmt.Printf("Turns:           %d\n", turns)
 
 	// Streaming status

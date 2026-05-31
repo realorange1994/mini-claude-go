@@ -380,7 +380,9 @@ func handleModelCommand(agent *AgentLoop, args []string) {
 		agent.config.Model = resolved
 		// Update compactor's max tokens for the new model
 		window := GetContextWindowForModel(resolved)
-		agent.compactor.SetMaxTokens(int(window))
+		if agent.compactor != nil {
+			agent.compactor.SetMaxTokens(int(window))
+		}
 		// Clear beta header cache since model changed
 		ClearBetaHeaderCache()
 	}

@@ -566,13 +566,10 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 						fmt.Println("    /history        -- Show recent prompts")
 						fmt.Println("  Configuration:")
 						fmt.Println("    /mode           -- Switch permission mode (ask|auto|bypass|plan)")
-						fmt.Println("    /settings       -- View settings hierarchy (sources/get/set)")
 						fmt.Println("    /feature        -- Manage feature flags (list/enable/disable)")
 						fmt.Println("  Operations:")
 						fmt.Println("    /doctor         -- Run installation diagnostics")
 						fmt.Println("    /cleanup        -- Remove stale session files")
-						fmt.Println("    /errors         -- View error logs (recent/clear)")
-						fmt.Println("    /telemetry      -- View telemetry events (recent/enable/disable/clear)")
 						fmt.Println("  Other:")
 						fmt.Println("    /help [cmd]     -- Show this help (or detailed help for cmd)")
 						fmt.Println("    /quit           -- Exit")
@@ -630,17 +627,8 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 						agent = newAgent
 					}
 					continue
-				case "/errors":
-					handleErrors(parts[1:])
-					continue
 				case "/feature":
 					handleFeature(agent, parts[1:])
-					continue
-				case "/settings":
-					handleSettings(parts[1:])
-					continue
-				case "/telemetry":
-					handleTelemetry(parts[1:])
 					continue
 				case "/status":
 					handleStatus(agent)
@@ -1487,12 +1475,9 @@ func showDetailedHelp(cmd string) {
 		"/tasks":          "View background tasks.\nUsage: /tasks [list|show <id>|stop <id>|message <id> <msg>|help]",
 		"/history":        "Show recent prompts from the session history.\nUsage: /history [N|clear]",
 		"/mode":           "Switch permission mode.\nUsage: /mode [ask|auto|bypass|plan]",
-		"/settings":       "View and modify settings from multiple sources.\nUsage: /settings [sources|get <key>|set <key> <value>]",
 		"/feature":        "Manage feature flags.\nUsage: /feature [list|enable <name>|disable <name>]",
 		"/doctor":         "Run installation diagnostics: API key, base URL, tools (rg/python/node/git),\nMCP servers, skills, transcripts, CLAUDE.md files.\nUsage: /doctor",
 		"/cleanup":        "Remove stale session files older than cutoff days.\nUsage: /cleanup [days]",
-		"/errors":         "View error logs.\nUsage: /errors [recent [N]|clear]",
-		"/telemetry":      "View telemetry events.\nUsage: /telemetry [recent [N]|enable|disable|clear]",
 		"/quit":           "Exit the interactive session.\nAliases: /exit, /q",
 		"/help":           "Show this help. Pass a command name for detailed help.\nUsage: /help [command]",
 	}
