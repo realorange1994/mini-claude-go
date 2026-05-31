@@ -2344,6 +2344,11 @@ fmt.Printf("[compact] %d -> %d entries (truncated)\n", before, after)
 	}
 }
 
+// ContextLen returns the number of conversation entries (for debugging).
+func (a *AgentLoop) ContextLen() int {
+	return a.context.Len()
+}
+
 // ClearHistory clears all conversation messages (for /clear command).
 // Returns the number of messages cleared.
 func (a *AgentLoop) ClearHistory() int {

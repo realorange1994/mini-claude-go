@@ -15,6 +15,24 @@ import (
 	"time"
 )
 
+// convertWindowsToPosixInCommand converts Windows paths like C:\Users\foo\bar.txt
+// to POSIX paths like /c/Users/foo/bar.txt in a shell command string, for use
+// with Git Bash. This handles paths that the LLM may have generated despite
+// instructions to use POSIX format.
+func convertWindowsToPosixInCommand(command string) string {
+	// Match Windows paths like C:\... or D:\... or E:\...
+	re := regexp.MustCompile(`([A-Za-z]):\\([^"\s|&;<>!]+)`)
+	return re.ReplaceAllStringFunc(command, func(match string) string {
+		parts := re.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return match
+		}
+		drive := strings.ToLower(parts[1])
+		rest := strings.ReplaceAll(parts[2], `\`, `/`)
+		return "/" + drive + "/" + rest
+	})
+}
+
 // SetGitBashPath sets a config-derived Git Bash path.
 // Called from main after config loading.
 // Takes priority over env vars in findGitBashForWindows.
@@ -489,8 +507,53 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	// process continues running in the background (registered via TimeoutCallback).
 	// On user interrupt (ctx.Done()), the process is killed.
 	// Apply resource limits: on Unix, wrap the command with prlimit
+	// On Windows with Git Bash, convert any Windows-style paths in the command
+	// to POSIX format. The LLM sometimes sends Windows paths despite instructions,
+	// and Git Bash cannot resolve them for file operations.
+	if runtime.GOOS == "windows" && isGitBash {
+		command = convertWindowsToPosixInCommand(command)
+	}
+
 	actualCommand := cdPrefix + command
 	actualCommand = wrapCommandForResourceLimits(actualCommand, rl)
+	// On Windows with Git Bash, use temp file redirection to capture output from
+	// Windows native executables. MSYS2/Cygwin's runtime may not properly inherit
+	// pipe handles for non-MSYS2 .exe, causing stdout/stderr to be silently discarded.
+	// The workaround: redirect the command's stdout/stderr to temp files, then use
+	// bash's `cat` to read those files back through the pipes. Since `cat` is an
+	// MSYS2 process, it properly inherits the Go-created pipe handles.
+	var tmpFiles []string
+	var cleanupTmpOnce func()
+	if runtime.GOOS == "windows" && isGitBash {
+		tmpDir := os.TempDir()
+		stdoutFile := filepath.Join(tmpDir, fmt.Sprintf(".claude_exec_out_%d", time.Now().UnixNano()))
+		stderrFile := filepath.Join(tmpDir, fmt.Sprintf(".claude_exec_err_%d", time.Now().UnixNano()))
+		posixStdout := shellQuote(windowsToPosixPath(stdoutFile))
+		posixStderr := shellQuote(windowsToPosixPath(stderrFile))
+		tmpFiles = []string{stdoutFile, stderrFile}
+		// Redirect to temp files, then cat them back. Capture the real command's
+		// exit code before cat, since bash returns the exit code of the last
+		// command in a ; chain (which would be cat, always 0).
+		actualCommand = fmt.Sprintf(
+			"%s > %s 2>%s; _ec=$?; cat %s; cat %s >&2; exit $_ec",
+			actualCommand, posixStdout, posixStderr, posixStdout, posixStderr,
+		)
+		// cleanupTmpOnce ensures temp files are deleted exactly once, even if
+		// multiple code paths try to clean them up (e.g., timeout + return).
+		var cleanupOnce sync.Once
+		cleanupTmpOnce = func() {
+			cleanupOnce.Do(func() {
+				for _, f := range tmpFiles {
+					os.Remove(f)
+				}
+			})
+		}
+		// Defer cleanup for normal exit paths. For timeout/stall paths that
+		// spawn background goroutines, cleanup is called inside the goroutine
+		// after the process exits and output is drained.
+		defer cleanupTmpOnce()
+	}
+
 	cmd := exec.Command(shell, flag, actualCommand)
 	cmd.Dir = wd
 	cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
