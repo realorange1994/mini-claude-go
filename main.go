@@ -579,7 +579,11 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 					continue
 				case "/partialcompact":
 					if len(parts) < 2 {
+						fmt.Printf("Total messages: %d\n", agent.context.Len())
 						fmt.Println("Usage: /partialcompact <up_to|from> [pivot_index]")
+						fmt.Println("  up_to  — summarize messages before pivot, keep pivot onwards")
+						fmt.Println("  from   — keep messages before pivot, summarize pivot onwards")
+						fmt.Println("  pivot_index defaults to midpoint if omitted")
 						continue
 					}
 					dir := strings.ToLower(parts[1])
