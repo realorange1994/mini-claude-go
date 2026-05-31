@@ -982,17 +982,36 @@ func (s *AgentSession) toStrings(msgs []extensions.Message) []string {
 
 func (s *AgentSession) buildCompactedMessages(reducedMsgs []string, summary string) []extensions.Message {
 	// Aligned to TS compaction message format: structured XML tags for better LLM parsing.
+	// The summary is injected as a user message (not system) so the LLM can see
+	// the conversation history context. System messages are extracted by the
+	// HTTP client into the top-level "system" field, which means a system-role
+	// compaction summary would NOT appear in the messages array the LLM sees.
 	result := []extensions.Message{
 		{
-			Role: extensions.RoleSystem,
+			Role: extensions.RoleUser,
 			Content: []extensions.ContentBlock{
 				{Type: "text", Text: "<compaction_summary>\n" + summary + "\n</compaction_summary>"},
 			},
 		},
+		{
+			Role: extensions.RoleAssistant,
+			Content: []extensions.ContentBlock{
+				{Type: "text", Text: "Understood. I'll continue based on the conversation summary above."},
+			},
+		},
 	}
-	for _, msg := range reducedMsgs {
+	// Append reduced messages with proper user/assistant alternation.
+	// reducedMsgs are the "keep recent" messages from the compactor,
+	// which alternate user/assistant. We assign roles based on position.
+	for i, msg := range reducedMsgs {
+		var role extensions.MessageRole
+		if i%2 == 0 {
+			role = extensions.RoleUser
+		} else {
+			role = extensions.RoleAssistant
+		}
 		result = append(result, extensions.Message{
-			Role: extensions.RoleUser,
+			Role: role,
 			Content: []extensions.ContentBlock{
 				extensions.TextContentBlock(msg),
 			},
