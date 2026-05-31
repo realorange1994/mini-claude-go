@@ -579,11 +579,12 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 					agent.ForceCompact()
 					continue
 				case "/partialcompact":
-					dir := "up_to"
-					pivot := 0
-					if len(parts) > 1 {
-						dir = strings.ToLower(parts[1])
+					if len(parts) < 2 {
+						fmt.Println("Usage: /partialcompact <up_to|from> [pivot_index]")
+						continue
 					}
+					dir := strings.ToLower(parts[1])
+					pivot := 0
 					if len(parts) > 2 {
 						fmt.Sscanf(parts[2], "%d", &pivot)
 					}
@@ -849,13 +850,14 @@ func handleAgentsCommand(agent *AgentLoop, args []string) {
 	}
 
 	if len(args) == 0 {
-		args = []string{"list"}
+		fmt.Println("Usage: /agents [list|show <id>|stop <id>|help]")
+		return
 	}
 
 	subcmd := strings.ToLower(args[0])
 
 	switch subcmd {
-	case "list", "":
+	case "list", "ls", "":
 		tasks := agent.agentTaskStore.List()
 		if len(tasks) == 0 {
 			fmt.Println("No agents found.")
@@ -982,13 +984,14 @@ func handleTasksCommand(agent *AgentLoop, args []string) {
 	}
 
 	if len(args) == 0 {
-		args = []string{"list"}
+		fmt.Println("Usage: /tasks [list|show <id>|stop <id>|message <id> <msg>|help]")
+		return
 	}
 
 	subcmd := strings.ToLower(args[0])
 
 	switch subcmd {
-	case "list", "":
+	case "list", "ls", "":
 		tasks := agent.agentTaskStore.List()
 		if len(tasks) == 0 {
 			fmt.Println("No tasks found.")
@@ -1310,7 +1313,12 @@ func handleHistory(history *PromptHistory, args []string) {
 		return
 	}
 
-	if len(args) > 0 && strings.ToLower(args[0]) == "clear" {
+	if len(args) == 0 {
+		fmt.Println("Usage: /history [N|clear]")
+		return
+	}
+
+	if strings.ToLower(args[0]) == "clear" {
 		if err := os.Remove(history.filePath); err != nil && !os.IsNotExist(err) {
 			fmt.Printf("Error clearing history: %v\n", err)
 		} else {
@@ -1320,10 +1328,8 @@ func handleHistory(history *PromptHistory, args []string) {
 	}
 
 	n := 20
-	if len(args) > 0 {
-		if parsed, err := strconv.Atoi(args[0]); err == nil && parsed > 0 {
-			n = parsed
-		}
+	if parsed, err := strconv.Atoi(args[0]); err == nil && parsed > 0 {
+		n = parsed
 	}
 
 	entries := history.LoadRecent(n)
@@ -1353,22 +1359,7 @@ func handleBranch(agent *AgentLoop, args []string) (*AgentLoop, error) {
 	os.MkdirAll(transcriptDir, 0o755)
 
 	if len(args) == 0 {
-		// Create a new branch (current behavior)
-		branchName := fmt.Sprintf("branch-%s", time.Now().Format("150405"))
-		branchFile := filepath.Join(transcriptDir, branchName+".jsonl")
-		srcFile := filepath.Join(".claude", "transcript.jsonl")
-		if _, err := os.Stat(srcFile); err == nil {
-			data, err := os.ReadFile(srcFile)
-			if err != nil {
-				return agent, fmt.Errorf("failed to read transcript: %w", err)
-			}
-			if err := os.WriteFile(branchFile, data, 0o644); err != nil {
-				return agent, fmt.Errorf("failed to write branch: %w", err)
-			}
-			fmt.Printf("Created branch: %s\n", branchName)
-		} else {
-			fmt.Println("No current transcript to branch from.")
-		}
+		fmt.Println("Usage: /branch [list|switch <name>]")
 		return agent, nil
 	}
 

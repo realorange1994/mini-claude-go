@@ -93,13 +93,17 @@ func (c *CleanupManager) Run() (int, error) {
 
 // handleCleanup handles the /cleanup slash command.
 func handleCleanup(projectDir string, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /cleanup <days>")
+		fmt.Println("  Remove stale session files older than <days> (default: 30)")
+		return
+	}
+
 	cm := NewCleanupManager(projectDir)
 
-	if len(args) > 0 {
-		if days, err := fmt.Sscanf(args[0], "%d", &cm.cutoffDays); err != nil || days != 1 {
-			fmt.Printf("Invalid cutoff: %s (expected number of days)\n", args[0])
-			return
-		}
+	if days, err := fmt.Sscanf(args[0], "%d", &cm.cutoffDays); err != nil || days != 1 {
+		fmt.Printf("Invalid cutoff: %s (expected number of days)\n", args[0])
+		return
 	}
 
 	removed, err := cm.Run()

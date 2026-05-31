@@ -127,24 +127,8 @@ func handleFeature(agent *AgentLoop, args []string) {
 	store := agent.featureFlags
 
 	if len(args) == 0 {
-		// List all flags
-		flags := store.List()
-		if len(flags) == 0 {
-			fmt.Println("No feature flags configured.")
-			return
-		}
-		fmt.Println("Feature Flags:")
-		for _, f := range flags {
-			status := "OFF"
-			if f.Enabled {
-				status = "ON"
-			}
-			desc := ""
-			if f.Description != "" {
-				desc = fmt.Sprintf(" — %s", f.Description)
-			}
-			fmt.Printf("  %s: %s%s\n", f.Name, status, desc)
-		}
+		// Show usage
+		fmt.Println("Usage: /feature [list|enable <name>|disable <name>]")
 		return
 	}
 
