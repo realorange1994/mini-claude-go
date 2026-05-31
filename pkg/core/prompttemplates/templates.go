@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // PromptTemplate represents a loaded prompt template.
@@ -22,8 +23,110 @@ type PromptTemplate struct {
 
 // SourceInfo tracks where a template was loaded from.
 type SourceInfo struct {
-	Source string // "user", "project", "local"
+	Source  string // "user", "project", "local"
 	BaseDir string
+}
+
+// Registry manages prompt templates with thread-safe access.
+type Registry struct {
+	mu        sync.RWMutex
+	templates map[string]PromptTemplate
+}
+
+// NewRegistry creates an empty prompt template registry.
+func NewRegistry() *Registry {
+	return &Registry{
+		templates: make(map[string]PromptTemplate),
+	}
+}
+
+// Register adds or replaces a template.
+func (r *Registry) Register(t PromptTemplate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.templates[t.Name] = t
+}
+
+// Unregister removes a template by name.
+func (r *Registry) Unregister(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.templates, name)
+}
+
+// Get returns a template by name.
+func (r *Registry) Get(name string) (PromptTemplate, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.templates[name]
+	return t, ok
+}
+
+// All returns all templates sorted by name.
+func (r *Registry) All() []PromptTemplate {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]PromptTemplate, 0, len(r.templates))
+	for _, t := range r.templates {
+		out = append(out, t)
+	}
+	// Simple sort by name
+	for i := 0; i < len(out)-1; i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[i].Name > out[j].Name {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+// LoadFromDir loads .md templates from a directory into the registry.
+func (r *Registry) LoadFromDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		tmpl := LoadTemplateFromFile(path, SourceInfo{Source: "local", BaseDir: dir})
+		if tmpl != nil {
+			r.Register(*tmpl)
+		}
+	}
+	return nil
+}
+
+// Expand finds a template by name in the text (format: /name args...)
+// and substitutes arguments, returning the expanded content.
+func (r *Registry) Expand(text string) string {
+	if !strings.HasPrefix(text, "/") {
+		return text
+	}
+
+	spaceIdx := strings.Index(text, " ")
+	var name, argsStr string
+	if spaceIdx == -1 {
+		name = strings.TrimPrefix(text, "/")
+	} else {
+		name = text[1:spaceIdx]
+		argsStr = strings.TrimSpace(text[spaceIdx+1:])
+	}
+
+	t, ok := r.Get(name)
+	if !ok {
+		return text
+	}
+
+	args := ParseCommandArgs(argsStr)
+	return SubstituteArgs(t.Content, args)
 }
 
 // LoadPromptTemplatesOptions configures template loading.
@@ -41,7 +144,6 @@ func parseFrontmatter(text string) (map[string]string, string) {
 
 	lines := strings.SplitN(text, "\n", 2)
 	if len(lines) >= 2 && strings.TrimSpace(lines[0]) == "---" {
-		// Find closing ---
 		rest := lines[1]
 		closeIdx := strings.Index(rest, "---")
 		if closeIdx != -1 {
@@ -53,6 +155,10 @@ func parseFrontmatter(text string) (map[string]string, string) {
 				if idx := strings.Index(line, ":"); idx > 0 {
 					key := strings.TrimSpace(line[:idx])
 					val := strings.TrimSpace(line[idx+1:])
+					// Strip quotes
+					if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+						val = val[1 : len(val)-1]
+					}
 					metadata[key] = val
 				}
 			}
@@ -75,7 +181,6 @@ func LoadTemplateFromFile(filePath string, sourceInfo SourceInfo) *PromptTemplat
 	name := strings.TrimSuffix(filepath.Base(filePath), ".md")
 	description := metadata["description"]
 	if description == "" {
-		// Fallback: first non-empty body line, truncated to 60 chars
 		for _, line := range strings.Split(body, "\n") {
 			line = strings.TrimSpace(line)
 			if line != "" {
@@ -113,7 +218,6 @@ func LoadTemplatesFromDir(dir string, getSourceInfo func(filePath string) Source
 		}
 
 		filePath := filepath.Join(dir, e.Name())
-		// Handle symlinks
 		if link, err := os.Readlink(filePath); err == nil {
 			if !filepath.IsAbs(link) {
 				link = filepath.Join(dir, link)
@@ -147,17 +251,14 @@ func LoadPromptTemplates(opts LoadPromptTemplatesOptions) []PromptTemplate {
 		return SourceInfo{Source: "project", BaseDir: projectDir}
 	}
 
-	// 1. Global templates
 	if opts.IncludeDefaults {
 		templates = append(templates, LoadTemplatesFromDir(globalDir, getGlobalSourceInfo)...)
 	}
 
-	// 2. Project templates
 	if opts.IncludeDefaults {
 		templates = append(templates, LoadTemplatesFromDir(projectDir, getProjectSourceInfo)...)
 	}
 
-	// 3. Explicit paths
 	for _, path := range opts.PromptPaths {
 		resolved := path
 		if !filepath.IsAbs(path) {
@@ -221,66 +322,74 @@ func ParseCommandArgs(argsString string) []string {
 	return args
 }
 
+var (
+	positionalRe = regexp.MustCompile(`\$(\d+)`)
+	sliceRe      = regexp.MustCompile(`\$\{@:(\d+)(?::(\d+))?\}`)
+	argumentsRe  = regexp.MustCompile(`\$ARGUMENTS`)
+	atRe         = regexp.MustCompile(`\$@`)
+)
+
 // SubstituteArgs replaces argument placeholders in template content.
 // Supports: $1, $2, ... (positional), ${@:N} and ${@:N:L} (bash slices),
 // $ARGUMENTS, $@ (all args).
 func SubstituteArgs(content string, args []string) string {
+	result := content
+
 	// 1. Bash-style slices: ${@:N:L} and ${@:N}
-	sliceRegex := regexp.MustCompile(`\$\{@:(\d+)(?::(\d+))?\}`)
-	content = sliceRegex.ReplaceAllStringFunc(content, func(match string) string {
-		submatch := sliceRegex.FindStringSubmatch(match)
-		if len(submatch) < 2 {
+	result = sliceRe.ReplaceAllStringFunc(result, func(match string) string {
+		sub := sliceRe.FindStringSubmatch(match)
+		if len(sub) < 2 {
 			return match
 		}
-		n, _ := strconv.Atoi(submatch[1])
-		l := -1
-		if len(submatch) > 2 && submatch[2] != "" {
-			l, _ = strconv.Atoi(submatch[2])
+		start, _ := strconv.Atoi(sub[1])
+		start = start - 1 // 1-indexed to 0-indexed
+		if start < 0 {
+			start = 0
 		}
-
-		// Convert 1-indexed to 0-indexed
-		start := n - 1
-		if start < 0 || start >= len(args) {
-			return ""
-		}
-
-		if l > 0 {
-			end := start + l
+		if sub[2] != "" {
+			length, _ := strconv.Atoi(sub[2])
+			end := start + length
 			if end > len(args) {
 				end = len(args)
 			}
+			if start >= len(args) {
+				return ""
+			}
 			return strings.Join(args[start:end], " ")
+		}
+		if start >= len(args) {
+			return ""
 		}
 		return strings.Join(args[start:], " ")
 	})
 
-	// 2. Positional arguments: $1, $2, ... $9 (single digit only)
-	posRegex := regexp.MustCompile(`\$(\d)`)
-	content = posRegex.ReplaceAllStringFunc(content, func(match string) string {
-		n, _ := strconv.Atoi(match[1:])
-		if n > 0 && n <= len(args) {
-			return args[n-1]
+	// 2. Positional arguments: $1, $2, ...
+	result = positionalRe.ReplaceAllStringFunc(result, func(match string) string {
+		numStr := match[1:]
+		num, _ := strconv.Atoi(numStr)
+		idx := num - 1
+		if idx >= 0 && idx < len(args) {
+			return args[idx]
 		}
-		return match
+		return ""
 	})
 
 	// 3. $ARGUMENTS (all args)
-	content = strings.ReplaceAll(content, "$ARGUMENTS", strings.Join(args, " "))
+	allArgs := strings.Join(args, " ")
+	result = argumentsRe.ReplaceAllLiteralString(result, allArgs)
 
 	// 4. $@ (all args)
-	content = strings.ReplaceAll(content, "$@", strings.Join(args, " "))
+	result = atRe.ReplaceAllLiteralString(result, allArgs)
 
-	return content
+	return result
 }
 
 // ExpandPromptTemplate expands a prompt template if the input matches /templateName [args...].
-// Returns the expanded content if matched, or the original text if not.
 func ExpandPromptTemplate(text string, templates []PromptTemplate) string {
 	if !strings.HasPrefix(text, "/") {
 		return text
 	}
 
-	// Extract template name and arguments
 	parts := strings.SplitN(strings.TrimPrefix(text, "/"), " ", 2)
 	name := parts[0]
 	argString := ""
@@ -288,7 +397,6 @@ func ExpandPromptTemplate(text string, templates []PromptTemplate) string {
 		argString = parts[1]
 	}
 
-	// Find matching template
 	for _, tmpl := range templates {
 		if tmpl.Name == name {
 			args := ParseCommandArgs(argString)

@@ -392,10 +392,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 		return
 	}
 
-	// Idle compression timer: auto-compress when user is idle for 3 minutes.
-	// This matches openclacky's idle_compression_timer pattern.
-	idleCompressTimer := NewIdleCompressionTimer(3 * time.Minute)
-
 	var lastCtrlC time.Time
 
 	for {
@@ -413,9 +409,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 
 		// Start idle timeout after agent finishes (only when waiting at prompt)
 		startIdleTimer()
-
-		// Cancel idle compression timer — user is now active
-		idleCompressTimer.Cancel()
 
 		fmt.Print("\n> ")
 
@@ -484,8 +477,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
 				cmd == "/tasks" ||
 				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" || cmd == "/errors" || cmd == "/feature" || cmd == "/settings" || cmd == "/telemetry" ||
-				cmd == "/status" || cmd == "/model" || cmd == "/idlecompact" ||
-				cmd == "/save" || cmd == "/load" || cmd == "/sessions"
+				cmd == "/status" || cmd == "/model"
 
 			if !isKnownCmd {
 				// Not a recognized command -- treat as normal prompt
@@ -609,26 +601,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 					}
 					continue
 				case "/resume":
-					if len(parts) > 1 {
-						target := parts[1]
-						path, err := findTranscript(target)
-						if err != nil {
-							fmt.Printf("Error: %v\n", err)
-							continue
-						}
-						newAgent, err := NewAgentLoopFromTranscript(agent.config, agent.registry, agent.useStream, path, true)
-						if err != nil {
-							fmt.Printf("Error resuming transcript: %v\n", err)
-							continue
-						}
-						// Swap the agent (close old one first)
-						agent.Close()
-						agent = newAgent
-						fmt.Printf("[+] Resumed session from transcript: %s\n", path)
-					} else {
-						// List available transcripts
-						listTranscripts()
-					}
+					handleResume(&agent, parts[1:])
 					continue
 				case "/agents":
 					handleAgentsCommand(agent, parts[1:])
@@ -674,73 +647,6 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 				case "/model":
 					handleModelCommand(agent, parts[1:])
 					continue
-				case "/idlecompact":
-					if idleCompressTimer.IsCompressing() {
-						fmt.Println("[idle] Compression already in progress.")
-					} else {
-						agent.ForceCompact()
-						fmt.Println("[idle] Manual idle compression complete.")
-					}
-					continue
-				case "/save":
-					if cfg.ProjectDir == "" {
-						fmt.Println("[session] No project directory configured.")
-						continue
-					}
-					if agent.TranscriptPath() == "" {
-						fmt.Println("[session] No active session to save.")
-						continue
-					}
-					sid := filepath.Base(strings.TrimSuffix(agent.TranscriptPath(), ".jsonl"))
-					path, err := SaveConversation(cfg.ProjectDir, sid, agent)
-					if err != nil {
-						fmt.Printf("[session] Save error: %v\n", err)
-					} else {
-						fmt.Printf("[session] Saved to %s\n", filepath.Base(path))
-					}
-					continue
-				case "/load":
-					if len(parts) < 2 {
-						fmt.Println("Usage: /load <session-id>")
-						fmt.Println("Use /sessions to list available sessions.")
-						continue
-					}
-					sid := parts[1]
-					snap, err := LoadConversation(cfg.ProjectDir, sid)
-					if err != nil {
-						fmt.Printf("[session] Load error: %v\n", err)
-						continue
-					}
-					if err := RestoreConversation(agent, snap); err != nil {
-						fmt.Printf("[session] Restore error: %v\n", err)
-						continue
-					}
-					fmt.Printf("[session] Loaded session %s: %d entries restored.\n", sid, len(snap.Entries))
-					continue
-				case "/sessions":
-					if cfg.ProjectDir == "" {
-						fmt.Println("[session] No project directory configured.")
-						continue
-					}
-					sessions, err := ListSessions(cfg.ProjectDir)
-					if err != nil {
-						fmt.Printf("[session] Error listing sessions: %v\n", err)
-						continue
-					}
-					if len(sessions) == 0 {
-						fmt.Println("[session] No saved sessions found.")
-						continue
-					}
-					fmt.Printf("Saved sessions (%d):\n", len(sessions))
-					for _, s := range sessions {
-						updated, _ := time.Parse(time.RFC3339, s.UpdatedAt)
-						fmt.Printf("  %-40s  %d entries  %d in/%d out tokens  updated %s\n",
-							s.SessionID, len(s.Entries), s.TotalInputTokens, s.TotalOutputTokens,
-							updated.Format("2006-01-02 15:04"))
-					}
-					fmt.Println()
-					fmt.Println("Use /load <session-id> to restore a session.")
-					continue
 				}
 			}
 		}
@@ -758,16 +664,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 		}
 		fmt.Println()
 
-		// Auto-save session after each turn
-		if cfg.ProjectDir != "" && agent.TranscriptPath() != "" {
-			sid := filepath.Base(strings.TrimSuffix(agent.TranscriptPath(), ".jsonl"))
-			if _, err := SaveConversation(cfg.ProjectDir, sid, agent); err != nil {
-				agent.logDebug("[session] Auto-save error: %v\n", err)
-			}
-		}
 
-		// Start idle compression timer after agent finishes (only when waiting at prompt)
-		idleCompressTimer.Start(agent)
 	}
 
 	// Print resume hint exactly once at final exit
@@ -802,7 +699,36 @@ func drainOneShotNotifications(agent *AgentLoop) {
 	}
 }
 
-// findTranscript resolves a transcript reference (number, filename, or 'last').
+// handleResume handles /resume command.
+// /resume list     - List recent transcripts (max 16)
+// /resume <id>     - Resume a transcript by number, filename, or 'last'
+func handleResume(agent **AgentLoop, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /resume list | /resume <number|filename|last>")
+		return
+	}
+
+	if strings.ToLower(args[0]) == "list" {
+		listTranscripts()
+		return
+	}
+
+	// /resume <id>
+	target := args[0]
+	path, err := findTranscript(target)
+	if err != nil {
+		fmt.Printf("[resume] Error: %v\n", err)
+		return
+	}
+	newAgent, err := NewAgentLoopFromTranscript((*agent).config, (*agent).registry, (*agent).useStream, path, true)
+	if err != nil {
+		fmt.Printf("[resume] Error resuming transcript: %v\n", err)
+		return
+	}
+	(*agent).Close()
+	*agent = newAgent
+	fmt.Printf("[resume] Resumed transcript: %s\n", path)
+}
 func findTranscript(target string) (string, error) {
 	files, err := loadTranscriptList()
 	if err != nil {
@@ -855,7 +781,11 @@ func listTranscripts() {
 	dir := ".claude/transcripts"
 	now := time.Now()
 
-	fmt.Println("\nAvailable transcripts:")
+	fmt.Println("\nAvailable transcripts (max 16):")
+	limit := 16
+	if len(files) > limit {
+		files = files[:limit]
+	}
 	for i, f := range files {
 		path := filepath.Join(dir, f.name)
 		info, err := os.Stat(path)
