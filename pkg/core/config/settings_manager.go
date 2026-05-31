@@ -37,10 +37,12 @@ type BranchSummarySettings struct {
 
 // RetrySettings holds retry-specific settings.
 type RetrySettings struct {
-	Enabled     bool   `json:"enabled,omitempty"`
-	MaxRetries  int    `json:"maxRetries,omitempty"`
-	BaseDelayMs int    `json:"baseDelayMs,omitempty"`
-	Provider    string `json:"provider,omitempty"`
+	Enabled        bool   `json:"enabled,omitempty"`
+	MaxRetries     int    `json:"maxRetries,omitempty"`
+	BaseDelayMs    int    `json:"baseDelayMs,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	TimeoutMs      int    `json:"timeoutMs,omitempty"`
+	MaxRetryDelayMs int   `json:"maxRetryDelayMs,omitempty"`
 }
 
 // TerminalSettings holds terminal display settings.
@@ -65,13 +67,37 @@ type ThinkingBudgetsSettings struct {
 	High    int `json:"high,omitempty"`
 }
 
+// MarkdownSettings holds markdown rendering settings.
+type MarkdownSettings struct {
+	CodeBlockIndent string `json:"codeBlockIndent,omitempty"` // default "  "
+}
+
+// WarningSettings holds warning configuration.
+type WarningSettings struct {
+	AnthropicExtraUsage bool `json:"anthropicExtraUsage,omitempty"` // default true
+}
+
+// PackageSource represents a package source (string or structured).
+type PackageSource struct {
+	Source     string   `json:"source"`
+	Extensions []string `json:"extensions,omitempty"`
+	Skills     []string `json:"skills,omitempty"`
+	Prompts    []string `json:"prompts,omitempty"`
+	Themes     []string `json:"themes,omitempty"`
+}
+
 // Settings holds all configurable options for the coding agent.
 // Aligned to TS Settings interface with the most impactful fields.
 type Settings struct {
 	// Model configuration
-	Model         string `json:"model,omitempty"`
-	MaxTokens     int    `json:"maxTokens,omitempty"`
+	Model         string   `json:"model,omitempty"`
+	MaxTokens     int      `json:"maxTokens,omitempty"`
 	Temperature   *float64 `json:"temperature,omitempty"`
+
+	// Default model/provider (TS: defaultProvider, defaultModel, defaultThinkingLevel)
+	DefaultProvider      string `json:"defaultProvider,omitempty"`
+	DefaultModel         string `json:"defaultModel,omitempty"`
+	DefaultThinkingLevel string `json:"defaultThinkingLevel,omitempty"` // "off"|"minimal"|"low"|"medium"|"high"|"xhigh"
 
 	// API configuration
 	APIKey   string `json:"apiKey,omitempty"`
@@ -84,18 +110,34 @@ type Settings struct {
 	CompactAfter    int    `json:"compactAfter,omitempty"`
 	AutoCompact     bool   `json:"autoCompact,omitempty"`
 	EnableStreaming  bool   `json:"enableStreaming,omitempty"`
+	SteeringMode    string `json:"steeringMode,omitempty"` // "all" | "one-at-a-time"
+	FollowUpMode    string `json:"followUpMode,omitempty"` // "all" | "one-at-a-time"
 
 	// Tool configuration
 	EnabledTools  []string `json:"enabledTools,omitempty"`
 	DisabledTools []string `json:"disabledTools,omitempty"`
+	EnabledModels []string `json:"enabledModels,omitempty"` // glob patterns for model filtering
 
 	// Shell / execution
-	Shell         string `json:"shell,omitempty"`
-	CommandTimeout int   `json:"commandTimeout,omitempty"`
+	Shell            string `json:"shell,omitempty"`
+	CommandTimeout   int    `json:"commandTimeout,omitempty"`
+	ShellPath        string `json:"shellPath,omitempty"`
+	ShellCommandPrefix string `json:"shellCommandPrefix,omitempty"`
+	NpmCommand       []string `json:"npmCommand,omitempty"`
+
+	// Transport
+	Transport string `json:"transport,omitempty"` // "sse" | "websocket" | "websocket-cached" | "auto"
 
 	// Output
 	Verbose       bool   `json:"verbose,omitempty"`
 	StreamOutput  bool   `json:"streamOutput,omitempty"`
+	QuietStartup  bool   `json:"quietStartup,omitempty"`
+
+	// UI / display
+	Theme             string `json:"theme,omitempty"`
+	HideThinkingBlock bool   `json:"hideThinkingBlock,omitempty"`
+	DoubleEscapeAction string `json:"doubleEscapeAction,omitempty"` // "fork" | "tree" | "none"
+	TreeFilterMode    string `json:"treeFilterMode,omitempty"`    // "default" | "no-tools" | "user-only" | "labeled-only" | "all"
 
 	// Project-specific
 	AppendSystemPrompt string   `json:"appendSystemPrompt,omitempty"`
@@ -107,6 +149,21 @@ type Settings struct {
 	// Custom system prompt (replaces default entirely)
 	CustomSystemPrompt string `json:"customSystemPrompt,omitempty"`
 
+	// Skills / extensions / packages
+	Skills              []string      `json:"skills,omitempty"`
+	Extensions          []string      `json:"extensions,omitempty"`
+	Packages            []PackageSource `json:"packages,omitempty"`
+	EnableSkillCommands bool          `json:"enableSkillCommands,omitempty"`
+
+	// Markdown rendering
+	Markdown MarkdownSettings `json:"markdown,omitempty"`
+
+	// Warnings
+	Warnings WarningSettings `json:"warnings,omitempty"`
+
+	// Session
+	SessionDir string `json:"sessionDir,omitempty"`
+
 	// Sub-struct settings
 	Compaction       CompactionSettings       `json:"compaction,omitempty"`
 	BranchSummary    BranchSummarySettings    `json:"branchSummary,omitempty"`
@@ -116,8 +173,11 @@ type Settings struct {
 	ThinkingBudgets  ThinkingBudgetsSettings  `json:"thinkingBudgets,omitempty"`
 
 	// Misc
-	TelemetryEnabled *bool `json:"telemetryEnabled,omitempty"`
-	HTTPIdleTimeoutMs *int `json:"httpIdleTimeoutMs,omitempty"`
+	TelemetryEnabled       *bool `json:"telemetryEnabled,omitempty"`
+	EnableInstallTelemetry *bool `json:"enableInstallTelemetry,omitempty"`
+	HTTPIdleTimeoutMs      *int  `json:"httpIdleTimeoutMs,omitempty"`
+	LastChangelogVersion   string `json:"lastChangelogVersion,omitempty"`
+	CollapseChangelog      bool   `json:"collapseChangelog,omitempty"`
 }
 
 // SettingsManager manages global and project-scoped settings.
@@ -150,6 +210,7 @@ func NewSettingsManager(globalDir, projectDir string) *SettingsManager {
 }
 
 // Load reads settings from disk for both scopes.
+// After loading, applies migrations for backward compatibility.
 func (sm *SettingsManager) Load() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -161,6 +222,11 @@ func (sm *SettingsManager) Load() error {
 		// Project settings are optional — don't fail if missing
 		sm.project = &Settings{}
 	}
+
+	// Apply migrations to both scopes
+	sm.migrateSettings(sm.global)
+	sm.migrateSettings(sm.project)
+
 	return nil
 }
 
@@ -239,6 +305,19 @@ func (sm *SettingsManager) GlobalDir() string { return sm.globalDir }
 // ProjectDir returns the project settings directory path.
 func (sm *SettingsManager) ProjectDir() string { return sm.projectDir }
 
+// Reload re-reads settings from disk for both scopes.
+func (sm *SettingsManager) Reload() error {
+	return sm.Load()
+}
+
+// SaveAll persists both scopes to disk.
+func (sm *SettingsManager) SaveAll() error {
+	if err := sm.Save(ScopeGlobal); err != nil {
+		return err
+	}
+	return sm.Save(ScopeProject)
+}
+
 // --- Internal ---
 
 func (sm *SettingsManager) globalPath() string {
@@ -300,6 +379,16 @@ func mergeSettings(global, project *Settings) Settings {
 	}
 	if project.Provider != "" {
 		result.Provider = project.Provider
+	}
+	// New TS-aligned model defaults
+	if project.DefaultProvider != "" {
+		result.DefaultProvider = project.DefaultProvider
+	}
+	if project.DefaultModel != "" {
+		result.DefaultModel = project.DefaultModel
+	}
+	if project.DefaultThinkingLevel != "" {
+		result.DefaultThinkingLevel = project.DefaultThinkingLevel
 	}
 	if project.MaxTurns != 0 {
 		result.MaxTurns = project.MaxTurns
@@ -375,6 +464,12 @@ func mergeSettings(global, project *Settings) Settings {
 	if project.Retry.Provider != "" {
 		result.Retry.Provider = project.Retry.Provider
 	}
+	if project.Retry.TimeoutMs != 0 {
+		result.Retry.TimeoutMs = project.Retry.TimeoutMs
+	}
+	if project.Retry.MaxRetryDelayMs != 0 {
+		result.Retry.MaxRetryDelayMs = project.Retry.MaxRetryDelayMs
+	}
 	if project.Terminal.ShowImages {
 		result.Terminal.ShowImages = project.Terminal.ShowImages
 	}
@@ -413,6 +508,203 @@ func mergeSettings(global, project *Settings) Settings {
 	if project.TelemetryEnabled != nil {
 		result.TelemetryEnabled = project.TelemetryEnabled
 	}
+	if project.EnableInstallTelemetry != nil {
+		result.EnableInstallTelemetry = project.EnableInstallTelemetry
+	}
+
+	// New TS-aligned fields
+	if project.SteeringMode != "" {
+		result.SteeringMode = project.SteeringMode
+	}
+	if project.FollowUpMode != "" {
+		result.FollowUpMode = project.FollowUpMode
+	}
+	if project.Transport != "" {
+		result.Transport = project.Transport
+	}
+	if project.ShellPath != "" {
+		result.ShellPath = project.ShellPath
+	}
+	if project.ShellCommandPrefix != "" {
+		result.ShellCommandPrefix = project.ShellCommandPrefix
+	}
+	if project.QuietStartup {
+		result.QuietStartup = project.QuietStartup
+	}
+	if project.Theme != "" {
+		result.Theme = project.Theme
+	}
+	if project.HideThinkingBlock {
+		result.HideThinkingBlock = project.HideThinkingBlock
+	}
+	if project.DoubleEscapeAction != "" {
+		result.DoubleEscapeAction = project.DoubleEscapeAction
+	}
+	if project.TreeFilterMode != "" {
+		result.TreeFilterMode = project.TreeFilterMode
+	}
+	if project.Markdown.CodeBlockIndent != "" {
+		result.Markdown.CodeBlockIndent = project.Markdown.CodeBlockIndent
+	}
+	if project.Warnings.AnthropicExtraUsage {
+		result.Warnings.AnthropicExtraUsage = project.Warnings.AnthropicExtraUsage
+	}
+	if project.SessionDir != "" {
+		result.SessionDir = project.SessionDir
+	}
+	if len(project.Skills) > 0 {
+		result.Skills = project.Skills
+	}
+	if len(project.Extensions) > 0 {
+		result.Extensions = project.Extensions
+	}
+	if project.EnableSkillCommands {
+		result.EnableSkillCommands = project.EnableSkillCommands
+	}
+	if len(project.EnabledModels) > 0 {
+		result.EnabledModels = project.EnabledModels
+	}
+	if len(project.Packages) > 0 {
+		result.Packages = project.Packages
+	}
+	if len(project.NpmCommand) > 0 {
+		result.NpmCommand = project.NpmCommand
+	}
+	if project.LastChangelogVersion != "" {
+		result.LastChangelogVersion = project.LastChangelogVersion
+	}
+	if project.CollapseChangelog {
+		result.CollapseChangelog = project.CollapseChangelog
+	}
 
 	return result
+}
+
+// migrateSettings applies backward-compatible migrations for settings.
+// TS equivalents:
+// - queueMode -> steeringMode (migration from legacy setting name)
+// - websockets -> transport (migration from legacy setting name)
+// - legacy skills object format -> string array
+func (sm *SettingsManager) migrateSettings(s *Settings) {
+	if s == nil {
+		return
+	}
+
+	// Migration 1: queueMode -> steeringMode
+	// If steeringMode is empty but we have legacy queueMode behavior,
+	// default to "normal" (which is the TS default after migration)
+	if s.SteeringMode == "" {
+		s.SteeringMode = "normal"
+	}
+
+	// Migration 2: websockets -> transport
+	// If transport is empty, default based on EnableStreaming
+	if s.Transport == "" {
+		if s.EnableStreaming {
+			s.Transport = "stdio"
+		}
+	}
+
+	// Migration 3: default FollowUpMode
+	if s.FollowUpMode == "" {
+		s.FollowUpMode = "off"
+	}
+
+	// Migration 4: default doubleEscapeAction
+	if s.DoubleEscapeAction == "" {
+		s.DoubleEscapeAction = "cancel"
+	}
+
+	// Migration 5: default treeFilterMode
+	if s.TreeFilterMode == "" {
+		s.TreeFilterMode = "all"
+	}
+
+	// Migration 6: default retry provider-level settings
+	if s.Retry.TimeoutMs == 0 {
+		s.Retry.TimeoutMs = 30000 // 30 seconds
+	}
+	if s.Retry.MaxRetryDelayMs == 0 {
+		s.Retry.MaxRetryDelayMs = 60000 // 60 seconds
+	}
+
+	// Migration 7: default SteeringMode (TS: "one-at-a-time")
+	if s.SteeringMode == "" || s.SteeringMode == "normal" {
+		s.SteeringMode = "one-at-a-time"
+	}
+	if s.SteeringMode == "queue" {
+		s.SteeringMode = "all" // old "queue" → new "all"
+	}
+
+	// Migration 8: default FollowUpMode (TS: "one-at-a-time")
+	if s.FollowUpMode == "" || s.FollowUpMode == "off" {
+		s.FollowUpMode = "one-at-a-time"
+	}
+	if s.FollowUpMode == "suggest" {
+		s.FollowUpMode = "all"
+	}
+	if s.FollowUpMode == "auto" {
+		s.FollowUpMode = "all"
+	}
+
+	// Migration 9: default DoubleEscapeAction (TS: "tree", was "cancel")
+	if s.DoubleEscapeAction == "" || s.DoubleEscapeAction == "cancel" {
+		s.DoubleEscapeAction = "tree"
+	}
+
+	// Migration 10: default TreeFilterMode (TS: "default", was "all")
+	if s.TreeFilterMode == "" || s.TreeFilterMode == "all" {
+		s.TreeFilterMode = "default"
+	}
+
+	// Migration 11: default Transport (TS: "auto")
+	if s.Transport == "" {
+		s.Transport = "auto"
+	}
+	if s.Transport == "stdio" {
+		s.Transport = "sse" // TS uses "sse" not "stdio"
+	}
+
+	// Migration 12: default Compaction settings (TS: enabled=true, reserveTokens=16384, keepRecentTokens=20000)
+	if !s.Compaction.Enabled {
+		s.Compaction.Enabled = true
+	}
+	if s.Compaction.ReserveTokens == 0 {
+		s.Compaction.ReserveTokens = 16384
+	}
+	if s.Compaction.KeepRecentTokens == 0 {
+		s.Compaction.KeepRecentTokens = 20000
+	}
+
+	// Migration 13: default Retry settings (TS: enabled=true, maxRetries=3, baseDelayMs=2000)
+	if !s.Retry.Enabled {
+		s.Retry.Enabled = true
+	}
+	if s.Retry.MaxRetries == 0 {
+		s.Retry.MaxRetries = 3
+	}
+	if s.Retry.BaseDelayMs == 0 {
+		s.Retry.BaseDelayMs = 2000
+	}
+
+	// Migration 14: default EnableSkillCommands (TS: true)
+	if !s.EnableSkillCommands {
+		s.EnableSkillCommands = true
+	}
+
+	// Migration 15: default Warnings (TS: anthropicExtraUsage=true)
+	if !s.Warnings.AnthropicExtraUsage {
+		s.Warnings.AnthropicExtraUsage = true
+	}
+
+	// Migration 16: default Markdown codeBlockIndent (TS: "  ")
+	if s.Markdown.CodeBlockIndent == "" {
+		s.Markdown.CodeBlockIndent = "  "
+	}
+
+	// Migration 17: default EnableInstallTelemetry (TS: true)
+	if s.EnableInstallTelemetry == nil {
+		t := true
+		s.EnableInstallTelemetry = &t
+	}
 }

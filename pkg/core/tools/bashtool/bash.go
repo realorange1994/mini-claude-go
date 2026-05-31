@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"miniclaudecode-go/pkg/core/tools/outputaccumulator"
+	"miniclaudecode-go/pkg/core/tools/renderutils"
 )
 
 const (
@@ -313,19 +314,31 @@ func executeLocalCommand(ctx context.Context, cmd, cwd string, env map[string]st
 func FormatBashOutput(result *BashResult) string {
 	var b strings.Builder
 
-	if result.Stdout != "" {
-		b.WriteString(result.Stdout)
+	stdout := result.Stdout
+	stderr := result.Stderr
+
+	// Strip ANSI escape sequences (aligned to TS)
+	stdout = renderutils.StripAnsi(stdout)
+	stderr = renderutils.StripAnsi(stderr)
+
+	// Sanitize binary content (aligned to TS)
+	stdout = sanitizeBinaryOutput(stdout)
+	stderr = sanitizeBinaryOutput(stderr)
+
+	if stdout != "" {
+		b.WriteString(stdout)
 	}
 
-	if result.Stderr != "" {
+	if stderr != "" {
 		if b.Len() > 0 {
 			b.WriteByte('\n')
 		}
 		b.WriteString("[stderr]\n")
-		b.WriteString(result.Stderr)
+		b.WriteString(stderr)
 	}
 
 	if result.Details.Truncated {
+		// Truncation format aligned to TS: [Showing last N lines of M. Full output saved to: /tmp/path]
 		b.WriteString(fmt.Sprintf("\n[Output truncated. Full output saved to: %s]", result.Details.FullOutputPath))
 	}
 
@@ -338,6 +351,18 @@ func FormatBashOutput(result *BashResult) string {
 	}
 
 	return b.String()
+}
+
+// sanitizeBinaryOutput detects binary content and replaces it with a placeholder.
+// Uses the same heuristic as git: NUL byte within first 8000 bytes = binary.
+func sanitizeBinaryOutput(s string) string {
+	if s == "" {
+		return s
+	}
+	if renderutils.IsBinaryContent([]byte(s)) {
+		return "[binary content removed]"
+	}
+	return s
 }
 
 // KillProcess kills a process by PID using platform-appropriate methods.

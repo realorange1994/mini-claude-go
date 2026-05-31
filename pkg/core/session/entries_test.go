@@ -137,7 +137,7 @@ func TestBranchWithSummary(t *testing.T) {
 	data, _ := json.Marshal(msg)
 	msgID := sm.AppendMessage(data)
 
-	newID := sm.BranchWithSummary(msgID, "Summary of conversation so far")
+	newID := sm.BranchWithSummary(msgID, "Summary of conversation so far", nil, false)
 	if newID == "" {
 		t.Error("should return new entry ID")
 	}

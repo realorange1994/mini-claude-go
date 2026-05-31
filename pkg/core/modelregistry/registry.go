@@ -283,6 +283,217 @@ func (r *Registry) Unregister(provider, id string) {
 	}
 }
 
+// DefaultModelPerProvider maps provider IDs to their default model IDs.
+// Aligned to TS model-resolver.ts defaultModelPerProvider (updated to latest).
+var DefaultModelPerProvider = map[string]string{
+	"anthropic":              "claude-opus-4-7",
+	"amazon-bedrock":         "us.anthropic.claude-opus-4-6-v1",
+	"openai":                 "gpt-5.4",
+	"azure-openai-responses": "gpt-5.4",
+	"openai-codex":           "gpt-5.5",
+	"deepseek":               "deepseek-v4-pro",
+	"google":                 "gemini-3.1-pro-preview",
+	"google-vertex":          "gemini-3.1-pro-preview",
+	"github-copilot":          "gpt-5.4",
+	"openrouter":             "moonshotai/kimi-k2.6",
+	"vercel-ai-gateway":      "zai/glm-5.1",
+	"xai":                    "grok-4.20-0309-reasoning",
+	"groq":                   "openai/gpt-oss-120b",
+	"cerebras":               "zai-glm-4.7",
+	"zai":                    "glm-5.1",
+	"mistral":                "devstral-medium-latest",
+	"minimax":                "MiniMax-M2.7",
+	"minimax-cn":             "MiniMax-M2.7",
+	"moonshotai":             "kimi-k2.6",
+	"moonshotai-cn":          "kimi-k2.6",
+	"huggingface":            "moonshotai/Kimi-K2.6",
+	"fireworks":              "accounts/fireworks/models/kimi-k2p6",
+	"together":               "moonshotai/Kimi-K2.6",
+	"opencode":               "kimi-k2.6",
+	"opencode-go":            "kimi-k2.6",
+	"kimi-coding":            "kimi-for-coding",
+	"cloudflare-workers-ai":  "@cf/moonshotai/kimi-k2.6",
+	"cloudflare-ai-gateway":   "workers-ai/@cf/moonshotai/kimi-k2.6",
+	"xiaomi":                 "mimo-v2.5-pro",
+	"xiaomi-token-plan-cn":   "mimo-v2.5-pro",
+	"xiaomi-token-plan-ams":  "mimo-v2.5-pro",
+	"xiaomi-token-plan-sgp":  "mimo-v2.5-pro",
+	// Legacy aliases for backward compatibility
+	"azure":       "gpt-5.4",
+	"vertex":      "gemini-3.1-pro-preview",
+	"bedrock":     "us.anthropic.claude-opus-4-6-v1",
+	"litellm":     "claude-opus-4-7",
+	"ollama":      "llama3",
+	"lm-studio":   "local-model",
+	"cohere":      "command-a-06-2025",
+	"perplexity":  "sonar-pro",
+}
+
+// ProviderDisplayNames maps provider IDs to human-readable display names.
+// Aligned to TS provider-display-names.ts.
+var ProviderDisplayNames = map[string]string{
+	"anthropic":             "Anthropic",
+	"openai":                "OpenAI",
+	"openrouter":            "OpenRouter",
+	"google":                "Google",
+	"google-vertex-ai":      "Google Vertex AI",
+	"azure-openai":          "Azure OpenAI",
+	"aws-bedrock":           "AWS Bedrock",
+	"gemini":                "Gemini",
+	"ollama":                "Ollama",
+	"litellm":               "LiteLLM",
+	"vercel-ai-sdk":         "Vercel AI SDK",
+	"together-ai":           "Together AI",
+	"groq":                  "Groq",
+	"mistral":               "Mistral",
+	"cohere":                "Cohere",
+	"deepseek":              "DeepSeek",
+	"opencode":              "OpenCode",
+	"cloudflare-workers-ai": "Cloudflare Workers AI",
+	"xai":                   "xAI",
+	"perplexity":            "Perplexity",
+	"fireworks":             "Fireworks",
+	"lm-studio":             "LM Studio",
+	"nebius":                "Nebius",
+	"replicate":             "Replicate",
+	"bedrock":               "Amazon Bedrock",
+	"vertex":                "Google Vertex AI",
+	"azure":                 "Azure OpenAI",
+	"cloudflare":            "Cloudflare",
+	"together":              "Together AI",
+	"vercel":                "Vercel",
+	"bedrock-converse":      "AWS Bedrock Converse",
+	"kimi-coding":           "Kimi Coding",
+}
+
+// GetProviderDisplayName returns a human-readable name for a provider.
+func GetProviderDisplayName(providerID string) string {
+	if name, ok := ProviderDisplayNames[providerID]; ok {
+		return name
+	}
+	return providerID
+}
+
+// GetDefaultModelForProvider returns the default model ID for a provider.
+// Returns empty string if no default is known.
+func GetDefaultModelForProvider(providerID string) string {
+	return DefaultModelPerProvider[providerID]
+}
+
+// RegisterProvider adds all models from a provider dynamically (e.g., from extensions).
+func (r *Registry) RegisterProvider(provider string, models []ModelDef, baseURL string, apiKey string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if apiKey != "" {
+		r.providerKeys[provider] = apiKey
+	}
+	for _, md := range models {
+		// Skip if already registered
+		exists := false
+		for _, m := range r.models {
+			if m.Provider == provider && m.ID == md.ID {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+		bURL := md.BaseURL
+		if bURL == "" {
+			bURL = baseURL
+		}
+		maxTokens := md.MaxTokens
+		if maxTokens == 0 {
+			maxTokens = 8192
+		}
+		ctxWindow := md.ContextWindow
+		if ctxWindow == 0 {
+			ctxWindow = 200000
+		}
+		name := md.Name
+		if name == "" {
+			name = md.ID
+		}
+		r.models = append(r.models, ModelInfo{
+			ID:            md.ID,
+			Name:          name,
+			Provider:      provider,
+			BaseURL:       bURL,
+			APIKey:        apiKey,
+			MaxTokens:     maxTokens,
+			ContextWindow: ctxWindow,
+			Reasoning:     md.Reasoning,
+			InputPrice:    md.InputPrice,
+			OutputPrice:   md.OutputPrice,
+		})
+	}
+}
+
+// Refresh rebuilds models from a models.json file, replacing all previously loaded models.
+func (r *Registry) Refresh(path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Keep built-in models, clear loaded ones
+	r.models = builtInModels()
+	r.providerKeys = make(map[string]string)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		r.loadError = err
+		return err
+	}
+
+	cleaned := stripComments(string(data))
+	var config ModelsConfig
+	if err := json.Unmarshal([]byte(cleaned), &config); err != nil {
+		r.loadError = fmt.Errorf("parse models.json: %w", err)
+		return r.loadError
+	}
+
+	for provider, pc := range config.Providers {
+		if pc.APIKey != "" {
+			r.providerKeys[provider] = pc.APIKey
+		}
+		for _, md := range pc.Models {
+			baseURL := md.BaseURL
+			if baseURL == "" {
+				baseURL = pc.BaseURL
+			}
+			maxTokens := md.MaxTokens
+			if maxTokens == 0 {
+				maxTokens = 16384
+			}
+			ctxWindow := md.ContextWindow
+			if ctxWindow == 0 {
+				ctxWindow = 128000
+			}
+			name := md.Name
+			if name == "" {
+				name = md.ID
+			}
+			r.models = append(r.models, ModelInfo{
+				ID:            md.ID,
+				Name:          name,
+				Provider:      provider,
+				BaseURL:       baseURL,
+				MaxTokens:     maxTokens,
+				ContextWindow: ctxWindow,
+				Reasoning:     md.Reasoning,
+				InputPrice:    md.InputPrice,
+				OutputPrice:   md.OutputPrice,
+			})
+		}
+	}
+	r.loadError = nil
+	return nil
+}
+
 // builtInModels returns the default Anthropic models.
 func builtInModels() []ModelInfo {
 	return []ModelInfo{

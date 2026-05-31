@@ -10,7 +10,7 @@ import (
 func TestDefaultTools(t *testing.T) {
 	reg := DefaultTools()
 
-	expectedTools := []string{"Read", "Write", "Edit", "Bash", "Grep", "Find", "Glob", "Ls"}
+	expectedTools := []string{"read", "write", "edit", "bash", "grep", "find", "glob", "ls"}
 	for _, name := range expectedTools {
 		tool := reg.Get(name)
 		if tool == nil {
@@ -45,19 +45,19 @@ func TestGetDefinitions(t *testing.T) {
 func TestExecute(t *testing.T) {
 	reg := DefaultTools()
 
-	// Test Read tool execution
+	// Test read tool execution
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
 	os.WriteFile(testFile, []byte("hello world\n"), 0644)
 
-	result, err := reg.Execute(context.Background(), "Read", map[string]interface{}{
+	result, err := reg.Execute(context.Background(), "read", map[string]interface{}{
 		"path": testFile,
 	})
 	if err != nil {
-		t.Fatalf("Read tool error: %v", err)
+		t.Fatalf("read tool error: %v", err)
 	}
 	if result != "hello world\n" {
-		t.Errorf("Read result = %q, want %q", result, "hello world\n")
+		t.Errorf("read result = %q, want %q", result, "hello world\n")
 	}
 }
 
@@ -68,27 +68,27 @@ func TestExecute_WriteAndRead(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "test2.txt")
 
 	// Write
-	writeResult, err := reg.Execute(context.Background(), "Write", map[string]interface{}{
+	writeResult, err := reg.Execute(context.Background(), "write", map[string]interface{}{
 		"path":    testFile,
 		"content": "test content for write and read",
 	})
 	if err != nil {
-		t.Fatalf("Write tool error: %v", err)
+		t.Fatalf("write tool error: %v", err)
 	}
 	if writeResult == "" {
-		t.Error("Write tool returned empty result")
+		t.Error("write tool returned empty result")
 	}
 
 	// Read back — write without newline, read adds one
-	readResult, err := reg.Execute(context.Background(), "Read", map[string]interface{}{
+	readResult, err := reg.Execute(context.Background(), "read", map[string]interface{}{
 		"path": testFile,
 	})
 	if err != nil {
-		t.Fatalf("Read tool error: %v", err)
+		t.Fatalf("read tool error: %v", err)
 	}
 	expected := "test content for write and read\n"
 	if readResult != expected {
-		t.Errorf("Read result = %q, want %q", readResult, expected)
+		t.Errorf("read result = %q, want %q", readResult, expected)
 	}
 }
 
@@ -99,14 +99,14 @@ func TestExecute_Ls(t *testing.T) {
 	os.Mkdir(filepath.Join(tmpDir, "subdir"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("test"), 0644)
 
-	result, err := reg.Execute(context.Background(), "Ls", map[string]interface{}{
+	result, err := reg.Execute(context.Background(), "ls", map[string]interface{}{
 		"path": tmpDir,
 	})
 	if err != nil {
-		t.Fatalf("Ls tool error: %v", err)
+		t.Fatalf("ls tool error: %v", err)
 	}
 	if result == "" {
-		t.Error("Ls tool returned empty result")
+		t.Error("ls tool returned empty result")
 	}
 }
 
@@ -117,15 +117,15 @@ func TestExecute_Grep(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "search_test.txt")
 	os.WriteFile(testFile, []byte("hello world\nfoo bar\nhello test"), 0644)
 
-	result, err := reg.Execute(context.Background(), "Grep", map[string]interface{}{
+	result, err := reg.Execute(context.Background(), "grep", map[string]interface{}{
 		"pattern": "hello",
 		"paths":   []interface{}{testFile},
 	})
 	if err != nil {
-		t.Fatalf("Grep tool error: %v", err)
+		t.Fatalf("grep tool error: %v", err)
 	}
 	if result == "" {
-		t.Error("Grep tool returned empty result")
+		t.Error("grep tool returned empty result")
 	}
 }
 
@@ -136,15 +136,15 @@ func TestExecute_Glob(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "test.go"), []byte("package main"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("hello"), 0644)
 
-	result, err := reg.Execute(context.Background(), "Glob", map[string]interface{}{
+	result, err := reg.Execute(context.Background(), "glob", map[string]interface{}{
 		"pattern": "*.go",
 		"cwd":     tmpDir,
 	})
 	if err != nil {
-		t.Fatalf("Glob tool error: %v", err)
+		t.Fatalf("glob tool error: %v", err)
 	}
 	if result == "" {
-		t.Error("Glob tool returned empty result")
+		t.Error("glob tool returned empty result")
 	}
 }
 
@@ -165,7 +165,7 @@ func TestParseToolCalls(t *testing.T) {
 	}{
 		{
 			name:     "JSON array of tool calls",
-			response: `[{"id":"tc_1","name":"Read","input":{"path":"test.txt"}},{"id":"tc_2","name":"Write","input":{"path":"out.txt","content":"hello"}}]`,
+			response: `[{"id":"tc_1","name":"read","input":{"path":"test.txt"}},{"id":"tc_2","name":"write","input":{"path":"out.txt","content":"hello"}}]`,
 			wantLen:  2,
 		},
 		{
@@ -175,7 +175,7 @@ func TestParseToolCalls(t *testing.T) {
 		},
 		{
 			name:     "Simple array format",
-			response: `[{"name":"Read","input":{"path":"file.txt"}}]`,
+			response: `[{"name":"read","input":{"path":"file.txt"}}]`,
 			wantLen:  1,
 		},
 	}

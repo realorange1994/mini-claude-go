@@ -3,125 +3,264 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestNewRegistry(t *testing.T) {
-	r := NewRegistry()
-	all := r.All()
-	if len(all) == 0 {
-		t.Error("should have builtin skills")
+func TestValidateName(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"valid simple", "commit", false},
+		{"valid with hyphens", "review-pr", false},
+		{"valid with numbers", "test-123", false},
+		{"too long", "a-very-long-name-that-exceeds-the-maximum-limit-of-sixty-four-characters-x", true},
+		{"uppercase", "Commit", true},
+		{"spaces", "my skill", true},
+		{"starts with hyphen", "-skill", true},
+		{"ends with hyphen", "skill-", true},
+		{"double hyphens", "my--skill", true},
+		{"underscores", "my_skill", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errors := ValidateName(tt.input)
+			if tt.wantErr && len(errors) == 0 {
+				t.Errorf("ValidateName(%q) should have errors", tt.input)
+			}
+			if !tt.wantErr && len(errors) > 0 {
+				t.Errorf("ValidateName(%q) should not have errors, got: %v", tt.input, errors)
+			}
+		})
 	}
 }
 
-func TestGetBuiltin(t *testing.T) {
-	r := NewRegistry()
-	s, ok := r.Get("commit")
-	if !ok {
-		t.Fatal("commit skill should exist")
+func TestValidateDescription(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"valid", "Create a commit", false},
+		{"empty", "", true},
+		{"whitespace only", "   ", true},
 	}
-	if s.Type != "builtin" {
-		t.Errorf("Type = %q, want builtin", s.Type)
-	}
-	if s.Prompt == "" {
-		t.Error("prompt should not be empty")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errors := ValidateDescription(tt.input)
+			if tt.wantErr && len(errors) == 0 {
+				t.Errorf("ValidateDescription(%q) should have errors", tt.input)
+			}
+			if !tt.wantErr && len(errors) > 0 {
+				t.Errorf("ValidateDescription(%q) should not have errors, got: %v", tt.input, errors)
+			}
+		})
 	}
 }
 
-func TestGetNotFound(t *testing.T) {
-	r := NewRegistry()
-	_, ok := r.Get("nonexistent")
-	if ok {
-		t.Error("should not find nonexistent skill")
+func TestLoadSkillsFromDir_SKILLMD(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillDir := filepath.Join(tmpDir, "commit")
+	os.MkdirAll(skillDir, 0755)
+
+	skillContent := `---
+name: commit
+description: Create a git commit
+---
+When asked to commit, follow these steps:
+1. Run git status
+2. Draft a commit message`
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0644)
+
+	result := loadSkillsFromDir(tmpDir, "user")
+	if len(result.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(result.Skills))
+	}
+	if result.Skills[0].Name != "commit" {
+		t.Errorf("skill name = %q, want commit", result.Skills[0].Name)
+	}
+	if result.Skills[0].Description != "Create a git commit" {
+		t.Errorf("skill description = %q, want 'Create a git commit'", result.Skills[0].Description)
 	}
 }
 
-func TestRegister(t *testing.T) {
-	r := NewRegistry()
-	r.Register(Skill{
-		Name:        "my-skill",
-		Description: "Custom skill",
-		Prompt:      "Do something custom",
-		Type:        "user",
+func TestLoadSkillsFromDir_RootMD(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillContent := `---
+name: my-skill
+description: A root-level skill
+---
+Do something custom.`
+	os.WriteFile(filepath.Join(tmpDir, "my-skill.md"), []byte(skillContent), 0644)
+	result := loadSkillsFromDir(tmpDir, "project")
+	if len(result.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(result.Skills))
+	}
+	if result.Skills[0].Name != "my-skill" {
+		t.Errorf("skill name = %q, want my-skill", result.Skills[0].Name)
+	}
+}
+
+func TestLoadSkillsFromDir_NoDescription(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillDir := filepath.Join(tmpDir, "bad-skill")
+	os.MkdirAll(skillDir, 0755)
+	skillContent := `---
+name: bad-skill
+---
+Some content without description.`
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0644)
+	result := loadSkillsFromDir(tmpDir, "user")
+	if len(result.Skills) != 0 {
+		t.Errorf("skill without description should not be loaded, got %d", len(result.Skills))
+	}
+	hasDescWarning := false
+	for _, d := range result.Diagnostics {
+		if d.Message == "description is required" {
+			hasDescWarning = true
+		}
+	}
+	if !hasDescWarning {
+		t.Error("should have description-is-required diagnostic")
+	}
+}
+
+func TestLoadSkillsFromDir_DisableModelInvocation(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillDir := filepath.Join(tmpDir, "hidden-skill")
+	os.MkdirAll(skillDir, 0755)
+	skillContent := `---
+name: hidden-skill
+description: A hidden skill
+disable-model-invocation: true
+---
+Hidden content.`
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0644)
+	result := loadSkillsFromDir(tmpDir, "user")
+	if len(result.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(result.Skills))
+	}
+	if !result.Skills[0].DisableModelInvocation {
+		t.Error("skill should have DisableModelInvocation=true")
+	}
+}
+
+func TestLoadSkillsFromDir_NameFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillDir := filepath.Join(tmpDir, "fallback-name")
+	os.MkdirAll(skillDir, 0755)
+	skillContent := `---
+description: Skill without explicit name
+---
+Some content.`
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0644)
+	result := loadSkillsFromDir(tmpDir, "user")
+	if len(result.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(result.Skills))
+	}
+	if result.Skills[0].Name != "fallback-name" {
+		t.Errorf("skill name = %q, want fallback-name (parent dir)", result.Skills[0].Name)
+	}
+}
+
+func TestLoadSkillsFromDir_NestedSKILLMD(t *testing.T) {
+	tmpDir := t.TempDir()
+	parentDir := filepath.Join(tmpDir, "skills")
+	os.MkdirAll(filepath.Join(parentDir, "nested"), 0755)
+	skillContent := `---
+name: nested-skill
+description: A nested skill
+---
+Nested content.`
+	os.WriteFile(filepath.Join(parentDir, "nested", "SKILL.md"), []byte(skillContent), 0644)
+	result := loadSkillsFromDir(parentDir, "user")
+	if len(result.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(result.Skills))
+	}
+	if result.Skills[0].Name != "nested-skill" {
+		t.Errorf("skill name = %q, want nested-skill", result.Skills[0].Name)
+	}
+}
+
+func TestLoadSkills_CollisionDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir1 := filepath.Join(tmpDir, "dir1")
+	os.MkdirAll(dir1, 0755)
+	os.WriteFile(filepath.Join(dir1, "SKILL.md"), []byte(`---
+name: commit
+description: First commit skill
+---
+Content 1.`), 0644)
+	dir2 := filepath.Join(tmpDir, "dir2")
+	os.MkdirAll(dir2, 0755)
+	os.WriteFile(filepath.Join(dir2, "SKILL.md"), []byte(`---
+name: commit
+description: Second commit skill
+---
+Content 2.`), 0644)
+	result := LoadSkills(LoadSkillsOptions{
+		SkillPaths:      []string{dir1, dir2},
+		IncludeDefaults: false,
 	})
-	s, ok := r.Get("my-skill")
-	if !ok {
-		t.Fatal("custom skill should exist")
+	if len(result.Skills) != 1 {
+		t.Errorf("should have 1 skill (winner), got %d", len(result.Skills))
 	}
-	if s.Prompt != "Do something custom" {
-		t.Errorf("Prompt = %q", s.Prompt)
+	hasCollision := false
+	for _, d := range result.Diagnostics {
+		if string(d.Type) == "collision" {
+			hasCollision = true
+		}
 	}
-}
-
-func TestUnregister(t *testing.T) {
-	r := NewRegistry()
-	r.Register(Skill{Name: "temp", Prompt: "temp"})
-	r.Unregister("temp")
-	_, ok := r.Get("temp")
-	if ok {
-		t.Error("skill should be removed")
+	if !hasCollision {
+		t.Error("should have collision diagnostic")
 	}
 }
 
-func TestActivePrompt(t *testing.T) {
-	r := NewRegistry()
-	prompt := r.ActivePrompt([]string{"commit", "nonexistent"})
-	if prompt == "" {
-		t.Error("should return prompt for commit")
+func TestFormatSkillsForPrompt(t *testing.T) {
+	skills := []Skill{
+		{Name: "commit", Description: "Create a git commit", FilePath: "/path/to/commit/SKILL.md"},
+		{Name: "review-pr", Description: "Review a pull request", FilePath: "/path/to/review-pr/SKILL.md"},
+	}
+	output := FormatSkillsForPrompt(skills)
+	if !containsAll(output, []string{"<available_skills>", "<skill>", "<name>commit</name>", "<description>Create a git commit</description>", "<location>", "</available_skills>", "Use the read tool to load"}) {
+		t.Errorf("FormatSkillsForPrompt output missing expected XML tags")
 	}
 }
 
-func TestLoadFromDir(t *testing.T) {
-	tmp := t.TempDir()
-	skillJSON := `{"name": "custom-skill", "description": "A custom skill", "prompt": "Do custom things"}`
-	if err := os.WriteFile(filepath.Join(tmp, "custom-skill.json"), []byte(skillJSON), 0666); err != nil {
-		t.Fatal(err)
+func TestFormatSkillsForPrompt_DisableModelInvocation(t *testing.T) {
+	skills := []Skill{
+		{Name: "commit", Description: "Create a commit", FilePath: "/path/commit"},
+		{Name: "hidden", Description: "Hidden skill", FilePath: "/path/hidden", DisableModelInvocation: true},
 	}
-
-	r := NewRegistry()
-	if err := r.LoadFromDir(tmp); err != nil {
-		t.Fatal(err)
+	output := FormatSkillsForPrompt(skills)
+	if contains(output, "<name>hidden</name>") {
+		t.Error("skills with DisableModelInvocation should not appear in prompt")
 	}
-
-	s, ok := r.Get("custom-skill")
-	if !ok {
-		t.Fatal("custom-skill should be loaded")
-	}
-	if s.Type != "user" {
-		t.Errorf("Type = %q, want user", s.Type)
+	if !contains(output, "<name>commit</name>") {
+		t.Error("visible skills should appear in prompt")
 	}
 }
 
-func TestLoadFromDir_NonExistent(t *testing.T) {
-	r := NewRegistry()
-	if err := r.LoadFromDir("/nonexistent/path"); err != nil {
-		t.Error("should not error for non-existent dir")
+func TestFormatSkillsForPrompt_Empty(t *testing.T) {
+	output := FormatSkillsForPrompt(nil)
+	if output != "" {
+		t.Errorf("empty skills should produce empty output, got: %s", output)
 	}
 }
 
-func TestLoadFromDir_SkipsInvalid(t *testing.T) {
-	tmp := t.TempDir()
-	// No prompt field
-	os.WriteFile(filepath.Join(tmp, "invalid.json"), []byte(`{"name": "bad"}`), 0666)
-	// Not JSON
-	os.WriteFile(filepath.Join(tmp, "not-json.json"), []byte(`not json`), 0666)
-
-	r := NewRegistry()
-	r.LoadFromDir(tmp)
-
-	_, ok := r.Get("bad")
-	if ok {
-		t.Error("should not load skill with no prompt")
-	}
+func contains(s, sub string) bool {
+	return strings.Contains(s, sub)
 }
 
-func TestAllSorted(t *testing.T) {
-	r := NewRegistry()
-	r.Register(Skill{Name: "zzz", Prompt: "z"})
-	r.Register(Skill{Name: "aaa", Prompt: "a"})
-
-	all := r.All()
-	if all[0].Name > all[len(all)-1].Name {
-		t.Error("skills should be sorted by name")
+func containsAll(s string, substrs []string) bool {
+	for _, substr := range substrs {
+		if !strings.Contains(s, substr) {
+			return false
+		}
 	}
+	return true
 }

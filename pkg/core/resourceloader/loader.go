@@ -2,6 +2,8 @@ package resourceloader
 
 import (
 	"fmt"
+	"miniclaudecode-go/pkg/core/diagnostics"
+	"miniclaudecode-go/pkg/core/skills"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,8 +18,11 @@ type ContextFile struct {
 // ResourceLoader loads project resources like CLAUDE.md, AGENTS.md, skills, etc.
 // Aligned to TS resource-loader.ts.
 type ResourceLoader struct {
-	Cwd      string
-	AgentDir string
+	Cwd            string
+	AgentDir       string
+	NoSkills       bool // skip skill discovery
+	NoContextFiles bool // skip context file loading
+	SkillPaths     []string // explicit skill paths
 }
 
 // New creates a new resource loader.
@@ -55,7 +60,11 @@ func (rl *ResourceLoader) LoadContextFileFromDir(dir string) *ContextFile {
 // LoadProjectContextFiles loads all context files from the project hierarchy.
 // Returns files in order: global agent dir (first), root dirs, ..., cwd (last).
 // This means cwd files override root files, which override global files.
+// If NoContextFiles is true, returns nil immediately.
 func (rl *ResourceLoader) LoadProjectContextFiles() []ContextFile {
+	if rl == nil || rl.NoContextFiles {
+		return nil
+	}
 	var files []ContextFile
 
 	// Load from global agent dir first
@@ -142,6 +151,23 @@ func (rl *ResourceLoader) DiscoverAppendSystemPromptFile() *ContextFile {
 	}
 
 	return nil
+}
+
+// DiscoverSkills loads skills from default and project locations.
+// Returns loaded skills and any diagnostic warnings.
+// If NoSkills is true, returns nil immediately.
+func (rl *ResourceLoader) DiscoverSkills() ([]skills.Skill, []diagnostics.ResourceDiagnostic) {
+	if rl == nil || rl.NoSkills {
+		return nil, nil
+	}
+
+	result := skills.LoadSkills(skills.LoadSkillsOptions{
+		Cwd:             rl.Cwd,
+		AgentDir:        rl.AgentDir,
+		SkillPaths:      rl.SkillPaths,
+		IncludeDefaults: true,
+	})
+	return result.Skills, result.Diagnostics
 }
 
 // ResolvePromptInput checks if input is a file path and loads it, or returns input as-is.

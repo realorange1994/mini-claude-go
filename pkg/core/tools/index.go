@@ -9,6 +9,7 @@ import (
 	"miniclaudecode-go/pkg/core/extensions"
 	"miniclaudecode-go/pkg/core/tools/bashtool"
 	"miniclaudecode-go/pkg/core/tools/edittool"
+	"miniclaudecode-go/pkg/core/tools/filemutationqueue"
 	"miniclaudecode-go/pkg/core/tools/findtool"
 	"miniclaudecode-go/pkg/core/tools/globtool"
 	"miniclaudecode-go/pkg/core/tools/greptool"
@@ -25,8 +26,9 @@ type ProcessLogger func(stage string, info map[string]string)
 
 // Registry manages available tools
 type Registry struct {
-	tools  map[string]*Tool
-	logger ProcessLogger
+	tools         map[string]*Tool
+	logger        ProcessLogger
+	mutationQueue *filemutationqueue.FileMutationQueue // serializes concurrent file writes per path
 }
 
 // Tool represents a registered tool
@@ -39,7 +41,8 @@ type Tool struct {
 // NewRegistry creates a new tool registry
 func NewRegistry() *Registry {
 	return &Registry{
-		tools: make(map[string]*Tool),
+		tools:         make(map[string]*Tool),
+		mutationQueue: filemutationqueue.NewFileMutationQueue(),
 	}
 }
 
@@ -100,14 +103,14 @@ func (r *Registry) Execute(ctx context.Context, name string, input map[string]in
 	if r.logger != nil {
 		info := map[string]string{"tool": name}
 		switch name {
-		case "Bash":
+		case "bash":
 			if cmd, ok := input["command"].(string); ok {
 				info["command"] = truncateForLog(cmd, 200)
 			}
 			if cwd, ok := input["cwd"].(string); ok && cwd != "" {
 				info["cwd"] = cwd
 			}
-		case "Read":
+		case "read":
 			if p, ok := input["path"].(string); ok {
 				info["path"] = p
 			}
@@ -117,14 +120,14 @@ func (r *Registry) Execute(ctx context.Context, name string, input map[string]in
 			if limit := intOf(input["limit"]); limit > 0 {
 				info["limit"] = fmt.Sprintf("%d", limit)
 			}
-		case "Write":
+		case "write":
 			if p, ok := input["path"].(string); ok {
 				info["path"] = p
 			}
 			if c, ok := input["content"].(string); ok {
 				info["contentLen"] = fmt.Sprintf("%d", len(c))
 			}
-		case "Edit":
+		case "edit":
 			if p, ok := input["path"].(string); ok {
 				info["path"] = p
 			}
@@ -134,25 +137,25 @@ func (r *Registry) Execute(ctx context.Context, name string, input map[string]in
 			if nw, ok := input["new_string"].(string); ok && nw != "" {
 				info["newLen"] = fmt.Sprintf("%d", len(nw))
 			}
-		case "Grep":
+		case "grep":
 			if p, ok := input["pattern"].(string); ok {
 				info["pattern"] = truncateForLog(p, 100)
 			}
 			if g, ok := input["glob"].(string); ok && g != "" {
 				info["glob"] = g
 			}
-		case "Glob":
+		case "glob":
 			if p, ok := input["pattern"].(string); ok {
 				info["pattern"] = p
 			}
-		case "Find":
+		case "find":
 			if p, ok := input["pattern"].(string); ok {
 				info["pattern"] = p
 			}
 			if d, ok := input["dir"].(string); ok && d != "" {
 				info["dir"] = d
 			}
-		case "Ls":
+		case "ls":
 			if p, ok := input["path"].(string); ok && p != "" {
 				info["path"] = p
 			}
@@ -212,15 +215,21 @@ func getCwd() string {
 func DefaultTools() *Registry {
 	reg := NewRegistry()
 
-	reg.Register("Read", extensions.ToolDefinition{
-		Name:        "Read",
+	reg.Register("read", extensions.ToolDefinition{
+		Name:        "read",
 		Description: "Read the contents of a file. Use this to view files before editing or to read configuration files, source code, or documentation.",
+		PromptSnippet: "Read file contents",
+		PromptGuidelines: []string{"Use read to examine files instead of cat or sed."},
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
 					"description": "Path to the file to read (relative or absolute)",
+				},
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to the file to read (alias for path)",
 				},
 				"offset": map[string]interface{}{
 					"type":        "integer",
@@ -231,11 +240,14 @@ func DefaultTools() *Registry {
 					"description": "Maximum number of lines to read",
 				},
 			},
-			"required": []string{"path"},
+			"required": []string{},
 		},
 	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
-		path, ok := input["path"].(string)
-		if !ok {
+		path := stringOf(input["path"])
+		if path == "" {
+			path = stringOf(input["file_path"])
+		}
+		if path == "" {
 			return "", fmt.Errorf("missing or invalid 'path' parameter")
 		}
 		ri := readtool.ReadInput{
@@ -250,9 +262,11 @@ func DefaultTools() *Registry {
 		return readtool.FormatReadOutput(result), nil
 	})
 
-	reg.Register("Write", extensions.ToolDefinition{
-		Name:        "Write",
+	reg.Register("write", extensions.ToolDefinition{
+		Name:        "write",
 		Description: "Write content to a file. This will create the file if it doesn't exist or overwrite if it does. Use for creating new files or making significant changes.",
+		PromptSnippet: "Create or overwrite files",
+		PromptGuidelines: []string{"Use write only for new files or complete rewrites."},
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -276,10 +290,15 @@ func DefaultTools() *Registry {
 		if !ok {
 			return "", fmt.Errorf("missing or invalid 'content' parameter")
 		}
-		result, err := writetool.Execute(writetool.WriteInput{
-			Path:    path,
-			Content: content,
-		}, getCwd(), writetool.LocalWriteOperations{})
+		var result *writetool.WriteResult
+		var err error
+		err = reg.mutationQueue.WithFileMutationQueue(path, func() error {
+			result, err = writetool.Execute(writetool.WriteInput{
+				Path:    path,
+				Content: content,
+			}, getCwd(), writetool.LocalWriteOperations{})
+			return err
+		})
 		if err != nil {
 			return "", err
 		}
@@ -292,62 +311,130 @@ func DefaultTools() *Registry {
 		return fmt.Sprintf("Updated %s (%d bytes):\n%s", result.Path, result.BytesWritten, result.Diff), nil
 	})
 
-	reg.Register("Edit", extensions.ToolDefinition{
-		Name:        "Edit",
-		Description: "Make targeted edits to a file. Supports three modes: replace (replace old_string with new_string), insert (insert new_string at line), and delete (remove content).",
+	reg.Register("edit", extensions.ToolDefinition{
+		Name:        "edit",
+		Description: "Make precise file edits with exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits.",
+		PromptSnippet: "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+		PromptGuidelines: []string{
+			"Use edit for precise changes (edits[].oldText must match exactly)",
+			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
+			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
+			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
+		},
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "The path to the file to edit",
+					"description": "Path to the file to edit (relative or absolute)",
+				},
+				"edits": map[string]interface{}{
+					"type":        "array",
+					"description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits.",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"oldText": map[string]interface{}{
+								"type":        "string",
+								"description": "Exact text for one targeted replacement. Must be unique in the original file and not overlap with other edits[].oldText.",
+							},
+							"newText": map[string]interface{}{
+								"type":        "string",
+								"description": "Replacement text for this targeted edit.",
+							},
+						},
+						"required": []string{"oldText", "newText"},
+					},
+				},
+				"type": map[string]interface{}{
+					"type":        "string",
+					"description": "Edit mode: replace, insert, or delete (legacy)",
 				},
 				"old_string": map[string]interface{}{
 					"type":        "string",
-					"description": "Text to find and replace (for replace/delete mode)",
+					"description": "Text to find and replace (legacy, for replace/delete mode)",
 				},
 				"new_string": map[string]interface{}{
 					"type":        "string",
-					"description": "Text to insert (for replace/insert mode)",
+					"description": "Text to insert (legacy, for replace/insert mode)",
 				},
 				"insert_line": map[string]interface{}{
 					"type":        "integer",
-					"description": "Line number to insert at (for insert mode)",
+					"description": "Line number to insert at (legacy)",
 				},
 				"start_line": map[string]interface{}{
 					"type":        "integer",
-					"description": "Start line for range edit",
+					"description": "Start line for range edit (legacy)",
 				},
 				"end_line": map[string]interface{}{
 					"type":        "integer",
-					"description": "End line for range edit",
+					"description": "End line for range edit (legacy)",
 				},
 			},
 			"required": []string{"path"},
 		},
 	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
+		// Parse edits: support edits[] array and legacy oldText/newText top-level fields
+		var editEntries []edittool.EditEntry
+		if editsRaw, ok := input["edits"]; ok {
+			if editsArr, ok := editsRaw.([]interface{}); ok {
+				for _, v := range editsArr {
+					if m, ok := v.(map[string]interface{}); ok {
+						oldT := stringOf(m["oldText"])
+						if oldT == "" {
+							oldT = stringOf(m["old_string"])
+						}
+						editEntries = append(editEntries, edittool.EditEntry{
+							OldText: oldT,
+							NewText: stringOf(m["newText"]),
+						})
+					}
+				}
+			}
+		}
+		// Legacy compat: if LLM sends oldText/newText as top-level fields (TS prepareEditArguments)
+		if len(editEntries) == 0 {
+			oldT := stringOf(input["oldText"])
+			newT := stringOf(input["newText"])
+			if oldT != "" || newT != "" {
+				editEntries = append(editEntries, edittool.EditEntry{
+					OldText: oldT,
+					NewText: newT,
+				})
+			}
+		}
+
 		editType := edittool.EditReplace
 		if t, ok := input["type"].(string); ok {
 			editType = edittool.EditType(t)
 		}
-		result, err := edittool.Execute(edittool.EditInput{
-			Type:       editType,
-			Path:       stringOf(input["path"]),
-			OldString:  stringOf(input["old_string"]),
-			NewString:  stringOf(input["new_string"]),
-			InsertLine: intOf(input["insert_line"]),
-			StartLine:  intOf(input["start_line"]),
-			EndLine:    intOf(input["end_line"]),
-		}, getCwd(), edittool.LocalEditOperations{})
+
+		filePath := stringOf(input["path"])
+		var result *edittool.EditResult
+		var err error
+		err = reg.mutationQueue.WithFileMutationQueue(filePath, func() error {
+			result, err = edittool.Execute(edittool.EditInput{
+				Edits:      editEntries,
+				Type:       editType,
+				Path:       filePath,
+				OldString:  stringOf(input["old_string"]),
+				NewString:  stringOf(input["new_string"]),
+				InsertLine: intOf(input["insert_line"]),
+				StartLine:  intOf(input["start_line"]),
+				EndLine:    intOf(input["end_line"]),
+			}, getCwd(), edittool.LocalEditOperations{})
+			return err
+		})
 		if err != nil {
 			return "", err
 		}
 		return edittool.FormatEditOutput(result), nil
 	})
 
-	reg.Register("Bash", extensions.ToolDefinition{
-		Name:        "Bash",
+	reg.Register("bash", extensions.ToolDefinition{
+		Name:        "bash",
 		Description: "Execute a shell command. Use for running git commands, npm scripts, running tests, or any command-line operations.",
+		PromptSnippet: "Execute bash commands (ls, grep, find, etc.)",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -386,9 +473,10 @@ func DefaultTools() *Registry {
 		return bashtool.FormatBashOutput(result), nil
 	})
 
-	reg.Register("Grep", extensions.ToolDefinition{
-		Name:        "Grep",
+	reg.Register("grep", extensions.ToolDefinition{
+		Name:        "grep",
 		Description: "Search for a pattern in files using ripgrep. Use to find function definitions, TODO comments, or any text pattern across your codebase.",
+		PromptSnippet: "Search file contents for patterns (respects .gitignore)",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -396,18 +484,34 @@ func DefaultTools() *Registry {
 					"type":        "string",
 					"description": "Regular expression pattern to search for",
 				},
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path or directory to search in (alias for paths[0])",
+				},
 				"paths": map[string]interface{}{
 					"type":        "array",
 					"description": "File paths or directories to search in",
 					"items":       map[string]interface{}{"type": "string"},
 				},
-				"max_results": map[string]interface{}{
-					"type":        "integer",
-					"description": "Maximum number of matches to return",
+				"ignoreCase": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Whether the search should be case insensitive (alias for !case_sensitive)",
 				},
 				"case_sensitive": map[string]interface{}{
 					"type":        "boolean",
 					"description": "Whether the search should be case sensitive",
+				},
+				"literal": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Treat pattern as a literal string instead of regex",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of matches to return (alias for max_results)",
+				},
+				"max_results": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of matches to return",
 				},
 				"context": map[string]interface{}{
 					"type":        "integer",
@@ -426,6 +530,10 @@ func DefaultTools() *Registry {
 			return "", fmt.Errorf("missing or invalid 'pattern' parameter")
 		}
 		var paths []string
+		// TS alias: "path" (string) → paths[0]
+		if p, ok := input["path"].(string); ok && p != "" {
+			paths = append(paths, p)
+		}
 		if p, ok := input["paths"].([]interface{}); ok {
 			for _, v := range p {
 				if s, ok := v.(string); ok {
@@ -433,11 +541,22 @@ func DefaultTools() *Registry {
 				}
 			}
 		}
+		// TS alias: "ignoreCase" → !CaseSensitive
+		caseSensitive := boolOf(input["case_sensitive"])
+		if ignoreCase, ok := input["ignoreCase"].(bool); ok {
+			caseSensitive = !ignoreCase
+		}
+		// TS alias: "limit" → MaxResults
+		maxResults := intOf(input["max_results"])
+		if limit := intOf(input["limit"]); limit > 0 {
+			maxResults = limit
+		}
 		ri := greptool.GrepInput{
 			Pattern:       pattern,
 			Paths:         paths,
-			MaxResults:    intOf(input["max_results"]),
-			CaseSensitive: boolOf(input["case_sensitive"]),
+			MaxResults:    maxResults,
+			CaseSensitive: caseSensitive,
+			Literal:       boolOf(input["literal"]),
 			ContextLines:  intOf(input["context"]),
 			Glob:          stringOf(input["glob"]),
 		}
@@ -450,12 +569,17 @@ func DefaultTools() *Registry {
 		return greptool.FormatGrepOutput(result), nil
 	})
 
-	reg.Register("Find", extensions.ToolDefinition{
-		Name:        "Find",
+	reg.Register("find", extensions.ToolDefinition{
+		Name:        "find",
 		Description: "Find files matching a pattern using fd (or Go fallback). Use to locate files by name pattern.",
+		PromptSnippet: "Find files by glob pattern (respects .gitignore)",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Directory to search in (alias for dir)",
+				},
 				"dir": map[string]interface{}{
 					"type":        "string",
 					"description": "Directory to search in",
@@ -463,6 +587,10 @@ func DefaultTools() *Registry {
 				"pattern": map[string]interface{}{
 					"type":        "string",
 					"description": "Regex or glob pattern for file names",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of results to return (alias for max_results, default: 1000)",
 				},
 				"max_depth": map[string]interface{}{
 					"type":        "integer",
@@ -474,7 +602,15 @@ func DefaultTools() *Registry {
 	}, func(ctx context.Context, input map[string]interface{}) (string, error) {
 		dir := stringOf(input["dir"])
 		if dir == "" {
+			dir = stringOf(input["path"])
+		}
+		if dir == "" {
 			dir = getCwd()
+		}
+		// TS default: limit=1000
+		limit := intOf(input["limit"])
+		if limit == 0 {
+			limit = 1000
 		}
 		ri := findtool.FindInput{
 			Dir:      dir,
@@ -487,11 +623,17 @@ func DefaultTools() *Registry {
 		if err != nil {
 			return "", err
 		}
+		// Apply limit to results (TS alignment: default limit=1000)
+		if len(result.Paths) > limit {
+			result.Paths = result.Paths[:limit]
+			result.TotalCount = limit
+			result.Truncated = true
+		}
 		return findtool.FormatFindOutput(result), nil
 	})
 
-	reg.Register("Glob", extensions.ToolDefinition{
-		Name:        "Glob",
+	reg.Register("glob", extensions.ToolDefinition{
+		Name:        "glob",
 		Description: "Find files matching a glob pattern. Use for quick file searches using wildcards.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -529,8 +671,8 @@ func DefaultTools() *Registry {
 		return globtool.FormatGlobOutput(result), nil
 	})
 
-	reg.Register("Ls", extensions.ToolDefinition{
-		Name:        "Ls",
+	reg.Register("ls", extensions.ToolDefinition{
+		Name:        "ls",
 		Description: "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles.",
 		InputSchema: map[string]interface{}{
 			"type": "object",

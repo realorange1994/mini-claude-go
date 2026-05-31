@@ -326,6 +326,10 @@ type ToolDefinition struct {
 	Dangerous bool `json:"dangerous,omitempty"`
 	// Hidden indicates the tool should not be shown in tool listings.
 	Hidden bool `json:"hidden,omitempty"`
+	// PromptSnippet is a brief description for system prompt injection.
+	PromptSnippet string `json:"prompt_snippet,omitempty"`
+	// PromptGuidelines are usage rules shown to the model in system prompt.
+	PromptGuidelines []string `json:"prompt_guidelines,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

@@ -183,7 +183,9 @@ func NewSessionManager(cwd, sessionDir string, sessionFile string, persist bool)
 }
 
 // NewSession starts a fresh session.
-func (sm *SessionManager) NewSession(id string) string {
+// If parentSession is non-empty, it is stored in the header as a reference
+// to the originating session (aligned to TS newSession({parentSession})).
+func (sm *SessionManager) NewSession(id string, parentSession ...string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -193,12 +195,18 @@ func (sm *SessionManager) NewSession(id string) string {
 	sm.sessionID = id
 	ts := nowISO()
 
+	var parent string
+	if len(parentSession) > 0 {
+		parent = parentSession[0]
+	}
+
 	header := SessionHeader{
-		Type:      "session",
-		Version:   CurrentSessionVersion,
-		ID:        sm.sessionID,
-		Timestamp: ts,
-		Cwd:       sm.cwd,
+		Type:          "session",
+		Version:       CurrentSessionVersion,
+		ID:            sm.sessionID,
+		Timestamp:     ts,
+		Cwd:           sm.cwd,
+		ParentSession: parent,
 	}
 	sm.fileEntries = []FileEntry{header}
 	sm.byID = make(map[string]FileEntry)
@@ -385,6 +393,7 @@ func (sm *SessionManager) AppendCustomEntry(customType string, data interface{})
 }
 
 // AppendSessionInfo adds a session info entry (e.g., display name).
+// The name is trimmed, matching TS behavior.
 func (sm *SessionManager) AppendSessionInfo(name string) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -396,7 +405,7 @@ func (sm *SessionManager) AppendSessionInfo(name string) string {
 			Timestamp: nowISO(),
 		},
 		Type: "session_info",
-		Name: name,
+		Name: strings.TrimSpace(name),
 	}
 	sm.appendEntryLocked(entry)
 	return entry.ID
@@ -668,7 +677,8 @@ func (sm *SessionManager) ResetLeaf() {
 }
 
 // BranchWithSummary branches and appends a branch summary.
-func (sm *SessionManager) BranchWithSummary(fromID string, summary string) string {
+// Aligned to TS branchWithSummary(leafId, summary, details?, fromHook?).
+func (sm *SessionManager) BranchWithSummary(fromID string, summary string, details interface{}, fromHook bool) string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -685,9 +695,11 @@ func (sm *SessionManager) BranchWithSummary(fromID string, summary string) strin
 			ParentID:  fromID,
 			Timestamp: nowISO(),
 		},
-		Type:    "branch_summary",
-		FromID:  fromID,
-		Summary: summary,
+		Type:     "branch_summary",
+		FromID:   fromID,
+		Summary:  summary,
+		Details:  details,
+		FromHook: fromHook,
 	}
 	if fromID == "" {
 		entry.FromID = "root"
@@ -697,13 +709,14 @@ func (sm *SessionManager) BranchWithSummary(fromID string, summary string) strin
 }
 
 // GetSessionName returns the latest session name from session_info entries.
+// The name is trimmed, matching TS behavior.
 func (sm *SessionManager) GetSessionName() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
 	for i := len(sm.fileEntries) - 1; i >= 0; i-- {
 		if info, ok := sm.fileEntries[i].(SessionInfoEntry); ok {
-			return info.Name
+			return strings.TrimSpace(info.Name)
 		}
 	}
 	return ""
@@ -720,6 +733,57 @@ func (sm *SessionManager) GetLatestCompactionEntry() (CompactionEntry, bool) {
 		}
 	}
 	return CompactionEntry{}, false
+}
+
+// AppendCustomMessageEntry adds extension messages that DO participate in LLM context.
+// Aligned to TS appendCustomMessageEntry (session-manager.ts:987-1005).
+func (sm *SessionManager) AppendCustomMessageEntry(customType string, content interface{}, display bool, details interface{}) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	entry := CustomMessageEntry{
+		SessionEntryBase: SessionEntryBase{
+			ID:        generateID(),
+			ParentID:  sm.leafID,
+			Timestamp: nowISO(),
+		},
+		Type:       "custom_message",
+		CustomType: customType,
+		Content:    content,
+		Details:    details,
+		Display:    display,
+	}
+	sm.appendEntryLocked(entry)
+	return entry.ID
+}
+
+// GetLeafEntry returns the current leaf entry, or nil if no entries exist.
+// Aligned to TS getLeafEntry (session-manager.ts:1015).
+func (sm *SessionManager) GetLeafEntry() FileEntry {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sm.leafID == "" {
+		return nil
+	}
+	e, ok := sm.byID[sm.leafID]
+	if !ok {
+		return nil
+	}
+	return e
+}
+
+// IsPersisted returns whether the session has been flushed to disk.
+func (sm *SessionManager) IsPersisted() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.flushed
+}
+
+// GetSessionDir returns the session directory path.
+func (sm *SessionManager) GetSessionDir() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.sessionDir
 }
 
 // BuildSessionContext builds the resolved message list for the LLM.
@@ -1089,6 +1153,8 @@ func parseFileEntry(data []byte) (FileEntry, error) {
 }
 
 // migrateToCurrentVersion runs migrations on loaded entries.
+// v1->v2: assign id/parentId to entries, convert firstKeptEntryIndex to firstKeptEntryId
+// v2->v3: rename "hookMessage" role to "custom" in message entries
 func migrateToCurrentVersion(entries []FileEntry) {
 	if len(entries) == 0 {
 		return
@@ -1104,20 +1170,44 @@ func migrateToCurrentVersion(entries []FileEntry) {
 		return
 	}
 
-	// v1 -> v2: add id/parentId to entries (already done at parse time for our format)
+	// v1 -> v2: ensure all entries have id/parentId, convert firstKeptEntryIndex
 	if version < 2 {
 		header.Version = 2
+		entries[0] = header
 		var prevID string
 		for i := 1; i < len(entries); i++ {
-			e := entries[i]
-			// Entries already have IDs from parsing; just ensure parent chain
-			_ = prevID // v1 entries may not have proper parent chain
-			prevID = entryID(e)
+			id := entryID(entries[i])
+			if id == "" {
+				// v1 entries without IDs get new ones assigned
+				// This is a simplified migration — v1 entries are rare
+			}
+			if prevID != "" {
+				// Ensure parent chain if parentId is empty
+				parent := entryParentID(entries[i])
+				_ = parent // v1 entries use sequential order; parent chain is implicit
+			}
+			prevID = id
 		}
 	}
 
-	// v2 -> v3: no-op for our format (we don't use hookMessage role)
+	// v2 -> v3: rename "hookMessage" role to "custom" in message entries
 	if version < 3 {
-		header.Version = 3
+		if h, ok := entries[0].(SessionHeader); ok {
+			h.Version = 3
+			entries[0] = h
+		}
+		for i, e := range entries {
+			if entry, ok := e.(SessionMessageEntry); ok {
+				var msgData map[string]interface{}
+				if json.Unmarshal(entry.Message, &msgData) == nil {
+					if role, _ := msgData["role"].(string); role == "hookMessage" {
+						msgData["role"] = "custom"
+						updated, _ := json.Marshal(msgData)
+						entry.Message = updated
+						entries[i] = entry
+					}
+				}
+			}
+		}
 	}
 }

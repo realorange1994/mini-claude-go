@@ -3,6 +3,7 @@ package systemprompt
 
 import (
 	"fmt"
+	"miniclaudecode-go/pkg/core/skills"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,8 +34,8 @@ type BuildSystemPromptOptions struct {
 	Cwd string
 	// ContextFiles are pre-loaded context files.
 	ContextFiles []ContextFile
-	// Skills are skill prompt fragments to include.
-	Skills []string
+	// Skills are discovered skills to include as <available_skills>.
+	Skills []skills.Skill
 }
 
 // BuildSystemPrompt constructs the full system prompt.
@@ -73,9 +74,7 @@ func BuildSystemPrompt(opts BuildSystemPromptOptions) string {
 		// Append skills if read tool is available
 		hasRead := len(opts.SelectedTools) == 0 || contains(opts.SelectedTools, "read")
 		if hasRead && len(opts.Skills) > 0 {
-			for _, s := range opts.Skills {
-				prompt += "\n" + s
-			}
+			prompt += skills.FormatSkillsForPrompt(opts.Skills)
 		}
 		prompt += fmt.Sprintf("\n\nCurrent date: %s", date)
 		prompt += fmt.Sprintf("\nCurrent working directory: %s", cwd)
@@ -173,9 +172,7 @@ Guidelines:
 
 	// Append skills
 	if hasRead && len(opts.Skills) > 0 {
-		for _, s := range opts.Skills {
-			prompt += "\n" + s
-		}
+		prompt += skills.FormatSkillsForPrompt(opts.Skills)
 	}
 
 	prompt += fmt.Sprintf("\n\nCurrent date: %s", date)

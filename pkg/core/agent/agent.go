@@ -18,6 +18,7 @@ import (
 	"miniclaudecode-go/pkg/core/resourceloader"
 	"miniclaudecode-go/pkg/core/session"
 	"miniclaudecode-go/pkg/core/shellexec"
+	"miniclaudecode-go/pkg/core/skills"
 	"miniclaudecode-go/pkg/core/systemprompt"
 	"miniclaudecode-go/pkg/core/tools"
 )
@@ -36,7 +37,7 @@ type AgentConfig struct {
 	AppendSystem     string       // text appended after system prompt
 	SelectedTools    []string     // tool names to include (empty = default)
 	ExtraGuidelines  []string     // additional guideline bullets
-	Skills           []string     // skill prompt fragments
+	Skills           []skills.Skill // discovered skills
 	ContextFiles     []systemprompt.ContextFile
 	EnableStreaming  bool         // use streaming LLM path
 	Timeout          time.Duration // per-turn timeout for LLM calls (0 = no timeout)
@@ -94,6 +95,10 @@ type AgentSession struct {
 	// Event subscription
 	subscribers []func(event AgentEvent)
 	subMu       sync.RWMutex
+
+	// Overflow recovery guard — prevents infinite compact/retry loops.
+	// Aligned to TS _overflowRecoveryAttempted (agent-session.ts:273).
+	overflowRecoveryAttempted bool
 }
 
 // AgentEvent represents an event emitted by the agent session.
@@ -423,8 +428,16 @@ func (s *AgentSession) runLoop() error {
 				return err
 			}
 
-			// Check if this is a context overflow error — trigger compaction instead of retry
+			// Check if this is a context overflow error — trigger compaction instead of retry.
+			// Aligned to TS agent-session.ts:1796-1814 (_overflowRecoveryAttempted guard).
 			if IsContextOverflow(err) {
+				if s.overflowRecoveryAttempted {
+					// Already attempted recovery and still overflowing — stop to avoid infinite loop
+					sid := s.session.GetSessionID()
+					s.eventRunner.EmitError(sid, "agent", err.Error())
+					return fmt.Errorf("context overflow recovery failed: compaction cannot reduce context further: %w", err)
+				}
+				s.overflowRecoveryAttempted = true
 				if compErr := s.Compact(); compErr != nil {
 					sid := s.session.GetSessionID()
 					s.eventRunner.EmitError(sid, "agent", err.Error())
@@ -968,11 +981,12 @@ func (s *AgentSession) toStrings(msgs []extensions.Message) []string {
 }
 
 func (s *AgentSession) buildCompactedMessages(reducedMsgs []string, summary string) []extensions.Message {
+	// Aligned to TS compaction message format: structured XML tags for better LLM parsing.
 	result := []extensions.Message{
 		{
 			Role: extensions.RoleSystem,
 			Content: []extensions.ContentBlock{
-				{Type: "text", Text: "[compaction] " + summary},
+				{Type: "text", Text: "<compaction_summary>\n" + summary + "\n</compaction_summary>"},
 			},
 		},
 	}
@@ -1059,23 +1073,32 @@ func (s *AgentSession) buildSystemPrompt() string {
 func (s *AgentSession) buildSystemPromptLocked() string {
 	// Build tool snippets from registry
 	toolSnippets := make(map[string]string)
+	var allGuidelines []string
 	for _, def := range s.tools.GetDefinitions() {
-		// Use first line of description as snippet
-		desc := def.Description
-		if idx := strings.Index(desc, "\n"); idx >= 0 {
-			desc = desc[:idx]
+		// Use PromptSnippet if available, otherwise first line of description
+		snippet := def.PromptSnippet
+		if snippet == "" {
+			snippet = def.Description
+			if idx := strings.Index(snippet, "\n"); idx >= 0 {
+				snippet = snippet[:idx]
+			}
 		}
-		if len(desc) > 100 {
-			desc = desc[:100]
+		if len(snippet) > 100 {
+			snippet = snippet[:100]
 		}
-		toolSnippets[def.Name] = desc
+		toolSnippets[def.Name] = snippet
+
+		// Collect guidelines from each tool definition
+		for _, g := range def.PromptGuidelines {
+			allGuidelines = append(allGuidelines, g)
+		}
 	}
 
 	// Load resources via ResourceLoader if available
 	contextFiles := s.config.ContextFiles
 	appendSystem := s.config.AppendSystem
 	var systemPromptOverride string
-	var skills = s.config.Skills
+	var skillsList = s.config.Skills
 
 	if rl := s.config.ResourceLoader; rl != nil {
 		// Load project context files (CLAUDE.md/AGENTS.md walk-up)
@@ -1098,6 +1121,11 @@ func (s *AgentSession) buildSystemPromptLocked() string {
 		if appendFile := rl.DiscoverAppendSystemPromptFile(); appendFile != nil {
 			appendSystem = appendFile.Content
 		}
+
+		// Discover skills from SKILL.md files
+		if discoveredSkills, _ := rl.DiscoverSkills(); len(discoveredSkills) > 0 {
+			skillsList = discoveredSkills
+		}
 	}
 
 	// Use config system prompt or discovered one
@@ -1110,11 +1138,11 @@ func (s *AgentSession) buildSystemPromptLocked() string {
 		CustomPrompt:       systemPrompt,
 		SelectedTools:      s.config.SelectedTools,
 		ToolSnippets:       toolSnippets,
-		PromptGuidelines:   s.config.ExtraGuidelines,
+		PromptGuidelines:   append(allGuidelines, s.config.ExtraGuidelines...),
 		AppendSystemPrompt: appendSystem,
 		Cwd:                s.config.Cwd,
 		ContextFiles:       contextFiles,
-		Skills:             skills,
+		Skills:             skillsList,
 	})
 }
 
@@ -1156,6 +1184,10 @@ func (s *AgentSession) SetModel(model string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.config.Model = model
+	// Clamp thinking level on model switch (aligned to TS model-switch thinking level clamping).
+	if !supportsReasoning(model) && s.thinkingLevel != ThinkingLevelOff {
+		s.thinkingLevel = ThinkingLevelOff
+	}
 }
 
 // GetModel returns the current model.
@@ -1546,6 +1578,11 @@ func (s *AgentSession) CycleThinkingLevel(direction int) ThinkingLevel {
 	defer s.mu.Unlock()
 
 	levels := ValidThinkingLevels()
+	// If the current model doesn't support reasoning, stay at "off"
+	if !supportsReasoning(s.config.Model) {
+		s.thinkingLevel = ThinkingLevelOff
+		return s.thinkingLevel
+	}
 	currentIdx := 0
 	for i, l := range levels {
 		if l == s.thinkingLevel {

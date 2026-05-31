@@ -36,6 +36,7 @@ type GrepInput struct {
 	Paths         []string `json:"paths,omitempty"`
 	MaxResults    int      `json:"max_results,omitempty"`
 	CaseSensitive bool     `json:"case_sensitive,omitempty"`
+	Literal       bool     `json:"literal,omitempty"`       // Treat pattern as literal string
 	ContextLines  int      `json:"context,omitempty"`      // Lines before/after match
 	Glob          string   `json:"glob,omitempty"`         // Glob filter for file names
 	Type          string   `json:"type,omitempty"`         // File type filter (js, py, etc.)
@@ -213,6 +214,14 @@ func buildRgArgs(input GrepInput, maxResults int) []string {
 	// Head limit (truncate output lines)
 	if input.HeadLimit > 0 {
 		args = append(args, "--max-lines", fmt.Sprintf("%d", input.HeadLimit))
+	}
+
+	// Hidden files (TS alignment: search dotfiles by default)
+	args = append(args, "--hidden")
+
+	// Literal mode (treat pattern as literal string, not regex)
+	if input.Literal {
+		args = append(args, "--fixed-strings")
 	}
 
 	// The pattern

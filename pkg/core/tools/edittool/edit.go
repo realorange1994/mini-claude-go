@@ -21,8 +21,21 @@ const (
 	EditDelete  EditType = "delete"
 )
 
+// EditEntry represents a single targeted replacement in the edits[] array.
+// Aligned to pi's replaceEditSchema: {oldText, newText}.
+type EditEntry struct {
+	OldText string `json:"oldText"`
+	NewText string `json:"newText"`
+}
+
 // EditInput is the input for the Edit tool.
+// Supports both the new edits[] array format (aligned to TS) and the legacy
+// single-edit format (type/old_string/new_string/insert_line/start_line/end_line).
 type EditInput struct {
+	// New-style: edits[] array for multiple targeted replacements in one call.
+	Edits []EditEntry `json:"edits,omitempty"`
+
+	// Legacy: single-edit fields
 	Type       EditType `json:"type,omitempty"`
 	Path       string   `json:"path"`
 	OldString  string   `json:"old_string,omitempty"`
@@ -82,7 +95,12 @@ func Execute(input EditInput, cwd string, ops EditOperations) (*EditResult, erro
 		return nil, err
 	}
 
-	// Default edit type
+	// New-style: edits[] array (aligned to TS edit tool)
+	if len(input.Edits) > 0 {
+		return executeEdits(input, absPath)
+	}
+
+	// Legacy: single-edit mode
 	if input.Type == "" {
 		input.Type = EditReplace
 	}
@@ -97,6 +115,28 @@ func Execute(input EditInput, cwd string, ops EditOperations) (*EditResult, erro
 	default:
 		return nil, fmt.Errorf("unknown edit type: %s", input.Type)
 	}
+}
+
+// executeEdits applies the edits[] array using editdiff.ApplyEditToFile.
+// This is the primary path aligned to the TS edit tool.
+func executeEdits(input EditInput, absPath string) (*EditResult, error) {
+	edits := make([]editdiff.Edit, len(input.Edits))
+	for i, e := range input.Edits {
+		edits[i] = editdiff.Edit{OldText: e.OldText, NewText: e.NewText}
+	}
+	result, err := editdiff.ApplyEditToFile(absPath, edits)
+	if err != nil {
+		return nil, err
+	}
+	return &EditResult{
+		Output: fmt.Sprintf("Successfully replaced %d block(s) in %s", len(input.Edits), absPath),
+		Details: EditDetails{
+			FirstChangedLine: result.FirstChangedLine,
+			EditsApplied:     result.EditsApplied,
+		},
+		Diff:  result.Diff,
+		Patch: result.Patch,
+	}, nil
 }
 
 func executeReplace(input EditInput, absPath string, ops EditOperations) (*EditResult, error) {

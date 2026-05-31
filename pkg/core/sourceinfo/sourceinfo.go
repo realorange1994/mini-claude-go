@@ -49,6 +49,32 @@ func CreateSyntheticSourceInfo(path string, source string, scope SourceScope, or
 	}
 }
 
+// SourceInfoOptions provides options for creating synthetic source info.
+type SourceInfoOptions struct {
+	Source string
+	Scope  string
+	BaseDir string
+}
+
+// CreateSyntheticSourceInfoFromOptions creates a ResourceSourceInfo from options map.
+// Used by skills package for source tracking.
+func CreateSyntheticSourceInfoFromOptions(path string, opts SourceInfoOptions) ResourceSourceInfo {
+	scope := ScopeTemporary
+	switch opts.Scope {
+	case "user":
+		scope = ScopeUser
+	case "project":
+		scope = ScopeProject
+	}
+	return ResourceSourceInfo{
+		Path:    path,
+		Source:  opts.Source,
+		Scope:   scope,
+		Origin:  OriginTopLevel,
+		BaseDir: opts.BaseDir,
+	}
+}
+
 // SourceInfo holds source file location information for edit/write operations.
 // Mirrors pi's source tracking for knowing where code came from.
 type SourceInfo struct {

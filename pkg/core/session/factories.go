@@ -248,17 +248,58 @@ func ForkFrom(sourcePath string, targetCwd string, sessionDir string) (*SessionM
 
 // CreateBranchedSession extracts a linear path from root to leafId into a new session file.
 // Aligned to pi's SessionManager.createBranchedSession(leafId).
+// Labels are preserved by recreating them as new LabelEntry items in the branched session.
 func (sm *SessionManager) CreateBranchedSession(leafID string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Get branch path
-	branch := sm.GetBranch(leafID)
+	// Get branch path (inline to avoid reentrant lock)
+	startID := leafID
+	if startID == "" {
+		startID = sm.leafID
+	}
+	var branch []FileEntry
+	visited := make(map[string]bool)
+	current := startID
+	for current != "" {
+		if visited[current] {
+			break
+		}
+		visited[current] = true
+		entry, ok := sm.byID[current]
+		if !ok {
+			break
+		}
+		branch = append([]FileEntry{entry}, branch...)
+		current = entryParentID(entry)
+	}
 	if len(branch) == 0 {
 		return fmt.Errorf("no entries found for leaf %s", leafID)
 	}
 
-	// Filter out LabelEntry items
+	// Collect labels that apply to entries in the branch
+	// Map: targetID -> label string
+	branchIDs := make(map[string]bool)
+	for _, e := range branch {
+		branchIDs[entryID(e)] = true
+	}
+	var labelEntries []LabelEntry
+	for targetID, label := range sm.labelsByID {
+		if branchIDs[targetID] && label != "" {
+			labelEntries = append(labelEntries, LabelEntry{
+				SessionEntryBase: SessionEntryBase{
+					ID:        generateID(),
+					ParentID:  "", // will be set after entries are written
+					Timestamp: nowISO(),
+				},
+				Type:     "label",
+				TargetID: targetID,
+				Label:    label,
+			})
+		}
+	}
+
+	// Filter out LabelEntry items from the branch itself
 	var filtered []FileEntry
 	for _, e := range branch {
 		if _, ok := e.(LabelEntry); !ok {
@@ -276,12 +317,7 @@ func (sm *SessionManager) CreateBranchedSession(leafID string) error {
 	fileTs = strings.ReplaceAll(fileTs, ".", "-")
 	newFile := filepath.Join(sm.sessionDir, fmt.Sprintf("%s_%s.jsonl", fileTs, newID))
 
-	f, err := os.Create(newFile)
-	if err != nil {
-		return fmt.Errorf("failed to create branched session file: %v", err)
-	}
-
-	// Write header with parentSession pointing to original
+	// Build new entries list: header + filtered + label entries
 	header := SessionHeader{
 		Type:          "session",
 		Version:       CurrentSessionVersion,
@@ -291,25 +327,51 @@ func (sm *SessionManager) CreateBranchedSession(leafID string) error {
 		ParentSession: origFile,
 	}
 
-	hdrLine, _ := json.Marshal(header)
-	f.Write(append(hdrLine, '\n'))
-
-	// Write filtered entries
+	newEntries := []FileEntry{header}
+	var lastID string
 	for _, e := range filtered {
-		line, _ := json.Marshal(e)
-		f.Write(append(line, '\n'))
+		newEntries = append(newEntries, e)
+		lastID = entryID(e)
 	}
-	f.Close()
+	// Append label entries at the end, parented to the last entry
+	for _, le := range labelEntries {
+		le.ParentID = lastID
+		newEntries = append(newEntries, le)
+	}
+
+	// Check if there's an assistant message (no-assistant guard)
+	hasAssistant := false
+	for _, e := range newEntries {
+		if msg, ok := e.(SessionMessageEntry); ok {
+			var msgData map[string]interface{}
+			if json.Unmarshal(msg.Message, &msgData) == nil {
+				if role, _ := msgData["role"].(string); role == "assistant" {
+					hasAssistant = true
+					break
+				}
+			}
+		}
+	}
+
+	// Write file only if there's an assistant message (deferred write pattern)
+	if hasAssistant {
+		f, err := os.Create(newFile)
+		if err != nil {
+			return fmt.Errorf("failed to create branched session file: %v", err)
+		}
+		for _, e := range newEntries {
+			line, _ := json.Marshal(e)
+			f.Write(append(line, '\n'))
+		}
+		f.Close()
+	}
 
 	// Replace session state
 	sm.sessionFile = newFile
 	sm.sessionID = newID
-	sm.fileEntries = filtered
+	sm.fileEntries = newEntries
 	sm.buildIndex()
-	sm.flushed = true
-
-	// Persist the file (rewrite)
-	sm.rewriteFile()
+	sm.flushed = hasAssistant
 
 	return nil
 }
@@ -362,6 +424,64 @@ func List(sessionDir string, onProgress SessionListProgress) ([]SessionInfo, err
 	return infos, nil
 }
 
+// ListAll walks the global sessions directory and returns sessions from all projects.
+// Aligned to TS listAll (session-manager.ts:421-465) which builds cross-project listing
+// with concurrency (MAX_CONCURRENT_SESSION_INFO_LOADS = 10).
+// The global session dir is typically ~/.miniclaude/sessions/.
+func ListAll(globalSessionDir string, onProgress SessionListProgress) ([]SessionInfo, error) {
+	if globalSessionDir == "" {
+		home, _ := os.UserHomeDir()
+		globalSessionDir = filepath.Join(home, ".miniclaude", "sessions")
+	}
+
+	// Read subdirectories (each is --<encoded-cwd>--/)
+	subdirs, err := os.ReadDir(globalSessionDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no sessions yet
+		}
+		return nil, err
+	}
+
+	// Collect all .jsonl files across all subdirectories
+	var allFiles []string
+	for _, sd := range subdirs {
+		if !sd.IsDir() {
+			continue
+		}
+		dirPath := filepath.Join(globalSessionDir, sd.Name())
+		files, err := filepath.Glob(filepath.Join(dirPath, "*.jsonl"))
+		if err != nil {
+			continue
+		}
+		allFiles = append(allFiles, files...)
+	}
+
+	total := len(allFiles)
+	var infos []SessionInfo
+	for i, f := range allFiles {
+		info, err := BuildSessionInfo(f)
+		if err != nil {
+			continue
+		}
+		infos = append(infos, info)
+		if onProgress != nil {
+			onProgress(i+1, total)
+		}
+	}
+
+	// Sort by modified descending
+	for i := 0; i < len(infos)-1; i++ {
+		for j := 0; j < len(infos)-i-1; j++ {
+			if infos[j].Modified.Before(infos[j+1].Modified) {
+				infos[j], infos[j+1] = infos[j+1], infos[j]
+			}
+		}
+	}
+
+	return infos, nil
+}
+
 // BuildSessionInfo builds a SessionInfo from a single .jsonl file.
 func BuildSessionInfo(path string) (SessionInfo, error) {
 	entries, err := loadEntriesFromFile(path)
@@ -375,6 +495,7 @@ func BuildSessionInfo(path string) (SessionInfo, error) {
 	var msgCount int
 	var firstMsg string
 	var allMsgs strings.Builder
+	var latestActivity time.Time
 
 	for _, e := range entries {
 		switch entry := e.(type) {
@@ -396,13 +517,23 @@ func BuildSessionInfo(path string) (SessionInfo, error) {
 					allMsgs.WriteString(content)
 				}
 			}
+			// Track activity time from entry timestamp
+			ts := parseTime(entry.Timestamp)
+			if ts.After(latestActivity) {
+				latestActivity = ts
+			}
 		}
 	}
 
+	// Use latest message timestamp, or fall back to file mtime
 	fileInfo, err := os.Stat(path)
-	modTime := time.Now()
+	fileModTime := time.Now()
 	if err == nil {
-		modTime = fileInfo.ModTime()
+		fileModTime = fileInfo.ModTime()
+	}
+	modTime := latestActivity
+	if modTime.IsZero() {
+		modTime = fileModTime
 	}
 
 	return SessionInfo{
