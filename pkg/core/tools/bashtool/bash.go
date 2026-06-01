@@ -282,6 +282,10 @@ func executeLocalCommand(ctx context.Context, cmd, cwd string, env map[string]st
 		if ctx.Err() == context.DeadlineExceeded {
 			result.Error = fmt.Sprintf("command timed out after %dms", durationMs)
 			result.Details.ExitCode = -1
+		} else if ctx.Err() == context.Canceled {
+			// Context was cancelled (e.g., Ctrl+C by user) — return error so
+			// it propagates up the tool execution chain and stops the agent loop.
+			return nil, context.Canceled
 		} else if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			result.Details.ExitCode = exitErr.ExitCode()
 			result.Details.Signal = exitErr.String()

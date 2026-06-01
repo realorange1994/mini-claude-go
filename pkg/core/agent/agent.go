@@ -887,6 +887,11 @@ func (s *AgentSession) executeTools(toolCalls []toolCall) ([]toolResult, error) 
 	s.mu.RUnlock()
 
 	for _, tc := range toolCalls {
+		// Check context before each tool call — if cancelled (e.g., Ctrl+C),
+		// stop executing remaining tools and return immediately.
+		if turnCtx.Err() != nil {
+			return nil, turnCtx.Err()
+		}
 		// Execute the tool using the registry with turn context
 		result, err := s.tools.Execute(turnCtx, tc.name, tc.input)
 		if err != nil {
@@ -895,6 +900,11 @@ func (s *AgentSession) executeTools(toolCalls []toolCall) ([]toolResult, error) 
 				content:    fmt.Sprintf("Error: %v", err),
 				isError:    true,
 			})
+			// After tool execution, check if context was cancelled (e.g., Ctrl+C).
+			// If so, stop executing remaining tools and propagate the cancellation.
+			if turnCtx.Err() != nil {
+				return nil, turnCtx.Err()
+			}
 			continue
 		}
 
