@@ -11,17 +11,20 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 	"unsafe"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 var (
-	kernel32                    = syscall.NewLazyDLL("kernel32.dll")
+	kernel32                   = syscall.NewLazyDLL("kernel32.dll")
 	procSetConsoleCtrlHandler  = kernel32.NewProc("SetConsoleCtrlHandler")
-	procGetStdHandle          = kernel32.NewProc("GetStdHandle")
-	procGetConsoleMode        = kernel32.NewProc("GetConsoleMode")
-	procSetConsoleMode        = kernel32.NewProc("SetConsoleMode")
-	procWaitForSingleObject   = kernel32.NewProc("WaitForSingleObject")
-	procReadFile              = kernel32.NewProc("ReadFile")
+	procGetStdHandle           = kernel32.NewProc("GetStdHandle")
+	procGetConsoleMode         = kernel32.NewProc("GetConsoleMode")
+	procSetConsoleMode         = kernel32.NewProc("SetConsoleMode")
+	procWaitForSingleObject    = kernel32.NewProc("WaitForSingleObject")
+	procReadFile               = kernel32.NewProc("ReadFile")
 )
 
 const (
@@ -107,35 +110,35 @@ func EnsureConsoleInputMode() {
 func ReadLine() (string, error) {
 	// Clear any pending interrupt flag at start
 	interruptPending.Store(0)
-	
+
 	// Get console input handle
 	h, _, _ := procGetStdHandle.Call(uintptr(0xFFFFFFF6)) // STD_INPUT_HANDLE
 	if h == 0 {
 		return "", io.EOF
 	}
-	
+
 	var buf []byte
 	var tmp [1]byte
 
 	for {
 		// Wait for input with 100ms timeout to allow Ctrl+C handler to run
 		ret, _, _ := procWaitForSingleObject.Call(h, 100)
-		
+
 		// Check if Ctrl+C was pressed (interruptPending flag set by handler)
 		if interruptPending.Load() == 1 {
 			interruptPending.Store(0)
-			return string(buf), context.Canceled
+			return decodeGBKIfNeeded(buf), context.Canceled
 		}
-		
+
 		if ret == 0 { // _WAIT_OBJECT_0 - input available
 			var bytesRead uint32
 			res, _, _ := procReadFile.Call(h, uintptr(unsafe.Pointer(&tmp[0])), 1, uintptr(unsafe.Pointer(&bytesRead)), 0)
 			if res == 0 {
-				return string(buf), fmt.Errorf("ReadFile failed")
+				return decodeGBKIfNeeded(buf), fmt.Errorf("ReadFile failed")
 			}
 			if bytesRead > 0 {
 				if tmp[0] == '\n' {
-					return string(buf), nil
+					return decodeGBKIfNeeded(buf), nil
 				}
 				if tmp[0] != '\r' {
 					buf = append(buf, tmp[0])
@@ -145,9 +148,26 @@ func ReadLine() (string, error) {
 			continue
 		} else {
 			// Error
-			return string(buf), fmt.Errorf("WaitForSingleObject returned %d", ret)
+			return decodeGBKIfNeeded(buf), fmt.Errorf("WaitForSingleObject returned %d", ret)
 		}
 	}
+}
+
+// decodeGBKIfNeeded converts GBK-encoded bytes to UTF-8 if the byte
+// sequence is not already valid UTF-8. procReadFile returns raw bytes
+// from the Windows console which uses the system code page (GBK/CP936
+// on Chinese Windows). If the bytes are already valid UTF-8 (e.g. on
+// English Windows), they are returned unchanged.
+func decodeGBKIfNeeded(data []byte) string {
+	if utf8.Valid(data) {
+		return string(data)
+	}
+	decoded, err := simplifiedchinese.GBK.NewDecoder().Bytes(data)
+	if err != nil {
+		// If GBK decoding fails, return the raw bytes as-is
+		return string(data)
+	}
+	return string(decoded)
 }
 
 // ReadLineInterruptible reads a line from stdin with context cancellation support.
