@@ -932,10 +932,11 @@ func (a *AgentLoop) runChildAgentSync(
 	// Without this, childLoop.Run() blocks with its own independent
 	// interrupted flag that never gets set by the SIGINT handler.
 	stopMonitor := make(chan struct{})
+	monitorDone := make(chan struct{})
 	go func() {
+		defer close(monitorDone)
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		defer close(stopMonitor) // FIX: ensure goroutine cleanup on all exit paths
 		for {
 			select {
 			case <-stopMonitor:
@@ -952,6 +953,7 @@ func (a *AgentLoop) runChildAgentSync(
 	// Run the child agent synchronously
 	childResult := childLoop.Run(userPrompt)
 	close(stopMonitor)
+	<-monitorDone
 
 	// If Run returned empty, try to recover partial results
 	if childResult == "" {

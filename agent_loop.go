@@ -5977,13 +5977,13 @@ func (a *AgentLoop) trySMCompact(sessionMemoryContent string, preCompactInst str
 		return // Not enough tokens to justify compaction
 	}
 
-	// Cooldown: skip if tokens haven't grown 25% since last compaction
+	// Cooldown: skip if tokens haven't grown 50% since last compaction
 	// (handled inside ShouldCompact, but double-check pre-compact tokens)
 	a.compactor.mu.Lock()
 	postTokens := a.compactor.postCompactTokens
 	a.compactor.mu.Unlock()
 	if postTokens > 0 {
-		cooldownThreshold := postTokens + postTokens/4
+		cooldownThreshold := postTokens + postTokens/2
 		if preTokens < cooldownThreshold {
 			return // Still in cooldown period
 		}

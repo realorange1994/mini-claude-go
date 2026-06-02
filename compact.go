@@ -1511,9 +1511,13 @@ func (c *Compactor) ShouldCompact(messages []anthropic.MessageParam) bool {
 	if tokens < threshold {
 		return false
 	}
-	// Cooldown: skip if tokens haven't grown 15% since last compaction
+	// Cooldown: skip if tokens haven't grown 50% since last compaction.
+	// 15% was too aggressive — a single Read tool result (~64K chars = ~16K tokens
+	// after 4/3 padding) would exceed the 15% threshold and re-trigger compaction
+	// immediately. 50% ensures at least 2-3 meaningful tool interactions between
+	// compactions.
 	if c.postCompactTokens > 0 {
-		cooldownThreshold := c.postCompactTokens + c.postCompactTokens*3/20
+		cooldownThreshold := c.postCompactTokens + c.postCompactTokens/2
 		if tokens < cooldownThreshold {
 			return false
 		}
