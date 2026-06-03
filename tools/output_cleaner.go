@@ -41,9 +41,20 @@ func StripTerminalCodes(raw string) string {
 	// Step 3: Strip simple ESC sequences (keypad modes)
 	s = simpleEscRegex.ReplaceAllString(s, "")
 
-	// Step 4: Collapse \r-overwrites within each line.
-	// Split on \n, then for each segment keep only the portion after
-	// the last \r (which is what would actually be visible on screen).
+	// Step 4: Normalize Windows-style \r\n line endings to \n FIRST.
+	// This must happen before the \r-overwrite collapse, because
+	// the collapse treats any \r as a "overwrite cursor" and keeps
+	// only the text after the last \r. For Windows \r\n endings,
+	// "42\r\n" gets split on \n into "42\r" — and the overwrite
+	// collapse truncates it to "" (empty), destroying the output.
+	// By converting \r\n to \n first, we preserve the data.
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+
+	// Step 5: Collapse \r-overwrites within each line.
+	// Now only genuine \r-overwrites (progress bars, spinners) remain,
+	// since \r\n was already normalized. Split on \n, then for each
+	// segment keep only the portion after the last \r (which is what
+	// would actually be visible on screen).
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		if idx := strings.LastIndex(line, "\r"); idx >= 0 {
@@ -52,14 +63,14 @@ func StripTerminalCodes(raw string) string {
 	}
 	s = strings.Join(lines, "\n")
 
-	// Step 5: Drop backspace erase pairs (readline rubout).
+	// Step 6: Drop backspace erase pairs (readline rubout).
 	// Repeatedly remove "X\b" pairs until none remain.
 	backspaceRegex := regexp.MustCompile(`[^\x08]\x08`)
 	for backspaceRegex.MatchString(s) {
 		s = backspaceRegex.ReplaceAllString(s, "")
 	}
 
-	// Step 6: Normalize any leftover isolated \r.
+	// Step 7: Normalize any leftover isolated \r.
 	s = strings.ReplaceAll(s, "\r", "")
 
 	return s

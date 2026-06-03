@@ -534,6 +534,24 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		// Redirect to temp files, then cat them back. Capture the real command's
 		// exit code before cat, since bash returns the exit code of the last
 		// command in a ; chain (which would be cat, always 0).
+		//
+		// IMPORTANT: Use "python -u" (unbuffered) to ensure output is immediately
+		// flushed to the temp file. When stdout is redirected to a file (not TTY),
+		// Python defaults to fully buffered mode (4KB+ buffer). Small outputs stay
+		// in the buffer until the process exits. While Python does flush on exit,
+		// the temp file workaround has shown timing issues where cat reads before
+		// the buffer is fully flushed. Using -u ensures immediate writes.
+		// This applies to all Python commands in the command string.
+		if strings.Contains(actualCommand, "python") {
+			// Add -u flag to python commands for unbuffered output.
+			// When stdout is redirected to a file (not TTY), Python defaults to
+			// fully buffered mode (4KB+ buffer). Using -u ensures immediate writes.
+			// Two-step approach (Go RE2 doesn't support negative lookahead):
+			// 1. Add -u after every python/python3 + space
+			// 2. Collapse any duplicate -u -u into single -u
+			actualCommand = regexp.MustCompile(`(python3?)\s+`).ReplaceAllString(actualCommand, `$1 -u `)
+			actualCommand = strings.ReplaceAll(actualCommand, "-u -u", "-u")
+		}
 		actualCommand = fmt.Sprintf(
 			"%s > %s 2>%s; _ec=$?; cat %s; cat %s >&2; exit $_ec",
 			actualCommand, posixStdout, posixStderr, posixStdout, posixStderr,
