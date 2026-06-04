@@ -76,7 +76,7 @@ func (*ExecTool) Description() string {
 		"SAFETY: Commands targeting system directories or using destructive patterns will be blocked. " +
 		"Use the env parameter to set environment variables (e.g. env={\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}). " +
 		"IMPORTANT: stdin is disconnected — commands requiring user input (sudo password, ssh host verification, vim/nano/less, REPLs, confirmation prompts) will hang and be killed after stall detection. " +
-		"For sudo commands, use the sudo_password parameter to securely provide the password via stdin (do NOT use echo | sudo -S). For other prompts: use apt-get -y, ssh with StrictHostKeyChecking=no, echo y | command, --force, --yes. " +
+		"For sudo commands, use the sudo_password parameter to securely provide the password via stdin (do NOT use echo | sudo -S). For other prompts: use non-interactive flags (apt-get -y, ssh -o StrictHostKeyChecking=no, --force, --yes) or echo y | command. " +
 		"If a command needs to run for a long time without input, use run_in_background=true."
 }
 
