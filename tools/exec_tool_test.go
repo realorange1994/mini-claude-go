@@ -1157,7 +1157,88 @@ func TestIsSudoCommand(t *testing.T) {
 	}
 }
 
+func TestCheckInteractiveCommand(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want string // non-empty = blocked, empty = allowed
+	}{
+		// Editors
+		{"vim file.txt", "vim requires"},
+		{"vi file.txt", "vi requires"},
+		{"nano file.txt", "nano requires"},
+		{"emacs file.txt", "emacs requires"},
+		// Pagers
+		{"less file.txt", "less is an interactive pager"},
+		{"more file.txt", "more is an interactive pager"},
+		// Bare REPLs
+		{"python3", "python/python3 without arguments"},
+		{"python", "python/python3 without arguments"},
+		{"python3 -c 'print(1)'", ""},
+		{"python3 script.py", ""},
+		{"node", "node without arguments"},
+		{"node app.js", ""},
+		{"node -e 'console.log(1)'", ""},
+		{"irb", "irb/ruby without arguments"},
+		{"bc", "bc is an interactive calculator"},
+		{"dc", "dc is an interactive calculator"},
+		// Git interactive
+		{"git add -p", "git add -p/--patch"},
+		{"git add --interactive", "git add -p/--patch"},
+		{"git add file.txt", ""},
+		{"git commit", "git commit without -m"},
+		{"git commit -m 'msg'", ""},
+		{"git rebase -i HEAD~3", "git rebase -i/--interactive"},
+		{"git rebase HEAD~3", ""},
+		// DB REPLs
+		{"mysql", "mysql without arguments"},
+		{"psql", "psql without arguments"},
+		{"sqlite3", "sqlite3 without arguments"},
+		{"mysql -e 'SELECT 1'", ""},
+		{"redis-cli -e 'PING'", ""},
+		// Network tools
+		{"ssh user@host", "ssh without -o StrictHostKeyChecking"},
+		{"ssh -o StrictHostKeyChecking=no user@host", ""},
+		{"su", "su requires password"},
+		{"su -l user", "su requires password"},
+		// FTP/SFTP
+		{"ftp", "ftp without arguments"},
+		{"sftp", "sftp without arguments"},
+		{"telnet", "telnet without arguments"},
+		{"ftp host.com", ""},
+		// crontab/visudo/systemctl
+		{"crontab -e", "crontab -e opens"},
+		{"crontab -l", ""},
+		{"visudo", "visudo opens"},
+		{"systemctl edit nginx", "systemctl edit opens"},
+		{"systemctl restart nginx", ""},
+		// GPG
+		{"gpg --edit-key foo@example.com", "gpg --edit-key"},
+		// Wrapped commands
+		{"timeout 5 vim file.txt", "vim requires"},
+		{"nice vim file.txt", "vim requires"},
+		{"env FOO=bar vim file.txt", "vim requires"},
+		// Non-interactive commands should be allowed
+		{"ls -la", ""},
+		{"echo hello", ""},
+		{"cat file.txt", ""},
+		{"git status", ""},
+	}
+	for _, tc := range cases {
+		result := checkInteractiveCommand(tc.cmd)
+		if tc.want == "" {
+			if result != "" {
+				t.Errorf("checkInteractiveCommand(%q) = %q, want empty string", tc.cmd, result)
+			}
+		} else {
+			if result == "" {
+				t.Errorf("checkInteractiveCommand(%q) = \"\", want non-empty (matching %q)", tc.cmd, tc.want)
+			}
+		}
+	}
+}
+
 func TestStripSafeWrappersEnvAsCommand(t *testing.T) {
+
 	tests := []struct {
 		input    string
 		expected string

@@ -166,10 +166,27 @@ var interactivePromptPatterns = []*regexp.Regexp{
 	// Terminal type
 	regexp.MustCompile(`(?i)\(TERM=.*\)`),
 	regexp.MustCompile(`(?i)terminal type`),
-	// REPL prompts (last line only)
-	regexp.MustCompile(`(?m)^>>> $`),
-	regexp.MustCompile(`(?m)^In \[\d+\]:`),
-	regexp.MustCompile(`(?m)^\.\.\. $`),
+	// REPL / interactive shells
+	regexp.MustCompile(`(?m)^>>> $`),              // Python
+	regexp.MustCompile(`(?m)^In \[\d+\]:`),    // IPython/Jupyter
+	regexp.MustCompile(`(?m)^\.\.\. $`),         // Python continuation
+	regexp.MustCompile(`(?m)^gpg> `),              // GPG edit mode
+	regexp.MustCompile(`(?m)^mysql> `),            // MySQL
+	regexp.MustCompile(`(?m)^MariaDB \[.*\]> `), // MariaDB
+	regexp.MustCompile(`(?m)^\w+=# `),             // PostgreSQL superuser
+	regexp.MustCompile(`(?m)^\w+=> `),             // PostgreSQL user
+	regexp.MustCompile(`(?m)^sqlite> `),           // SQLite
+	regexp.MustCompile(`(?m)^sqlite3> `),          // SQLite 3
+	regexp.MustCompile(`(?m)^ftp> `),              // FTP client
+	regexp.MustCompile(`(?m)^sftp> `),             // SFTP client
+	regexp.MustCompile(`(?m)^telnet> `),           // Telnet client
+	regexp.MustCompile(`(?m)^\[\]bc `),           // bc calculator
+	regexp.MustCompile(`(?m)^\(irb\)\(main\) `), // Ruby IRB
+	regexp.MustCompile(`(?m)^node> `),             // Node.js REPL
+	// Credential / login prompts
+	regexp.MustCompile(`(?i)username for `),       // Git credential
+	regexp.MustCompile(`(?i)^login(?: as)?[: ]`),  // SSH/telnet login
+	regexp.MustCompile(`(?i)^email `),             // SSH keygen email
 }
 
 // isSudoCommand checks if a command starts with sudo (the outer command, not a wrapper).
@@ -241,6 +258,223 @@ func isSudoCommand(cmd string) bool {
 	}
 	return trimmed == "sudo" || strings.HasPrefix(trimmed, "sudo ") ||
 		trimmed == "doas" || strings.HasPrefix(trimmed, "doas ")
+}
+
+// checkInteractiveCommand returns a non-empty string if the command is known
+// to require interactive stdin input that cannot be satisfied when stdin
+// is nil (disconnected). Returns an empty string if the command is safe.
+// This catches commands that would hang and rely on stall detection alone
+// to terminate — pre-flight gives a faster, more actionable error.
+func checkInteractiveCommand(cmd string) string {
+	trimmed := strings.TrimSpace(cmd)
+	if trimmed == "" {
+		return ""
+	}
+
+	// Strip safe wrappers to find the inner command.
+	for {
+		found := false
+		for _, w := range safeWrapperPrefixes {
+			prefix := w.prefix + " "
+			if strings.HasPrefix(trimmed, prefix) {
+				rest := strings.TrimSpace(trimmed[len(prefix):])
+				if w.hasFlags {
+					for strings.HasPrefix(rest, "-") {
+						parts := strings.Fields(rest)
+						if len(parts) <= 1 {
+							break
+						}
+						rest = strings.TrimSpace(strings.Join(parts[1:], " "))
+					}
+				}
+				if w.skipArgs == -1 {
+					for {
+						eqIdx := strings.Index(rest, "=")
+						if eqIdx < 0 {
+							break
+						}
+						beforeEq := rest[:eqIdx]
+						afterEq := strings.TrimSpace(rest[eqIdx+1:])
+						if strings.Contains(beforeEq, " ") || afterEq == "" {
+							break
+						}
+						if spaceIdx := strings.Index(afterEq, " "); spaceIdx >= 0 {
+							rest = strings.TrimSpace(afterEq[spaceIdx+1:])
+						} else {
+							rest = afterEq
+						}
+					}
+				} else if w.skipArgs > 0 {
+					parts := strings.Fields(rest)
+					if len(parts) > w.skipArgs {
+						rest = strings.TrimSpace(strings.Join(parts[w.skipArgs:], " "))
+					} else {
+						break
+					}
+				}
+				if rest == "" {
+					break
+				}
+				trimmed = rest
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+
+	// Extract the command name (first word).
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return ""
+	}
+	cmdName := fields[0]
+
+	// Check against known interactive-only commands.
+	switch cmdName {
+	// Editors that require TTY and interactive input
+	case "vim", "vi", "nano", "emacs", "micro", "ed":
+		return cmdName + " requires interactive terminal input. Use sed, tee, or other non-editor tools instead."
+
+	// Pagers
+	case "less", "more", "most", "lv":
+		return cmdName + " is an interactive pager. Use cat, head, tail, or redirect output instead."
+
+	// REPLs / interpreters
+	case "python3", "python":
+		// Only flag bare python/python3 (which opens a REPL).
+		// Commands with -c flag or file args are fine.
+		if len(fields) == 1 {
+			return "python/python3 without arguments starts an interactive REPL."
+		}
+		if len(fields) > 1 && fields[1] != "-c" && !strings.HasPrefix(fields[1], "-") && fields[1] != "-m" {
+			// File argument — OK
+			return ""
+		}
+	case "node":
+		if len(fields) == 1 {
+			return "node without arguments starts an interactive REPL. Provide a script file or use -e."
+		}
+	case "irb", "ruby":
+		if len(fields) == 1 {
+			return "irb/ruby without arguments starts an interactive REPL."
+		}
+	case "perl", "php":
+		// These also open REPLs without args
+		if len(fields) == 1 {
+			return cmdName + " without arguments starts an interactive shell."
+		}
+	case "bc", "dc":
+		return cmdName + " is an interactive calculator. Pipe input or use -l flag with script redirection instead."
+
+	// Git interactive modes
+	case "git":
+		if len(fields) > 1 {
+			subCmd := fields[1]
+			switch subCmd {
+			case "add":
+				// git add -p / -i requires interactive input
+				for _, f := range fields[2:] {
+					if f == "-p" || f == "--patch" || f == "-i" || f == "--interactive" {
+						return "git add -p/--patch/--interactive requires interactive terminal input."
+					}
+				}
+			case "commit":
+				// git commit without -m opens editor
+				hasM := false
+				hasF := false
+				for _, f := range fields[2:] {
+					if strings.HasPrefix(f, "-m") || strings.HasPrefix(f, "--message") {
+						hasM = true
+					}
+					if strings.HasPrefix(f, "-F") || strings.HasPrefix(f, "--file") {
+						hasF = true
+					}
+				}
+				if !hasM && !hasF {
+					return "git commit without -m or -F opens an editor. Use git commit -m \"message\"."
+				}
+			case "rebase":
+				for _, f := range fields[2:] {
+					if f == "-i" || f == "--interactive" {
+						return "git rebase -i/--interactive requires interactive terminal input."
+					}
+				}
+			case "merge":
+				for _, f := range fields[2:] {
+					if f == "--edit" {
+						return "git merge --edit opens an editor for merge commit message."
+					}
+				}
+			}
+		}
+
+	// GPG interactive edit mode
+	case "gpg":
+		for _, f := range fields[1:] {
+			if f == "--edit-key" || f == "-e" || strings.HasPrefix(f, "--edit-key") {
+				return "gpg --edit-key enters interactive key editing mode."
+			}
+		}
+
+	// Database CLI (bare invocation opens REPL)
+	case "mysql", "psql", "sqlite3", "sqlite", "mongo", "mongosh", "redis-cli", "sqlcmd":
+		if len(fields) == 1 {
+			return cmdName + " without arguments starts an interactive database shell."
+		}
+		// Check for -e or --eval flags (non-interactive mode)
+		hasEval := false
+		for _, f := range fields[1:] {
+			if strings.HasPrefix(f, "-e") || strings.HasPrefix(f, "--eval") || strings.HasPrefix(f, "--command") || f == "-c" {
+				hasEval = true
+			}
+		}
+		if !hasEval && len(fields) <= 1 {
+			return cmdName + " starts an interactive database shell without -e/--eval/--command flags."
+		}
+
+			// ssh without -o StrictHostKeyChecking=no may hang on host verification
+		case "ssh":
+			hasNoHostCheck := false
+			for _, f := range fields[1:] {
+				if strings.Contains(f, "StrictHostKeyChecking") {
+					hasNoHostCheck = true
+				}
+			}
+			if !hasNoHostCheck {
+				return "ssh without -o StrictHostKeyChecking=no may hang on host verification. Consider adding the flag or using ssh-keyscan first."
+			}
+
+// su requires password, can't be bypassed
+	case "su":
+		return "su requires password input. Use sudo with sudo_password parameter instead."
+
+	// FTP / SFTP / Telnet interactive clients
+	case "ftp", "sftp", "telnet":
+		if len(fields) <= 1 {
+			return cmdName + " without arguments starts an interactive session. Use curl, wget, or ssh -C instead."
+		}
+
+	// crontab/visudo/systemctl edit (opens editor)
+	case "crontab":
+		for _, f := range fields[1:] {
+			if f == "-e" || f == "--edit" {
+				return "crontab -e opens an interactive editor. Use crontab < file to import."
+			}
+		}
+	case "visudo":
+		return "visudo opens an interactive editor. Edit /etc/sudoers.d/ file directly with caution instead."
+	case "systemctl":
+		for _, f := range fields[1:] {
+			if f == "edit" {
+				return "systemctl edit opens an interactive editor. Write a drop-in file directly instead."
+			}
+		}
+	}
+
+	return ""
 }
 
 // sudoHasSFlag checks if a sudo command already has the -S flag.
@@ -541,11 +775,19 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		return ToolResult{Output: "Error: empty command", IsError: true}
 	}
 
-	// Pre-flight: intercept sudo commands that lack sudo_password.
+	// Pre-flight: intercept interactive commands that will hang with nil stdin.
+	// 1. sudo/doas without sudo_password (Windows UAC, Linux stdin-less sudo)
+	// 2. Editor-based commands (visudo, crontab -e, systemctl edit)
+	// 3. Interactive git operations (git add -p/-i)
+	trimmedCmd := strings.TrimSpace(command)
+	if msg := checkInteractiveCommand(trimmedCmd); msg != "" {
+		return ToolResult{Output: "Error: " + msg, IsError: true}
+	}
+
+	// Intercept sudo commands that lack sudo_password.
 	// On Windows, sudo.exe uses UAC/desktop prompts (not stdin/stderr),
 	// so stall detection cannot catch it. On Linux, sudo with nil stdin
 	// also hangs. Block upfront with a helpful error instead.
-	trimmedCmd := strings.TrimSpace(command)
 	sudoPassword, hasPassword := params["sudo_password"].(string)
 	if isSudoCommand(trimmedCmd) && (!hasPassword || sudoPassword == "") {
 		return ToolResult{
