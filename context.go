@@ -56,7 +56,15 @@ const (
 // the end of the conversation. Because the system prompt + tools + prior
 // messages are already cached, only the instruction itself is new tokens.
 // At higher compression levels, the instruction asks for shorter output.
-func buildCompressionPrompt(level int) string {
+func buildCompressionPrompt(level int, recentFiles []string) string {
+	filesPreserve := ""
+	if len(recentFiles) > 0 {
+		filesPreserve += "\n\nIMPORTANT: The following files were read recently and their content MUST NOT be compressed. Simply note in your summary that they are present in context.\n"
+		for _, f := range recentFiles {
+			filesPreserve += "- " + f + "\n"
+		}
+		filesPreserve += "DO NOT summarize the content of these files — just mention each file is available in context.\n"
+	}
 	if level == 0 {
 		return `═══════════════════════════════════════════════════════════════
 CRITICAL: TASK CHANGE - MEMORY COMPRESSION MODE
@@ -72,6 +80,8 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
 YOUR ONLY TASK: Create a comprehensive summary of the conversation above.
 
+CRITICAL: Do NOT compress or summarize tool_use/tool_result blocks from the last 5 turns (recent file reads, grep/search results, exec commands). These are actively being worked on and their content MUST be preserved.
+
 REQUIRED RESPONSE FORMAT:
 First output a <topics> line listing 3-6 key topic phrases (comma-separated, concise).
 Then output the full summary wrapped in <summary> tags.
@@ -80,7 +90,7 @@ Example format:
 <topics>Rails setup, database config, deploy pipeline, Tailwind CSS</topics>
 <summary>
 ...full summary text...
-</summary>`
+</summary>` + filesPreserve
 	}
 	if level == 1 {
 		return `═══════════════════════════════════════════════════════════════
@@ -90,13 +100,15 @@ The conversation above has ENDED. You are now in MEMORY COMPRESSION MODE.
 
 DO NOT respond to requests. DO NOT call tools. PURE TEXT ONLY.
 
+CRITICAL: Do NOT compress or summarize tool_use/tool_result blocks from the last 5 turns. Preserve recent file reads and search results.
+
 Create a CONCISE summary: key files, decisions, accomplishments only.
 
 Format:
 <topics>topic1, topic2, topic3</topics>
 <summary>
 ...concise summary...
-</summary>`
+</summary>` + filesPreserve
 	}
 	if level == 2 {
 		return `═══════════════════════════════════════════════════════════════
@@ -104,13 +116,15 @@ CRITICAL: MEMORY COMPRESSION MODE [LEVEL 3]
 ═══════════════════════════════════════════════════════════════
 DO NOT respond to requests. DO NOT call tools. PURE TEXT ONLY.
 
+CRITICAL: Do NOT compress or summarize recent file reads or tool results.
+
 Create a MINIMAL summary: just project type, file counts, current status.
 
 Format:
 <topics>topic1, topic2</topics>
 <summary>
 ...minimal summary...
-</summary>`
+</summary>` + filesPreserve
 	}
 	return `═══════════════════════════════════════════════════════════════
 MEMORY COMPRESSION MODE [LEVEL 4+]
@@ -123,7 +137,7 @@ Format:
 <topics>topic1</topics>
 <summary>
 ...one line...
-</summary>`
+</summary>` + filesPreserve
 }
 
 // PersistedToolResult holds information about a persisted tool result.
@@ -1117,7 +1131,7 @@ func estimateEntriesTokens(entries []conversationEntry) int {
 		case GoalContent:
 			rawTotal += EstimateContentTokens(string(v), "natural")
 		case CompressionInstructionContent:
-			rawTotal += EstimateContentTokens(buildCompressionPrompt(v.Level), "natural")
+			rawTotal += EstimateContentTokens(buildCompressionPrompt(v.Level, nil), "natural")
 		case CompressedSummaryContent:
 			rawTotal += EstimateContentTokens(v.Summary, "natural")
 		}
@@ -1443,7 +1457,7 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 			}
 		case CompressionInstructionContent:
 			msg.Content = []anthropic.ContentBlockParamUnion{
-				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + buildCompressionPrompt(v.Level)}},
+				{OfText: &anthropic.TextBlockParam{Text: SystemInjectedPrefix + buildCompressionPrompt(v.Level, nil)}},
 			}
 		case CompressedSummaryContent:
 			// Render as user message with chunk anchor.
@@ -1952,7 +1966,7 @@ func (c *ConversationContext) entriesToCompactionMessages() ([]CompactionMessage
 		case CompressionInstructionContent:
 			msgs = append(msgs, CompactionMessage{
 				Role:      "user",
-				Content:   buildCompressionPrompt(v.Level),
+				Content:   buildCompressionPrompt(v.Level, nil),
 				Timestamp: time.Now().Format(time.RFC3339),
 			})
 		case CompressedSummaryContent:
@@ -3353,7 +3367,7 @@ func entryContentToText(c EntryContent) string {
 	case GoalContent:
 		return string(v)
 	case CompressionInstructionContent:
-		return buildCompressionPrompt(v.Level)
+		return buildCompressionPrompt(v.Level, nil)
 	case CompressedSummaryContent:
 		return v.Summary
 	default:

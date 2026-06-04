@@ -4747,7 +4747,7 @@ func (a *AgentLoop) PostCompactRecovery(trigger HookTrigger, compactSummary stri
 				break
 			}
 
-			attachment := fmt.Sprintf("[Post-compact file recovery: %s]\n```\n%s\n```", path, content)
+			attachment := fmt.Sprintf("[Post-compact file recovery: %s -- ALREADY IN CONTEXT, DO NOT RE-READ]\n## IMPORTANT: This file was recovered from cache. Do NOT call Read or read_file again on this file unless you believe its content has changed.\n## Re-reading wastes tokens and causes compaction churn.\n```\n%s\n```", path, content)
 			a.context.AddAttachment(attachment)
 			totalTokens += contentTokens
 			filesRecovered++
@@ -5673,6 +5673,43 @@ func (a *AgentLoop) injectTruncationContinuation(preTokens int) {
 	a.context.AddSummary(summaryContent)
 }
 
+// collectRecentReadFiles returns a list of file paths from the most recent
+// read_file tool calls in the conversation. This is used by the compression
+// prompt to tell the LLM which files to preserve during compaction, preventing
+// the read-compact-reread thrashing cycle.
+func (a *AgentLoop) collectRecentReadFiles() []string {
+	if a.context == nil {
+		return nil
+	}
+	entries := a.context.Entries()
+	var files []string
+	seen := make(map[string]bool)
+	// Walk backwards through entries, collecting read_file paths from the last 10 turns.
+	turnCount := 0
+	for i := len(entries) - 1; i >= 0 && turnCount < 10; i-- {
+		entry := entries[i]
+		if entry.role == "assistant" {
+			turnCount++
+		}
+		if blocks, ok := entry.content.(ToolUseContent); ok {
+			for _, b := range blocks {
+				if b.OfToolUse == nil || b.OfToolUse.Name != "read_file" {
+					continue
+				}
+				inputMap, _ := b.OfToolUse.Input.(map[string]any)
+				if inputMap == nil {
+					continue
+				}
+				if path, ok := inputMap["file_path"].(string); ok && path != "" && !seen[path] {
+					seen[path] = true
+					files = append(files, path)
+				}
+			}
+		}
+	}
+	return files
+}
+
 // extractRecentToolCallsForSummary returns a list of recent tool call descriptions
 // for inclusion in compaction summaries. This helps the model understand what
 // work was done before compaction truncated the conversation history.
@@ -6188,7 +6225,10 @@ func (a *AgentLoop) tryLLMCompaction(preCompactInst string) {
 	// only the instruction text itself is new tokens).
 	//
 	// The instruction is built and appended as the final user message:
-	compressPrompt := buildCompressionPrompt(level)
+
+	// Collect recent file reads so the compression instruction tells LLM to preserve them.
+	recentFiles := a.collectRecentReadFiles()
+	compressPrompt := buildCompressionPrompt(level, recentFiles)
 	finalMsgs := make([]anthropic.MessageParam, len(messages)+1)
 	copy(finalMsgs, messages)
 	finalMsgs[len(messages)] = anthropic.MessageParam{
