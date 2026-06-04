@@ -13,8 +13,8 @@ func (*AskUserQuestionTool) Name() string { return "AskUserQuestion" }
 
 func (*AskUserQuestionTool) Description() string {
 	return "Prompts the user with a multiple-choice question. Use this when you need to " +
-		"clarify something before proceeding. The question is presented with 2-4 options, " +
-		"and the user selects one by entering a number."
+		"clarify something before proceeding. The question is presented with 2-4 options " +
+		"plus an 'Other' choice for custom text input. The user selects one by entering a number."
 }
 
 func (*AskUserQuestionTool) InputSchema() map[string]any {
@@ -131,15 +131,25 @@ func (t *AskUserQuestionTool) ExecuteContext(ctx context.Context, params map[str
 
 	answers := make(map[string]string)
 
-	for _, q := range questions {
+	for qIdx, q := range questions {
+		// Bug 2 fix: dynamically append an "Other / custom input" option
+		// so users aren't forced to choose from LLM-provided options.
+		allOptions := make([]option, len(q.Options)+1)
+		copy(allOptions, q.Options)
+		customIdx := len(q.Options) + 1
+		allOptions[customIdx-1] = option{
+			Label:       "Other",
+			Description: "Type your own answer instead of choosing one of the above",
+		}
+
 		fmt.Printf("\n┌─ %s ──────────────────────────────────────\n", q.Header)
 		fmt.Printf("│  %s\n", q.Question)
 		fmt.Printf("│\n")
-		for i, opt := range q.Options {
+		for i, opt := range allOptions {
 			fmt.Printf("│  %d. %s — %s\n", i+1, opt.Label, opt.Description)
 		}
 		fmt.Printf("│\n")
-		fmt.Printf("│  Enter a number (1-%d): ", len(q.Options))
+		fmt.Printf("│  Enter a number (1-%d): ", len(allOptions))
 		fmt.Printf("│\n")
 		fmt.Printf("└─────────────────────────────────────────────\n")
 
@@ -151,7 +161,22 @@ func (t *AskUserQuestionTool) ExecuteContext(ctx context.Context, params map[str
 			input, err := readLineWithContext(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
-					return ToolResult{Output: fmt.Sprintf("Error: AskUserQuestion timed out waiting for user input"), IsError: true}
+					// Bug 1 fix: on timeout/Ctrl+C, collect any partial
+					// answers already gathered so far and return them with
+					// a clear cancellation notice. This prevents the agent
+					// loop from re-asking the same question on next input.
+					if len(answers) > 0 {
+						var sb strings.Builder
+						for i, prevQ := range questions[:qIdx] {
+							if i > 0 {
+								sb.WriteString("\n")
+							}
+							sb.WriteString(fmt.Sprintf("Q: %s\nA: %s (already answered before cancellation)\n", prevQ.Question, answers[prevQ.Question]))
+						}
+						sb.WriteString(fmt.Sprintf("\n[Question %d/%d was cancelled by user — proceeding without answer]\n", qIdx+1, len(questions)))
+						return ToolResultOK(sb.String())
+					}
+					return ToolResultOK("[Question cancelled by user — proceeding without answer]")
 				}
 				return ToolResultError(fmt.Sprintf("failed to read input: %v", err))
 			}
@@ -161,12 +186,33 @@ func (t *AskUserQuestionTool) ExecuteContext(ctx context.Context, params map[str
 				input = input[:3]
 			}
 			num, err := parseNumber(input)
-			if err != nil || num < 1 || num > len(q.Options) {
-				fmt.Printf("  Please enter a number between 1 and %d: ", len(q.Options))
+			if err != nil || num < 1 || num > len(allOptions) {
+				fmt.Printf("  Please enter a number between 1 and %d: ", len(allOptions))
 				continue
 			}
-			answers[q.Question] = q.Options[num-1].Label
-			fmt.Printf("  Selected: %s\n", q.Options[num-1].Label)
+
+			// Bug 2 fix: if user selected "Other", read custom text input
+			if num == customIdx {
+				fmt.Printf("  Your answer: ")
+				customInput, err := readLineWithContext(ctx)
+				if err != nil {
+					if ctx.Err() != nil {
+						return ToolResultOK("[Custom input cancelled by user]")
+					}
+					return ToolResultError(fmt.Sprintf("failed to read custom input: %v", err))
+				}
+				customInput = strings.TrimSpace(customInput)
+				if customInput == "" {
+					fmt.Printf("  Empty input. Please enter your answer or select a numbered option.\n")
+					continue
+				}
+				answers[q.Question] = customInput
+				fmt.Printf("  Selected: (custom) %s\n", customInput)
+				break
+			}
+
+			answers[q.Question] = allOptions[num-1].Label
+			fmt.Printf("  Selected: %s\n", allOptions[num-1].Label)
 			break
 		}
 	}
