@@ -76,7 +76,7 @@ func (*ExecTool) Description() string {
 		"SAFETY: Commands targeting system directories or using destructive patterns will be blocked. " +
 		"Use the env parameter to set environment variables (e.g. env={\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}). " +
 		"IMPORTANT: stdin is disconnected — commands requiring user input (sudo password, ssh host verification, vim/nano/less, REPLs, confirmation prompts) will hang and be killed after stall detection. " +
-		"Use non-interactive flags instead (e.g., sudo -S with echo, apt-get -y, ssh with StrictHostKeyChecking=no, echo y | command, --force, --yes). " +
+		"For sudo commands, use the sudo_password parameter to securely provide the password via stdin (do NOT use echo | sudo -S). For other prompts: use apt-get -y, ssh with StrictHostKeyChecking=no, echo y | command, --force, --yes. " +
 		"If a command needs to run for a long time without input, use run_in_background=true."
 }
 
@@ -116,6 +116,10 @@ func (*ExecTool) InputSchema() map[string]any {
 			"max_cpu_ms": map[string]any{
 				"type":        "integer",
 				"description": "Maximum CPU time in milliseconds the command can use. 0 (default) means no limit. On Linux uses prlimit; on Windows uses Job Objects.",
+			},
+			"sudo_password": map[string]any{
+				"type":        "string",
+				"description": "Password for sudo -S. When provided and the command starts with sudo, automatically adds -S flag and pipes the password via stdin. The password never appears in the command line or logs.",
 			},
 		},
 		"required": []string{"command"},
@@ -166,6 +170,26 @@ var interactivePromptPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^>>> $`),
 	regexp.MustCompile(`(?m)^In \[\d+\]:`),
 	regexp.MustCompile(`(?m)^\.\.\. $`),
+}
+
+// sudoHasSFlag checks if a sudo command already has the -S flag.
+func sudoHasSFlag(cmd string) bool {
+	parts := strings.Fields(cmd)
+	if len(parts) == 0 {
+		return false
+	}
+	for i, p := range parts {
+		if i == 0 && p == "sudo" {
+			continue
+		}
+		if p == "-S" || p == "--stdin" {
+			return true
+		}
+		if !strings.HasPrefix(p, "-") && i > 0 {
+			break
+		}
+	}
+	return false
 }
 
 // stallResult carries the detected prompt pattern when a stall is found.
@@ -516,7 +540,19 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 
 	actualCommand := cdPrefix + command
 	actualCommand = wrapCommandForResourceLimits(actualCommand, rl)
-	// On Windows with Git Bash, use temp file redirection to capture output from
+
+
+	// sudo -S support: if sudo_password is provided and the command starts with
+	// sudo, inject -S flag (if not already present) so sudo reads the password
+	// from stdin instead of the terminal.
+	if sudoPassword, ok := params["sudo_password"].(string); ok && sudoPassword != "" {
+		trimmed := strings.TrimSpace(actualCommand)
+		if strings.HasPrefix(trimmed, "sudo") && (len(trimmed) == 4 || trimmed[4] == ' ') {
+			if !sudoHasSFlag(trimmed) {
+				actualCommand = strings.Replace(actualCommand, "sudo", "sudo -S", 1)
+			}
+		}
+	}	// On Windows with Git Bash, use temp file redirection to capture output from
 	// Windows native executables. MSYS2/Cygwin's runtime may not properly inherit
 	// pipe handles for non-MSYS2 .exe, causing stdout/stderr to be silently discarded.
 	// The workaround: redirect the command's stdout/stderr to temp files, then use
@@ -574,7 +610,26 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 
 	cmd := exec.Command(shell, flag, actualCommand)
 	cmd.Dir = wd
-	cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
+	// Set up stdin: if sudo_password is provided and command uses sudo -S,
+	// create a pipe to feed the password. Otherwise leave stdin disconnected.
+	if sudoPassword, ok := params["sudo_password"].(string); ok && sudoPassword != "" {
+		trimmed := strings.TrimSpace(actualCommand)
+		if strings.HasPrefix(trimmed, "sudo") && sudoHasSFlag(trimmed) {
+			stdinR, stdinW, err := os.Pipe()
+			if err != nil {
+				return ToolResult{Output: fmt.Sprintf("Error: failed to create stdin pipe: %v", err), IsError: true}
+			}
+			cmd.Stdin = stdinR
+			go func() {
+				defer stdinW.Close()
+				io.WriteString(stdinW, sudoPassword + "\n")
+			}()
+		} else {
+			cmd.Stdin = nil
+		}
+	} else {
+		cmd.Stdin = nil // Isolate from REPL stdin to prevent interactive prompts
+	}
 
 	// Set environment variables from env parameter
 	if envParams, ok := params["env"].(map[string]any); ok && len(envParams) > 0 {
