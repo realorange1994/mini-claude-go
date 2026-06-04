@@ -1133,6 +1133,30 @@ func TestExecStderrOnFailure(t *testing.T) {
 // env (skipArgs=-1) was treated as a wrapper even when used as the main command.
 // Now: env without VAR=val assignments is NOT stripped.
 
+func TestIsSudoCommand(t *testing.T) {
+	cases := []struct {
+		cmd     string
+		isSudo  bool
+	}{
+		{"sudo whoami", true},
+		{"sudo -u root ls", true},
+		{"sudo", true},
+		{"  sudo  whoami  ", true},
+		{"timeout 5 sudo whoami", true},
+		{"nice sudo whoami", true},
+		{"whoami", false},
+		{"sudoer check", false},
+		{"ls -la", false},
+		{"env FOO=bar sudo whoami", true},
+	}
+	for _, tc := range cases {
+		result := isSudoCommand(tc.cmd)
+		if result != tc.isSudo {
+			t.Errorf("isSudoCommand(%q) = %v, want %v", tc.cmd, result, tc.isSudo)
+		}
+	}
+}
+
 func TestStripSafeWrappersEnvAsCommand(t *testing.T) {
 	tests := []struct {
 		input    string

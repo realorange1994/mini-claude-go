@@ -172,6 +172,77 @@ var interactivePromptPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^\.\.\. $`),
 }
 
+// isSudoCommand checks if a command starts with sudo (the outer command, not a wrapper).
+// Strips common safe wrappers (timeout, nice, nohup, env, etc.) first.
+func isSudoCommand(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	if trimmed == "" {
+		return false
+	}
+	// Recursively strip safe wrappers (but NOT sudo/doas) to find the inner command.
+	// Unlike stripSafeWrappers, we treat sudo/doas as the target, not a wrapper.
+	for {
+		found := false
+		for _, w := range safeWrapperPrefixes {
+			if w.prefix == "sudo" || w.prefix == "doas" {
+				continue
+			}
+			prefix := w.prefix + " "
+			if strings.HasPrefix(trimmed, prefix) {
+				rest := strings.TrimSpace(trimmed[len(prefix):])
+				if w.hasFlags {
+					for strings.HasPrefix(rest, "-") {
+						parts := strings.Fields(rest)
+						if len(parts) <= 1 {
+							break
+						}
+						rest = strings.TrimSpace(strings.Join(parts[1:], " "))
+					}
+				}
+				// Handle skipArgs == -1 (env VAR=val cmd): strip all VAR=val pairs
+				if w.skipArgs == -1 {
+					for {
+						eqIdx := strings.Index(rest, "=")
+						if eqIdx < 0 {
+							break
+						}
+						beforeEq := rest[:eqIdx]
+						afterEq := strings.TrimSpace(rest[eqIdx+1:])
+						// Check if it looks like VAR=val (no spaces in var name)
+						if strings.Contains(beforeEq, " ") || afterEq == "" {
+							break
+						}
+						// Check if value contains space (next token starts)
+						if spaceIdx := strings.Index(afterEq, " "); spaceIdx >= 0 {
+							rest = strings.TrimSpace(afterEq[spaceIdx+1:])
+						} else {
+							rest = afterEq
+						}
+					}
+				} else if w.skipArgs > 0 {
+					parts := strings.Fields(rest)
+					if len(parts) > w.skipArgs {
+						rest = strings.TrimSpace(strings.Join(parts[w.skipArgs:], " "))
+					} else {
+						return false
+					}
+				}
+				if rest == "" {
+					return false
+				}
+				trimmed = rest
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+	return trimmed == "sudo" || strings.HasPrefix(trimmed, "sudo ") ||
+		trimmed == "doas" || strings.HasPrefix(trimmed, "doas ")
+}
+
 // sudoHasSFlag checks if a sudo command already has the -S flag.
 func sudoHasSFlag(cmd string) bool {
 	parts := strings.Fields(cmd)
@@ -470,6 +541,19 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 		return ToolResult{Output: "Error: empty command", IsError: true}
 	}
 
+	// Pre-flight: intercept sudo commands that lack sudo_password.
+	// On Windows, sudo.exe uses UAC/desktop prompts (not stdin/stderr),
+	// so stall detection cannot catch it. On Linux, sudo with nil stdin
+	// also hangs. Block upfront with a helpful error instead.
+	trimmedCmd := strings.TrimSpace(command)
+	sudoPassword, hasPassword := params["sudo_password"].(string)
+	if isSudoCommand(trimmedCmd) && (!hasPassword || sudoPassword == "") {
+		return ToolResult{
+			Output:  "Error: sudo command requires a password but no sudo_password parameter was provided. Use the AskUserQuestion tool with sensitive: true to securely request the password from the user, then pass it as the sudo_password parameter to exec.",
+			IsError: true,
+		}
+	}
+
 	timeoutMs := 120000 // default: 2 minutes (matching official Claude Code)
 	if t, ok := params["timeout"]; ok {
 		switch v := t.(type) {
@@ -716,16 +800,16 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	}()
 
 	// Start the stall watchdog goroutine.
-	// Use a stall threshold proportional to the command timeout:
-	//   - For short timeouts (<60s): timeout/3, minimum 10s
-	//   - For longer timeouts (>=60s): 60s
-	// This avoids false positives for commands with long silent periods.
-	stallThreshold := int64(timeoutMs) / 3
-	if timeoutMs >= 60000 {
-		stallThreshold = 60000
+	// Stall threshold: interactive prompts (sudo, ssh, yes/no) typically
+	// appear within 1-3 seconds of command start. Use a shorter threshold
+	// to detect them quickly. For very short commands, keep a reasonable
+	// minimum to avoid false positives.
+	stallThreshold := int64(timeoutMs) / 6
+	if stallThreshold < 5000 {
+		stallThreshold = 5000
 	}
-	if stallThreshold < 10000 {
-		stallThreshold = 10000
+	if stallThreshold > 15000 {
+		stallThreshold = 15000
 	}
 
 	stallCtx, stallCancel := context.WithCancel(ctx)
