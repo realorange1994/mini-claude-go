@@ -76,7 +76,7 @@ func (*ExecTool) Description() string {
 		"SAFETY: Commands targeting system directories or using destructive patterns will be blocked. " +
 		"Use the env parameter to set environment variables (e.g. env={\"GOOS\": \"linux\", \"CGO_ENABLED\": \"0\"}). " +
 		"IMPORTANT: stdin is disconnected — commands requiring user input (sudo password, ssh host verification, vim/nano/less, REPLs, confirmation prompts) will hang and be killed after stall detection. " +
-		"For sudo commands, use the sudo_password parameter to securely provide the password via stdin (do NOT use echo | sudo -S). For other prompts: use non-interactive flags (apt-get -y, ssh -o StrictHostKeyChecking=no, --force, --yes) or echo y | command. " +
+		"For sudo commands: first call AskUserQuestion with sensitive: true to ask the user for their password, then pass it as the sudo_password parameter (do NOT use echo | sudo -S or put the password in the command). For other prompts: use non-interactive flags (apt-get -y, ssh -o StrictHostKeyChecking=no, --force, --yes) or echo y | command. " +
 		"If a command needs to run for a long time without input, use run_in_background=true."
 }
 
@@ -119,7 +119,7 @@ func (*ExecTool) InputSchema() map[string]any {
 			},
 			"sudo_password": map[string]any{
 				"type":        "string",
-				"description": "Password for sudo -S. When provided and the command starts with sudo, automatically adds -S flag and pipes the password via stdin. The password never appears in the command line or logs.",
+				"description": "Password for sudo -S. To obtain the password securely, use the AskUserQuestion tool with sensitive: true to ask the user, then pass the returned password here. When provided and the command starts with sudo, automatically adds -S flag and pipes the password via stdin. The password never appears in the command line or logs.",
 			},
 		},
 		"required": []string{"command"},
@@ -791,7 +791,7 @@ func (et *ExecTool) execToolExecute(ctx context.Context, params map[string]any) 
 	sudoPassword, hasPassword := params["sudo_password"].(string)
 	if isSudoCommand(trimmedCmd) && (!hasPassword || sudoPassword == "") {
 		return ToolResult{
-			Output:  "Error: sudo command requires a password but no sudo_password parameter was provided. Use the AskUserQuestion tool with sensitive: true to securely request the password from the user, then pass it as the sudo_password parameter to exec.",
+			Output:  "sudo command requires a password. Call AskUserQuestion with sensitive: true to securely request the password from the user, then pass the returned password as the sudo_password parameter to exec.",
 			IsError: true,
 		}
 	}
