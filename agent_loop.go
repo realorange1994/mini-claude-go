@@ -736,7 +736,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		evictionDone:        make(chan struct{}),
 		agentNameRegistry:   make(map[string]string),
 		agentHandleStore:    tools.NewAgentHandleStore(),
-		workTaskStore:       NewWorkTaskStore(),
+		workTaskStore:       NewWorkTaskStore(cfg.ProjectDir),
 		agentOutput:         os.Stderr,
 		toolStateTracker:    NewToolStateTracker(),
 		todoList:            tools.NewTodoList(),
@@ -770,6 +770,8 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		compactState.StartFlushLoop()
 		agent.compactor.SetCompactionState(compactState)
 	}
+	// Start task store flush loop for disk persistence
+	agent.workTaskStore.StartFlushLoop()
 	// Initialize proactive budget manager
 	agent.budgetManager = NewProactiveBudgetManager(int(contextWindow))
 	agent.redundantCallDetector = NewRedundantCallDetector()
@@ -949,7 +951,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		evictionDone:        make(chan struct{}),
 		agentNameRegistry:   make(map[string]string),
 		agentHandleStore:    tools.NewAgentHandleStore(),
-		workTaskStore:       NewWorkTaskStore(),
+		workTaskStore:       NewWorkTaskStore(cfg.ProjectDir),
 		agentOutput:         os.Stderr,
 		toolStateTracker:    NewToolStateTracker(),
 		todoList:            tools.NewTodoList(),
@@ -982,6 +984,8 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		compactState.StartFlushLoop()
 		agent.compactor.SetCompactionState(compactState)
 	}
+	// Start task store flush loop for disk persistence
+	agent.workTaskStore.StartFlushLoop()
 	// Initialize proactive budget manager
 	agent.budgetManager = NewProactiveBudgetManager(int(contextWindow))
 	agent.redundantCallDetector = NewRedundantCallDetector()
@@ -2212,6 +2216,11 @@ func (a *AgentLoop) Close() {
 	// Flush compaction state to disk before exit (P0)
 	if a.compactor != nil && a.compactor.compactionState != nil {
 		a.compactor.compactionState.Close()
+	}
+
+	// Flush task store to disk before exit
+	if a.workTaskStore != nil {
+		a.workTaskStore.Close()
 	}
 
 	if a.transcript != nil {
@@ -4999,6 +5008,58 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 	// recompute headers from current env vars and model configuration.
 	a.betaHeadersLatched = nil
 	ClearBetaHeaderCache()
+
+	// Inject active task status after compaction — ensures the LLM knows
+	// what tasks are still pending even after context is compressed.
+	// This prevents "task amnesia" in long-running sessions.
+	a.injectTaskStatusAfterCompact()
+}
+
+// injectTaskStatusAfterCompact injects a system message listing active tasks
+// after compaction, so the LLM can continue working on them.
+// Shows hierarchical task tree with subtasks.
+func (a *AgentLoop) injectTaskStatusAfterCompact() {
+	if a.workTaskStore == nil {
+		return
+	}
+	topTasks := a.workTaskStore.ListTopLevelTasks()
+	if len(topTasks) == 0 {
+		// Fallback: show all active tasks if no hierarchy
+		activeTasks := a.workTaskStore.ListActiveTasks()
+		if len(activeTasks) == 0 {
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString("## Active Tasks After Compaction\n\n")
+		sb.WriteString("The following tasks are still pending or in progress. Continue working on them:\n\n")
+		for _, t := range activeTasks {
+			sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", t.Status, t.ID, t.Subject))
+		}
+		sb.WriteString("\nMark tasks done when complete. Do not re-create existing tasks.\n")
+		a.context.AddAttachment(SystemInjectedPrefix + "\n" + sb.String())
+		a.logDebug("\n[post-compact] Injected %d active tasks\n", len(activeTasks))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Active Tasks After Compaction\n\n")
+	sb.WriteString("The following tasks are still pending or in progress. Continue working on them:\n\n")
+
+	for _, t := range topTasks {
+		if t.Status == WorkTaskDeleted || t.Status == WorkTaskCompleted {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", t.Status, t.ID, t.Subject))
+		// Show subtasks
+		subtasks := a.workTaskStore.ListSubtasks(t.ID)
+		for _, st := range subtasks {
+			sb.WriteString(fmt.Sprintf("  - [%s] %s: %s\n", st.Status, st.ID, st.Subject))
+		}
+	}
+	sb.WriteString("\nMark tasks done when complete. Do not re-create existing tasks.\n")
+
+	a.context.AddAttachment(SystemInjectedPrefix + "\n" + sb.String())
+	a.logDebug("\n[post-compact] Injected task tree with subtasks\n")
 }
 
 // buildPostCompactToolsAnnouncement re-announces available tools after compaction.

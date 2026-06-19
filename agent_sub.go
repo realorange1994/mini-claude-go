@@ -1058,7 +1058,7 @@ func (a *AgentLoop) createChildAgentLoop(cfg Config, registry *tools.Registry, a
 		sonnetModel:         a.sonnetModel,             // inherit parent's sonnet model for fallback
 		agentNameRegistry:   make(map[string]string),
 		agentHandleStore:    tools.NewAgentHandleStore(),
-		workTaskStore:       NewWorkTaskStore(),
+		workTaskStore:       NewWorkTaskStore(a.config.ProjectDir),
 		redundantCallDetector: NewRedundantCallDetector(),
 		stormBreaker:        NewStormBreaker(),
 		budgetManager:       NewProactiveBudgetManager(int(a.modelCapabilities.GetContextWindow(cfg.Model, cfg.MaxContextTokens))),

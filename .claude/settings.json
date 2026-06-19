@@ -1,7 +1,7 @@
 {
   "env": {
-    "ANTHROPIC_AUTH_TOKEN": "",
-    "ANTHROPIC_BASE_URL": "",
-    "ANTHROPIC_MODEL": ""
+    "ANTHROPIC_AUTH_TOKEN": "sk-WhOYYcJbcrWQaBnkN3eKhGoT6P0YMJSlY4KVpZlt2mgQJkOV",
+    "ANTHROPIC_BASE_URL": "https://bx5b2c2ngm.coze.site",
+    "ANTHROPIC_MODEL": "coding"
   }
 }

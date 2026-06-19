@@ -65,6 +65,10 @@ func main() {
 			if fileCfg.SkillLoader != nil {
 				cfg.SkillLoader = fileCfg.SkillLoader
 			}
+			// Carry over ProjectDir for task persistence
+			if fileCfg.ProjectDir != "" {
+				cfg.ProjectDir = fileCfg.ProjectDir
+			}
 		}
 	}
 
