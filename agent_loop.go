@@ -2040,6 +2040,8 @@ func (a *AgentLoop) Run(userMessage string) string {
 			currentTokens := int64(a.context.EstimatedTokens())
 			if a.extractionState.ShouldExtract(currentTokens, len(toolCalls) > 0) {
 				go a.runSessionMemoryExtraction()
+				// Phase 4: Extract user instructions and discoveries
+				go a.runPhase4Extraction()
 			}
 		}
 
@@ -5017,49 +5019,170 @@ func (a *AgentLoop) RunPostCompactCleanup() {
 
 // injectTaskStatusAfterCompact injects a system message listing active tasks
 // after compaction, so the LLM can continue working on them.
-// Shows hierarchical task tree with subtasks.
+// Shows hierarchical task tree with subtasks, priorities, dependencies, and time tracking.
 func (a *AgentLoop) injectTaskStatusAfterCompact() {
 	if a.workTaskStore == nil {
 		return
 	}
-	topTasks := a.workTaskStore.ListTopLevelTasks()
-	if len(topTasks) == 0 {
-		// Fallback: show all active tasks if no hierarchy
-		activeTasks := a.workTaskStore.ListActiveTasks()
-		if len(activeTasks) == 0 {
-			return
-		}
-		var sb strings.Builder
-		sb.WriteString("## Active Tasks After Compaction\n\n")
-		sb.WriteString("The following tasks are still pending or in progress. Continue working on them:\n\n")
-		for _, t := range activeTasks {
-			sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", t.Status, t.ID, t.Subject))
-		}
-		sb.WriteString("\nMark tasks done when complete. Do not re-create existing tasks.\n")
-		a.context.AddAttachment(SystemInjectedPrefix + "\n" + sb.String())
-		a.logDebug("\n[post-compact] Injected %d active tasks\n", len(activeTasks))
+
+	store := a.workTaskStore
+	activeTasks := store.ListActiveTasks()
+	if len(activeTasks) == 0 {
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## Active Tasks After Compaction\n\n")
-	sb.WriteString("The following tasks are still pending or in progress. Continue working on them:\n\n")
+	sb.WriteString("## Task Context After Compaction\n\n")
 
-	for _, t := range topTasks {
-		if t.Status == WorkTaskDeleted || t.Status == WorkTaskCompleted {
-			continue
+	// Section 1: Active task tree with rich info
+	sb.WriteString("### Active Tasks\n\n")
+	topTasks := store.ListTopLevelTasks()
+	if len(topTasks) > 0 {
+		for _, t := range topTasks {
+			if t.Status == WorkTaskDeleted || t.Status == WorkTaskCompleted {
+				continue
+			}
+			sb.WriteString(formatTaskLine(t, 0))
+			subtasks := store.ListSubtasks(t.ID)
+			for _, st := range subtasks {
+				if st.Status != WorkTaskDeleted && st.Status != WorkTaskCompleted {
+					sb.WriteString(formatTaskLine(st, 1))
+				}
+			}
 		}
-		sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", t.Status, t.ID, t.Subject))
-		// Show subtasks
-		subtasks := a.workTaskStore.ListSubtasks(t.ID)
-		for _, st := range subtasks {
-			sb.WriteString(fmt.Sprintf("  - [%s] %s: %s\n", st.Status, st.ID, st.Subject))
+	} else {
+		// No hierarchy, show flat list
+		for _, t := range activeTasks {
+			sb.WriteString(formatTaskLine(t, 0))
 		}
 	}
-	sb.WriteString("\nMark tasks done when complete. Do not re-create existing tasks.\n")
+
+	// Section 2: Blocked tasks with reasons
+	blockedTasks := store.ListBlockedTasks()
+	if len(blockedTasks) > 0 {
+		sb.WriteString("\n### Blocked Tasks\n\n")
+		for _, t := range blockedTasks {
+			blockers := store.GetBlockers(t.ID)
+			blockerInfo := make([]string, len(blockers))
+			for i, b := range blockers {
+				blockerInfo[i] = fmt.Sprintf("#%s (%s)", b.ID, b.Subject)
+			}
+			sb.WriteString(fmt.Sprintf("- #%s: %s — waiting on: %s\n",
+				t.ID, t.Subject, strings.Join(blockerInfo, ", ")))
+		}
+	}
+
+	// Section 3: Ready tasks (can start now)
+	readyTasks := store.GetReadyTasks()
+	if len(readyTasks) > 0 {
+		sb.WriteString("\n### Ready to Start\n\n")
+		for _, t := range readyTasks {
+			pri := string(t.Priority)
+			if pri == "" {
+				pri = "medium"
+			}
+			sb.WriteString(fmt.Sprintf("- [#%s] %s (%s priority)\n", t.ID, t.Subject, pri))
+		}
+	}
+
+	// Section 4: Priority distribution
+	priStats := store.PriorityStats()
+	if priStats[PriorityCritical] > 0 || priStats[PriorityHigh] > 0 {
+		sb.WriteString("\n### Priority Summary\n\n")
+		if priStats[PriorityCritical] > 0 {
+			sb.WriteString(fmt.Sprintf("- Critical: %d task(s)\n", priStats[PriorityCritical]))
+		}
+		if priStats[PriorityHigh] > 0 {
+			sb.WriteString(fmt.Sprintf("- High: %d task(s)\n", priStats[PriorityHigh]))
+		}
+	}
+
+	// Section 5: Time tracking summary
+	var overdueTasks []*WorkTask
+	var longRunningTasks []*WorkTask
+	for _, t := range activeTasks {
+		if t.IsOverdue(30 * time.Minute) {
+			overdueTasks = append(overdueTasks, t)
+		}
+		if t.GetActiveTime() > 10*time.Minute {
+			longRunningTasks = append(longRunningTasks, t)
+		}
+	}
+
+	if len(overdueTasks) > 0 || len(longRunningTasks) > 0 {
+		sb.WriteString("\n### Time Alerts\n\n")
+		for _, t := range overdueTasks {
+			sb.WriteString(fmt.Sprintf("- #%s: %s — OVERDUE (active for %s)\n",
+				t.ID, t.Subject, t.GetActiveTime().Round(time.Minute)))
+		}
+		for _, t := range longRunningTasks {
+			sb.WriteString(fmt.Sprintf("- #%s: %s — long-running (%s active)\n",
+				t.ID, t.Subject, t.GetActiveTime().Round(time.Minute)))
+		}
+	}
+
+	// Section 6: Execution plan hint
+	groups := store.GetExecutionGroups()
+	if len(groups) > 1 {
+		sb.WriteString("\n### Execution Order\n\n")
+		sb.WriteString(fmt.Sprintf("Tasks can be parallelized into %d groups:\n", len(groups)))
+		for i, group := range groups {
+			var ids []string
+			for _, t := range group {
+				ids = append(ids, fmt.Sprintf("#%s", t.ID))
+			}
+			sb.WriteString(fmt.Sprintf("  Group %d: %s\n", i+1, strings.Join(ids, ", ")))
+		}
+	}
+
+	sb.WriteString("\nContinue working on these tasks. Mark done when complete. Do not re-create existing tasks.\n")
 
 	a.context.AddAttachment(SystemInjectedPrefix + "\n" + sb.String())
-	a.logDebug("\n[post-compact] Injected task tree with subtasks\n")
+	a.logDebug("\n[post-compact] Injected enhanced task context\n")
+}
+
+// formatTaskLine returns a formatted task line with priority and status icons.
+func formatTaskLine(t *WorkTask, depth int) string {
+	indent := strings.Repeat("  ", depth)
+
+	// Status icon
+	statusIcon := "[ ]"
+	switch t.Status {
+	case WorkTaskInProgress:
+		statusIcon = "[>]"
+	case WorkTaskBlocked:
+		statusIcon = "[!]"
+	case WorkTaskCompleted:
+		statusIcon = "[x]"
+	case WorkTaskCancelled:
+		statusIcon = "[-]"
+	}
+
+	// Priority indicator
+	pri := ""
+	switch t.Priority {
+	case PriorityCritical:
+		pri = " !!!"
+	case PriorityHigh:
+		pri = " !!"
+	case PriorityLow:
+		pri = " (low)"
+	}
+
+	// Tags
+	tags := ""
+	if len(t.Tags) > 0 {
+		tags = fmt.Sprintf(" [%s]", strings.Join(t.Tags, ","))
+	}
+
+	// Time info
+	timeInfo := ""
+	if t.Status == WorkTaskInProgress && t.GetActiveTime() > 0 {
+		timeInfo = fmt.Sprintf(" (%s)", t.GetActiveTime().Round(time.Second))
+	}
+
+	return fmt.Sprintf("%s%s #%s: %s%s%s%s\n",
+		indent, statusIcon, t.ID, t.Subject, pri, tags, timeInfo)
 }
 
 // buildPostCompactToolsAnnouncement re-announces available tools after compaction.
@@ -6717,6 +6840,48 @@ func (a *AgentLoop) runSessionMemoryExtraction() {
 	// Mark extraction complete and record token count
 	if a.extractionState != nil {
 		a.extractionState.MarkExtracted(int64(a.context.EstimatedTokens()))
+	}
+}
+
+// runPhase4Extraction extracts user instructions and discoveries from the
+// conversation context and saves them to session memory. This runs alongside
+// the existing session memory extraction to capture structured knowledge.
+func (a *AgentLoop) runPhase4Extraction() {
+	sm := a.config.SessionMemory
+	if sm == nil {
+		return
+	}
+
+	// Build conversation messages from context
+	entries := a.context.Entries()
+	var messages []ConversationMessage
+	for _, entry := range entries {
+		role := ""
+		content := ""
+		switch v := entry.content.(type) {
+		case TextContent:
+			role = entry.role
+			content = string(v)
+		case SummaryContent:
+			role = "assistant"
+			content = string(v)
+		}
+		if role != "" && content != "" {
+			messages = append(messages, ConversationMessage{
+				Role:    role,
+				Content: content,
+			})
+		}
+	}
+
+	if len(messages) == 0 {
+		return
+	}
+
+	// Extract and save
+	count := sm.ExtractAndSave(messages)
+	if count > 0 {
+		a.logDebug("[phase4] Extracted %d items (instructions/discoveries)\n", count)
 	}
 }
 

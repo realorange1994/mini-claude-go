@@ -476,7 +476,7 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 			isKnownCmd := cmd == "/quit" || cmd == "/exit" || cmd == "/q" ||
 				cmd == "/tools" || cmd == "/mode" || cmd == "/help" || cmd == "/resume" ||
 				cmd == "/compact" || cmd == "/clear" || cmd == "/partialcompact" || cmd == "/agents" ||
-				cmd == "/tasks" ||
+				cmd == "/tasks" || cmd == "/work" ||
 				cmd == "/doctor" || cmd == "/history" || cmd == "/cleanup" || cmd == "/branch" ||
 				cmd == "/status" || cmd == "/model"
 
@@ -560,11 +560,12 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 						fmt.Println("    /model          -- View/switch model")
 						fmt.Println("    /resume         -- Resume a previous session")
 						fmt.Println("    /branch         -- Create a conversation branch")
-						fmt.Println("  Development:")
-						fmt.Println("    /tools          -- List available tools (by category)")
-						fmt.Println("    /agents         -- Manage background agents")
-						fmt.Println("    /tasks          -- View background tasks")
-						fmt.Println("    /history        -- Show recent prompts")
+					fmt.Println("  Development:")
+					fmt.Println("    /tools          -- List available tools (by category)")
+					fmt.Println("    /agents         -- Manage background agents")
+					fmt.Println("    /tasks          -- View background tasks")
+					fmt.Println("    /work           -- Manage work tasks (TODO items)")
+					fmt.Println("    /history        -- Show recent prompts")
 						fmt.Println("  Configuration:")
 						fmt.Println("    /mode           -- Switch permission mode (ask|auto|bypass|plan)")
 						fmt.Println("  Operations:")
@@ -611,6 +612,9 @@ func runInteractive(agent *AgentLoop, history *PromptHistory, sessionID string, 
 					continue
 				case "/tasks":
 					handleTasksCommand(agent, parts[1:])
+					continue
+				case "/work":
+					handleWorkCommand(agent, parts[1:])
 					continue
 				case "/doctor":
 					runDoctor(agent)
@@ -1126,6 +1130,928 @@ func handleTasksCommand(agent *AgentLoop, args []string) {
 	}
 }
 
+// handleWorkCommand manages work tasks (LLM TODO items) via CLI.
+// Supports: list, show <id>, create, update <id>, complete <id>, delete <id>,
+//           tags, priority, deps, tree, plan, help
+func handleWorkCommand(agent *AgentLoop, args []string) {
+	if agent.workTaskStore == nil {
+		fmt.Println("No work task store available.")
+		return
+	}
+
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+
+	subcmd := strings.ToLower(args[0])
+
+	switch subcmd {
+	case "list", "ls":
+		handleWorkList(agent, args[1:])
+	case "show":
+		handleWorkShow(agent, args[1:])
+	case "create", "add":
+		handleWorkCreate(agent, args[1:])
+	case "update":
+		handleWorkUpdate(agent, args[1:])
+	case "complete", "done":
+		handleWorkComplete(agent, args[1:])
+	case "start":
+		handleWorkStart(agent, args[1:])
+	case "delete", "rm":
+		handleWorkDelete(agent, args[1:])
+	case "tags":
+		handleWorkTags(agent, args[1:])
+	case "priority", "pri":
+		handleWorkPriority(agent, args[1:])
+	case "deps", "dependencies":
+		handleWorkDeps(agent, args[1:])
+	case "tree":
+		handleWorkTree(agent, args[1:])
+	case "plan":
+		handleWorkPlan(agent, args[1:])
+	case "ready":
+		handleWorkReady(agent)
+	case "blocked":
+		handleWorkBlocked(agent)
+	case "stats":
+		handleWorkStats(agent)
+	case "graph":
+		handleWorkGraph(agent)
+	case "board":
+		handleWorkBoard(agent)
+	case "critical":
+		handleWorkCritical(agent, args[1:])
+	case "search", "find":
+		handleWorkSearch(agent, args[1:])
+	case "batch":
+		handleWorkBatch(agent, args[1:])
+	case "help":
+		handleWorkHelp()
+	default:
+		fmt.Printf("Unknown /work subcommand: %s\n", subcmd)
+		fmt.Println("Use /work help for usage information.")
+	}
+}
+
+func handleWorkList(agent *AgentLoop, args []string) {
+	store := agent.workTaskStore
+	filter := TaskFilter{}
+
+	for _, arg := range args {
+		switch {
+		case arg == "--all" || arg == "-a":
+			// Show all statuses
+		case arg == "--completed":
+			filter.Statuses = append(filter.Statuses, WorkTaskCompleted)
+		case arg == "--pending":
+			filter.Statuses = append(filter.Statuses, WorkTaskPending)
+		case arg == "--in-progress":
+			filter.Statuses = append(filter.Statuses, WorkTaskInProgress)
+		case arg == "--blocked":
+			blocked := true
+			filter.Blocked = &blocked
+		case strings.HasPrefix(arg, "--tag="):
+			filter.Tags = append(filter.Tags, strings.TrimPrefix(arg, "--tag="))
+		case strings.HasPrefix(arg, "--priority=") || strings.HasPrefix(arg, "--pri="):
+			pri := strings.TrimPrefix(strings.TrimPrefix(arg, "--priority="), "--pri=")
+			filter.Priorities = append(filter.Priorities, WorkTaskPriority(pri))
+		case strings.HasPrefix(arg, "--owner="):
+			filter.Owner = strings.TrimPrefix(arg, "--owner=")
+		case strings.HasPrefix(arg, "--sort="):
+			filter.SortBy = strings.TrimPrefix(arg, "--sort=")
+		case arg == "--desc":
+			filter.SortDesc = true
+		case strings.HasPrefix(arg, "--limit="):
+			fmt.Sscanf(strings.TrimPrefix(arg, "--limit="), "%d", &filter.Limit)
+		case strings.HasPrefix(arg, "--search=") || strings.HasPrefix(arg, "-s="):
+			filter.Query = strings.TrimPrefix(strings.TrimPrefix(arg, "--search="), "-s=")
+		}
+	}
+
+	// Default: show active tasks
+	if len(filter.Statuses) == 0 && filter.Blocked == nil && filter.Query == "" {
+		filter.Statuses = []WorkTaskStatus{WorkTaskPending, WorkTaskInProgress}
+	}
+
+	tasks := store.FilterTasks(filter)
+
+	if len(tasks) == 0 {
+		fmt.Println("No tasks found.")
+		return
+	}
+
+	printTaskList(tasks)
+}
+
+func handleWorkShow(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /work show <id>")
+		return
+	}
+
+	task := agent.workTaskStore.GetTask(args[0])
+	if task == nil {
+		fmt.Printf("Task %s not found.\n", args[0])
+		return
+	}
+
+	fmt.Printf("\nTask #%s: %s\n", task.ID, task.Subject)
+	fmt.Printf("  Status:     %s\n", task.Status)
+	fmt.Printf("  Priority:   %s\n", orDefault(string(task.Priority), "medium"))
+	fmt.Printf("  Description: %s\n", orDefault(task.Description, "(none)"))
+	fmt.Printf("  ActiveForm:  %s\n", orDefault(task.ActiveForm, "(none)"))
+	fmt.Printf("  Owner:      %s\n", orDefault(task.Owner, "(none)"))
+	fmt.Printf("  Parent:     %s\n", orDefault(task.ParentID, "(none)"))
+	fmt.Printf("  Tags:       %s\n", orDefault(strings.Join(task.Tags, ", "), "(none)"))
+	fmt.Printf("  Created:    %s\n", task.CreatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Printf("  Updated:    %s\n", task.UpdatedAt.Format("2006-01-02 15:04:05"))
+
+	if task.StartedAt != nil {
+		fmt.Printf("  Started:    %s\n", task.StartedAt.Format("2006-01-02 15:04:05"))
+	}
+	if task.CompletedAt != nil {
+		fmt.Printf("  Completed:  %s\n", task.CompletedAt.Format("2006-01-02 15:04:05"))
+	}
+	if task.TimeSpent > 0 {
+		fmt.Printf("  TimeSpent:  %s\n", task.TimeSpent.Round(time.Second))
+	}
+	fmt.Printf("  ActiveTime: %s\n", task.GetActiveTime().Round(time.Second))
+
+	if len(task.Blocks) > 0 {
+		fmt.Printf("  Blocks:     %s\n", strings.Join(task.Blocks, ", "))
+	}
+	if len(task.BlockedBy) > 0 {
+		fmt.Printf("  BlockedBy:  %s\n", strings.Join(task.BlockedBy, ", "))
+	}
+
+	// Show subtasks
+	subtasks := agent.workTaskStore.ListSubtasks(task.ID)
+	if len(subtasks) > 0 {
+		fmt.Printf("\n  Subtasks:\n")
+		for _, st := range subtasks {
+			fmt.Printf("    [%s] %s: %s\n", st.Status, st.ID, st.Subject)
+		}
+	}
+
+	// Show valid transitions
+	transitions := agent.workTaskStore.GetValidTransitions(task.ID)
+	if len(transitions) > 0 {
+		fmt.Printf("\n  Can transition to: %s\n", strings.Join(toStrings(transitions), ", "))
+	}
+}
+
+func handleWorkCreate(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /work create <subject> [--desc=<description>] [--priority=<level>] [--tag=<tag>]")
+		return
+	}
+
+	subject := args[0]
+	description := ""
+	priority := ""
+	var tags []string
+
+	for _, arg := range args[1:] {
+		switch {
+		case strings.HasPrefix(arg, "--desc="):
+			description = strings.TrimPrefix(arg, "--desc=")
+		case strings.HasPrefix(arg, "--priority=") || strings.HasPrefix(arg, "--pri="):
+			priority = strings.TrimPrefix(strings.TrimPrefix(arg, "--priority="), "--pri=")
+		case strings.HasPrefix(arg, "--tag="):
+			tags = append(tags, strings.TrimPrefix(arg, "--tag="))
+		}
+	}
+
+	id := agent.workTaskStore.CreateTask(subject, description, "", nil)
+
+	if priority != "" {
+		agent.workTaskStore.SetTaskPriority(id, WorkTaskPriority(priority))
+	}
+	for _, tag := range tags {
+		agent.workTaskStore.AddTaskTag(id, tag)
+	}
+
+	fmt.Printf("Created task #%s: %s\n", id, subject)
+}
+
+func handleWorkUpdate(agent *AgentLoop, args []string) {
+	if len(args) < 2 {
+		fmt.Println("Usage: /work update <id> <field>=<value> [...]")
+		fmt.Println("Fields: subject, desc, priority, tag, addTag, removeTag, parent")
+		return
+	}
+
+	id := args[0]
+	task := agent.workTaskStore.GetTask(id)
+	if task == nil {
+		fmt.Printf("Task %s not found.\n", id)
+		return
+	}
+
+	for _, arg := range args[1:] {
+		parts := strings.SplitN(arg, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key, val := parts[0], parts[1]
+
+		switch strings.ToLower(key) {
+		case "subject":
+			agent.workTaskStore.UpdateTask(id, map[string]any{"subject": val})
+		case "desc", "description":
+			agent.workTaskStore.UpdateTask(id, map[string]any{"description": val})
+		case "priority", "pri":
+			agent.workTaskStore.SetTaskPriority(id, WorkTaskPriority(val))
+		case "tag":
+			agent.workTaskStore.AddTaskTag(id, val)
+		case "addtag":
+			agent.workTaskStore.AddTaskTag(id, val)
+		case "removetag":
+			agent.workTaskStore.RemoveTaskTag(id, val)
+		case "parent":
+			agent.workTaskStore.UpdateTask(id, map[string]any{"parentID": val})
+		default:
+			fmt.Printf("Unknown field: %s\n", key)
+		}
+	}
+
+	fmt.Printf("Updated task #%s\n", id)
+}
+
+func handleWorkComplete(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /work complete <id>")
+		return
+	}
+
+	id := args[0]
+	err := agent.workTaskStore.TransitionTo(id, WorkTaskInProgress, "CLI")
+	if err != nil {
+		// May already be in_progress
+	}
+	err = agent.workTaskStore.TransitionTo(id, WorkTaskCompleted, "CLI completed")
+	if err != nil {
+		fmt.Printf("Error completing task %s: %v\n", id, err)
+		return
+	}
+	fmt.Printf("Completed task #%s\n", id)
+}
+
+func handleWorkStart(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /work start <id>")
+		return
+	}
+
+	id := args[0]
+	err := agent.workTaskStore.TransitionTo(id, WorkTaskInProgress, "CLI started")
+	if err != nil {
+		fmt.Printf("Error starting task %s: %v\n", id, err)
+		return
+	}
+	fmt.Printf("Started task #%s\n", id)
+}
+
+func handleWorkDelete(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /work delete <id>")
+		return
+	}
+
+	id := args[0]
+	err := agent.workTaskStore.TransitionTo(id, WorkTaskDeleted, "CLI deleted")
+	if err != nil {
+		fmt.Printf("Error deleting task %s: %v\n", id, err)
+		return
+	}
+	fmt.Printf("Deleted task #%s\n", id)
+}
+
+func handleWorkTags(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		// List all tags
+		tags := agent.workTaskStore.ListAllTags()
+		if len(tags) == 0 {
+			fmt.Println("No tags found.")
+			return
+		}
+		stats := agent.workTaskStore.TagStats()
+		fmt.Println("\nTags:")
+		for _, tag := range tags {
+			fmt.Printf("  %-15s %d task(s)\n", tag, stats[tag])
+		}
+		return
+	}
+
+	subcmd := strings.ToLower(args[0])
+	switch subcmd {
+	case "add":
+		if len(args) < 3 {
+			fmt.Println("Usage: /work tags add <task_id> <tag>")
+			return
+		}
+		err := agent.workTaskStore.AddTaskTag(args[1], args[2])
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		} else {
+			fmt.Printf("Added tag '%s' to task %s\n", args[2], args[1])
+		}
+	case "remove", "rm":
+		if len(args) < 3 {
+			fmt.Println("Usage: /work tags remove <task_id> <tag>")
+			return
+		}
+		err := agent.workTaskStore.RemoveTaskTag(args[1], args[2])
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		} else {
+			fmt.Printf("Removed tag '%s' from task %s\n", args[2], args[1])
+		}
+	default:
+		// Filter by tag
+		tasks := agent.workTaskStore.FilterByTag(subcmd)
+		if len(tasks) == 0 {
+			fmt.Printf("No tasks with tag '%s'\n", subcmd)
+			return
+		}
+		fmt.Printf("\nTasks with tag '%s':\n", subcmd)
+		for _, t := range tasks {
+			fmt.Printf("  [%s] %s: %s\n", t.Status, t.ID, t.Subject)
+		}
+	}
+}
+
+func handleWorkPriority(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		// Show priority stats
+		stats := agent.workTaskStore.PriorityStats()
+		fmt.Println("\nPriority Distribution:")
+		for _, pri := range []WorkTaskPriority{PriorityCritical, PriorityHigh, PriorityMedium, PriorityLow} {
+			count := stats[pri]
+			bar := strings.Repeat("█", count)
+			fmt.Printf("  %-10s %d %s\n", pri, count, bar)
+		}
+		return
+	}
+
+	if len(args) < 2 {
+		fmt.Println("Usage: /work priority <task_id> <level>")
+		fmt.Println("Levels: critical, high, medium, low")
+		return
+	}
+
+	id := args[0]
+	priority := WorkTaskPriority(args[1])
+	err := agent.workTaskStore.SetTaskPriority(id, priority)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	fmt.Printf("Set task %s priority to %s\n", id, priority)
+}
+
+func handleWorkDeps(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /work deps <subcommand>")
+		fmt.Println("Subcommands: add, remove, graph, ready")
+		return
+	}
+
+	subcmd := strings.ToLower(args[0])
+	switch subcmd {
+	case "add":
+		if len(args) < 3 {
+			fmt.Println("Usage: /work deps add <blocked_id> <blocker_id>")
+			return
+		}
+		err := agent.workTaskStore.AddDependency(args[1], args[2])
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		} else {
+			fmt.Printf("Added dependency: %s blocked by %s\n", args[1], args[2])
+		}
+	case "remove", "rm":
+		if len(args) < 3 {
+			fmt.Println("Usage: /work deps remove <blocked_id> <blocker_id>")
+			return
+		}
+		err := agent.workTaskStore.RemoveDependency(args[1], args[2])
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		} else {
+			fmt.Printf("Removed dependency: %s unblocked from %s\n", args[1], args[2])
+		}
+	case "graph":
+		graph := agent.workTaskStore.GetDependencyGraph()
+		if len(graph) == 0 {
+			fmt.Println("No dependencies.")
+			return
+		}
+		fmt.Println("\nDependency Graph:")
+		for id, blocked := range graph {
+			task := agent.workTaskStore.GetTask(id)
+			if task != nil {
+				fmt.Printf("  %s (%s) -> %s\n", id, task.Subject, strings.Join(blocked, ", "))
+			}
+		}
+	case "ready":
+		ready := agent.workTaskStore.GetReadyTasks()
+		if len(ready) == 0 {
+			fmt.Println("No tasks ready to start.")
+			return
+		}
+		fmt.Printf("\nReady Tasks (%d):\n", len(ready))
+		for _, t := range ready {
+			fmt.Printf("  [%s] %s: %s\n", t.Priority, t.ID, t.Subject)
+		}
+	default:
+		fmt.Printf("Unknown deps subcommand: %s\n", subcmd)
+	}
+}
+
+func handleWorkTree(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		// Show all top-level tasks with their subtasks
+		topTasks := agent.workTaskStore.ListTopLevelTasks()
+		if len(topTasks) == 0 {
+			fmt.Println("No tasks found.")
+			return
+		}
+		fmt.Println("\nTask Tree:")
+		for _, t := range topTasks {
+			printTaskTree(agent, t.ID, 0)
+		}
+		return
+	}
+
+	// Show specific task tree
+	id := args[0]
+	tree := agent.workTaskStore.GetTaskTree(id)
+	if tree == nil {
+		fmt.Printf("Task %s not found.\n", id)
+		return
+	}
+	fmt.Printf("\nTask Tree for #%s:\n", id)
+	printTaskTreeNode(tree, 0)
+}
+
+func printTaskTree(agent *AgentLoop, id string, depth int) {
+	task := agent.workTaskStore.GetTask(id)
+	if task == nil {
+		return
+	}
+	indent := strings.Repeat("  ", depth)
+	pri := string(task.Priority)
+	if pri == "" {
+		pri = "medium"
+	}
+	fmt.Printf("%s[%s] %s: %s (%s)\n", indent, task.Status, task.ID, task.Subject, pri)
+
+	subtasks := agent.workTaskStore.ListSubtasks(id)
+	for _, st := range subtasks {
+		printTaskTree(agent, st.ID, depth+1)
+	}
+}
+
+func printTaskTreeNode(node *TaskTreeNode, depth int) {
+	if node == nil || node.Task == nil {
+		return
+	}
+	indent := strings.Repeat("  ", depth)
+	t := node.Task
+	pri := string(t.Priority)
+	if pri == "" {
+		pri = "medium"
+	}
+	fmt.Printf("%s[%s] %s: %s (%s)\n", indent, t.Status, t.ID, t.Subject, pri)
+
+	for _, child := range node.Subtasks {
+		printTaskTreeNode(child, depth+1)
+	}
+}
+
+func handleWorkPlan(agent *AgentLoop, args []string) {
+	plan := agent.workTaskStore.FormatExecutionPlan()
+	fmt.Println(plan)
+}
+
+func handleWorkReady(agent *AgentLoop) {
+	ready := agent.workTaskStore.GetReadyTasks()
+	if len(ready) == 0 {
+		fmt.Println("No tasks ready to start.")
+		return
+	}
+	fmt.Printf("\nReady Tasks (%d):\n", len(ready))
+	fmt.Printf("  %-5s %-10s %s\n", "ID", "Priority", "Subject")
+	fmt.Println("  " + strings.Repeat("-", 40))
+	for _, t := range ready {
+		pri := string(t.Priority)
+		if pri == "" {
+			pri = "medium"
+		}
+		fmt.Printf("  %-5s %-10s %s\n", t.ID, pri, t.Subject)
+	}
+}
+
+func handleWorkBlocked(agent *AgentLoop) {
+	blocked := agent.workTaskStore.ListBlockedTasks()
+	if len(blocked) == 0 {
+		fmt.Println("No blocked tasks.")
+		return
+	}
+	fmt.Printf("\nBlocked Tasks (%d):\n", len(blocked))
+	for _, t := range blocked {
+		blockers := agent.workTaskStore.GetBlockers(t.ID)
+		blockerNames := make([]string, len(blockers))
+		for i, b := range blockers {
+			blockerNames[i] = fmt.Sprintf("%s (%s)", b.ID, b.Subject)
+		}
+		fmt.Printf("  [%s] %s: %s — blocked by: %s\n",
+			t.Status, t.ID, t.Subject, strings.Join(blockerNames, ", "))
+	}
+}
+
+func handleWorkStats(agent *AgentLoop) {
+	store := agent.workTaskStore
+
+	depStats := store.DependencyStats()
+	priStats := store.PriorityStats()
+	timeReport := store.GetStoreTimeReport()
+
+	fmt.Println("\n=== Work Task Statistics ===")
+	fmt.Printf("  Total Tasks:      %d\n", depStats.TotalTasks)
+	fmt.Printf("  Blocked Tasks:    %d\n", depStats.BlockedTasks)
+	fmt.Printf("  Blocking Tasks:   %d\n", depStats.BlockingTasks)
+	fmt.Printf("  Overdue Tasks:    %d\n", timeReport.OverdueTasks)
+
+	fmt.Println("\n  Priority Distribution:")
+	for _, pri := range []WorkTaskPriority{PriorityCritical, PriorityHigh, PriorityMedium, PriorityLow} {
+		fmt.Printf("    %-10s %d\n", pri, priStats[pri])
+	}
+
+	fmt.Printf("\n  Total Active Time: %s\n", timeReport.TotalActiveTime.Round(time.Second))
+	fmt.Printf("  Total Idle Time:   %s\n", timeReport.TotalIdleTime.Round(time.Second))
+
+	groups := store.GetExecutionGroups()
+	if len(groups) > 0 {
+		fmt.Printf("\n  Execution Groups:  %d\n", len(groups))
+		fmt.Printf("  Parallelism:      %.1fx\n", store.GetParallelismRatio())
+	}
+
+	fmt.Printf("  Listeners:        %d\n", store.ListenerCount())
+	fmt.Println("============================")
+}
+
+func handleWorkGraph(agent *AgentLoop) {
+	store := agent.workTaskStore
+	fmt.Println(store.FormatDependencyTree())
+}
+
+func handleWorkBoard(agent *AgentLoop) {
+	store := agent.workTaskStore
+	fmt.Println(store.FormatTaskStatus())
+}
+
+func handleWorkCritical(agent *AgentLoop, args []string) {
+	store := agent.workTaskStore
+	if len(args) == 0 {
+		// Find the first task with dependencies
+		graph := store.GetDependencyGraph()
+		for id := range graph {
+			fmt.Println(store.FormatCriticalPath(id))
+			return
+		}
+		fmt.Println("No dependencies found. Usage: /work critical <task_id>")
+		return
+	}
+	fmt.Println(store.FormatCriticalPath(args[0]))
+}
+
+func handleWorkSearch(agent *AgentLoop, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: /work search <query>")
+		return
+	}
+	query := strings.Join(args, " ")
+	fmt.Println(agent.workTaskStore.FormatSearchResults(query))
+}
+
+func handleWorkBatch(agent *AgentLoop, args []string) {
+	store := agent.workTaskStore
+
+	if len(args) < 2 {
+		fmt.Println("Usage: /work batch <operation> <id1> [id2] [...]")
+		fmt.Println("       /work batch filter <filter-args> <operation> [params]")
+		fmt.Println()
+		fmt.Println("Operations: complete, delete, start, pending, priority=<level>, tag=<tag>, untag=<tag>, owner=<name>")
+		fmt.Println()
+		fmt.Println("Examples:")
+		fmt.Println("  /work batch complete 1 2 3          # Complete tasks 1, 2, 3")
+		fmt.Println("  /work batch delete 5 6              # Delete tasks 5, 6")
+		fmt.Println("  /work batch priority=critical 1 2   # Set priority to critical")
+		fmt.Println("  /work batch tag=urgent 1 2 3        # Add 'urgent' tag")
+		fmt.Println("  /work batch untag=bug 1 2           # Remove 'bug' tag")
+		fmt.Println("  /work batch filter --tag=bug complete  # Complete all bug tasks")
+		return
+	}
+
+	// Parse filter mode
+	if strings.ToLower(args[0]) == "filter" {
+		handleBatchByFilter(agent, args[1:])
+		return
+	}
+
+	// Parse operation and IDs
+	operation := strings.ToLower(args[0])
+	var ids []string
+	params := make(map[string]any)
+
+	// Parse operation with inline parameter (e.g., priority=critical)
+	if strings.Contains(operation, "=") {
+		parts := strings.SplitN(operation, "=", 2)
+		operation = parts[0]
+		params["value"] = parts[1]
+	}
+
+	// Collect IDs from remaining args
+	for _, arg := range args[1:] {
+		if strings.HasPrefix(arg, "--") {
+			// Parse inline filter options
+			parts := strings.SplitN(strings.TrimPrefix(arg, "--"), "=", 2)
+			if len(parts) == 2 {
+				params[parts[0]] = parts[1]
+			}
+		} else {
+			ids = append(ids, arg)
+		}
+	}
+
+	if len(ids) == 0 {
+		fmt.Println("No task IDs specified.")
+		return
+	}
+
+	var result BatchResult
+	switch operation {
+	case "complete", "done":
+		result = store.BatchComplete(ids)
+	case "delete", "rm":
+		result = store.BatchDelete(ids)
+	case "start":
+		result = store.BatchTransition(ids, WorkTaskInProgress, "batch start")
+	case "pending":
+		result = store.BatchTransition(ids, WorkTaskPending, "batch reset to pending")
+	case "block":
+		result = store.BatchTransition(ids, WorkTaskBlocked, "batch blocked")
+	case "cancel":
+		result = store.BatchTransition(ids, WorkTaskCancelled, "batch cancelled")
+	case "priority":
+		priority, _ := params["value"].(WorkTaskPriority)
+		if priority == "" {
+			fmt.Println("Usage: /work batch priority=<level> <id1> [id2] ...")
+			return
+		}
+		result = store.BatchSetPriority(ids, priority)
+	case "tag":
+		tag, _ := params["value"].(string)
+		if tag == "" {
+			fmt.Println("Usage: /work batch tag=<tag> <id1> [id2] ...")
+			return
+		}
+		result = store.BatchAddTag(ids, tag)
+	case "untag":
+		tag, _ := params["value"].(string)
+		if tag == "" {
+			fmt.Println("Usage: /work batch untag=<tag> <id1> [id2] ...")
+			return
+		}
+		result = store.BatchRemoveTag(ids, tag)
+	case "owner":
+		owner, _ := params["value"].(string)
+		if owner == "" {
+			fmt.Println("Usage: /work batch owner=<name> <id1> [id2] ...")
+			return
+		}
+		result = store.BatchSetOwner(ids, owner)
+	default:
+		fmt.Printf("Unknown batch operation: %s\n", operation)
+		fmt.Println("Valid operations: complete, delete, start, pending, block, cancel, priority=<level>, tag=<tag>, untag=<tag>, owner=<name>")
+		return
+	}
+
+	fmt.Print(FormatBatchResult(result, operation))
+}
+
+func handleBatchByFilter(agent *AgentLoop, args []string) {
+	store := agent.workTaskStore
+
+	if len(args) < 1 {
+		fmt.Println("Usage: /work batch filter <filter-args> <operation> [params]")
+		return
+	}
+
+	// Parse filter args and operation
+	filter := TaskFilter{}
+	var operation string
+	params := make(map[string]any)
+
+	i := 0
+	for ; i < len(args); i++ {
+		arg := strings.ToLower(args[i])
+
+		// Check if this is an operation (not a filter)
+		switch arg {
+		case "complete", "done", "delete", "rm", "start", "pending", "block", "cancel":
+			operation = arg
+			i++
+			goto parseParams
+		case "priority", "tag", "untag", "owner":
+			if i+1 < len(args) {
+				operation = arg + "=" + args[i+1]
+				i += 2
+				goto parseParams
+			}
+		}
+
+		// Parse filter arg
+		switch {
+		case arg == "--all" || arg == "-a":
+			// no filter
+		case arg == "--pending":
+			filter.Statuses = append(filter.Statuses, WorkTaskPending)
+		case arg == "--in-progress":
+			filter.Statuses = append(filter.Statuses, WorkTaskInProgress)
+		case arg == "--completed":
+			filter.Statuses = append(filter.Statuses, WorkTaskCompleted)
+		case arg == "--blocked":
+			blocked := true
+			filter.Blocked = &blocked
+		case strings.HasPrefix(arg, "--tag="):
+			filter.Tags = append(filter.Tags, strings.TrimPrefix(arg, "--tag="))
+		case strings.HasPrefix(arg, "--pri=") || strings.HasPrefix(arg, "--priority="):
+			pri := strings.TrimPrefix(strings.TrimPrefix(arg, "--priority="), "--pri=")
+			filter.Priorities = append(filter.Priorities, WorkTaskPriority(pri))
+		case strings.HasPrefix(arg, "--owner="):
+			filter.Owner = strings.TrimPrefix(arg, "--owner=")
+		case strings.HasPrefix(arg, "--search="):
+			filter.Query = strings.TrimPrefix(arg, "--search=")
+		}
+	}
+
+parseParams:
+	// Parse remaining args as params
+	for ; i < len(args); i++ {
+		parts := strings.SplitN(args[i], "=", 2)
+		if len(parts) == 2 {
+			params[parts[0]] = parts[1]
+		}
+	}
+
+	if operation == "" {
+		fmt.Println("No operation specified. Use: complete, delete, start, pending, priority=<level>, tag=<tag>, untag=<tag>, owner=<name>")
+		return
+	}
+
+	// Parse operation
+	op := operation
+	opParams := make(map[string]any)
+	if strings.Contains(op, "=") {
+		parts := strings.SplitN(op, "=", 2)
+		op = parts[0]
+		opParams["value"] = parts[1]
+	}
+
+	// Merge params
+	for k, v := range params {
+		opParams[k] = v
+	}
+
+	result := store.BatchByFilter(filter, op, opParams)
+	fmt.Print(FormatBatchResult(result, op))
+}
+
+func printTaskList(tasks []*WorkTask) {
+	fmt.Println()
+	fmt.Printf("  %-5s %-10s %-12s %-8s %s\n", "ID", "Priority", "Status", "Tags", "Subject")
+	fmt.Println("  " + strings.Repeat("-", 70))
+
+	for _, t := range tasks {
+		pri := string(t.Priority)
+		if pri == "" {
+			pri = "medium"
+		}
+		tags := strings.Join(t.Tags, ",")
+		if tags == "" {
+			tags = "-"
+		}
+		subject := t.Subject
+		if len(subject) > 35 {
+			subject = subject[:32] + "..."
+		}
+		fmt.Printf("  %-5s %-10s %-12s %-8s %s\n",
+			t.ID, pri, t.Status, tags, subject)
+	}
+	fmt.Printf("\n  %d task(s)\n", len(tasks))
+}
+
+func handleWorkHelp() {
+	fmt.Println(`
+/work — Manage work tasks (LLM TODO items)
+
+USAGE:
+  /work [list|show|create|complete|start|delete|search|tags|priority|deps|tree|plan|ready|blocked|stats|graph|board|critical|help]
+
+COMMANDS:
+  list [--all] [--tag=<tag>] [--priority=<level>] [--status=<status>]
+       [--owner=<owner>] [--search=<query>] [--sort=<field>] [--desc] [--limit=<n>]
+      List tasks with filtering. Default: active tasks by priority.
+      Filters: --pending, --in-progress, --completed, --blocked
+      Sort: --sort=id|priority|status|created|updated (default: id)
+
+  search <query>
+      Full-text search across task subject, description, tags.
+
+  batch <operation> <id1> [id2] [...]
+      Batch operations on multiple tasks.
+      Operations: complete, delete, start, pending, block, cancel
+      With params: priority=<level>, tag=<tag>, untag=<tag>, owner=<name>
+      Examples:
+        /work batch complete 1 2 3
+        /work batch priority=critical 1 2
+        /work batch tag=urgent 1 2 3
+        /work batch filter --tag=bug complete
+
+  show <id>
+      Show detailed task info.
+
+  create <subject> [--desc=<description>] [--priority=<level>] [--tag=<tag>]
+      Create a new task.
+
+  complete <id>
+      Mark a task as completed.
+
+  start <id>
+      Mark a task as in_progress.
+
+  delete <id>
+      Delete a task.
+
+  update <id> <field>=<value> [...]
+      Update task fields: subject, desc, priority, tag, addTag, removeTag, parent
+
+  tags [add|remove] [task_id] [tag]
+      Manage tags. Without args: list all tags.
+
+  priority [task_id] [level]
+      Manage priority. Without args: show distribution.
+
+  deps [add|remove|graph|ready]
+      Manage dependencies.
+
+  tree [id]
+      Show task tree with subtasks.
+
+  plan
+      Show execution plan with parallel groups.
+
+  ready
+      Show tasks ready to start.
+
+  blocked
+      Show blocked tasks with their blockers.
+
+  stats
+      Show task statistics.
+
+  graph
+      Show ASCII dependency tree visualization.
+
+  board
+      Show ASCII status board with all tasks.
+
+  critical [id]
+      Show critical path (longest dependency chain).
+
+  help
+      Show this help.`)
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+func toStrings(statuses []WorkTaskStatus) []string {
+	result := make([]string, len(statuses))
+	for i, s := range statuses {
+		result[i] = string(s)
+	}
+	return result
+}
+
 // truncateString truncates a string to maxLen characters, adding "..." if truncated.
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
@@ -1465,6 +2391,7 @@ func showDetailedHelp(cmd string) {
 		"/tools":          "List all available tools, grouped by category (file, search, exec, git, agent, code, MCP).\nUsage: /tools",
 		"/agents":         "Manage background agents.\nUsage: /agents [list|show <id>|stop <id>|help]",
 		"/tasks":          "View background tasks.\nUsage: /tasks [list|show <id>|stop <id>|message <id> <msg>|help]",
+		"/work":           "Manage work tasks (TODO items). Supports create, list, show, complete, start, delete,\ntags, priority, dependencies, tree view, execution plan, and statistics.\nUsage: /work [list|show|create|complete|start|delete|tags|priority|deps|tree|plan|ready|blocked|stats|help]",
 		"/history":        "Show recent prompts from the session history.\nUsage: /history [N|clear]",
 		"/mode":           "Switch permission mode.\nUsage: /mode [ask|auto|bypass|plan]",
 		"/doctor":         "Run installation diagnostics: API key, base URL, tools (rg/python/node/git),\nMCP servers, skills, transcripts, CLAUDE.md files.\nUsage: /doctor",

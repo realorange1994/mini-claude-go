@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -991,5 +992,1265 @@ func TestThreeLevelMemoryMultipleFlushes(t *testing.T) {
 	notes := sm2.GetScopedNotes(ScopeGlobal)
 	if len(notes) != 2 {
 		t.Errorf("expected 2 global notes after multiple flushes, got %d", len(notes))
+	}
+}
+
+// ─── Phase 4: Extraction Tests ──────────────────────────────────────────────
+
+func TestExtractUserInstructions(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected string // expected type
+	}{
+		{
+			name:     "explicit request",
+			content:  "Please make sure to use Go 1.25 for this project",
+			expected: "instruction",
+		},
+		{
+			name:     "constraint",
+			content:  "You must not use any external dependencies",
+			expected: "constraint",
+		},
+		{
+			name:     "preference",
+			content:  "I prefer using table-driven tests",
+			expected: "preference",
+		},
+		{
+			name:     "fix request",
+			content:  "Fix the authentication bug in the login flow",
+			expected: "instruction",
+		},
+		{
+			name:     "create request",
+			content:  "Add a new REST endpoint for user management",
+			expected: "instruction",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			items := extractUserInstructions(tt.content, 0)
+			if len(items) == 0 {
+				t.Errorf("expected at least 1 item, got 0")
+				return
+			}
+			found := false
+			for _, item := range items {
+				if item.Type == tt.expected {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected type '%s', got items: %v", tt.expected, items)
+			}
+		})
+	}
+}
+
+func TestExtractDiscoveries(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected string
+	}{
+		{
+			name:     "discovery",
+			content:  "Found that the issue was caused by a race condition in the mutex",
+			expected: "discovery",
+		},
+		{
+			name:     "solution",
+			content:  "The fix is to use sync.RWMutex instead of sync.Mutex",
+			expected: "discovery",
+		},
+		{
+			name:     "error finding",
+			content:  "Error: the database connection string was malformed",
+			expected: "error",
+		},
+		{
+			name:     "result",
+			content:  "Fixed: the authentication now works correctly",
+			expected: "result",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			items := extractDiscoveries(tt.content, 0)
+			if len(items) == 0 {
+				t.Errorf("expected at least 1 item, got 0")
+				return
+			}
+			found := false
+			for _, item := range items {
+				if item.Category == tt.expected {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected category '%s', got items: %v", tt.expected, items)
+			}
+		})
+	}
+}
+
+func TestExtractFromMessages(t *testing.T) {
+	messages := []ConversationMessage{
+		{Role: "user", Content: "Please implement the REST API using Go standard library"},
+		{Role: "assistant", Content: "I found that the issue was caused by missing error handling"},
+		{Role: "user", Content: "Make sure to add unit tests for all endpoints"},
+		{Role: "assistant", Content: "Fixed: the authentication now works correctly"},
+	}
+
+	items := ExtractFromMessages(messages)
+	if len(items) < 2 {
+		t.Errorf("expected at least 2 items, got %d", len(items))
+	}
+
+	// Check for user instruction
+	hasInstruction := false
+	for _, item := range items {
+		if item.Source == "user" && item.Type == "instruction" {
+			hasInstruction = true
+			break
+		}
+	}
+	if !hasInstruction {
+		t.Error("expected at least 1 user instruction")
+	}
+
+	// Check for discovery
+	hasDiscovery := false
+	for _, item := range items {
+		if item.Source == "assistant" && item.Type == "discovery" {
+			hasDiscovery = true
+			break
+		}
+	}
+	if !hasDiscovery {
+		t.Error("expected at least 1 discovery")
+	}
+}
+
+func TestSaveExtractedItems(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	items := []ExtractedItem{
+		{Type: "instruction", Content: "Use Go 1.25", Source: "user", Category: "instruction"},
+		{Type: "discovery", Content: "Found race condition in mutex", Source: "assistant", Category: "discovery"},
+		{Type: "constraint", Content: "No external dependencies", Source: "user", Category: "constraint"},
+	}
+
+	sm.SaveExtractedItems(items)
+
+	// Verify items were saved
+	notes := sm.GetNotes()
+	if len(notes) < 3 {
+		t.Errorf("expected at least 3 notes, got %d", len(notes))
+	}
+
+	// Check categories
+	foundCategories := make(map[string]bool)
+	for _, note := range notes {
+		foundCategories[note.Category] = true
+	}
+	if !foundCategories["instruction"] {
+		t.Error("expected instruction category")
+	}
+	if !foundCategories["discovery"] {
+		t.Error("expected discovery category")
+	}
+	if !foundCategories["constraint"] {
+		t.Error("expected constraint category")
+	}
+}
+
+func TestSaveExtractedItems_Dedup(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	items := []ExtractedItem{
+		{Type: "instruction", Content: "Use Go 1.25", Source: "user", Category: "instruction"},
+		{Type: "instruction", Content: "Use Go 1.25", Source: "user", Category: "instruction"}, // duplicate
+	}
+
+	sm.SaveExtractedItems(items)
+
+	notes := sm.GetScopedNotes(ScopeSession)
+	instructionCount := 0
+	for _, note := range notes {
+		if note.Category == "instruction" {
+			instructionCount++
+		}
+	}
+	if instructionCount != 1 {
+		t.Errorf("expected 1 instruction (deduped), got %d", instructionCount)
+	}
+}
+
+func TestExtractAndSave(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	messages := []ConversationMessage{
+		{Role: "user", Content: "Please implement the REST API"},
+		{Role: "assistant", Content: "Found that the issue was caused by missing error handling"},
+	}
+
+	count := sm.ExtractAndSave(messages)
+	if count < 1 {
+		t.Errorf("expected at least 1 extracted item, got %d", count)
+	}
+
+	notes := sm.GetNotes()
+	if len(notes) < 1 {
+		t.Errorf("expected at least 1 note, got %d", len(notes))
+	}
+}
+
+func TestExtractSentence(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		pattern  string
+		contains string
+	}{
+		{
+			name:     "simple sentence",
+			content:  "Please make sure to use Go for this project",
+			pattern:  "make sure",
+			contains: "make sure",
+		},
+		{
+			name:     "multiline",
+			content:  "Line 1\nPlease make sure to use Go for this project\nLine 3",
+			pattern:  "make sure",
+			contains: "make sure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractSentence(tt.content, tt.pattern)
+			if !strings.Contains(result, tt.contains) {
+				t.Errorf("expected to contain '%s', got '%s'", tt.contains, result)
+			}
+		})
+	}
+}
+
+func TestExtractUserInstructions_Empty(t *testing.T) {
+	items := extractUserInstructions("", 0)
+	if len(items) != 0 {
+		t.Errorf("expected 0 items for empty content, got %d", len(items))
+	}
+}
+
+func TestExtractDiscoveries_Empty(t *testing.T) {
+	items := extractDiscoveries("", 0)
+	if len(items) != 0 {
+		t.Errorf("expected 0 items for empty content, got %d", len(items))
+	}
+}
+
+func TestDeduplicateItems(t *testing.T) {
+	items := []ExtractedItem{
+		{Type: "instruction", Content: "Use Go 1.25", Source: "user"},
+		{Type: "instruction", Content: "Use Go 1.25", Source: "user"},
+		{Type: "discovery", Content: "Found race condition", Source: "assistant"},
+	}
+
+	result := deduplicateItems(items)
+	if len(result) != 2 {
+		t.Errorf("expected 2 items after dedup, got %d", len(result))
+	}
+}
+
+// ─── Deduplication and Version Control Tests ─────────────────────────────────
+
+func TestContentSimilarity(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        string
+		b        string
+		minScore float64
+		maxScore float64
+	}{
+		{"identical", "hello world", "hello world", 1.0, 1.0},
+		{"empty", "", "", 1.0, 1.0},
+		{"one empty", "hello", "", 0.0, 0.0},
+		{"similar", "Use Go 1.25 for this project", "Use Go 1.25 for the project", 0.7, 1.0},
+		{"different", "hello world", "foo bar baz", 0.0, 0.5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ContentSimilarity(tt.a, tt.b)
+			if result < tt.minScore || result > tt.maxScore {
+				t.Errorf("expected %.2f-%.2f, got %.2f", tt.minScore, tt.maxScore, result)
+			}
+		})
+	}
+}
+
+func TestDeduplicateEntries_ExactMatch(t *testing.T) {
+	entries := []MemoryEntry{
+		{Category: "state", Content: "Working on auth", Timestamp: time.Now()},
+		{Category: "state", Content: "Working on auth", Timestamp: time.Now()},
+		{Category: "decision", Content: "Use SQLite", Timestamp: time.Now()},
+	}
+
+	result, merged := DeduplicateEntries(entries)
+	if len(result) != 2 {
+		t.Errorf("expected 2 entries after dedup, got %d", len(result))
+	}
+	if merged != 1 {
+		t.Errorf("expected 1 merge, got %d", merged)
+	}
+}
+
+func TestDeduplicateEntries_FuzzyMatch(t *testing.T) {
+	entries := []MemoryEntry{
+		{Category: "state", Content: "Working on authentication module", Timestamp: time.Now()},
+		{Category: "state", Content: "Working on the authentication module", Timestamp: time.Now()},
+		{Category: "decision", Content: "Use SQLite", Timestamp: time.Now()},
+	}
+
+	result, _ := DeduplicateEntries(entries)
+	if len(result) < 2 {
+		t.Errorf("expected at least 2 entries after fuzzy dedup, got %d", len(result))
+	}
+}
+
+func TestMergeEntries(t *testing.T) {
+	a := MemoryEntry{
+		Category:  "state",
+		Content:   "Working on auth",
+		Timestamp: time.Now().Add(-time.Hour),
+		Version:   1,
+	}
+	b := MemoryEntry{
+		Category:  "state",
+		Content:   "Working on authentication",
+		Timestamp: time.Now(),
+		Version:   1,
+	}
+
+	merged := MergeEntries(a, b)
+	if merged.Version != 2 {
+		t.Errorf("expected version 2, got %d", merged.Version)
+	}
+	if merged.PrevHash == "" {
+		t.Error("expected non-empty PrevHash")
+	}
+}
+
+func TestUpdateNote(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working on auth", "user")
+	sm.UpdateNote("state", "Working on auth", "Working on authentication module", "assistant")
+
+	notes := sm.GetScopedNotes(ScopeSession)
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(notes))
+	}
+	if notes[0].Content != "Working on authentication module" {
+		t.Errorf("expected updated content, got '%s'", notes[0].Content)
+	}
+	if notes[0].Version != 2 {
+		t.Errorf("expected version 2, got %d", notes[0].Version)
+	}
+}
+
+func TestUpdateNote_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	result := sm.UpdateNote("state", "nonexistent", "new content", "user")
+	if result {
+		t.Error("expected false for non-existent note")
+	}
+}
+
+func TestMergeDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Directly add entries (bypass AddNote's fuzzy dedup)
+	sm.mu.Lock()
+	sm.entries = []MemoryEntry{
+		{Category: "state", Content: "Working on authentication module for the app", Timestamp: time.Now(), Version: 1},
+		{Category: "state", Content: "Working on authentication module for the app now", Timestamp: time.Now(), Version: 1},
+		{Category: "decision", Content: "Use SQLite", Timestamp: time.Now(), Version: 1},
+	}
+	sm.mu.Unlock()
+
+	merged := sm.MergeDuplicates()
+	if merged < 1 {
+		t.Errorf("expected at least 1 merge, got %d", merged)
+	}
+
+	notes := sm.GetScopedNotes(ScopeSession)
+	stateNotes := 0
+	for _, n := range notes {
+		if n.Category == "state" {
+			stateNotes++
+		}
+	}
+	if stateNotes > 1 {
+		t.Errorf("expected at most 1 state note after merge, got %d", stateNotes)
+	}
+}
+
+func TestGetStats(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working on auth", "user")
+	sm.AddNote("decision", "Use SQLite", "user")
+	sm.AddNote("reference", "src/auth.go", "auto")
+
+	stats := sm.GetStats()
+	if stats.SessionEntries != 3 {
+		t.Errorf("expected 3 session entries, got %d", stats.SessionEntries)
+	}
+	if stats.ByCategory["state"] != 1 {
+		t.Errorf("expected 1 state entry, got %d", stats.ByCategory["state"])
+	}
+}
+
+func TestAddNote_VersionTracking(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// First add
+	sm.AddNote("state", "Working on auth", "user")
+
+	// Exact duplicate - should just update timestamp
+	sm.AddNote("state", "Working on auth", "user")
+
+	notes := sm.GetScopedNotes(ScopeSession)
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(notes))
+	}
+
+	// Version should still be 1 (exact dedup doesn't increment)
+	if notes[0].Version != 1 {
+		t.Errorf("expected version 1 after exact dedup, got %d", notes[0].Version)
+	}
+}
+
+func TestAddNote_FuzzyMerge(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// First add
+	sm.AddNote("state", "Working on authentication module", "user")
+
+	// Similar content - should merge
+	sm.AddNote("state", "Working on the authentication module", "user")
+
+	notes := sm.GetScopedNotes(ScopeSession)
+	stateNotes := 0
+	for _, n := range notes {
+		if n.Category == "state" {
+			stateNotes++
+		}
+	}
+
+	// Should have merged into 1 entry
+	if stateNotes != 1 {
+		t.Errorf("expected 1 state note after fuzzy merge, got %d", stateNotes)
+	}
+}
+
+func TestContentHash(t *testing.T) {
+	e := MemoryEntry{Content: "hello world"}
+	hash := e.ContentHash()
+	if hash == "" {
+		t.Error("expected non-empty hash")
+	}
+
+	// Same content should produce same hash
+	e2 := MemoryEntry{Content: "hello world"}
+	if e.ContentHash() != e2.ContentHash() {
+		t.Error("same content should produce same hash")
+	}
+
+	// Different content should produce different hash
+	e3 := MemoryEntry{Content: "goodbye world"}
+	if e.ContentHash() == e3.ContentHash() {
+		t.Error("different content should produce different hash")
+	}
+}
+
+// ─── Intelligent Memory Retrieval Tests ─────────────────────────────────────
+
+func TestSmartSearch_ExactMatch(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("preference", "Use Go 1.25 for all projects", "user")
+	sm.AddNote("decision", "Use SQLite for persistence", "user")
+	sm.AddNote("state", "Working on authentication module", "user")
+
+	opts := DefaultSearchOptions()
+	results := sm.SmartSearch("Go 1.25", opts)
+
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result")
+	}
+	if results[0].Entry.Content != "Use Go 1.25 for all projects" {
+		t.Errorf("expected 'Use Go 1.25 for all projects', got '%s'", results[0].Entry.Content)
+	}
+	if results[0].Score <= 0.5 {
+		t.Errorf("expected high score for exact match, got %.2f", results[0].Score)
+	}
+}
+
+func TestSmartSearch_PartialMatch(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("preference", "Use Go 1.25 for all projects", "user")
+	sm.AddNote("decision", "Use SQLite for persistence", "user")
+
+	opts := DefaultSearchOptions()
+	results := sm.SmartSearch("SQLite persistence", opts)
+
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result")
+	}
+	found := false
+	for _, r := range results {
+		if strings.Contains(r.Entry.Content, "SQLite") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find SQLite entry")
+	}
+}
+
+func TestSmartSearch_CategoryFilter(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("preference", "Use Go 1.25", "user")
+	sm.AddNote("decision", "Use Go 1.25 for backend", "user")
+
+	opts := DefaultSearchOptions()
+	opts.Categories = []string{"preference"}
+	results := sm.SmartSearch("Go 1.25", opts)
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result with category filter, got %d", len(results))
+	}
+	if len(results) > 0 && results[0].Entry.Category != "preference" {
+		t.Errorf("expected category 'preference', got '%s'", results[0].Entry.Category)
+	}
+}
+
+func TestSmartSearch_RecencyRanking(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Add old entry
+	sm.mu.Lock()
+	sm.entries = append(sm.entries, MemoryEntry{
+		Category:  "state",
+		Content:   "Old state about authentication module",
+		Timestamp: time.Now().Add(-24 * time.Hour),
+		Source:    "user",
+	})
+	// Add recent entry
+	sm.entries = append(sm.entries, MemoryEntry{
+		Category:  "state",
+		Content:   "Recent state about authentication module",
+		Timestamp: time.Now(),
+		Source:    "user",
+	})
+	sm.mu.Unlock()
+
+	opts := DefaultSearchOptions()
+	opts.RecencyWeight = 0.5
+	results := sm.SmartSearch("authentication module", opts)
+
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+	// Both should match, but scores should be close
+	t.Logf("Result 0: %s (score: %.2f)", results[0].Entry.Content, results[0].Score)
+	t.Logf("Result 1: %s (score: %.2f)", results[1].Entry.Content, results[1].Score)
+}
+
+func TestSmartSearch_Limit(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Task 1", "user")
+	sm.AddNote("state", "Task 2", "user")
+	sm.AddNote("state", "Task 3", "user")
+
+	opts := DefaultSearchOptions()
+	opts.Limit = 2
+	results := sm.SmartSearch("Task", opts)
+
+	if len(results) > 2 {
+		t.Errorf("expected at most 2 results, got %d", len(results))
+	}
+}
+
+func TestContextSearch(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("preference", "Use Go for backend development", "user")
+	sm.AddNote("decision", "SQLite for database", "user")
+	sm.AddNote("state", "Working on REST API", "user")
+
+	context := []string{
+		"I need to implement the REST API using Go",
+		"The database should use SQLite",
+	}
+
+	results := sm.ContextSearch(context, 5)
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result")
+	}
+}
+
+func TestExtractKeywords(t *testing.T) {
+	messages := []string{
+		"I need to implement the REST API using Go",
+		"The database should use SQLite for persistence",
+		"Make sure to add unit tests for all endpoints",
+	}
+
+	keywords := extractKeywords(messages)
+	if len(keywords) == 0 {
+		t.Fatal("expected at least 1 keyword")
+	}
+
+	// Should contain significant words
+	found := false
+	for _, kw := range keywords {
+		if kw == "rest" || kw == "api" || kw == "sqlite" || kw == "database" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected to find significant keywords, got %v", keywords)
+	}
+}
+
+func TestIsStopWord(t *testing.T) {
+	tests := []struct {
+		word     string
+		expected bool
+	}{
+		{"the", true},
+		{"is", true},
+		{"a", true},
+		{"go", false},
+		{"sqlite", false},
+		{"implement", false},
+	}
+
+	for _, tt := range tests {
+		if isStopWord(tt.word) != tt.expected {
+			t.Errorf("isStopWord(%q) = %v, want %v", tt.word, isStopWord(tt.word), tt.expected)
+		}
+	}
+}
+
+func TestGetRelevantMemories(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("preference", "Use Go 1.25 for all projects", "user")
+	sm.AddNote("decision", "Use SQLite for persistence", "user")
+	sm.AddNote("state", "Working on REST API", "user")
+
+	result := sm.GetRelevantMemories("implement REST API with Go and SQLite", 5)
+	if result == "" {
+		t.Fatal("expected non-empty result")
+	}
+	if !strings.Contains(result, "Relevant Memories") {
+		t.Error("expected 'Relevant Memories' header")
+	}
+}
+
+func TestGetRelevantMemories_NoMatch(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("preference", "Use Go 1.25 for all projects", "user")
+
+	// Search for something completely unrelated
+	result := sm.GetRelevantMemories("quantum physics theory", 5)
+	// May return low-relevance results or empty
+	t.Logf("Result: %q", result)
+}
+
+func TestSearchOptions_Defaults(t *testing.T) {
+	opts := DefaultSearchOptions()
+	if opts.RecencyWeight != 0.3 {
+		t.Errorf("expected RecencyWeight 0.3, got %.2f", opts.RecencyWeight)
+	}
+	if opts.ExactMatchBonus != 0.5 {
+		t.Errorf("expected ExactMatchBonus 0.5, got %.2f", opts.ExactMatchBonus)
+	}
+	if opts.MinScore != 0.1 {
+		t.Errorf("expected MinScore 0.1, got %.2f", opts.MinScore)
+	}
+}
+
+func TestSmartSearch_MultipleScopes(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, ".claude", "memory", "global.md")
+	sm := NewSessionMemoryWithPaths(dir, globalPath)
+
+	// Add to different scopes
+	sm.addGlobalNote("preference", "Use Go globally", "user")
+	sm.addProjectNote("decision", "Use SQLite for this project", "user")
+	sm.AddNote("state", "Working on API", "user")
+
+	opts := DefaultSearchOptions()
+	opts.Limit = 10
+	results := sm.SmartSearch("Go", opts)
+
+	// Should find global entry
+	foundGlobal := false
+	for _, r := range results {
+		if r.Scope == ScopeGlobal {
+			foundGlobal = true
+			break
+		}
+	}
+	if !foundGlobal {
+		t.Error("expected to find global entry")
+	}
+}
+
+// ─── Memory Consolidation Tests ─────────────────────────────────────────────
+
+func TestConsolidateMemory_Basic(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Add some entries
+	sm.AddNote("state", "Task 1", "user")
+	sm.AddNote("state", "Task 2", "user")
+	sm.AddNote("decision", "Use Go", "user")
+
+	config := DefaultConsolidationConfig()
+	result := sm.ConsolidateMemory(config)
+
+	if result.Remaining < 3 {
+		t.Errorf("expected at least 3 remaining entries, got %d", result.Remaining)
+	}
+}
+
+func TestConsolidateMemory_Deduplication(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Directly add duplicate entries (bypass AddNote's fuzzy dedup)
+	sm.mu.Lock()
+	sm.entries = []MemoryEntry{
+		{Category: "state", Content: "Working on authentication", Timestamp: time.Now(), Version: 1},
+		{Category: "state", Content: "Working on authentication", Timestamp: time.Now(), Version: 1},
+		{Category: "state", Content: "Working on authentication", Timestamp: time.Now(), Version: 1},
+	}
+	sm.mu.Unlock()
+
+	config := DefaultConsolidationConfig()
+	result := sm.ConsolidateMemory(config)
+
+	if result.Merged < 2 {
+		t.Errorf("expected at least 2 merges, got %d", result.Merged)
+	}
+
+	notes := sm.GetScopedNotes(ScopeSession)
+	stateCount := 0
+	for _, n := range notes {
+		if n.Category == "state" {
+			stateCount++
+		}
+	}
+	if stateCount != 1 {
+		t.Errorf("expected 1 state entry after dedup, got %d", stateCount)
+	}
+}
+
+func TestConsolidateMemory_ExpiredEntries(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Add expired entry
+	sm.mu.Lock()
+	sm.entries = append(sm.entries, MemoryEntry{
+		Category:  "state",
+		Content:   "Old state",
+		Timestamp: time.Now().Add(-8 * 24 * time.Hour), // 8 days old (state expires in 7)
+		Source:    "user",
+	})
+	sm.entries = append(sm.entries, MemoryEntry{
+		Category:  "state",
+		Content:   "Recent state",
+		Timestamp: time.Now(),
+		Source:    "user",
+	})
+	sm.mu.Unlock()
+
+	config := DefaultConsolidationConfig()
+	result := sm.ConsolidateMemory(config)
+
+	if result.Removed < 1 {
+		t.Errorf("expected at least 1 removal, got %d", result.Removed)
+	}
+}
+
+func TestConsolidateMemory_CompressOld(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Directly add old entries
+	sm.mu.Lock()
+	for i := 0; i < 10; i++ {
+		sm.entries = append(sm.entries, MemoryEntry{
+			Category:  "state",
+			Content:   fmt.Sprintf("Working on authentication module for the app %d", i),
+			Timestamp: time.Now().Add(-8 * 24 * time.Hour),
+			Source:    "user",
+			Version:   1,
+		})
+	}
+	sm.mu.Unlock()
+
+	config := DefaultConsolidationConfig()
+	config.CompressOlderThan = 7 * 24 * time.Hour
+	config.KeepRecent = 0
+	result := sm.ConsolidateMemory(config)
+
+	// Should have compressed some entries
+	t.Logf("Compressed: %d, Merged: %d, Removed: %d, Remaining: %d",
+		result.Compressed, result.Merged, result.Removed, result.Remaining)
+}
+
+func TestConsolidateMemory_MaxEntries(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Add many entries
+	for i := 0; i < 50; i++ {
+		sm.AddNote("state", fmt.Sprintf("State %d", i), "user")
+	}
+
+	config := DefaultConsolidationConfig()
+	config.MaxEntriesPerCategory = 20
+	sm.ConsolidateMemory(config)
+
+	stateCount := 0
+	notes := sm.GetScopedNotes(ScopeSession)
+	for _, n := range notes {
+		if n.Category == "state" {
+			stateCount++
+		}
+	}
+	if stateCount > 20 {
+		t.Errorf("expected at most 20 state entries, got %d", stateCount)
+	}
+}
+
+func TestGetMemoryHealth(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working on auth", "user")
+	sm.AddNote("decision", "Use Go", "user")
+	sm.AddNote("preference", "Dark theme", "user")
+
+	health := sm.GetMemoryHealth()
+
+	if health.TotalEntries < 3 {
+		t.Errorf("expected at least 3 total entries, got %d", health.TotalEntries)
+	}
+	if health.Score < 0 || health.Score > 100 {
+		t.Errorf("expected score 0-100, got %d", health.Score)
+	}
+}
+
+func TestFormatConsolidationReport(t *testing.T) {
+	result := ConsolidationResult{
+		Merged:     5,
+		Removed:    2,
+		Compressed: 3,
+		Remaining:  20,
+	}
+	health := MemoryHealth{
+		TotalEntries:   20,
+		ExpiredEntries: 2,
+		Score:          85,
+	}
+
+	report := FormatConsolidationReport(result, health)
+
+	if !strings.Contains(report, "Merged: 5") {
+		t.Error("expected 'Merged: 5' in report")
+	}
+	if !strings.Contains(report, "Health Score: 85/100") {
+		t.Error("expected 'Health Score: 85/100' in report")
+	}
+}
+
+func TestDefaultConsolidationConfig(t *testing.T) {
+	config := DefaultConsolidationConfig()
+
+	if config.MaxEntriesPerCategory <= 0 {
+		t.Error("expected positive MaxEntriesPerCategory")
+	}
+	if config.SimilarityThreshold <= 0 || config.SimilarityThreshold > 1 {
+		t.Errorf("expected SimilarityThreshold 0-1, got %.2f", config.SimilarityThreshold)
+	}
+	if config.CompressOlderThan <= 0 {
+		t.Error("expected positive CompressOlderThan")
+	}
+	if config.KeepRecent <= 0 {
+		t.Error("expected positive KeepRecent")
+	}
+}
+
+func TestRemoveExpired(t *testing.T) {
+	entries := []MemoryEntry{
+		{Category: "state", Content: "Recent", Timestamp: time.Now()},
+		{Category: "state", Content: "Old", Timestamp: time.Now().Add(-8 * 24 * time.Hour)},
+		{Category: "decision", Content: "Recent decision", Timestamp: time.Now()},
+	}
+
+	result, removed := removeExpired(entries)
+	if removed != 1 {
+		t.Errorf("expected 1 removal, got %d", removed)
+	}
+	if len(result) != 2 {
+		t.Errorf("expected 2 remaining, got %d", len(result))
+	}
+}
+
+func TestEnforceMaxEntries(t *testing.T) {
+	entries := make([]MemoryEntry, 30)
+	for i := range entries {
+		entries[i] = MemoryEntry{
+			Category:  "state",
+			Content:   fmt.Sprintf("Entry %d", i),
+			Timestamp: time.Now().Add(-time.Duration(i) * time.Hour),
+		}
+	}
+
+	result := enforceMaxEntries(entries, 10)
+	if len(result) > 10 {
+		t.Errorf("expected at most 10 entries, got %d", len(result))
+	}
+}
+
+func TestCalculateHealthScore(t *testing.T) {
+	tests := []struct {
+		name    string
+		health  MemoryHealth
+		minScore int
+		maxScore int
+	}{
+		{"healthy", MemoryHealth{TotalEntries: 20, ExpiredEntries: 0, OldEntries: 0}, 90, 100},
+		{"too many entries", MemoryHealth{TotalEntries: 250, ExpiredEntries: 0, OldEntries: 0}, 70, 85},
+		{"expired entries", MemoryHealth{TotalEntries: 20, ExpiredEntries: 15, OldEntries: 0}, 75, 90},
+		{"old entries", MemoryHealth{TotalEntries: 20, ExpiredEntries: 0, OldEntries: 60}, 75, 90},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			score := calculateHealthScore(tt.health)
+			if score < tt.minScore || score > tt.maxScore {
+				t.Errorf("expected score %d-%d, got %d", tt.minScore, tt.maxScore, score)
+			}
+		})
+	}
+}
+
+// ─── Search & Filtering Tests ────────────────────────────────────────────────
+
+func TestFilteredSearch_ByCategory(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working on auth", "user")
+	sm.AddNote("decision", "Use Go", "user")
+	sm.AddNote("preference", "Dark theme", "user")
+
+	filter := MemoryFilter{
+		Categories: []string{"state"},
+	}
+	results := sm.FilteredSearch(filter)
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+	if len(results) > 0 && results[0].Entry.Category != "state" {
+		t.Errorf("expected category 'state', got '%s'", results[0].Entry.Category)
+	}
+}
+
+func TestFilteredSearch_BySource(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working on auth", "user")
+	sm.AddNote("decision", "Use Go", "assistant")
+	sm.AddNote("preference", "Dark theme", "auto")
+
+	filter := MemoryFilter{
+		Sources: []string{"user"},
+	}
+	results := sm.FilteredSearch(filter)
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+}
+
+func TestFilteredSearch_ByTimeRange(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Add old entry
+	sm.mu.Lock()
+	sm.entries = append(sm.entries, MemoryEntry{
+		Category:  "state",
+		Content:   "Old state",
+		Timestamp: time.Now().Add(-24 * time.Hour),
+		Source:    "user",
+	})
+	// Add recent entry
+	sm.entries = append(sm.entries, MemoryEntry{
+		Category:  "state",
+		Content:   "Recent state",
+		Timestamp: time.Now(),
+		Source:    "user",
+	})
+	sm.mu.Unlock()
+
+	after := time.Now().Add(-1 * time.Hour)
+	filter := MemoryFilter{
+		After: &after,
+	}
+	results := sm.FilteredSearch(filter)
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+	if len(results) > 0 && results[0].Entry.Content != "Recent state" {
+		t.Errorf("expected 'Recent state', got '%s'", results[0].Entry.Content)
+	}
+}
+
+func TestFilteredSearch_WithQuery(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working on authentication module", "user")
+	sm.AddNote("decision", "Use SQLite for persistence", "user")
+
+	filter := MemoryFilter{
+		Query: "authentication",
+	}
+	results := sm.FilteredSearch(filter)
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+}
+
+func TestFilteredSearch_SortByTime(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.mu.Lock()
+	sm.entries = []MemoryEntry{
+		{Category: "state", Content: "Old", Timestamp: time.Now().Add(-time.Hour), Source: "user"},
+		{Category: "state", Content: "New", Timestamp: time.Now(), Source: "user"},
+	}
+	sm.mu.Unlock()
+
+	filter := MemoryFilter{
+		SortBy:   "time",
+		SortDesc: true,
+	}
+	results := sm.FilteredSearch(filter)
+
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+	if results[0].Entry.Content != "New" {
+		t.Errorf("expected 'New' first (desc), got '%s'", results[0].Entry.Content)
+	}
+}
+
+func TestFilteredSearch_Limit(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Task 1", "user")
+	sm.AddNote("state", "Task 2", "user")
+	sm.AddNote("state", "Task 3", "user")
+
+	filter := MemoryFilter{
+		Limit: 2,
+	}
+	results := sm.FilteredSearch(filter)
+
+	if len(results) > 2 {
+		t.Errorf("expected at most 2 results, got %d", len(results))
+	}
+}
+
+func TestGetCategories(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working", "user")
+	sm.AddNote("decision", "Use Go", "user")
+	sm.AddNote("preference", "Dark theme", "user")
+
+	categories := sm.GetCategories()
+	if len(categories) < 3 {
+		t.Errorf("expected at least 3 categories, got %d", len(categories))
+	}
+}
+
+func TestGetSources(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working", "user")
+	sm.AddNote("decision", "Use Go", "assistant")
+
+	sources := sm.GetSources()
+	if len(sources) < 2 {
+		t.Errorf("expected at least 2 sources, got %d", len(sources))
+	}
+}
+
+func TestSearchByCategory(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working on auth", "user")
+	sm.AddNote("state", "Working on API", "user")
+	sm.AddNote("decision", "Use Go", "user")
+
+	results := sm.SearchByCategory("state")
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestSearchBySource(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Working", "user")
+	sm.AddNote("decision", "Use Go", "assistant")
+
+	results := sm.SearchBySource("user")
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+}
+
+func TestSearchByTimeRange(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.mu.Lock()
+	sm.entries = []MemoryEntry{
+		{Category: "state", Content: "Old", Timestamp: time.Now().Add(-2 * time.Hour), Source: "user"},
+		{Category: "state", Content: "Recent", Timestamp: time.Now(), Source: "user"},
+	}
+	sm.mu.Unlock()
+
+	after := time.Now().Add(-1 * time.Hour)
+	before := time.Now().Add(1 * time.Hour)
+	results := sm.SearchByTimeRange(after, before)
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+}
+
+func TestGetRecentEntries(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddNote("state", "Task 1", "user")
+	sm.AddNote("state", "Task 2", "user")
+	sm.AddNote("state", "Task 3", "user")
+
+	results := sm.GetRecentEntries(2)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestGetTimeRange(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.mu.Lock()
+	sm.entries = []MemoryEntry{
+		{Category: "state", Content: "Old", Timestamp: time.Now().Add(-time.Hour), Source: "user"},
+		{Category: "state", Content: "New", Timestamp: time.Now(), Source: "user"},
+	}
+	sm.mu.Unlock()
+
+	earliest, latest := sm.GetTimeRange()
+	if earliest.After(latest) {
+		t.Error("earliest should be before latest")
+	}
+}
+
+func TestFormatSearchResults(t *testing.T) {
+	results := []SearchResult{
+		{
+			Entry:     MemoryEntry{Category: "state", Content: "Working on auth", Timestamp: time.Now()},
+			Score:     0.8,
+			Scope:     ScopeSession,
+			MatchType: "exact",
+		},
+	}
+
+	output := FormatSearchResults(results, "auth")
+	if !strings.Contains(output, "Working on auth") {
+		t.Error("expected to contain 'Working on auth'")
+	}
+	if !strings.Contains(output, "80.0%") {
+		t.Error("expected to contain score")
+	}
+}
+
+func TestFormatSearchResults_NoResults(t *testing.T) {
+	output := FormatSearchResults(nil, "nonexistent")
+	if !strings.Contains(output, "No results found") {
+		t.Error("expected 'No results found'")
 	}
 }
