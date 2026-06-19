@@ -1,7 +1,8 @@
-package tools
+package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -11,36 +12,21 @@ import (
 	"miniclaudecode-go/microlisp"
 )
 
-// LispToolsTool provides a backup toolset that uses the Lisp interpreter
-// for core file/text operations when Go-native tools are unavailable.
-type LispToolsTool struct{}
+var lispToolsLoaded bool
+var lispToolsMu sync.Mutex
 
-// lispToolsLoaded tracks whether lispToolsLib has been loaded into globalEnv.
-// ResetGlobalEnv clears all function definitions, so we need to reload.
-// Call ResetLispToolsState() after any ResetGlobalEnv call.
-// resolvePath converts Unix-style paths (especially /tmp) to native paths on Windows.
+type evalResult struct {
+	output string
+	err    error
+}
+
 func resolvePath(path string) string {
 	if runtime.GOOS == "windows" {
-		return PosixToWindowsPath(path)
+		return posixToWindowsPath(path)
 	}
 	return path
 }
 
-var lispToolsLoaded bool
-var lispToolsMu sync.Mutex
-
-// ResetLispToolsState clears the library loaded flag so the library
-// will be reloaded on the next ExecuteContext call. Call this after
-// any microlisp.ResetGlobalEnv() to ensure stdlib functions are restored.
-func ResetLispToolsState() {
-	lispToolsMu.Lock()
-	defer lispToolsMu.Unlock()
-	lispToolsLoaded = false
-}
-
-// ensureLispToolsLoaded loads lispToolsLib if not already loaded.
-// It is context-aware: if the context is cancelled while waiting for evalMu,
-// it returns an error instead of blocking indefinitely.
 func ensureLispToolsLoaded(ctx context.Context) error {
 	lispToolsMu.Lock()
 	if lispToolsLoaded {
@@ -49,11 +35,6 @@ func ensureLispToolsLoaded(ctx context.Context) error {
 	}
 	lispToolsMu.Unlock()
 
-	// Load in a goroutine so we can respect context cancellation.
-	// SafeEvalWithLimits acquires evalMu; if held by another caller, this
-	// would block indefinitely without the goroutine + select pattern.
-	// We use DefaultLimits() (30s deadline) — the context timeout provides
-	// user-visible cancellation while the 30s deadline prevents infinite hangs.
 	ch := make(chan error, 1)
 	go func() {
 		defer func() {
@@ -78,178 +59,152 @@ func ensureLispToolsLoaded(ctx context.Context) error {
 	}
 }
 
-func (*LispToolsTool) Name() string { return "lisp_tools" }
-
-func (*LispToolsTool) Description() string {
-	return "Backup file/text toolset powered by the Lisp interpreter. " +
-		"Provides read, write, edit, multi_edit, list, search, glob, mkdir, rm, mv, cp operations. " +
-		"Use when Go-native tools (read_file, write_file, etc.) are unavailable. " +
-		"All logic runs in the Lisp interpreter with resource limits. " +
-		"Search uses substring matching (no regex)."
-}
-
-func (*LispToolsTool) InputSchema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"operation": map[string]any{
-				"type":        "string",
-				"enum":        []string{"read", "write", "edit", "multi_edit", "list", "search", "glob", "mkdir", "rm", "mv", "cp"},
-				"description": "Operation to perform: read (read file), write (write file), edit (string replace), multi_edit (batch edits), list (directory listing), search (text search), glob (file matching), mkdir (create directory), rm (delete file), mv (move/rename), cp (copy file).",
+func RegisterToolsTool(s *MCPServer) {
+	s.RegisterTool(ToolDef{
+		Name: "lisp_tools",
+		Description: "Backup file/text toolset powered by the Lisp interpreter. " +
+			"Provides read, write, edit, multi_edit, list, search, glob, mkdir, rm, mv, cp operations. " +
+			"Use when Go-native tools (read_file, write_file, etc.) are unavailable. " +
+			"All logic runs in the Lisp interpreter with resource limits. " +
+			"Search uses substring matching (no regex).",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"operation": map[string]any{
+					"type":        "string",
+					"enum":        []string{"read", "write", "edit", "multi_edit", "list", "search", "glob", "mkdir", "rm", "mv", "cp"},
+					"description": "Operation to perform: read (read file), write (write file), edit (string replace), multi_edit (batch edits), list (directory listing), search (text search), glob (file matching), mkdir (create directory), rm (delete file), mv (move/rename), cp (copy file).",
+				},
+				"file_path": map[string]any{
+					"type":        "string",
+					"description": "File path for read, write, edit, multi_edit operations.",
+				},
+				"content": map[string]any{
+					"type":        "string",
+					"description": "Content to write (for write operation).",
+				},
+				"old_string": map[string]any{
+					"type":        "string",
+					"description": "Text to find and replace (for edit operation).",
+				},
+				"new_string": map[string]any{
+					"type":        "string",
+					"description": "Replacement text (for edit operation).",
+				},
+				"replace_all": map[string]any{
+					"type":        "boolean",
+					"description": "Replace all occurrences of old_string (default: false, for edit).",
+				},
+				"edits": map[string]any{
+					"type":        "array",
+					"description": "Array of {old_string, new_string, replace_all?} for multi_edit operation.",
+				},
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Search root directory (required for list, search, glob, mkdir, rm; defaults to '.' for search and glob if omitted).",
+				},
+				"pattern": map[string]any{
+					"type":        "string",
+					"description": "Required for search (substring) and glob (shell wildcard pattern, e.g. '*.go').",
+				},
+				"recursive": map[string]any{
+					"type":        "boolean",
+					"description": "Recurse into subdirectories (for list and glob, default: false).",
+				},
+				"max_entries": map[string]any{
+					"type":        "integer",
+					"description": "Max entries to return (for list, default: 200).",
+				},
+				"show_hidden": map[string]any{
+					"type":        "boolean",
+					"description": "Include hidden/dot files (for list, default: false).",
+				},
+				"case_insensitive": map[string]any{
+					"type":        "boolean",
+					"description": "Case-insensitive search (for search, default: false).",
+				},
+				"output_mode": map[string]any{
+					"type":        "string",
+					"enum":        []string{"content", "files_with_matches", "count"},
+					"description": "Search output format (for search, default: content).",
+				},
+				"offset": map[string]any{
+					"type":        "integer",
+					"description": "1-based line number to start reading (for read, default: 1).",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Max lines to read (for read, default: 2000).",
+				},
+				"destination": map[string]any{
+					"type":        "string",
+					"description": "Destination path (for mv and cp operations).",
+				},
+				"head_limit": map[string]any{
+					"type":        "integer",
+					"description": "Max results to return (for glob and search, default: 100).",
+				},
+				"glob": map[string]any{
+					"type":        "string",
+					"description": "File name filter for search, e.g. '*.go'.",
+				},
 			},
-			"file_path": map[string]any{
-				"type":        "string",
-				"description": "File path for read, write, edit, multi_edit operations.",
-			},
-			"content": map[string]any{
-				"type":        "string",
-				"description": "Content to write (for write operation).",
-			},
-			"old_string": map[string]any{
-				"type":        "string",
-				"description": "Text to find and replace (for edit operation).",
-			},
-			"new_string": map[string]any{
-				"type":        "string",
-				"description": "Replacement text (for edit operation).",
-			},
-			"replace_all": map[string]any{
-				"type":        "boolean",
-				"description": "Replace all occurrences of old_string (default: false, for edit).",
-			},
-			"edits": map[string]any{
-				"type":        "array",
-				"description": "Array of {old_string, new_string, replace_all?} for multi_edit operation.",
-			},
-			"path": map[string]any{
-				"type":        "string",
-				"description": "Search root directory (required for list, search, glob, mkdir, rm; defaults to '.' for search and glob if omitted).",
-			},
-			"pattern": map[string]any{
-				"type":        "string",
-				"description": "Required for search (substring) and glob (shell wildcard pattern, e.g. '*.go').",
-			},
-			"recursive": map[string]any{
-				"type":        "boolean",
-				"description": "Recurse into subdirectories (for list and glob, default: false).",
-			},
-			"max_entries": map[string]any{
-				"type":        "integer",
-				"description": "Max entries to return (for list, default: 200).",
-			},
-			"show_hidden": map[string]any{
-				"type":        "boolean",
-				"description": "Include hidden/dot files (for list, default: false).",
-			},
-			"case_insensitive": map[string]any{
-				"type":        "boolean",
-				"description": "Case-insensitive search (for search, default: false).",
-			},
-			"output_mode": map[string]any{
-				"type":        "string",
-				"enum":        []string{"content", "files_with_matches", "count"},
-				"description": "Search output format (for search, default: content).",
-			},
-			"offset": map[string]any{
-				"type":        "integer",
-				"description": "1-based line number to start reading (for read, default: 1).",
-			},
-			"limit": map[string]any{
-				"type":        "integer",
-				"description": "Max lines to read (for read, default: 2000).",
-			},
-			"destination": map[string]any{
-				"type":        "string",
-				"description": "Destination path (for mv and cp operations).",
-			},
-			"head_limit": map[string]any{
-				"type":        "integer",
-				"description": "Max results to return (for glob and search, default: 100).",
-			},
-			"glob": map[string]any{
-				"type":        "string",
-				"description": "File name filter for search, e.g. '*.go'.",
-			},
+			"required": []string{"operation"},
 		},
-		"required": []string{"operation"},
-	}
+	}, handleTools)
 }
 
-func (t *LispToolsTool) CheckPermissions(params map[string]any) PermissionResult {
-	op, _ := params["operation"].(string)
-	switch op {
-	case "write", "edit", "multi_edit", "mkdir":
-		path, _ := params["file_path"].(string)
-		if path == "" {
-			path, _ = params["path"].(string)
-		}
-		return CheckPathSafetyForAutoEdit(path)
-	default:
-		return PermissionResultPassthrough()
-	}
-}
-
-func (t *LispToolsTool) ExecuteContext(ctx context.Context, params map[string]any) (result ToolResult) {
-	defer func() {
-		if r := recover(); r != nil {
-			result = ToolResult{Output: fmt.Sprintf("Error: lisp_tools panic: %v", r), IsError: true}
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return ToolResult{Output: fmt.Sprintf("Error: lisp_tools timed out: %v", ctx.Err()), IsError: true}
-	default:
+func handleTools(params json.RawMessage) (ToolCallResult, error) {
+	var p map[string]any
+	if err := json.Unmarshal(params, &p); err != nil {
+		return textResult("Invalid params: "+err.Error(), true), nil
 	}
 
-	// Load helper library (idempotent: loaded once, reloaded after ResetGlobalEnv)
+	ctx := context.Background()
+
 	if err := ensureLispToolsLoaded(ctx); err != nil {
-		return ToolResult{Output: fmt.Sprintf("Error: failed to load lisp_tools library: %v", err), IsError: true}
+		return textResult(fmt.Sprintf("Error: failed to load lisp_tools library: %v", err), true), nil
 	}
 
-	op, _ := params["operation"].(string)
+	op, _ := p["operation"].(string)
 	if op == "" {
-		return ToolResult{Output: "Error: operation is required", IsError: true}
+		return textResult("Error: operation is required", true), nil
 	}
 
 	switch op {
 	case "read":
-		return t.doRead(ctx, params)
+		return doRead(ctx, p), nil
 	case "write":
-		return t.doWrite(ctx, params)
+		return doWrite(ctx, p), nil
 	case "edit":
-		return t.doEdit(ctx, params)
+		return doEdit(ctx, p), nil
 	case "multi_edit":
-		return t.doMultiEdit(ctx, params)
+		return doMultiEdit(ctx, p), nil
 	case "list":
-		return t.doList(ctx, params)
+		return doList(ctx, p), nil
 	case "search":
-		return t.doSearch(ctx, params)
+		return doSearch(ctx, p), nil
 	case "glob":
-		return t.doGlob(ctx, params)
+		return doGlob(ctx, p), nil
 	case "mkdir":
-		return t.doMkdir(ctx, params)
+		return doMkdir(ctx, p), nil
 	case "rm":
-		return t.doRm(ctx, params)
+		return doRm(ctx, p), nil
 	case "mv":
-		return t.doMv(ctx, params)
+		return doMv(ctx, p), nil
 	case "cp":
-		return t.doCp(ctx, params)
+		return doCp(ctx, p), nil
 	default:
-		return ToolResult{Output: fmt.Sprintf("Error: unknown operation: %s", op), IsError: true}
+		return textResult(fmt.Sprintf("Error: unknown operation: %s", op), true), nil
 	}
-}
-
-func (t *LispToolsTool) Execute(params map[string]any) ToolResult {
-	return t.ExecuteContext(context.Background(), params)
 }
 
 // -------- Operation implementations --------
 
-func (t *LispToolsTool) doRead(ctx context.Context, params map[string]any) ToolResult {
+func doRead(ctx context.Context, params map[string]any) ToolCallResult {
 	path, _ := params["file_path"].(string)
 	if path == "" {
-		return ToolResult{Output: "Error: file_path is required for read", IsError: true}
+		return textResult("Error: file_path is required for read", true)
 	}
 	path = resolvePath(path)
 	offset := 1
@@ -261,56 +216,56 @@ func (t *LispToolsTool) doRead(ctx context.Context, params map[string]any) ToolR
 		limit = v
 	}
 	expr := fmt.Sprintf(`(lisp-read-file %s %d %d)`, lispStr(path), offset, limit)
-	return t.evalCapture(ctx, expr)
+	return evalCapture(ctx, expr)
 }
 
-func (t *LispToolsTool) doWrite(ctx context.Context, params map[string]any) ToolResult {
+func doWrite(ctx context.Context, params map[string]any) ToolCallResult {
 	path, _ := params["file_path"].(string)
 	if path == "" {
-		return ToolResult{Output: "Error: file_path is required for write", IsError: true}
+		return textResult("Error: file_path is required for write", true)
 	}
 	path = resolvePath(path)
 	content, hasContent := params["content"]
 	if !hasContent {
-		return ToolResult{Output: "Error: content is required for write", IsError: true}
+		return textResult("Error: content is required for write", true)
 	}
 	contentStr, _ := content.(string)
 	expr := fmt.Sprintf(`(lisp-write-file %s %s)`, lispStr(path), lispStr(contentStr))
-	return t.evalVoid(ctx, expr)
+	return evalVoid(ctx, expr)
 }
 
-func (t *LispToolsTool) doEdit(ctx context.Context, params map[string]any) ToolResult {
+func doEdit(ctx context.Context, params map[string]any) ToolCallResult {
 	path, _ := params["file_path"].(string)
 	if path == "" {
-		return ToolResult{Output: "Error: file_path is required for edit", IsError: true}
+		return textResult("Error: file_path is required for edit", true)
 	}
 	path = resolvePath(path)
 	oldStr, _ := params["old_string"].(string)
 	newStr, _ := params["new_string"].(string)
 	if oldStr == "" {
-		return ToolResult{Output: "Error: old_string is required for edit and must be non-empty", IsError: true}
+		return textResult("Error: old_string is required for edit and must be non-empty", true)
 	}
 	replaceAll := "nil"
 	if v, ok := params["replace_all"].(bool); ok && v {
 		replaceAll = "t"
 	}
 	expr := fmt.Sprintf(`(lisp-edit-file %s %s %s %s)`, lispStr(path), lispStr(oldStr), lispStr(newStr), replaceAll)
-	return t.evalVoid(ctx, expr)
+	return evalVoid(ctx, expr)
 }
 
-func (t *LispToolsTool) doMultiEdit(ctx context.Context, params map[string]any) ToolResult {
+func doMultiEdit(ctx context.Context, params map[string]any) ToolCallResult {
 	path, _ := params["file_path"].(string)
 	if path == "" {
-		return ToolResult{Output: "Error: file_path is required for multi_edit", IsError: true}
+		return textResult("Error: file_path is required for multi_edit", true)
 	}
 	path = resolvePath(path)
 	editsVal, ok := params["edits"]
 	if !ok {
-		return ToolResult{Output: "Error: edits array is required for multi_edit", IsError: true}
+		return textResult("Error: edits array is required for multi_edit", true)
 	}
 	editsArr, ok := editsVal.([]any)
 	if !ok || len(editsArr) == 0 {
-		return ToolResult{Output: "Error: edits must be a non-empty array", IsError: true}
+		return textResult("Error: edits must be a non-empty array", true)
 	}
 	var editItems []string
 	for _, e := range editsArr {
@@ -328,17 +283,17 @@ func (t *LispToolsTool) doMultiEdit(ctx context.Context, params map[string]any) 
 	}
 	editsList := fmt.Sprintf(`(list %s)`, strings.Join(editItems, " "))
 	expr := fmt.Sprintf(`(lisp-multi-edit %s %s)`, lispStr(path), editsList)
-	return t.evalVoid(ctx, expr)
+	return evalVoid(ctx, expr)
 }
 
-func (t *LispToolsTool) doList(ctx context.Context, params map[string]any) ToolResult {
+func doList(ctx context.Context, params map[string]any) ToolCallResult {
 	path, _ := params["path"].(string)
 	if path == "" {
 		path = "."
 	}
 	path = resolvePath(path)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return ToolResult{Output: fmt.Sprintf("Error: no such directory: %s", path), IsError: true}
+		return textResult(fmt.Sprintf("Error: no such directory: %s", path), true)
 	}
 	recursive := "nil"
 	if v, ok := params["recursive"].(bool); ok && v {
@@ -353,13 +308,13 @@ func (t *LispToolsTool) doList(ctx context.Context, params map[string]any) ToolR
 		showHidden = "t"
 	}
 	expr := fmt.Sprintf(`(lisp-list-dir %s %s %d %s)`, lispStr(path), recursive, maxEntries, showHidden)
-	return t.evalCapture(ctx, expr)
+	return evalCapture(ctx, expr)
 }
 
-func (t *LispToolsTool) doSearch(ctx context.Context, params map[string]any) ToolResult {
+func doSearch(ctx context.Context, params map[string]any) ToolCallResult {
 	pattern, _ := params["pattern"].(string)
 	if pattern == "" {
-		return ToolResult{Output: "Error: pattern is required for search", IsError: true}
+		return textResult("Error: pattern is required for search", true)
 	}
 	path, _ := params["path"].(string)
 	if path == "" {
@@ -384,13 +339,13 @@ func (t *LispToolsTool) doSearch(ctx context.Context, params map[string]any) Too
 	}
 	expr := fmt.Sprintf(`(lisp-search %s %s %s %s %d %s)`,
 		lispStr(pattern), lispStr(path), lispStr(outputMode), caseInsensitive, headLimit, globFilter)
-	return t.evalCapture(ctx, expr)
+	return evalCapture(ctx, expr)
 }
 
-func (t *LispToolsTool) doGlob(ctx context.Context, params map[string]any) ToolResult {
+func doGlob(ctx context.Context, params map[string]any) ToolCallResult {
 	pattern, _ := params["pattern"].(string)
 	if pattern == "" {
-		return ToolResult{Output: "Error: pattern is required for glob", IsError: true}
+		return textResult("Error: pattern is required for glob", true)
 	}
 	path, _ := params["path"].(string)
 	if path == "" {
@@ -398,20 +353,20 @@ func (t *LispToolsTool) doGlob(ctx context.Context, params map[string]any) ToolR
 	}
 	path = resolvePath(path)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return ToolResult{Output: fmt.Sprintf("Error: no such directory: %s", path), IsError: true}
+		return textResult(fmt.Sprintf("Error: no such directory: %s", path), true)
 	}
 	headLimit := 100
 	if v, ok := paramInt(params["head_limit"]); ok {
 		headLimit = v
 	}
 	expr := fmt.Sprintf(`(lisp-glob %s %s %d)`, lispStr(pattern), lispStr(path), headLimit)
-	return t.evalCapture(ctx, expr)
+	return evalCapture(ctx, expr)
 }
 
-func (t *LispToolsTool) doMkdir(ctx context.Context, params map[string]any) ToolResult {
+func doMkdir(ctx context.Context, params map[string]any) ToolCallResult {
 	path, _ := params["path"].(string)
 	if path == "" {
-		return ToolResult{Output: "Error: path is required for mkdir", IsError: true}
+		return textResult("Error: path is required for mkdir", true)
 	}
 	path = resolvePath(path)
 	recursive := "nil"
@@ -419,66 +374,63 @@ func (t *LispToolsTool) doMkdir(ctx context.Context, params map[string]any) Tool
 		recursive = "t"
 	}
 	expr := fmt.Sprintf(`(lisp-mkdir %s %s)`, lispStr(path), recursive)
-	return t.evalVoid(ctx, expr)
+	return evalVoid(ctx, expr)
 }
 
-func (t *LispToolsTool) doRm(ctx context.Context, params map[string]any) ToolResult {
+func doRm(ctx context.Context, params map[string]any) ToolCallResult {
 	path, _ := params["path"].(string)
 	if path == "" {
 		path, _ = params["file_path"].(string)
 	}
 	if path == "" {
-		return ToolResult{Output: "Error: path is required for rm", IsError: true}
+		return textResult("Error: path is required for rm", true)
 	}
 	path = resolvePath(path)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return ToolResult{Output: fmt.Sprintf("Error: no such file or directory: %s", path), IsError: true}
+		return textResult(fmt.Sprintf("Error: no such file or directory: %s", path), true)
 	}
 	expr := fmt.Sprintf(`(lisp-rm %s)`, lispStr(path))
-	return t.evalVoid(ctx, expr)
+	return evalVoid(ctx, expr)
 }
 
-func (t *LispToolsTool) doMv(ctx context.Context, params map[string]any) ToolResult {
+func doMv(ctx context.Context, params map[string]any) ToolCallResult {
 	src, _ := params["file_path"].(string)
 	if src == "" {
 		src, _ = params["path"].(string)
 	}
 	dst, _ := params["destination"].(string)
 	if src == "" || dst == "" {
-		return ToolResult{Output: "Error: file_path and destination are required for mv", IsError: true}
+		return textResult("Error: file_path and destination are required for mv", true)
 	}
 	src = resolvePath(src)
 	dst = resolvePath(dst)
 	if _, err := os.Stat(src); os.IsNotExist(err) {
-		return ToolResult{Output: fmt.Sprintf("Error: no such file or directory: %s", src), IsError: true}
+		return textResult(fmt.Sprintf("Error: no such file or directory: %s", src), true)
 	}
 	expr := fmt.Sprintf(`(lisp-mv %s %s)`, lispStr(src), lispStr(dst))
-	return t.evalVoid(ctx, expr)
+	return evalVoid(ctx, expr)
 }
 
-func (t *LispToolsTool) doCp(ctx context.Context, params map[string]any) ToolResult {
+func doCp(ctx context.Context, params map[string]any) ToolCallResult {
 	src, _ := params["file_path"].(string)
 	if src == "" {
 		src, _ = params["path"].(string)
 	}
 	dst, _ := params["destination"].(string)
 	if src == "" || dst == "" {
-		return ToolResult{Output: "Error: file_path and destination are required for cp", IsError: true}
+		return textResult("Error: file_path and destination are required for cp", true)
 	}
 	src = resolvePath(src)
 	dst = resolvePath(dst)
 	expr := fmt.Sprintf(`(lisp-cp %s %s)`, lispStr(src), lispStr(dst))
-	return t.evalVoid(ctx, expr)
+	return evalVoid(ctx, expr)
 }
 
 // -------- Unquote helper --------
 
-// unquoteLispString strips outer quotes from a Lisp string literal
-// returned by SafeEvalWithLimits ToString(), e.g. "\"ok\"" -> "ok".
 func unquoteLispString(s string) string {
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		inner := s[1 : len(s)-1]
-		// Unescape common Lisp string escapes
 		inner = strings.ReplaceAll(inner, `\"`, `"`)
 		inner = strings.ReplaceAll(inner, `\\`, `\`)
 		return inner
@@ -501,10 +453,8 @@ func paramInt(v any) (int, bool) {
 
 // -------- Eval helpers --------
 
-func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult {
+func evalCapture(ctx context.Context, expr string) ToolCallResult {
 	limits := microlisp.UnlimitedLimits()
-	// Wire context cancellation into CancelChan so stepCheck() aborts
-	// mid-evaluation when ctx.Done() fires, releasing evalMu promptly.
 	cancelChan := microlisp.NewCancelChannel()
 	limits.CancelChan = cancelChan
 
@@ -522,7 +472,6 @@ func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult
 		}
 		output := captured
 		if ret != "" && ret != "NIL" {
-			// Strip outer quotes from Lisp string literals
 			ret = unquoteLispString(ret)
 			if output != "" {
 				output += "\n" + ret
@@ -534,28 +483,25 @@ func (t *LispToolsTool) evalCapture(ctx context.Context, expr string) ToolResult
 	}()
 	select {
 	case <-ctx.Done():
-		close(cancelChan) // Trigger stepCheck() abort to release evalMu
-		return ToolResult{Output: "Error: lisp_tools timed out", IsError: true}
+		close(cancelChan)
+		return textResult("Error: lisp_tools timed out", true)
 	case r := <-ch:
 		if r.err != nil {
-			return ToolResult{Output: fmt.Sprintf("Error: %v", r.err), IsError: true}
+			return textResult(fmt.Sprintf("Error: %v", r.err), true)
 		}
 		result := r.output
 		if result == "" {
 			result = "NIL"
 		}
-		// Check if the Lisp function returned an error string
 		if strings.HasPrefix(result, "Error:") {
-			return ToolResult{Output: result, IsError: true}
+			return textResult(result, true)
 		}
-		return ToolResult{Output: result}
+		return textResult(result, false)
 	}
 }
 
-func (t *LispToolsTool) evalVoid(ctx context.Context, expr string) ToolResult {
+func evalVoid(ctx context.Context, expr string) ToolCallResult {
 	limits := microlisp.UnlimitedLimits()
-	// Wire context cancellation into CancelChan so stepCheck() aborts
-	// mid-evaluation when ctx.Done() fires, releasing evalMu promptly.
 	cancelChan := microlisp.NewCancelChannel()
 	limits.CancelChan = cancelChan
 
@@ -571,30 +517,27 @@ func (t *LispToolsTool) evalVoid(ctx context.Context, expr string) ToolResult {
 	}()
 	select {
 	case <-ctx.Done():
-		close(cancelChan) // Trigger stepCheck() abort to release evalMu
-		return ToolResult{Output: "Error: lisp_tools timed out", IsError: true}
+		close(cancelChan)
+		return textResult("Error: lisp_tools timed out", true)
 	case r := <-ch:
 		if r.err != nil {
-			return ToolResult{Output: fmt.Sprintf("Error: %v", r.err), IsError: true}
+			return textResult(fmt.Sprintf("Error: %v", r.err), true)
 		}
 		result := r.output
 		if result == "" {
 			result = "ok"
 		} else {
-			// Strip outer quotes from Lisp string literals returned by SafeEvalWithLimits
 			result = unquoteLispString(result)
 		}
-		// Check if the Lisp function returned an error string
 		if strings.HasPrefix(result, "Error:") {
-			return ToolResult{Output: result, IsError: true}
+			return textResult(result, true)
 		}
-		return ToolResult{Output: result}
+		return textResult(result, false)
 	}
 }
 
 // -------- Lisp string escaping --------
 
-// lispStr returns a Lisp string literal with proper escaping.
 func lispStr(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -619,9 +562,6 @@ func lispStr(s string) string {
 }
 
 // -------- Embedded Lisp helper library --------
-// NOTE: microlisp reader upcases all symbols. All identifiers must be lowercase
-// in source (reader upcases them). No named-let (let loop) — use define for
-// recursion. No let* — use nested let. No &optional — use fixed params.
 
 const lispToolsLib = `
 ;; ===== Lisp Tools Helper Library =====

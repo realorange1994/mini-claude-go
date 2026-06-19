@@ -1,5 +1,12 @@
 {
   "mcpServers": {
+    "microlisp": {
+      "command": "microlisp-mcp",
+      "args": [],
+      "env": {
+        "ANTHROPIC_API_KEY": "your-api-key-here"
+      }
+    },
     "minimax": {
       "command": "node",
       "args": ["path/to/minimax-mcp/server.js"],
