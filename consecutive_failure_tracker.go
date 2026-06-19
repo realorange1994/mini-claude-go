@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"sync"
 )
 
 // ConsecutiveCallTracker tracks consecutive identical tool call failures
@@ -125,4 +126,65 @@ func containsHelper(s, substr string) bool {
 func (t *ConsecutiveCallTracker) Clear() {
 	t.lastMalformed = make(map[string]string)
 	t.lastGateRejection = make(map[string]string)
+}
+
+// ─── Doom Loop Detection (MiMo-Code pattern) ───────────────────────────────
+
+// DoomLoopDetector tracks the last N tool calls and detects if the model
+// is stuck repeating the same tool+input combination. MiMo-Code pattern:
+// if last 3 calls are identical tool+input, interrupt with a permission ask.
+type DoomLoopDetector struct {
+	mu       sync.Mutex
+	recent   []toolCallFingerprint
+	maxRecent int
+	threshold int // how many identical calls trigger doom loop
+}
+
+type toolCallFingerprint struct {
+	toolName string
+	argsHash string
+}
+
+// NewDoomLoopDetector creates a new detector.
+func NewDoomLoopDetector() *DoomLoopDetector {
+	return &DoomLoopDetector{
+		recent:    make([]toolCallFingerprint, 0, 5),
+		maxRecent: 5,
+		threshold: 3,
+	}
+}
+
+// CheckRecord records a tool call and returns true if doom loop detected.
+func (d *DoomLoopDetector) CheckRecord(toolName string, args map[string]any) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	fp := toolCallFingerprint{
+		toolName: toolName,
+		argsHash: fingerprintArgs(args),
+	}
+
+	d.recent = append(d.recent, fp)
+	if len(d.recent) > d.maxRecent {
+		d.recent = d.recent[1:]
+	}
+
+	// Count consecutive identical calls from the end
+	count := 0
+	for i := len(d.recent) - 1; i >= 0; i-- {
+		if d.recent[i].toolName == fp.toolName && d.recent[i].argsHash == fp.argsHash {
+			count++
+		} else {
+			break
+		}
+	}
+
+	return count >= d.threshold
+}
+
+// Clear resets the detector state.
+func (d *DoomLoopDetector) Clear() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.recent = make([]toolCallFingerprint, 0, d.maxRecent)
 }

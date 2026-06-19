@@ -1594,3 +1594,71 @@ func TestEstimatedTokensAnchorInvalidAfterCompaction(t *testing.T) {
 		t.Error("estimate should be positive after compaction")
 	}
 }
+
+// ─── Pressure Level Tests ────────────────────────────────────────────────────
+
+func TestPressureLevel_Empty(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	level := ctx.PressureLevel(200000)
+	if level != 0 {
+		t.Errorf("expected pressure 0 for empty context, got %d", level)
+	}
+}
+
+func TestPressureLevel_Low(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	// Add enough content to reach ~60% of 100 tokens
+	for i := 0; i < 20; i++ {
+		ctx.AddUserMessage(strings.Repeat("hello world ", 10))
+	}
+
+	level := ctx.PressureLevel(100)
+	if level < 1 {
+		t.Errorf("expected pressure >= 1, got %d", level)
+	}
+}
+
+func TestPressureLevel_InvalidMax(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	level := ctx.PressureLevel(0)
+	if level != 0 {
+		t.Errorf("expected pressure 0 for invalid max, got %d", level)
+	}
+}
+
+func TestUpdateAndGetPressureLevel(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ctx.UpdatePressureLevel(200000)
+	level := ctx.GetPressureLevel()
+	if level != 0 {
+		t.Errorf("expected pressure 0, got %d", level)
+	}
+}
+
+func TestEstimatedTokenRatio(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ratio := ctx.EstimatedTokenRatio(200000)
+	if ratio != 0 {
+		t.Errorf("expected 0 for empty context, got %f", ratio)
+	}
+}
+
+func TestEstimatedTokenRatio_InvalidMax(t *testing.T) {
+	cfg := DefaultConfig()
+	ctx := NewConversationContext(cfg)
+
+	ratio := ctx.EstimatedTokenRatio(0)
+	if ratio != 0 {
+		t.Errorf("expected 0 for invalid max, got %f", ratio)
+	}
+}

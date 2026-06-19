@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -236,6 +237,10 @@ type SessionMemory struct {
 	projectEntries []MemoryEntry // project-level rules
 	projectPath    string        // {projectDir}/.claude/memory/project.md
 	projectDirty   bool
+
+	// Session checkpoint (MiMo-Code pattern)
+	checkpointDir    string // {projectDir}/.claude/checkpoints/
+	lastCheckpointID string
 }
 
 // NewSessionMemory creates a new SessionMemory for the given project.
@@ -274,6 +279,7 @@ func NewSessionMemoryWithPaths(projectDir, globalPath string) *SessionMemory {
 		filePath:       sessionPath,
 		globalPath:     globalPath,
 		projectPath:    projectPath,
+		checkpointDir:  filepath.Join(projectDir, ".claude", "checkpoints"),
 		stopCh:         make(chan struct{}),
 		maxEntries:     100,
 	}
@@ -2698,6 +2704,166 @@ func (sm *SessionMemory) Stop() {
 		close(sm.stopCh)
 	})
 	sm.wg.Wait()
+}
+
+// ─── Session Checkpoint (MiMo-Code pattern) ─────────────────────────────────
+
+// SessionCheckpoint represents a point-in-time snapshot of session state.
+type SessionCheckpoint struct {
+	ID        string                 `json:"id"`
+	Timestamp time.Time              `json:"timestamp"`
+	Entries   []MemoryEntry          `json:"entries"`
+	Tasks     map[string]interface{} `json:"tasks,omitempty"`
+	Metadata  map[string]string      `json:"metadata,omitempty"`
+}
+
+// WriteCheckpoint writes the current session state to a checkpoint file.
+func (sm *SessionMemory) WriteCheckpoint(tasks interface{}) (string, error) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if sm.checkpointDir == "" {
+		return "", fmt.Errorf("checkpoint directory not configured")
+	}
+
+	// Ensure checkpoint directory exists
+	if err := os.MkdirAll(sm.checkpointDir, 0755); err != nil {
+		return "", fmt.Errorf("create checkpoint dir: %w", err)
+	}
+
+	// Generate checkpoint ID
+	checkpointID := fmt.Sprintf("cp-%s", time.Now().Format("20060102-150405"))
+
+	checkpoint := SessionCheckpoint{
+		ID:        checkpointID,
+		Timestamp: time.Now(),
+		Entries:   sm.entries,
+		Metadata: map[string]string{
+			"session_entries":  fmt.Sprintf("%d", len(sm.entries)),
+			"project_entries":  fmt.Sprintf("%d", len(sm.projectEntries)),
+			"global_entries":   fmt.Sprintf("%d", len(sm.globalEntries)),
+		},
+	}
+
+	// Write checkpoint file
+	data, err := json.MarshalIndent(checkpoint, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal checkpoint: %w", err)
+	}
+
+	checkpointPath := filepath.Join(sm.checkpointDir, checkpointID+".json")
+	tmpPath := checkpointPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return "", fmt.Errorf("write checkpoint: %w", err)
+	}
+	if err := os.Rename(tmpPath, checkpointPath); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("rename checkpoint: %w", err)
+	}
+
+	sm.lastCheckpointID = checkpointID
+	return checkpointID, nil
+}
+
+// LoadCheckpoint loads a checkpoint by ID.
+func (sm *SessionMemory) LoadCheckpoint(checkpointID string) (*SessionCheckpoint, error) {
+	checkpointPath := filepath.Join(sm.checkpointDir, checkpointID+".json")
+	data, err := os.ReadFile(checkpointPath)
+	if err != nil {
+		return nil, fmt.Errorf("read checkpoint: %w", err)
+	}
+
+	var checkpoint SessionCheckpoint
+	if err := json.Unmarshal(data, &checkpoint); err != nil {
+		return nil, fmt.Errorf("unmarshal checkpoint: %w", err)
+	}
+
+	return &checkpoint, nil
+}
+
+// ListCheckpoints returns available checkpoint IDs.
+func (sm *SessionMemory) ListCheckpoints() []string {
+	if sm.checkpointDir == "" {
+		return nil
+	}
+
+	entries, err := os.ReadDir(sm.checkpointDir)
+	if err != nil {
+		return nil
+	}
+
+	var checkpoints []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			id := strings.TrimSuffix(e.Name(), ".json")
+			checkpoints = append(checkpoints, id)
+		}
+	}
+
+	sort.Slice(checkpoints, func(i, j int) bool {
+		return checkpoints[i] > checkpoints[j] // newest first
+	})
+
+	return checkpoints
+}
+
+// RevertToCheckpoint reverts session state to a checkpoint.
+func (sm *SessionMemory) RevertToCheckpoint(checkpointID string) error {
+	checkpoint, err := sm.LoadCheckpoint(checkpointID)
+	if err != nil {
+		return err
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.entries = checkpoint.Entries
+	sm.dirty = true
+	sm.lastCheckpointID = checkpointID
+
+	return nil
+}
+
+// GetCheckpointSummary returns a summary of the current session state for checkpointing.
+func (sm *SessionMemory) GetCheckpointSummary() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	var sb strings.Builder
+	sb.WriteString("## Session Checkpoint\n\n")
+
+	// Session entries summary
+	if len(sm.entries) > 0 {
+		sb.WriteString("### Session Notes\n")
+		byCategory := make(map[string][]string)
+		for _, e := range sm.entries {
+			byCategory[e.Category] = append(byCategory[e.Category], e.Content)
+		}
+		for cat, items := range byCategory {
+			sb.WriteString(fmt.Sprintf("- %s: %d items\n", cat, len(items)))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Project entries summary
+	if len(sm.projectEntries) > 0 {
+		sb.WriteString("### Project Rules\n")
+		for _, e := range sm.projectEntries {
+			sb.WriteString(fmt.Sprintf("- [%s] %s\n", e.Category, e.Content))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Global entries summary
+	if len(sm.globalEntries) > 0 {
+		sb.WriteString("### Global Preferences\n")
+		for _, e := range sm.globalEntries {
+			sb.WriteString(fmt.Sprintf("- [%s] %s\n", e.Category, e.Content))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
 
 // ─── Forked Agent Extraction ─────────────────────────────────────────────────

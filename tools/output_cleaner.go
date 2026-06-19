@@ -100,3 +100,60 @@ func TruncateLongLines(raw string, maxLen int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// SmartTruncate performs error-aware head+tail truncation.
+// MiMo-Code pattern: scans tail for error patterns, if found: 70% head + 30% tail;
+// otherwise head-only. This preserves error context when truncating large outputs.
+func SmartTruncate(output string, maxChars int) (string, bool) {
+	if len(output) <= maxChars {
+		return output, false
+	}
+
+	lines := strings.Split(output, "\n")
+
+	// Scan tail for error patterns
+	tailStart := len(lines) * 70 / 100
+	if tailStart < 10 {
+		tailStart = 10
+	}
+	tailHasError := false
+	for i := tailStart; i < len(lines); i++ {
+		lower := strings.ToLower(lines[i])
+		if strings.Contains(lower, "error") || strings.Contains(lower, "fail") ||
+			strings.Contains(lower, "panic") || strings.Contains(lower, "fatal") ||
+			strings.Contains(lower, "exception") || strings.Contains(lower, "traceback") {
+			tailHasError = true
+			break
+		}
+	}
+
+	var result string
+	if tailHasError {
+		// Error in tail: keep 70% head + 30% tail
+		headChars := maxChars * 70 / 100
+		tailChars := maxChars * 30 / 100
+
+		head := truncateToChars(output, headChars)
+		tail := output[len(output)-tailChars:]
+
+		result = head + "\n\n[... truncated — error context preserved from tail ...]\n\n" + tail
+	} else {
+		// No error in tail: head-only truncation
+		result = truncateToChars(output, maxChars) + "\n[... truncated ...]"
+	}
+
+	return result, true
+}
+
+// truncateToChars truncates string to maxChars at a line boundary.
+func truncateToChars(s string, maxChars int) string {
+	if len(s) <= maxChars {
+		return s
+	}
+	truncated := s[:maxChars]
+	// Try to break at newline
+	if idx := strings.LastIndex(truncated, "\n"); idx > maxChars/2 {
+		truncated = truncated[:idx]
+	}
+	return truncated
+}

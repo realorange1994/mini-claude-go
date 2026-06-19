@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"miniclaudecode-go/tools"
@@ -1712,4 +1714,140 @@ func extractPartialResult(output string, n int) string {
 	}
 	result := strings.Join(lines, "\n")
 	return "[partial result, agent was killed]\n" + result
+}
+
+// ─── Completion Gate (MiMo-Code pattern) ────────────────────────────────────
+
+// CompletionGate verifies that a sub-agent has completed its assigned work
+// before allowing it to stop. MiMo-Code pattern: DB truth overrides model
+// self-report — if tasks remain incomplete, the agent is nudged to continue.
+type CompletionGate struct {
+	maxReEntries int
+}
+
+// NewCompletionGate creates a new completion gate.
+func NewCompletionGate() *CompletionGate {
+	return &CompletionGate{
+		maxReEntries: 2, // max nudges before forcing stop
+	}
+}
+
+// CheckCompletion verifies if an agent's output indicates completion.
+// Returns (complete bool, reason string).
+func (g *CompletionGate) CheckCompletion(output string, taskDescription string) (bool, string) {
+	// Check for explicit completion markers
+	if strings.Contains(output, "**Status**: success") ||
+		strings.Contains(output, "**Status**: partial") ||
+		strings.Contains(output, "Task completed") ||
+		strings.Contains(output, "Done.") {
+		return true, ""
+	}
+
+	// Check for explicit non-completion markers
+	if strings.Contains(output, "**Status**: blocked") {
+		return false, "agent reports blocked status"
+	}
+	if strings.Contains(output, "**Status**: failed") {
+		return false, "agent reports failure"
+	}
+
+	// Check for incomplete work indicators
+	incompleteMarkers := []string{
+		"I still need to",
+		"remaining work",
+		"not yet complete",
+		"TODO:",
+		"FIXME:",
+	}
+	for _, marker := range incompleteMarkers {
+		if strings.Contains(strings.ToLower(output), strings.ToLower(marker)) {
+			return false, fmt.Sprintf("output contains incomplete work indicator: %s", marker)
+		}
+	}
+
+	// Default: assume complete if no indicators
+	return true, ""
+}
+
+// BuildNudgeMessage builds a message to nudge an agent to continue working.
+func (g *CompletionGate) BuildNudgeMessage(reason string, taskDescription string) string {
+	return fmt.Sprintf("Your task is not yet complete. %s\n\nPlease continue working on: %s\n\nWhen finished, explicitly state that the task is complete.", reason, taskDescription)
+}
+
+// ─── Structured Output (MiMo-Code pattern) ──────────────────────────────────
+
+// StructuredOutput forces a sub-agent to return validated JSON.
+// MiMo-Code pattern: output_schema parameter forces agents to return
+// structured data via a dedicated tool.
+type StructuredOutput struct {
+	Schema map[string]any `json:"schema"`
+}
+
+// ValidateOutput validates agent output against a schema.
+// Returns (valid bool, parsed map, error).
+func ValidateOutput(output string, schema map[string]any) (bool, map[string]any, error) {
+	// Try to extract JSON from output
+	jsonStr := extractJSON(output)
+	if jsonStr == "" {
+		return false, nil, fmt.Errorf("no JSON found in output")
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return false, nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	// Basic schema validation (check required fields)
+	if required, ok := schema["required"].([]string); ok {
+		for _, field := range required {
+			if _, exists := result[field]; !exists {
+				return false, result, fmt.Errorf("missing required field: %s", field)
+			}
+		}
+	}
+
+	return true, result, nil
+}
+
+// ─── Agent Health Check (MiMo-Code pattern) ─────────────────────────────────
+
+// AgentHealthCheck monitors sub-agent health and detects stuck agents.
+type AgentHealthCheck struct {
+	mu           sync.Mutex
+	lastActivity map[string]time.Time
+	timeout      time.Duration
+}
+
+// NewAgentHealthCheck creates a new health check.
+func NewAgentHealthCheck(timeout time.Duration) *AgentHealthCheck {
+	return &AgentHealthCheck{
+		lastActivity: make(map[string]time.Time),
+		timeout:      timeout,
+	}
+}
+
+// RecordActivity records activity for an agent.
+func (h *AgentHealthCheck) RecordActivity(agentID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastActivity[agentID] = time.Now()
+}
+
+// IsStuck checks if an agent is stuck (no activity for timeout duration).
+func (h *AgentHealthCheck) IsStuck(agentID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	last, exists := h.lastActivity[agentID]
+	if !exists {
+		return false
+	}
+	return time.Since(last) > h.timeout
+}
+
+// RemoveAgent removes an agent from health tracking.
+func (h *AgentHealthCheck) RemoveAgent(agentID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.lastActivity, agentID)
 }

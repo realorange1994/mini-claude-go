@@ -97,6 +97,15 @@ var (
 		"truncating input", "slot context", "n_ctx_slot",
 		"超过最大长度", "上下文长度", "max input token",
 		"input token", "exceeds the maximum number of input tokens",
+		// MiMo-Code provider-specific patterns
+		"request too large", "payload too large",
+		"maximum_context_length", "context_length_exceeded",
+		"max_context_length", "context_window_exceeded",
+		"token_limit_exceeded", "max_tokens_per_request",
+		"input_too_long", "prompt_too_large",
+		"maximum sequence length", "max_position_embeddings",
+		"total tokens exceeds", "token count exceeds",
+		"request entity too large", "413",
 	}
 
 	modelNotFoundPatterns = []string{

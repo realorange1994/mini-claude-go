@@ -383,6 +383,7 @@ type AgentLoop struct {
 	stormBreaker              *StormBreaker                       // detects and suppresses repeat-loop tool call storms
 	truncatedResultSaver      *TruncatedResultSaver               // saves truncated tool output to disk for recall
 	consecutiveCallTracker    *ConsecutiveCallTracker             // tracks consecutive identical tool call failures for sharper errors
+	doomLoopDetector          *DoomLoopDetector                   // detects doom loops (MiMo-Code pattern)
 	toolListFingerprint       *ToolListFingerprint                // tracks tool list schema hash to detect cache-invalidating drift
 	prefixFingerprint         *PrefixFingerprint                  // tracks system+tools+fewshots hash to detect prefix cache drift
 	foldSummaryPin            *FoldSummaryPin                    // tracks content that must survive compaction (active skills, constraints)
@@ -780,6 +781,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		agent.truncatedResultSaver = NewTruncatedResultSaver(cfg.ProjectDir)
 	}
 	agent.consecutiveCallTracker = NewConsecutiveCallTracker()
+	agent.doomLoopDetector = NewDoomLoopDetector()
 	agent.toolListFingerprint = NewToolListFingerprint()
 	agent.prefixFingerprint = NewPrefixFingerprint()
 	agent.foldSummaryPin = NewFoldSummaryPin()
@@ -994,6 +996,7 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 		agent.truncatedResultSaver = NewTruncatedResultSaver(cfg.ProjectDir)
 	}
 	agent.consecutiveCallTracker = NewConsecutiveCallTracker()
+	agent.doomLoopDetector = NewDoomLoopDetector()
 	agent.toolListFingerprint = NewToolListFingerprint()
 	agent.prefixFingerprint = NewPrefixFingerprint()
 	agent.foldSummaryPin = NewFoldSummaryPin()
@@ -2587,6 +2590,15 @@ func (a *AgentLoop) applyMessageHealing(messages []anthropic.MessageParam) []ant
 	if pruned, dropped := reasoningRetention(messages); pruned > 0 {
 		a.logDebug("[reasoning] pruned %d reasoning blocks (%d chars)\n", pruned, dropped)
 	}
+	// Reasoning pruning (MiMo-Code pattern) - blank old reasoning text to free context
+	// while preserving message structure. Keeps last 3 turns of reasoning intact.
+	if pruned, dropped := pruneOldReasoning(messages, 3); pruned > 0 {
+		a.logDebug("[reasoning] pruned %d old reasoning blocks (%d chars)\n", pruned, dropped)
+	}
+	// Think-only detection - nudge model if it only emits reasoning
+	if detectThinkOnly(messages) {
+		a.logDebug("[reasoning] detected think-only response, will nudge model\n")
+	}
 	// Thinking mode stamping - ensure reasoning_content for thinking models
 	isThinkingMode := strings.Contains(a.config.Model, "reasoner")
 	if stamped := thinkingModeStamping(messages, isThinkingMode); stamped > 0 {
@@ -3708,7 +3720,7 @@ func toolCallArgsTruncated(input []byte) bool {
 func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 	var toolResults []anthropic.ToolResultBlockParam
 
-	// Print all tool calls upfront
+	// Print all tool calls upfront and check for doom loops
 	for _, call := range toolCalls {
 		toolName, _ := call["name"].(string)
 		// Resolve aliases: LLMs often use non-canonical names (bash, read, cat, etc.)
@@ -3723,6 +3735,24 @@ func (a *AgentLoop) executeToolCallsConcurrent(toolCalls []map[string]any) {
 			a.out("  [%s]: %s\n", toolName, inputPreview)
 		} else {
 			a.out("  [%s] %s\n", toolName, inputPreview)
+		}
+
+		// Doom loop detection (MiMo-Code pattern)
+		if a.doomLoopDetector != nil {
+			if a.doomLoopDetector.CheckRecord(toolName, input) {
+				a.out("[doom-loop] Detected repeated %s calls with identical args\n", toolName)
+				// Add a warning to the tool result
+				toolResults = append(toolResults, anthropic.ToolResultBlockParam{
+					ToolUseID: call["id"].(string),
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{
+							Text: fmt.Sprintf("[DOOM LOOP WARNING] You have called %s with identical arguments %d times in a row. STOP and try a different approach.", toolName, 3),
+						}},
+					},
+					IsError: param.NewOpt(true),
+				})
+				continue
+			}
 		}
 	}
 

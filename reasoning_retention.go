@@ -239,3 +239,129 @@ func shrinkJSONLongStrings(jsonStr string, threshold int) (string, int) {
 }
 
 // itoa is defined in json_repair.go
+
+// ─── MiMo-Code Reasoning Improvements ──────────────────────────────────────
+
+// ReasoningStats tracks reasoning token usage across turns.
+type ReasoningStats struct {
+	TotalReasoningTokens int   `json:"total_reasoning_tokens"`
+	TurnsWithReasoning   int   `json:"turns_with_reasoning"`
+	AvgReasoningPerTurn  int   `json:"avg_reasoning_per_turn"`
+	LastReasoningTokens  int   `json:"last_reasoning_tokens"`
+}
+
+// pruneOldReasoning blanks reasoning text in messages older than keepTurns.
+// This frees context space while preserving the message structure.
+// Inspired by MiMo-Code's reasoning pruning in prune.ts.
+func pruneOldReasoning(messages []anthropic.MessageParam, keepTurns int) (int, int) {
+	if keepTurns <= 0 {
+		keepTurns = 3
+	}
+
+	// Find the Nth user message from the end (boundary for keeping reasoning)
+	userCount := 0
+	boundary := len(messages)
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == anthropic.MessageParamRoleUser {
+			userCount++
+			if userCount >= keepTurns {
+				boundary = i
+				break
+			}
+		}
+	}
+
+	prunedCount := 0
+	charsDropped := 0
+
+	for i := 0; i < boundary; i++ {
+		msg := &messages[i]
+		if msg.Role != anthropic.MessageParamRoleAssistant {
+			continue
+		}
+
+		for j := range msg.Content {
+			block := &msg.Content[j]
+			if block.OfThinking != nil && block.OfThinking.Thinking != "" {
+				charsDropped += len(block.OfThinking.Thinking)
+				block.OfThinking.Thinking = "" // Blank, don't remove
+				prunedCount++
+			}
+		}
+	}
+
+	return prunedCount, charsDropped
+}
+
+// detectThinkOnly checks if the last assistant message contains only reasoning
+// (no text, no tool calls). Returns true if the model is "stuck thinking".
+// Inspired by MiMo-Code's classify.ts think-only detection.
+func detectThinkOnly(messages []anthropic.MessageParam) bool {
+	if len(messages) == 0 {
+		return false
+	}
+
+	// Find last assistant message
+	var lastAssistant *anthropic.MessageParam
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == anthropic.MessageParamRoleAssistant {
+			lastAssistant = &messages[i]
+			break
+		}
+	}
+
+	if lastAssistant == nil {
+		return false
+	}
+
+	hasThinking := false
+	hasText := false
+	hasToolUse := false
+
+	for _, block := range lastAssistant.Content {
+		if block.OfThinking != nil {
+			hasThinking = true
+		}
+		if block.OfText != nil && block.OfText.Text != "" {
+			hasText = true
+		}
+		if block.OfToolUse != nil {
+			hasToolUse = true
+		}
+	}
+
+	// Think-only: has reasoning but no text or tool calls
+	return hasThinking && !hasText && !hasToolUse
+}
+
+// getThinkOnlyNudge returns a user message to nudge the model out of think-only mode.
+func getThinkOnlyNudge() string {
+	return "Your previous response contained only reasoning/thinking without any actionable output. Please proceed with your task — use tools, provide text output, or ask for clarification."
+}
+
+// extractReasoningTokens extracts reasoning token count from API response usage.
+// Anthropic returns output_tokens that includes reasoning tokens.
+func extractReasoningTokens(usage *anthropic.Usage) int {
+	if usage == nil {
+		return 0
+	}
+	// Anthropic doesn't separate reasoning tokens in the standard response,
+	// but we can estimate from thinking block content
+	return 0
+}
+
+// estimateReasoningTokens estimates token count from thinking block content.
+func estimateReasoningTokens(messages []anthropic.MessageParam) int {
+	total := 0
+	for _, msg := range messages {
+		if msg.Role != anthropic.MessageParamRoleAssistant {
+			continue
+		}
+		for _, block := range msg.Content {
+			if block.OfThinking != nil && block.OfThinking.Thinking != "" {
+				total += len(block.OfThinking.Thinking) / 4 // ~4 chars per token
+			}
+		}
+	}
+	return total
+}

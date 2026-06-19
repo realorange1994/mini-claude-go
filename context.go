@@ -967,6 +967,10 @@ type ConversationContext struct {
 	// Increments after each compaction, used for progressive summarization:
 	// Level 1 = full detail, Level 2 = concise, Level 3 = minimal, Level 4+ = ultra-minimal.
 	compressionLevel int
+	// pressureLevel tracks current context pressure (0-3, MiMo-Code pattern).
+	// 0: < 50% used, 1: 50-70%, 2: 70-85%, 3: >= 85%.
+	// Drives graduated compression responses.
+	pressureLevel int
 }
 
 // NewConversationContext creates a new context.
@@ -1085,6 +1089,77 @@ func (c *ConversationContext) EstimatedTokenRatio(ctxMax int) float64 {
 		return 0
 	}
 	return float64(c.EstimatedTokens()) / float64(ctxMax)
+}
+
+// PressureLevel returns the current context pressure level (0-3).
+// MiMo-Code pattern: graduated response based on context usage.
+//   0: < 50% used (comfortable)
+//   1: 50-70% used (watch)
+//   2: 70-85% used (compress)
+//   3: >= 85% used (critical)
+func (c *ConversationContext) PressureLevel(ctxMax int) int {
+	if ctxMax <= 0 {
+		return 0
+	}
+	ratio := c.EstimatedTokenRatio(ctxMax)
+	switch {
+	case ratio >= 0.85:
+		return 3
+	case ratio >= 0.70:
+		return 2
+	case ratio >= 0.50:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// UpdatePressureLevel recalculates and caches the pressure level.
+func (c *ConversationContext) UpdatePressureLevel(ctxMax int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Calculate directly without calling lock-acquiring methods to avoid deadlock
+	if ctxMax <= 0 {
+		c.pressureLevel = 0
+		return
+	}
+	// Use the same logic as EstimatedTokens but without acquiring lock
+	tokens := c.estimatedTokensLocked()
+	ratio := float64(tokens) / float64(ctxMax)
+	switch {
+	case ratio >= 0.85:
+		c.pressureLevel = 3
+	case ratio >= 0.70:
+		c.pressureLevel = 2
+	case ratio >= 0.50:
+		c.pressureLevel = 1
+	default:
+		c.pressureLevel = 0
+	}
+}
+
+// estimatedTokensLocked returns estimated tokens without acquiring lock.
+// Caller must hold at least a read lock.
+func (c *ConversationContext) estimatedTokensLocked() int {
+	startIdx := 0
+	if c.lastSummarizedIndex >= 0 {
+		startIdx = c.lastSummarizedIndex + 1
+	}
+	if startIdx >= len(c.entries) {
+		return 0
+	}
+	rawTotal := estimateEntriesTokens(c.entries[startIdx:])
+	if rawTotal == 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(rawTotal) * 4.0 / 3.0))
+}
+
+// GetPressureLevel returns the cached pressure level.
+func (c *ConversationContext) GetPressureLevel() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.pressureLevel
 }
 
 // EstimateRequestTokens estimates total request tokens including tools and system prompt.

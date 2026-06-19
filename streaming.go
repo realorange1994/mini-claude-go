@@ -33,6 +33,98 @@ const (
 	ChunkTypeRedactedThinking ChunkType = "redacted_thinking" // redacted thinking block (content policy)
 )
 
+// isRetryableStreamError determines if a streaming error is transient and worth retrying.
+// MiMo-Code pattern: unified classification used by both SDK-internal and processor-level retries.
+func isRetryableStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := err.Error()
+
+	// Context overflow: never retry (triggers compaction instead)
+	if isContextLengthError(errMsg) {
+		return false
+	}
+
+	// Transient HTTP errors
+	retryablePatterns := []string{
+		"429", "500", "502", "503", "504", "529",
+		"rate_limit", "rate limit", "too many requests",
+		"overloaded", "capacity",
+	}
+	for _, p := range retryablePatterns {
+		if strings.Contains(errMsg, p) {
+			return true
+		}
+	}
+
+	// Network errors
+	networkPatterns := []string{
+		"ECONNRESET", "EPIPE", "ETIMEDOUT",
+		"connection reset", "connection timed out",
+		"server disconnected", "unexpected eof",
+		"SSE read timed out", "stream stalled",
+	}
+	for _, p := range networkPatterns {
+		if strings.Contains(errMsg, p) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// getRetryDelay extracts retry delay from error headers or computes exponential backoff.
+// MiMo-Code pattern: respects retry-after and retry-after-ms headers.
+func getRetryDelay(err error, attempt int) time.Duration {
+	errMsg := err.Error()
+
+	// Check for retry-after-ms header
+	if strings.Contains(errMsg, "retry-after-ms") {
+		// Parse "retry-after-ms: 5000" format
+		if idx := strings.Index(errMsg, "retry-after-ms"); idx >= 0 {
+			rest := errMsg[idx:]
+			if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
+				val := strings.TrimSpace(rest[colonIdx+1:])
+				if ms, err := parseInt64(val); err == nil && ms > 0 {
+					return time.Duration(ms) * time.Millisecond
+				}
+			}
+		}
+	}
+
+	// Check for retry-after header (seconds)
+	if strings.Contains(errMsg, "retry-after") {
+		if idx := strings.Index(errMsg, "retry-after"); idx >= 0 {
+			rest := errMsg[idx:]
+			if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
+				val := strings.TrimSpace(rest[colonIdx+1:])
+				if sec, err := parseInt64(val); err == nil && sec > 0 {
+					return time.Duration(sec) * time.Second
+				}
+			}
+		}
+	}
+
+	// Exponential backoff: 2s * 2^attempt, capped at 30s
+	delay := 2 * time.Second
+	for i := 0; i < attempt; i++ {
+		delay *= 2
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+			break
+		}
+	}
+	return delay
+}
+
+// parseInt64 parses a string to int64, ignoring errors.
+func parseInt64(s string) (int64, error) {
+	var n int64
+	_, err := fmt.Sscanf(s, "%d", &n)
+	return n, err
+}
+
 // StreamChunk is a single event emitted during a streaming response.
 type StreamChunk struct {
 	Type    ChunkType

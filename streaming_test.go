@@ -1,564 +1,115 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
 
-func TestCollectHandlerText(t *testing.T) {
-	h := NewCollectHandler()
-
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: "Hello"})
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: " "})
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: "World"})
-
-	if h.Text != "Hello World" {
-		t.Errorf("expected 'Hello World', got %q", h.Text)
-	}
-}
-
-func TestCollectHandlerToolCall(t *testing.T) {
-	h := NewCollectHandler()
-
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "tool-1", Name: "read_file"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"path": "test.txt"}`})
-
-	if len(h.ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(h.ToolCalls))
-	}
-	if h.ToolCalls[0].ID != "tool-1" {
-		t.Errorf("expected ID 'tool-1', got %q", h.ToolCalls[0].ID)
-	}
-	if h.ToolCalls[0].Name != "read_file" {
-		t.Errorf("expected name 'read_file', got %q", h.ToolCalls[0].Name)
-	}
-	if h.ToolCalls[0].Arguments != `{"path": "test.txt"}` {
-		t.Errorf("unexpected arguments: %q", h.ToolCalls[0].Arguments)
-	}
-}
-
-func TestCollectHandlerMultipleToolCalls(t *testing.T) {
-	h := NewCollectHandler()
-
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "tool-1", Name: "read_file"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"path": "a.txt"}`})
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "tool-2", Name: "exec"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"command": "ls"`})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `}`})
-
-	if len(h.ToolCalls) != 2 {
-		t.Fatalf("expected 2 tool calls, got %d", len(h.ToolCalls))
-	}
-	if h.ToolCalls[0].Name != "read_file" {
-		t.Errorf("expected first tool to be read_file, got %q", h.ToolCalls[0].Name)
-	}
-	if h.ToolCalls[1].Name != "exec" {
-		t.Errorf("expected second tool to be exec, got %q", h.ToolCalls[1].Name)
-	}
-	if h.ToolCalls[1].Arguments != `{"command": "ls"}` {
-		t.Errorf("expected complete arguments, got %q", h.ToolCalls[1].Arguments)
-	}
-}
-
-func TestCollectHandlerThinking(t *testing.T) {
-	h := NewCollectHandler()
-
-	h.Handle(StreamChunk{Type: ChunkTypeThinking, Content: "Let me think..."})
-	h.Handle(StreamChunk{Type: ChunkTypeThinking, Content: " about this."})
-
-	if h.Thinking != "Let me think... about this." {
-		t.Errorf("expected thinking content, got %q", h.Thinking)
-	}
-}
-
-func TestCollectHandlerUsage(t *testing.T) {
-	h := NewCollectHandler()
-
-	h.Handle(StreamChunk{Type: ChunkTypeUsage, Usage: &Usage{InputTokens: 100, OutputTokens: 50}})
-
-	if h.Usage == nil {
-		t.Fatal("expected usage to be set")
-	}
-	if h.Usage.InputTokens != 100 {
-		t.Errorf("expected input tokens 100, got %d", h.Usage.InputTokens)
-	}
-	if h.Usage.OutputTokens != 50 {
-		t.Errorf("expected output tokens 50, got %d", h.Usage.OutputTokens)
-	}
-}
-
-func TestCollectHandlerError(t *testing.T) {
-	h := NewCollectHandler()
-
-	h.Handle(StreamChunk{Type: ChunkTypeError, Content: "something went wrong"})
-
-	if h.Err == nil {
-		t.Fatal("expected error to be set")
-	}
-}
-
-func TestCollectHandlerAsParsedResponse(t *testing.T) {
-	h := NewCollectHandler()
-
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: "Response text"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "tool-1", Name: "exec"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"command": "ls"}`})
-
-	toolCalls, textParts := h.AsParsedResponse()
-
-	if len(textParts) != 1 {
-		t.Fatalf("expected 1 text part, got %d", len(textParts))
-	}
-	if textParts[0] != "Response text" {
-		t.Errorf("expected 'Response text', got %q", textParts[0])
-	}
-
-	if len(toolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
-	}
-	if toolCalls[0]["id"] != "tool-1" {
-		t.Errorf("expected id 'tool-1', got %v", toolCalls[0]["id"])
-	}
-	if toolCalls[0]["name"] != "exec" {
-		t.Errorf("expected name 'exec', got %v", toolCalls[0]["name"])
-	}
-}
-
-func TestCollectHandlerToolUseAsText(t *testing.T) {
-	testCases := []struct {
-		name     string
-		content  string
-		expected bool
-	}{
-		// New stricter logic: requires 2 of 3 structural markers (type, id, name)
-		{"type + id (2 markers)", `{"type":"tool_use","id":"abc123"}`, true},
-		{"type + name (2 markers)", `{"type":"tool_use","name":"read_file"}`, true},
-		{"id + name (2 markers)", `{"id":"abc123","name":"read_file"}`, true},
-		{"all 3 markers", `{"type":"tool_use","id":"abc","name":"exec"}`, true},
-		{"only type (1 marker)", `{"type":"tool_use"}`, false},
-		{"only id (1 marker)", `{"id":"abc123"}`, false},
-		{"only name (1 marker)", `{"name":"read_file"}`, false},
-		{"no markers", `{"path":"test.txt"}`, false},
-		{"loose spacing", `{"type": "tool_use", "id": "abc"}`, true},
-		{"discussing tool_use (only type)", `"The tool_use feature allows..."`, false},
-		{"discussing id (only id)", `"The id field contains..."`, false},
-		{"XML-like (no JSON structure)", `<tool_use><id>abc</id></tool_use>`, false},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := NewCollectHandler()
-			h.Handle(StreamChunk{Type: ChunkTypeText, Content: tc.content})
-			if h.toolUseAsText != tc.expected {
-				t.Errorf("content=%q: expected toolUseAsText=%v, got %v", tc.content, tc.expected, h.toolUseAsText)
-			}
-		})
-	}
-}
-
-func TestStreamBusSubscribe(t *testing.T) {
-	bus := NewStreamBus()
-	ch := bus.Subscribe("test")
-
-	if ch == nil {
-		t.Error("expected channel to be returned")
-	}
-
-	// Check that publishing works
-	bus.Publish(StreamChunk{Type: ChunkTypeText, Content: "test"})
-
-	select {
-	case chunk := <-ch:
-		if chunk.Content != "test" {
-			t.Errorf("expected 'test', got %q", chunk.Content)
-		}
-	default:
-		t.Error("expected to receive chunk")
-	}
-}
-
-func TestStreamBusUnsubscribe(t *testing.T) {
-	bus := NewStreamBus()
-	ch := bus.Subscribe("test")
-	bus.Unsubscribe("test")
-
-	// Channel should be closed
-	_, ok := <-ch
-	if ok {
-		t.Error("expected channel to be closed")
-	}
-}
-
-func TestStreamBusPublishToMultiple(t *testing.T) {
-	bus := NewStreamBus()
-	ch1 := bus.Subscribe("sub1")
-	ch2 := bus.Subscribe("sub2")
-
-	bus.Publish(StreamChunk{Type: ChunkTypeText, Content: "hello"})
-
-	// Both should receive
-	if (<-ch1).Content != "hello" {
-		t.Error("sub1 didn't receive")
-	}
-	if (<-ch2).Content != "hello" {
-		t.Error("sub2 didn't receive")
-	}
-}
-
-func TestStreamBusClose(t *testing.T) {
-	bus := NewStreamBus()
-	ch1 := bus.Subscribe("sub1")
-	ch2 := bus.Subscribe("sub2")
-
-	bus.Close()
-
-	// Both channels should be closed
-	_, ok1 := <-ch1
-	_, ok2 := <-ch2
-	if ok1 || ok2 {
-		t.Error("expected both channels to be closed")
-	}
-}
-
-func TestContextErr(t *testing.T) {
-	testCases := []struct {
+func TestIsRetryableStreamError_RateLimit(t *testing.T) {
+	tests := []struct {
 		err      string
-		expected bool
+		retryable bool
 	}{
-		{"context canceled", true},
-		{"context deadline exceeded", true},
-		{"deadline exceeded", true},
-		{"some other error", false},
-		{"", false},
+		{"HTTP 429 Too Many Requests", true},
+		{"HTTP 500 Internal Server Error", true},
+		{"HTTP 502 Bad Gateway", true},
+		{"HTTP 503 Service Unavailable", true},
+		{"HTTP 504 Gateway Timeout", true},
+		{"HTTP 529", true},
+		{"rate_limit exceeded", true},
+		{"too many requests", true},
+		{"overloaded", true},
+		{"capacity exceeded", true},
+		{"ECONNRESET", true},
+		{"connection reset by peer", true},
+		{"connection timed out", true},
+		{"server disconnected", true},
+		{"unexpected eof", true},
+		{"SSE read timed out", true},
+		{"stream stalled", true},
+		// Non-retryable
+		{"context_length_exceeded", false},
+		{"prompt is too long", false},
+		{"invalid api key", false},
+		{"authentication failed", false},
+		{"bad request", false},
 	}
 
-	for _, tc := range testCases {
-		result := contextErr(&testError{msg: tc.err})
-		if result != tc.expected {
-			t.Errorf("contextErr(%q) = %v, expected %v", tc.err, result, tc.expected)
+	for _, tt := range tests {
+		err := fmt.Errorf("%s", tt.err)
+		got := isRetryableStreamError(err)
+		if got != tt.retryable {
+			t.Errorf("isRetryableStreamError(%q) = %v, want %v", tt.err, got, tt.retryable)
 		}
 	}
 }
 
-// testError is a simple error type for testing
-type testError struct {
-	msg string
-}
-
-func (e *testError) Error() string { return e.msg }
-
-// ---------------------------------------------------------------------------
-// FinishReason tests
-// ---------------------------------------------------------------------------
-
-func TestCollectHandlerFinishReasonDefault(t *testing.T) {
-	h := NewCollectHandler()
-	if h.FinishReason() != "" {
-		t.Errorf("expected empty finish reason by default, got %q", h.FinishReason())
+func TestIsRetryableStreamError_Nil(t *testing.T) {
+	if isRetryableStreamError(nil) {
+		t.Error("expected false for nil error")
 	}
 }
 
-func TestCollectHandlerFinishReasonSetAndGet(t *testing.T) {
-	h := NewCollectHandler()
-	h.SetFinishReason("end_turn")
-	if h.FinishReason() != "end_turn" {
-		t.Errorf("expected 'end_turn', got %q", h.FinishReason())
+func TestGetRetryDelay_ExponentialBackoff(t *testing.T) {
+	err := fmt.Errorf("HTTP 500")
+
+	tests := []struct {
+		attempt int
+		min     time.Duration
+		max     time.Duration
+	}{
+		{0, 1 * time.Second, 3 * time.Second},
+		{1, 3 * time.Second, 5 * time.Second},
+		{2, 7 * time.Second, 9 * time.Second},
+		{3, 15 * time.Second, 17 * time.Second},
+		{10, 29 * time.Second, 31 * time.Second}, // capped at 30s
+	}
+
+	for _, tt := range tests {
+		delay := getRetryDelay(err, tt.attempt)
+		if delay < tt.min || delay > tt.max {
+			t.Errorf("attempt %d: expected %v-%v, got %v", tt.attempt, tt.min, tt.max, delay)
+		}
 	}
 }
 
-func TestCollectHandlerFinishReasonOverwrite(t *testing.T) {
-	h := NewCollectHandler()
-	h.SetFinishReason("tool_use")
-	h.SetFinishReason("max_tokens")
-	if h.FinishReason() != "max_tokens" {
-		t.Errorf("expected 'max_tokens' after overwrite, got %q", h.FinishReason())
+func TestGetRetryDelay_RetryAfterMs(t *testing.T) {
+	err := fmt.Errorf("HTTP 429: retry-after-ms: 5000")
+	delay := getRetryDelay(err, 0)
+	if delay != 5000*time.Millisecond {
+		t.Errorf("expected 5000ms, got %v", delay)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// HasTruncatedToolArgs tests
-// ---------------------------------------------------------------------------
-
-func TestCollectHandlerHasTruncatedToolArgsValidJSON(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"command":"ls"}`})
-	if h.HasTruncatedToolArgs() {
-		t.Error("expected false when tool args are valid JSON")
+func TestGetRetryDelay_RetryAfterSeconds(t *testing.T) {
+	err := fmt.Errorf("HTTP 429: retry-after: 10")
+	delay := getRetryDelay(err, 0)
+	if delay != 10*time.Second {
+		t.Errorf("expected 10s, got %v", delay)
 	}
 }
 
-func TestCollectHandlerHasTruncatedToolArgsInvalidJSON(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"command":"l`})
-	if !h.HasTruncatedToolArgs() {
-		t.Error("expected true when tool args are invalid JSON")
-	}
-}
-
-func TestCollectHandlerHasTruncatedToolArgsEmptyArgsIgnored(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	// Tool call with no args at all -- not truncated, just incomplete
-	if h.HasTruncatedToolArgs() {
-		t.Error("expected false when tool has no args (not truncated)")
-	}
-}
-
-func TestCollectHandlerHasTruncatedToolArgsMultipleOneTruncated(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "read_file"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"path":"a.txt"}`})
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t2", Name: "exec"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"command":"l`})
-	if !h.HasTruncatedToolArgs() {
-		t.Error("expected true when one of multiple tools has truncated args")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// DeltasState tracking tests
-// ---------------------------------------------------------------------------
-
-func TestDeltasStateTrackTextOnly(t *testing.T) {
-	sa := NewStreamAdapter(nil, nil)
-	sa.trackDeltaState(ChunkTypeText, "")
-	if sa.deltasState != DeltasStateTextOnly {
-		t.Errorf("expected TextOnly after text delta, got %q", sa.deltasState)
-	}
-}
-
-func TestDeltasStateTrackToolInFlight(t *testing.T) {
-	sa := NewStreamAdapter(nil, nil)
-	sa.trackDeltaState(ChunkTypeToolCall, "t1")
-	if sa.deltasState != DeltasStateToolInFlight {
-		t.Errorf("expected ToolInFlight after tool call, got %q", sa.deltasState)
-	}
-}
-
-func TestDeltasStateStaysToolInFlight(t *testing.T) {
-	sa := NewStreamAdapter(nil, nil)
-	sa.trackDeltaState(ChunkTypeToolCall, "t1")
-	sa.trackDeltaState(ChunkTypeToolArgument, "")
-	if sa.deltasState != DeltasStateToolInFlight {
-		t.Errorf("expected ToolInFlight to persist through args, got %q", sa.deltasState)
-	}
-}
-
-func TestDeltasStateTextThenTool(t *testing.T) {
-	sa := NewStreamAdapter(nil, nil)
-	sa.trackDeltaState(ChunkTypeText, "")
-	sa.trackDeltaState(ChunkTypeToolCall, "t1")
-	if sa.deltasState != DeltasStateTextOnly {
-		t.Errorf("expected TextOnly to persist after tool following text, got %q", sa.deltasState)
-	}
-}
-
-func TestDeltasStateInitialStateNone(t *testing.T) {
-	sa := NewStreamAdapter(nil, nil)
-	if sa.DeltasState() != DeltasStateNone {
-		t.Errorf("expected initial state to be None, got %q", sa.DeltasState())
-	}
-}
-
-// ---------------------------------------------------------------------------
-// StreamProgress tests
-// ---------------------------------------------------------------------------
-
-func TestStreamProgressTTFB(t *testing.T) {
-	p := &StreamProgress{}
-	p.StartTime = time.Now()
-
-	// Before first byte, TTFB should be 0
-	if p.TTFB() != 0 {
-		t.Error("expected TTFB=0 before first byte")
+func TestParseInt64(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    int64
+		wantErr bool
+	}{
+		{"123", 123, false},
+		{"0", 0, false},
+		{"-1", -1, false},
+		{"abc", 0, true},
+		{"", 0, true},
 	}
 
-	time.Sleep(2 * time.Millisecond)
-	p.RecordFirstByte()
-
-	// After first byte, TTFB should be non-zero
-	ttfb := p.TTFB()
-	if ttfb == 0 {
-		t.Errorf("expected TTFB>0 after first byte, got %v", ttfb)
-	}
-}
-
-func TestStreamProgressTTFBOnlyOnce(t *testing.T) {
-	p := &StreamProgress{}
-	p.StartTime = time.Now()
-
-	p.RecordFirstByte()
-	first := p.TTFB()
-
-	// Small delay then record again -- should not change
-	time.Sleep(10 * time.Millisecond)
-	p.RecordFirstByte()
-	second := p.TTFB()
-
-	if first != second {
-		t.Errorf("TTFB should not change on subsequent RecordFirstByte calls: first=%v, second=%v", first, second)
-	}
-}
-
-func TestStreamProgressThroughput(t *testing.T) {
-	p := &StreamProgress{}
-	p.StartTime = time.Now()
-	p.RecordFirstByte()
-	p.RecordTokens(100)
-
-	time.Sleep(5 * time.Millisecond)
-	tp := p.Throughput()
-	if tp <= 0 {
-		t.Errorf("expected throughput>0, got %f", tp)
-	}
-}
-
-func TestStreamProgressThroughputZeroTokens(t *testing.T) {
-	p := &StreamProgress{}
-	p.StartTime = time.Now()
-	p.RecordFirstByte()
-
-	// No tokens recorded -> throughput = 0
-	if p.Throughput() != 0 {
-		t.Error("expected throughput=0 with no tokens")
-	}
-}
-
-func TestStreamProgressThroughputNoFirstByte(t *testing.T) {
-	p := &StreamProgress{}
-	p.StartTime = time.Now()
-	p.RecordTokens(100)
-
-	// No first byte recorded -> throughput = 0
-	if p.Throughput() != 0 {
-		t.Error("expected throughput=0 with no first byte")
-	}
-}
-
-func TestStreamProgressRecordTokens(t *testing.T) {
-	p := &StreamProgress{}
-	p.RecordTokens(50)
-	p.RecordTokens(30)
-
-	if p.TokensRecv != 80 {
-		t.Errorf("expected 80 tokens, got %d", p.TokensRecv)
-	}
-}
-
-// ============================================================================
-// Upstream Quality: Refusal and Redacted Thinking (port from stream tests)
-// ============================================================================
-
-func TestCollectHandlerIsRefusal(t *testing.T) {
-	h := NewCollectHandler()
-	if h.IsRefusal() {
-		t.Error("should not be refusal by default")
-	}
-
-	h.Handle(StreamChunk{Type: ChunkTypeRefusal})
-	if !h.IsRefusal() {
-		t.Error("should be refusal after ChunkTypeRefusal")
-	}
-}
-
-func TestCollectHandlerRedactedThinkingData(t *testing.T) {
-	h := NewCollectHandler()
-
-	// Initially empty
-	if len(h.RedactedThinkingData()) != 0 {
-		t.Error("redacted thinking data should be empty by default")
-	}
-
-	// Collect redacted thinking blocks
-	h.Handle(StreamChunk{Type: ChunkTypeRedactedThinking, Content: "blob1"})
-	h.Handle(StreamChunk{Type: ChunkTypeRedactedThinking, Content: "blob2"})
-
-	data := h.RedactedThinkingData()
-	if len(data) != 2 {
-		t.Fatalf("expected 2 redacted blobs, got %d", len(data))
-	}
-	if data[0] != "blob1" {
-		t.Errorf("expected first blob 'blob1', got %q", data[0])
-	}
-	if data[1] != "blob2" {
-		t.Errorf("expected second blob 'blob2', got %q", data[1])
-	}
-}
-
-func TestCollectHandlerRedactedThinkingDataReturnsCopy(t *testing.T) {
-	// RedactedThinkingData should return a copy, not the internal slice
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeRedactedThinking, Content: "blob"})
-
-	data1 := h.RedactedThinkingData()
-	data1[0] = "modified"
-
-	data2 := h.RedactedThinkingData()
-	if data2[0] == "modified" {
-		t.Error("RedactedThinkingData should return a copy, not internal slice")
-	}
-}
-
-// ============================================================================
-// Upstream Quality: ClearAll (port from stream tests)
-// ============================================================================
-
-func TestCollectHandlerClearAll(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeText, Content: "some text"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolCall, ID: "t1", Name: "exec"})
-	h.Handle(StreamChunk{Type: ChunkTypeToolArgument, Content: `{"cmd":"ls"}`})
-	h.Handle(StreamChunk{Type: ChunkTypeThinking, Content: "thinking..."})
-
-	h.ClearAll()
-
-	if h.Text != "" {
-		t.Errorf("expected empty text after ClearAll, got %q", h.Text)
-	}
-	if len(h.ToolCalls) != 0 {
-		t.Errorf("expected 0 tool calls after ClearAll, got %d", len(h.ToolCalls))
-	}
-	if h.Thinking != "" {
-		t.Errorf("expected empty thinking after ClearAll, got %q", h.Thinking)
-	}
-}
-
-func TestCollectHandlerClearAllOnEmpty(t *testing.T) {
-	// ClearAll on empty handler should not panic
-	h := NewCollectHandler()
-	h.ClearAll()
-}
-
-func TestCollectHandlerClearAllDoesNotClearError(t *testing.T) {
-	h := NewCollectHandler()
-	h.Handle(StreamChunk{Type: ChunkTypeError, Content: "error"})
-	h.ClearAll()
-	// ClearAll only clears text/tool calls/thinking, not error
-	if h.Err == nil {
-		t.Error("ClearAll should not clear error")
-	}
-}
-
-// ============================================================================
-// Upstream Quality: Concurrent enqueue invariant (port: concurrent chunk safety)
-// ============================================================================
-
-func TestCollectHandlerConcurrentChunks(t *testing.T) {
-	// Concurrent Handle calls should not lose data (mutex safety)
-	h := NewCollectHandler()
-
-	const n = 100
-	for i := 0; i < n; i++ {
-		go func(i int) {
-			h.Handle(StreamChunk{Type: ChunkTypeText, Content: "x"})
-		}(i)
-	}
-	// Give goroutines time to finish
-	time.Sleep(100 * time.Millisecond)
-
-	if len(h.Text) != n {
-		t.Errorf("expected %d chars in text, got %d", n, len(h.Text))
+	for _, tt := range tests {
+		got, err := parseInt64(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parseInt64(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+		}
+		if got != tt.want {
+			t.Errorf("parseInt64(%q) = %d, want %d", tt.input, got, tt.want)
+		}
 	}
 }

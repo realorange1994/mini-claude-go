@@ -99,6 +99,56 @@ func isSymlinkEscape(path, parentDir string) bool {
 	return false
 }
 
+// ─── Memory Path Isolation (MiMo-Code pattern) ─────────────────────────────
+
+// IsMemoryPath checks if a path is within the memory directory structure.
+// Memory paths are: .claude/memory/, .claude/session_memory.md, .claude/checkpoints/
+func IsMemoryPath(path, projectDir string) bool {
+	abs := resolvePath(path, projectDir)
+	memDir := filepath.Join(projectDir, ".claude", "memory")
+	sessionFile := filepath.Join(projectDir, ".claude", "session_memory.md")
+	checkpointDir := filepath.Join(projectDir, ".claude", "checkpoint")
+
+	return hasPathPrefix(abs, memDir) || abs == sessionFile || hasPathPrefix(abs, checkpointDir)
+}
+
+// IsCheckpointWriterAllowed checks if a path is allowed for checkpoint-writer agents.
+// Checkpoint writers can only write to:
+//   - {projectDir}/.claude/memory/*.md
+//   - {projectDir}/.claude/session_memory.md
+//   - {projectDir}/.claude/checkpoints/*.json
+func IsCheckpointWriterAllowed(path, projectDir string) bool {
+	abs := resolvePath(path, projectDir)
+	memDir := filepath.Join(projectDir, ".claude", "memory")
+	sessionFile := filepath.Join(projectDir, ".claude", "session_memory.md")
+	checkpointDir := filepath.Join(projectDir, ".claude", "checkpoint")
+
+	// Allow memory directory (any .md file)
+	if hasPathPrefix(abs, memDir) && strings.HasSuffix(abs, ".md") {
+		return true
+	}
+	// Allow session memory file
+	if abs == sessionFile {
+		return true
+	}
+	// Allow checkpoint directory (any .json file)
+	if hasPathPrefix(abs, checkpointDir) && strings.HasSuffix(abs, ".json") {
+		return true
+	}
+	return false
+}
+
+// GetMemoryPathError returns a helpful error message for invalid memory path access.
+func GetMemoryPathError(path, agentType string) string {
+	switch agentType {
+	case "checkpoint-writer":
+		return "Checkpoint-writer agents can only write to: " +
+			".claude/memory/*.md, .claude/session_memory.md, .claude/checkpoints/*.json"
+	default:
+		return "Memory paths are reserved for system use. Use session memory tools instead."
+	}
+}
+
 // ─── Internal path checks ─────────────────────────────────────────────────────
 
 // IsInternalEditablePath checks if a path is Claude Code's internal editable path

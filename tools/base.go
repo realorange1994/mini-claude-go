@@ -164,6 +164,15 @@ func ToolResultError(msg string) ToolResult {
 	return ToolResult{Output: msg, IsError: true}
 }
 
+// ToolResultRecoverable creates a recoverable error ToolResult.
+// Recoverable errors are agent-fixable (e.g., bad arguments, invalid input).
+// The model can correct them on the next turn.
+func ToolResultRecoverable(msg string) ToolResult {
+	return ToolResult{Output: msg, IsError: true, Metadata: ToolResultMetadata{
+		Recoverable: true,
+	}}
+}
+
 // WithMetadata returns the ToolResult with metadata set.
 func (r ToolResult) WithMetadata(meta ToolResultMetadata) ToolResult {
 	r.Metadata = meta
@@ -177,7 +186,9 @@ type ToolResultMetadata struct {
 	ExitCodeSet bool // true when ExitCode was explicitly set (distinguishes 0 from not-set)
 	DurationMs  int64
 	OutputLines int
-	Truncated   bool
+	Truncated   bool   // true when output was truncated
+	Recoverable bool   // true when error is agent-fixable (MiMo-Code pattern)
+	ErrorType   string // "recoverable", "fatal", "permission", "timeout"
 }
 
 // NewToolResultMetadata creates metadata with tool name and exit code explicitly set.
