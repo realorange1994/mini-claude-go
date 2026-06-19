@@ -53,6 +53,13 @@ _Step by step, what was attempted and done? Very terse summary for each step._
 	maxTokensPerSection         = 2500
 	maxTotalSessionMemoryTokens = 10000
 
+	// Three-level memory token budgets (MiMo-Code pattern).
+	// Global memory: cross-project user preferences (small, stable).
+	// Project memory: project-level rules and architecture decisions (medium).
+	// Session memory: per-session state and work context (large).
+	maxGlobalMemoryTokens  = 6000
+	maxProjectMemoryTokens = 10000
+
 	// Entry expiration: state entries expire after 7 days,
 	// other categories expire after 30 days.
 	entryExpirationState = 7 * 24 * time.Hour
@@ -160,16 +167,33 @@ func (e MemoryEntry) isExpired() bool {
 	return time.Since(e.Timestamp) > expirationForCategory(e.Category)
 }
 
+// ─── MemoryScope ─────────────────────────────────────────────────────────────
+
+// MemoryScope identifies the persistence scope of a memory entry.
+// Inspired by MiMo-Code's three-level memory hierarchy.
+type MemoryScope string
+
+const (
+	ScopeGlobal  MemoryScope = "global"  // Cross-project user preferences
+	ScopeProject MemoryScope = "project" // Project-level rules, architecture decisions
+	ScopeSession MemoryScope = "session" // Per-session state and work context
+)
+
 // ─── SessionMemory ───────────────────────────────────────────────────────────
 
 // SessionMemory manages structured notes that persist across the session.
 // It uses file locking to safely handle concurrent writes from multiple
 // instances, and expires old entries on load to prevent unbounded growth.
+//
+// Three-level memory hierarchy (MiMo-Code pattern):
+//   - Global: ~/.claude/memory/global.md — cross-project preferences
+//   - Project: {projectDir}/.claude/memory/project.md — project rules
+//   - Session: {projectDir}/.claude/session_memory.md — session state
 type SessionMemory struct {
 	mu         sync.RWMutex
-	entries    []MemoryEntry
+	entries    []MemoryEntry // session-scoped entries
 	projectDir string
-	filePath   string
+	filePath   string // session memory file path
 	dirty      bool
 	stopCh     chan struct{}
 	stopOnce   sync.Once // guards against double-close of stopCh
@@ -182,18 +206,61 @@ type SessionMemory struct {
 	// avoiding redundant re-summarization of already-summarized content.
 	// Mirrors upstream's lastSummarizedMessageId in sessionMemoryUtils.ts.
 	LastSummarizedMessageUUID string
+
+	// Three-level memory (MiMo-Code pattern)
+	globalEntries  []MemoryEntry // cross-project preferences
+	globalPath     string        // ~/.claude/memory/global.md
+	globalDirty    bool
+	projectEntries []MemoryEntry // project-level rules
+	projectPath    string        // {projectDir}/.claude/memory/project.md
+	projectDirty   bool
 }
 
 // NewSessionMemory creates a new SessionMemory for the given project.
+// Loads all three memory levels: global, project, and session.
+// Default global path: {projectDir}/.claude/memory/global.md (project-local).
+// Use NewSessionMemoryWithPaths to set a custom global path (e.g. ~/.claude/memory/global.md).
 func NewSessionMemory(projectDir string) *SessionMemory {
-	sm := &SessionMemory{
-		entries:    make([]MemoryEntry, 0),
-		projectDir: projectDir,
-		filePath:   filepath.Join(projectDir, ".claude", "session_memory.md"),
-		stopCh:     make(chan struct{}),
-		maxEntries: 100,
+	// Default global path is project-local for test isolation.
+	// Main code should use NewSessionMemoryWithPaths for cross-project global memory.
+	globalPath := filepath.Join(projectDir, ".claude", "memory", "global.md")
+	return NewSessionMemoryWithPaths(projectDir, globalPath)
+}
+
+// NewSessionMemoryWithPaths creates a new SessionMemory with an optional custom global path.
+// If globalPath is empty, defaults to ~/.claude/memory/global.md.
+func NewSessionMemoryWithPaths(projectDir, globalPath string) *SessionMemory {
+	// Global memory path: ~/.claude/memory/global.md (or custom)
+	if globalPath == "" {
+		homeDir, _ := os.UserHomeDir()
+		if homeDir != "" {
+			globalPath = filepath.Join(homeDir, ".claude", "memory", "global.md")
+		}
 	}
+
+	// Project memory path: {projectDir}/.claude/memory/project.md
+	projectPath := filepath.Join(projectDir, ".claude", "memory", "project.md")
+
+	// Session memory path: {projectDir}/.claude/session_memory.md (legacy location)
+	sessionPath := filepath.Join(projectDir, ".claude", "session_memory.md")
+
+	sm := &SessionMemory{
+		entries:        make([]MemoryEntry, 0),
+		globalEntries:  make([]MemoryEntry, 0),
+		projectEntries: make([]MemoryEntry, 0),
+		projectDir:     projectDir,
+		filePath:       sessionPath,
+		globalPath:     globalPath,
+		projectPath:    projectPath,
+		stopCh:         make(chan struct{}),
+		maxEntries:     100,
+	}
+
+	// Load all three memory levels
+	sm.loadGlobalFromDisk()
+	sm.loadProjectFromDisk()
 	sm.loadFromDisk()
+
 	// Clear state entries loaded from disk — they are stale session context
 	// that should not bleed into new sessions.
 	sm.ClearStateEntries()
@@ -238,6 +305,127 @@ func (sm *SessionMemory) AddNote(category, content, source string) {
 	sm.maybeInvokeOnAdd()
 }
 
+// AddScopedNote adds a memory entry to the specified scope.
+// This is the primary API for the three-level memory system.
+func (sm *SessionMemory) AddScopedNote(scope MemoryScope, category, content, source string) {
+	switch scope {
+	case ScopeGlobal:
+		sm.addGlobalNote(category, content, source)
+	case ScopeProject:
+		sm.addProjectNote(category, content, source)
+	case ScopeSession:
+		sm.AddNote(category, content, source)
+	}
+}
+
+// addGlobalNote adds a note to global memory (cross-project preferences).
+func (sm *SessionMemory) addGlobalNote(category, content, source string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Deduplicate
+	for i, e := range sm.globalEntries {
+		if e.Category == category && e.Content == content {
+			sm.globalEntries[i].Timestamp = time.Now()
+			sm.globalDirty = true
+			return
+		}
+	}
+
+	sm.globalEntries = append(sm.globalEntries, MemoryEntry{
+		Category:  category,
+		Content:   content,
+		Timestamp: time.Now(),
+		Source:    source,
+	})
+	sm.globalDirty = true
+}
+
+// addProjectNote adds a note to project memory (project-level rules).
+func (sm *SessionMemory) addProjectNote(category, content, source string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Deduplicate
+	for i, e := range sm.projectEntries {
+		if e.Category == category && e.Content == content {
+			sm.projectEntries[i].Timestamp = time.Now()
+			sm.projectDirty = true
+			return
+		}
+	}
+
+	sm.projectEntries = append(sm.projectEntries, MemoryEntry{
+		Category:  category,
+		Content:   content,
+		Timestamp: time.Now(),
+		Source:    source,
+	})
+	sm.projectDirty = true
+}
+
+// GetScopedNotes returns entries from the specified scope.
+func (sm *SessionMemory) GetScopedNotes(scope MemoryScope) []MemoryEntry {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	var source []MemoryEntry
+	switch scope {
+	case ScopeGlobal:
+		source = sm.globalEntries
+	case ScopeProject:
+		source = sm.projectEntries
+	case ScopeSession:
+		source = sm.entries
+	}
+
+	result := make([]MemoryEntry, len(source))
+	copy(result, source)
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Category != result[j].Category {
+			return result[i].Category < result[j].Category
+		}
+		return result[i].Timestamp.After(result[j].Timestamp)
+	})
+
+	return result
+}
+
+// SearchScopedNotes searches entries across specified scopes.
+func (sm *SessionMemory) SearchScopedNotes(query string, scopes ...MemoryScope) []MemoryEntry {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if len(scopes) == 0 {
+		scopes = []MemoryScope{ScopeGlobal, ScopeProject, ScopeSession}
+	}
+
+	lower := strings.ToLower(query)
+	var result []MemoryEntry
+
+	for _, scope := range scopes {
+		var source []MemoryEntry
+		switch scope {
+		case ScopeGlobal:
+			source = sm.globalEntries
+		case ScopeProject:
+			source = sm.projectEntries
+		case ScopeSession:
+			source = sm.entries
+		}
+
+		for _, e := range source {
+			if strings.Contains(strings.ToLower(e.Content), lower) ||
+				strings.Contains(strings.ToLower(e.Category), lower) {
+				result = append(result, e)
+			}
+		}
+	}
+
+	return result
+}
+
 // maybeInvokeOnAdd invokes the onAdd callback if set (must hold lock).
 func (sm *SessionMemory) maybeInvokeOnAdd() {
 	if sm.onAdd != nil {
@@ -273,13 +461,17 @@ func (sm *SessionMemory) trimCategoryEntriesLocked(category string) {
 	sm.entries = result
 }
 
-// GetNotes returns all memory entries, sorted by category then timestamp.
+// GetNotes returns all memory entries from all three levels, sorted by category then timestamp.
 func (sm *SessionMemory) GetNotes() []MemoryEntry {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	result := make([]MemoryEntry, len(sm.entries))
-	copy(result, sm.entries)
+	// Combine all three levels
+	total := len(sm.globalEntries) + len(sm.projectEntries) + len(sm.entries)
+	result := make([]MemoryEntry, 0, total)
+	result = append(result, sm.globalEntries...)
+	result = append(result, sm.projectEntries...)
+	result = append(result, sm.entries...)
 
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Category != result[j].Category {
@@ -292,16 +484,22 @@ func (sm *SessionMemory) GetNotes() []MemoryEntry {
 }
 
 // SearchNotes returns memory entries whose content contains the query (case-insensitive).
+// Searches across all three memory levels: global, project, and session.
 func (sm *SessionMemory) SearchNotes(query string) []MemoryEntry {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
 	lower := strings.ToLower(query)
 	var result []MemoryEntry
-	for _, e := range sm.entries {
-		if strings.Contains(strings.ToLower(e.Content), lower) ||
-			strings.Contains(strings.ToLower(e.Category), lower) {
-			result = append(result, e)
+
+	// Search all three levels
+	allEntries := [][]MemoryEntry{sm.globalEntries, sm.projectEntries, sm.entries}
+	for _, entries := range allEntries {
+		for _, e := range entries {
+			if strings.Contains(strings.ToLower(e.Content), lower) ||
+				strings.Contains(strings.ToLower(e.Category), lower) {
+				result = append(result, e)
+			}
 		}
 	}
 	return result
@@ -334,39 +532,78 @@ func filterEntries(entries []MemoryEntry, keep func(MemoryEntry) bool) []MemoryE
 }
 
 // FormatForPrompt formats memory entries for injection into the system prompt.
+// Includes all three memory levels: global, project, and session.
 func (sm *SessionMemory) FormatForPrompt() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	if len(sm.entries) == 0 {
+	hasAny := len(sm.globalEntries) > 0 || len(sm.projectEntries) > 0 || len(sm.entries) > 0
+	if !hasAny {
 		return ""
 	}
 
-	// Group by category
-	groups := make(map[string][]MemoryEntry)
-	var categories []string
-	for _, e := range sm.entries {
-		if _, ok := groups[e.Category]; !ok {
-			categories = append(categories, e.Category)
-		}
-		groups[e.Category] = append(groups[e.Category], e)
-	}
-	sort.Strings(categories)
-
 	var sb strings.Builder
-	sb.WriteString("## Session Memory\n\n")
-	sb.WriteString("The following notes were recorded during this or previous sessions. Use them as context.\n\n")
 
-	for _, cat := range categories {
-		entries := groups[cat]
-		sb.WriteString(fmt.Sprintf("### %s\n", cat))
-		for _, e := range entries {
-			sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
+	// Level 1: Global memory
+	if len(sm.globalEntries) > 0 {
+		sb.WriteString("## Global Memory (cross-project preferences)\n\n")
+		groups := groupByCategory(sm.globalEntries)
+		for _, cat := range sortedKeys(groups) {
+			sb.WriteString(fmt.Sprintf("### %s\n", cat))
+			for _, e := range groups[cat] {
+				sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
+			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
+	}
+
+	// Level 2: Project memory
+	if len(sm.projectEntries) > 0 {
+		sb.WriteString("## Project Memory (project rules and architecture)\n\n")
+		groups := groupByCategory(sm.projectEntries)
+		for _, cat := range sortedKeys(groups) {
+			sb.WriteString(fmt.Sprintf("### %s\n", cat))
+			for _, e := range groups[cat] {
+				sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// Level 3: Session memory
+	if len(sm.entries) > 0 {
+		sb.WriteString("## Session Memory\n\n")
+		sb.WriteString("The following notes were recorded during this or previous sessions. Use them as context.\n\n")
+		groups := groupByCategory(sm.entries)
+		for _, cat := range sortedKeys(groups) {
+			sb.WriteString(fmt.Sprintf("### %s\n", cat))
+			for _, e := range groups[cat] {
+				sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
+			}
+			sb.WriteString("\n")
+		}
 	}
 
 	return sb.String()
+}
+
+// groupByCategory groups entries by category.
+func groupByCategory(entries []MemoryEntry) map[string][]MemoryEntry {
+	groups := make(map[string][]MemoryEntry)
+	for _, e := range entries {
+		groups[e.Category] = append(groups[e.Category], e)
+	}
+	return groups
+}
+
+// sortedKeys returns sorted keys from a map.
+func sortedKeys(m map[string][]MemoryEntry) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // GetLastSummarizedMessageUUID returns the UUID of the most recently summarized
@@ -387,21 +624,49 @@ func (s *SessionMemory) SetLastSummarizedMessageUUID(uuid string) {
 }
 
 // FormatForPromptCompact formats memory entries for injection after compaction.
-// Each section is truncated to maxTokensPerSection (~2000 tokens),
-// with a total cap of maxTotalSessionMemoryTokens (~12000 tokens),
-// matching upstream's truncateSessionMemoryForCompact.
+// Includes all three memory levels (global, project, session) with separate budgets.
+// MiMo-Code pattern: global (6K tokens) + project (10K tokens) + session (10K tokens).
 func (sm *SessionMemory) FormatForPromptCompact() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	if len(sm.entries) == 0 {
+	hasAny := len(sm.globalEntries) > 0 || len(sm.projectEntries) > 0 || len(sm.entries) > 0
+	if !hasAny {
 		return ""
 	}
 
+	var sb strings.Builder
+
+	// Level 1: Global memory (cross-project preferences)
+	if len(sm.globalEntries) > 0 {
+		sb.WriteString("## Global Memory (cross-project preferences)\n\n")
+		formatEntriesInto(&sb, sm.globalEntries, maxGlobalMemoryTokens*4, maxTokensPerSection*4)
+		sb.WriteString("\n")
+	}
+
+	// Level 2: Project memory (project-level rules and architecture)
+	if len(sm.projectEntries) > 0 {
+		sb.WriteString("## Project Memory (project rules and architecture)\n\n")
+		formatEntriesInto(&sb, sm.projectEntries, maxProjectMemoryTokens*4, maxTokensPerSection*4)
+		sb.WriteString("\n")
+	}
+
+	// Level 3: Session memory (per-session state)
+	if len(sm.entries) > 0 {
+		sb.WriteString("## Session Memory\n\n")
+		sb.WriteString("The following notes were recorded during this or previous sessions. Use them as context.\n\n")
+		formatEntriesInto(&sb, sm.entries, maxTotalSessionMemoryTokens*4, maxTokensPerSection*4)
+	}
+
+	return sb.String()
+}
+
+// formatEntriesInto writes entries grouped by category into sb with budget limits.
+func formatEntriesInto(sb *strings.Builder, entries []MemoryEntry, totalBudget, maxSectionChars int) {
 	// Group by category
 	groups := make(map[string][]MemoryEntry)
 	var categories []string
-	for _, e := range sm.entries {
+	for _, e := range entries {
 		if _, ok := groups[e.Category]; !ok {
 			categories = append(categories, e.Category)
 		}
@@ -409,33 +674,20 @@ func (sm *SessionMemory) FormatForPromptCompact() string {
 	}
 	sort.Strings(categories)
 
-	// Rough char budget: ~4 chars/token (roughTokenCountEstimation uses length/4).
-	// maxTotal chars = maxTotalSessionMemoryTokens * 4
-	maxTotalChars := maxTotalSessionMemoryTokens * 4
-	maxSectionChars := maxTokensPerSection * 4
-
-	var sb strings.Builder
-	totalBudget := maxTotalChars
 	totalUsed := 0
-
-	sb.WriteString("## Session Memory\n\n")
-	sb.WriteString("The following notes were recorded during this or previous sessions. Use them as context.\n\n")
-
 	for _, cat := range categories {
-		entries := groups[cat]
+		entryList := groups[cat]
 		sectionHeader := fmt.Sprintf("### %s\n", cat)
 		sb.WriteString(sectionHeader)
 		sectionUsed := len(sectionHeader)
 
-		for _, e := range entries {
+		for _, e := range entryList {
 			line := fmt.Sprintf("- %s\n", e.Content)
 			lineLen := len(line)
 			if totalUsed+lineLen > totalBudget {
 				break
 			}
-			// Per-section budget check (keep section under maxSectionChars)
 			if sectionUsed+lineLen > maxSectionChars {
-				// Truncate at sentence or line boundary
 				remaining := maxSectionChars - sectionUsed - len("  [... truncated ...]\n")
 				if remaining > 0 {
 					truncated := truncateLine(line, remaining)
@@ -448,13 +700,8 @@ func (sm *SessionMemory) FormatForPromptCompact() string {
 			sectionUsed += lineLen
 			totalUsed += lineLen
 		}
-
-		// Per-section truncation already added a marker at the section boundary.
-		// Total budget overflow (totalUsed > totalBudget) is checked at line 357.
 		sb.WriteString("\n")
 	}
-
-	return sb.String()
 }
 
 // truncateLine truncates a line to fit within remaining budget.
@@ -687,6 +934,74 @@ func (sm *SessionMemory) loadFromDisk() {
 	sm.entries = sm.parseMarkdownEntries(string(data))
 }
 
+// loadGlobalFromDisk reads global memory entries from ~/.claude/memory/global.md.
+// Global memory contains cross-project user preferences that persist across all projects.
+func (sm *SessionMemory) loadGlobalFromDisk() {
+	if sm.globalPath == "" {
+		return
+	}
+	data, err := os.ReadFile(sm.globalPath)
+	if err != nil {
+		return // no file yet
+	}
+	sm.globalEntries = sm.parseSimpleEntries(string(data))
+}
+
+// loadProjectFromDisk reads project memory entries from {projectDir}/.claude/memory/project.md.
+// Project memory contains project-level rules, architecture decisions, and durable knowledge.
+func (sm *SessionMemory) loadProjectFromDisk() {
+	data, err := os.ReadFile(sm.projectPath)
+	if err != nil {
+		return // no file yet
+	}
+	sm.projectEntries = sm.parseSimpleEntries(string(data))
+}
+
+// parseSimpleEntries parses entries from a simple markdown list format.
+// Format: "## Category\n- content\n- content\n\n## Category2\n..."
+func (sm *SessionMemory) parseSimpleEntries(data string) []MemoryEntry {
+	var entries []MemoryEntry
+	lines := strings.Split(data, "\n")
+	var currentCategory string
+	lastTimestamp := time.Now()
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Category header: ## Category
+		if strings.HasPrefix(trimmed, "## ") {
+			currentCategory = strings.TrimSpace(trimmed[3:])
+			continue
+		}
+
+		// Timestamp comment: <!-- timestamp -->
+		if strings.HasPrefix(trimmed, "<!-- ") && strings.HasSuffix(trimmed, " -->") {
+			ts := strings.TrimPrefix(trimmed, "<!-- ")
+			ts = strings.TrimSuffix(ts, " -->")
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				lastTimestamp = t
+			}
+			continue
+		}
+
+		// Bullet point: - content
+		if strings.HasPrefix(trimmed, "- ") && currentCategory != "" {
+			content := strings.TrimSpace(trimmed[2:])
+			if content == "" {
+				continue
+			}
+			entries = append(entries, MemoryEntry{
+				Category:  currentCategory,
+				Content:   content,
+				Timestamp: lastTimestamp,
+				Source:    "disk",
+			})
+		}
+	}
+
+	return entries
+}
+
 // parseMarkdownEntries parses entries from a markdown session memory file.
 // Handles both structured template format (with section headers like "# Section")
 // and simple list format (with "### Category" headers).
@@ -899,6 +1214,25 @@ func (sm *SessionMemory) flushToDisk() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// Flush global memory if dirty
+	if sm.globalDirty && sm.globalPath != "" {
+		if err := sm.writeSimpleEntriesLocked(sm.globalPath, sm.globalEntries); err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] flush global error: %v\n", err)
+		} else {
+			sm.globalDirty = false
+		}
+	}
+
+	// Flush project memory if dirty
+	if sm.projectDirty {
+		if err := sm.writeSimpleEntriesLocked(sm.projectPath, sm.projectEntries); err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] flush project error: %v\n", err)
+		} else {
+			sm.projectDirty = false
+		}
+	}
+
+	// Flush session memory if dirty
 	if !sm.dirty {
 		return nil
 	}
@@ -907,6 +1241,52 @@ func (sm *SessionMemory) flushToDisk() error {
 		return err
 	}
 	sm.dirty = false
+	return nil
+}
+
+// writeSimpleEntriesLocked writes entries in simple "## Category\n- content" format.
+// Used for global and project memory files.
+func (sm *SessionMemory) writeSimpleEntriesLocked(path string, entries []MemoryEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Ensure directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create memory dir: %w", err)
+	}
+
+	// Group by category
+	groups := make(map[string][]MemoryEntry)
+	var categories []string
+	for _, e := range entries {
+		if _, ok := groups[e.Category]; !ok {
+			categories = append(categories, e.Category)
+		}
+		groups[e.Category] = append(groups[e.Category], e)
+	}
+	sort.Strings(categories)
+
+	var sb strings.Builder
+	for _, cat := range categories {
+		sb.WriteString(fmt.Sprintf("## %s\n", cat))
+		for _, e := range groups[cat] {
+			sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
+			sb.WriteString(fmt.Sprintf("<!-- %s -->\n", e.Timestamp.Format(time.RFC3339)))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Atomic write
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(sb.String()), 0644); err != nil {
+		return fmt.Errorf("write memory file tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename memory file: %w", err)
+	}
 	return nil
 }
 

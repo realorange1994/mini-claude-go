@@ -665,3 +665,331 @@ func TestSessionMemoryDiskFormatRoundTripConsistency(t *testing.T) {
 		t.Error("second flush should contain new content")
 	}
 }
+
+// ─── Three-Level Memory System ──────────────────────────────────────────────
+
+func TestThreeLevelMemoryAddScopedNote(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Add notes to different scopes
+	sm.AddScopedNote(ScopeGlobal, "preference", "Use Go 1.25+", "user")
+	sm.AddScopedNote(ScopeProject, "decision", "Use SQLite for persistence", "user")
+	sm.AddScopedNote(ScopeSession, "state", "Working on P0", "auto")
+
+	// Verify each scope has its entry
+	globalNotes := sm.GetScopedNotes(ScopeGlobal)
+	if len(globalNotes) != 1 {
+		t.Errorf("expected 1 global note, got %d", len(globalNotes))
+	}
+	if globalNotes[0].Content != "Use Go 1.25+" {
+		t.Errorf("unexpected global content: %s", globalNotes[0].Content)
+	}
+
+	projectNotes := sm.GetScopedNotes(ScopeProject)
+	if len(projectNotes) != 1 {
+		t.Errorf("expected 1 project note, got %d", len(projectNotes))
+	}
+	if projectNotes[0].Content != "Use SQLite for persistence" {
+		t.Errorf("unexpected project content: %s", projectNotes[0].Content)
+	}
+
+	sessionNotes := sm.GetScopedNotes(ScopeSession)
+	if len(sessionNotes) != 1 {
+		t.Errorf("expected 1 session note, got %d", len(sessionNotes))
+	}
+	if sessionNotes[0].Content != "Working on P0" {
+		t.Errorf("unexpected session content: %s", sessionNotes[0].Content)
+	}
+}
+
+func TestThreeLevelMemoryGetNotesIncludesAll(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddScopedNote(ScopeGlobal, "preference", "global-pref", "user")
+	sm.AddScopedNote(ScopeProject, "decision", "project-dec", "user")
+	sm.AddScopedNote(ScopeSession, "state", "session-state", "auto")
+
+	// GetNotes should return all three levels
+	allNotes := sm.GetNotes()
+	if len(allNotes) != 3 {
+		t.Errorf("expected 3 total notes, got %d", len(allNotes))
+	}
+}
+
+func TestThreeLevelMemorySearchAcrossScopes(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddScopedNote(ScopeGlobal, "preference", "Use Go channels for concurrency", "user")
+	sm.AddScopedNote(ScopeProject, "decision", "Use goroutine pool", "user")
+	sm.AddScopedNote(ScopeSession, "state", "Working on channel implementation", "auto")
+
+	// Search should find matches across all scopes
+	results := sm.SearchNotes("channel")
+	if len(results) != 2 {
+		t.Errorf("expected 2 results for 'channel', got %d", len(results))
+	}
+
+	// Scoped search should filter
+	scopedResults := sm.SearchScopedNotes("channel", ScopeGlobal)
+	if len(scopedResults) != 1 {
+		t.Errorf("expected 1 global result for 'channel', got %d", len(scopedResults))
+	}
+}
+
+func TestThreeLevelMemoryDeduplication(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Add same content twice to same scope
+	sm.AddScopedNote(ScopeGlobal, "preference", "Use Go 1.25+", "user")
+	sm.AddScopedNote(ScopeGlobal, "preference", "Use Go 1.25+", "user")
+
+	globalNotes := sm.GetScopedNotes(ScopeGlobal)
+	if len(globalNotes) != 1 {
+		t.Errorf("expected deduplication, got %d notes", len(globalNotes))
+	}
+}
+
+func TestThreeLevelMemoryFlushAndLoad(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, ".claude", "memory", "global.md")
+
+	// Create and populate
+	sm1 := NewSessionMemoryWithPaths(dir, globalPath)
+	sm1.AddScopedNote(ScopeGlobal, "preference", "global-pref-1", "user")
+	sm1.AddScopedNote(ScopeProject, "decision", "project-dec-1", "user")
+	sm1.AddScopedNote(ScopeSession, "decision", "session-dec-1", "user") // Use "decision" not "state" — state is cleared on reload
+	sm1.FlushToDisk()
+
+	// Verify files exist
+	projectPath := filepath.Join(dir, ".claude", "memory", "project.md")
+	sessionPath := filepath.Join(dir, ".claude", "session_memory.md")
+
+	if _, err := os.Stat(globalPath); os.IsNotExist(err) {
+		t.Error("global memory file should exist")
+	}
+	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+		t.Error("project memory file should exist")
+	}
+	if _, err := os.Stat(sessionPath); os.IsNotExist(err) {
+		t.Error("session memory file should exist")
+	}
+
+	// Load in new instance
+	sm2 := NewSessionMemoryWithPaths(dir, globalPath)
+
+	globalNotes := sm2.GetScopedNotes(ScopeGlobal)
+	if len(globalNotes) != 1 {
+		t.Errorf("expected 1 global note after reload, got %d", len(globalNotes))
+	}
+	if globalNotes[0].Content != "global-pref-1" {
+		t.Errorf("unexpected global content after reload: %s", globalNotes[0].Content)
+	}
+
+	projectNotes := sm2.GetScopedNotes(ScopeProject)
+	if len(projectNotes) != 1 {
+		t.Errorf("expected 1 project note after reload, got %d", len(projectNotes))
+	}
+	if projectNotes[0].Content != "project-dec-1" {
+		t.Errorf("unexpected project content after reload: %s", projectNotes[0].Content)
+	}
+
+	// Session notes are loaded from template format
+	sessionNotes := sm2.GetScopedNotes(ScopeSession)
+	if len(sessionNotes) != 1 {
+		t.Errorf("expected 1 session note after reload, got %d", len(sessionNotes))
+	}
+	if sessionNotes[0].Content != "session-dec-1" {
+		t.Errorf("unexpected session content after reload: %s", sessionNotes[0].Content)
+	}
+}
+
+func TestThreeLevelMemoryFormatForPromptCompact(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddScopedNote(ScopeGlobal, "preference", "Use Go 1.25+", "user")
+	sm.AddScopedNote(ScopeProject, "decision", "Use SQLite", "user")
+	sm.AddScopedNote(ScopeSession, "state", "Working on P0", "auto")
+
+	compact := sm.FormatForPromptCompact()
+
+	// Should contain all three level headers
+	if !strings.Contains(compact, "## Global Memory") {
+		t.Error("compact should contain Global Memory section")
+	}
+	if !strings.Contains(compact, "## Project Memory") {
+		t.Error("compact should contain Project Memory section")
+	}
+	if !strings.Contains(compact, "## Session Memory") {
+		t.Error("compact should contain Session Memory section")
+	}
+
+	// Should contain actual content
+	if !strings.Contains(compact, "Use Go 1.25+") {
+		t.Error("compact should contain global content")
+	}
+	if !strings.Contains(compact, "Use SQLite") {
+		t.Error("compact should contain project content")
+	}
+	if !strings.Contains(compact, "Working on P0") {
+		t.Error("compact should contain session content")
+	}
+}
+
+func TestThreeLevelMemoryFormatForPrompt(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddScopedNote(ScopeGlobal, "preference", "global-pref", "user")
+	sm.AddScopedNote(ScopeProject, "decision", "project-dec", "user")
+	sm.AddScopedNote(ScopeSession, "state", "session-state", "auto")
+
+	prompt := sm.FormatForPrompt()
+
+	if !strings.Contains(prompt, "## Global Memory") {
+		t.Error("prompt should contain Global Memory section")
+	}
+	if !strings.Contains(prompt, "## Project Memory") {
+		t.Error("prompt should contain Project Memory section")
+	}
+	if !strings.Contains(prompt, "## Session Memory") {
+		t.Error("prompt should contain Session Memory section")
+	}
+}
+
+func TestThreeLevelMemoryFormatForPromptCompactEmpty(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Empty memory should return empty string
+	compact := sm.FormatForPromptCompact()
+	if compact != "" {
+		t.Errorf("expected empty compact for empty memory, got %q", compact)
+	}
+}
+
+func TestThreeLevelMemoryClearStateEntries(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	// Add state entries to session scope
+	sm.AddScopedNote(ScopeSession, "state", "session-state-1", "auto")
+	sm.AddScopedNote(ScopeSession, "state", "session-state-2", "auto")
+	sm.AddScopedNote(ScopeSession, "decision", "session-dec-1", "user")
+
+	// ClearStateEntries should only clear session state
+	sm.ClearStateEntries()
+
+	sessionNotes := sm.GetScopedNotes(ScopeSession)
+	if len(sessionNotes) != 1 {
+		t.Errorf("expected 1 session note after clear, got %d", len(sessionNotes))
+	}
+	if sessionNotes[0].Category != "decision" {
+		t.Errorf("expected remaining note to be decision, got %s", sessionNotes[0].Category)
+	}
+}
+
+func TestThreeLevelMemoryFileContent(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, ".claude", "memory", "global.md")
+	sm := NewSessionMemoryWithPaths(dir, globalPath)
+
+	sm.AddScopedNote(ScopeGlobal, "preference", "Use Go 1.25+", "user")
+	sm.AddScopedNote(ScopeGlobal, "preference", "Prefer table-driven tests", "user")
+	sm.FlushToDisk()
+
+	// Read global file and verify format
+	data, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatalf("failed to read global memory: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "## preference") {
+		t.Error("global file should contain category header")
+	}
+	if !strings.Contains(content, "- Use Go 1.25+") {
+		t.Error("global file should contain first entry")
+	}
+	if !strings.Contains(content, "- Prefer table-driven tests") {
+		t.Error("global file should contain second entry")
+	}
+}
+
+func TestThreeLevelMemoryProjectFileContent(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionMemoryWithPaths(dir, filepath.Join(dir, ".claude", "memory", "global.md"))
+
+	sm.AddScopedNote(ScopeProject, "decision", "Use SQLite for persistence", "user")
+	sm.AddScopedNote(ScopeProject, "reference", "src/db/schema.go", "auto")
+	sm.FlushToDisk()
+
+	// Read project file and verify format
+	projectPath := filepath.Join(dir, ".claude", "memory", "project.md")
+	data, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatalf("failed to read project memory: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "## decision") {
+		t.Error("project file should contain decision header")
+	}
+	if !strings.Contains(content, "## reference") {
+		t.Error("project file should contain reference header")
+	}
+	if !strings.Contains(content, "- Use SQLite for persistence") {
+		t.Error("project file should contain decision content")
+	}
+	if !strings.Contains(content, "- src/db/schema.go") {
+		t.Error("project file should contain reference content")
+	}
+}
+
+func TestThreeLevelMemoryTimestampPersistence(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, ".claude", "memory", "global.md")
+	sm := NewSessionMemoryWithPaths(dir, globalPath)
+
+	// Add a note with a known timestamp
+	before := time.Now().Truncate(time.Second)
+	sm.AddScopedNote(ScopeGlobal, "preference", "test-timestamp", "user")
+	sm.FlushToDisk()
+
+	// Reload and check timestamp is preserved
+	sm2 := NewSessionMemoryWithPaths(dir, globalPath)
+	notes := sm2.GetScopedNotes(ScopeGlobal)
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(notes))
+	}
+
+	// Timestamp should be after 'before' (with some tolerance)
+	if notes[0].Timestamp.Before(before) {
+		t.Errorf("timestamp should be preserved: got %v, expected >= %v", notes[0].Timestamp, before)
+	}
+}
+
+func TestThreeLevelMemoryMultipleFlushes(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, ".claude", "memory", "global.md")
+	sm := NewSessionMemoryWithPaths(dir, globalPath)
+
+	// First flush
+	sm.AddScopedNote(ScopeGlobal, "preference", "first-global", "user")
+	sm.FlushToDisk()
+
+	// Second flush with additional entries
+	sm.AddScopedNote(ScopeGlobal, "preference", "second-global", "user")
+	sm.FlushToDisk()
+
+	// Reload and verify both entries exist
+	sm2 := NewSessionMemoryWithPaths(dir, globalPath)
+	notes := sm2.GetScopedNotes(ScopeGlobal)
+	if len(notes) != 2 {
+		t.Errorf("expected 2 global notes after multiple flushes, got %d", len(notes))
+	}
+}

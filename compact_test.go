@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -788,5 +789,254 @@ func TestContextInfoManyMessages(t *testing.T) {
 	info := ContextInfo(msgs, 200000)
 	if !strings.Contains(info, "100 messages") {
 		t.Errorf("ContextInfo should report 100 messages, got %q", info)
+	}
+}
+
+// ─── Progressive Micro-Compression Tests ────────────────────────────────────
+
+func TestSoftTrimEntriesTrimsLargeOutput(t *testing.T) {
+	ctx := &ConversationContext{
+		entries:             make([]conversationEntry, 0),
+		toolResultReplacements: make(map[string]string),
+		clearedToolResults:     make(map[string]bool),
+	}
+
+	// Add multiple tool_use/tool_result pairs to exceed keepRecent=5
+	largeText := stringsRepeat("x", 8000) // 8K chars, well above SOFT_TRIM_THRESHOLD
+	for i := 0; i < 7; i++ {
+		toolID := fmt.Sprintf("tool-%d", i)
+		ctx.entries = append(ctx.entries, conversationEntry{
+			role: "assistant",
+			content: ToolUseContent{
+				{OfToolUse: &anthropic.ToolUseBlockParam{ID: toolID, Name: "read_file"}},
+			},
+		})
+		ctx.entries = append(ctx.entries, conversationEntry{
+			role: "user",
+			content: ToolResultContent{
+				{ToolUseID: toolID, Content: []anthropic.ToolResultBlockParamContentUnion{
+					{OfText: &anthropic.TextBlockParam{Text: largeText}},
+				}},
+			},
+		})
+	}
+
+	trimmed := ctx.SoftTrimEntries(0) // keepRecent=0 -> defaults to 5
+	if trimmed != 2 { // 7 results - 5 recent = 2 eligible
+		t.Errorf("expected 2 trimmed, got %d", trimmed)
+	}
+
+	// Verify the oldest entries (tool-0, tool-1) were trimmed
+	// The recent entries (tool-2 through tool-6) should be unchanged
+	oldestResult := ctx.entries[1] // tool-0's result
+	if results, ok := oldestResult.content.(ToolResultContent); ok {
+		for _, r := range results {
+			for _, cb := range r.Content {
+				if cb.OfText != nil {
+					if len(cb.OfText.Text) >= 8000 {
+						t.Error("oldest text should have been trimmed")
+					}
+					if !strings.Contains(cb.OfText.Text, "[... trimmed") {
+						t.Error("trimmed text should contain marker")
+					}
+				}
+			}
+		}
+	}
+
+	// Verify the newest entry (tool-6) was NOT trimmed
+	newestResult := ctx.entries[len(ctx.entries)-1] // tool-6's result
+	if results, ok := newestResult.content.(ToolResultContent); ok {
+		for _, r := range results {
+			for _, cb := range r.Content {
+				if cb.OfText != nil {
+					if len(cb.OfText.Text) < 8000 {
+						t.Error("newest text should NOT have been trimmed")
+					}
+					if strings.Contains(cb.OfText.Text, "[... trimmed") {
+						t.Error("newest text should not contain trim marker")
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestSoftTrimEntriesSkipsSmallOutput(t *testing.T) {
+	ctx := &ConversationContext{
+		entries:             make([]conversationEntry, 0),
+		toolResultReplacements: make(map[string]string),
+		clearedToolResults:     make(map[string]bool),
+	}
+
+	// Add a tool_use entry
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "assistant",
+		content: ToolUseContent{
+			{OfToolUse: &anthropic.ToolUseBlockParam{ID: "tool-1", Name: "read_file"}},
+		},
+	})
+
+	// Add a tool_result entry with small output (below threshold)
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "user",
+		content: ToolResultContent{
+			{ToolUseID: "tool-1", Content: []anthropic.ToolResultBlockParamContentUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "small output"}},
+			}},
+		},
+	})
+
+	trimmed := ctx.SoftTrimEntries(0)
+	if trimmed != 0 {
+		t.Errorf("expected 0 trimmed (below threshold), got %d", trimmed)
+	}
+}
+
+func TestSoftTrimEntriesSkipsRecentEntries(t *testing.T) {
+	ctx := &ConversationContext{
+		entries:             make([]conversationEntry, 0),
+		toolResultReplacements: make(map[string]string),
+		clearedToolResults:     make(map[string]bool),
+	}
+
+	// Add a tool_use entry
+	largeText := stringsRepeat("x", 8000)
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "assistant",
+		content: ToolUseContent{
+			{OfToolUse: &anthropic.ToolUseBlockParam{ID: "tool-1", Name: "read_file"}},
+		},
+	})
+
+	// Add a tool_result entry
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "user",
+		content: ToolResultContent{
+			{ToolUseID: "tool-1", Content: []anthropic.ToolResultBlockParamContentUnion{
+				{OfText: &anthropic.TextBlockParam{Text: largeText}},
+			}},
+		},
+	})
+
+	// keepRecent=5 means this result is protected
+	trimmed := ctx.SoftTrimEntries(5)
+	if trimmed != 0 {
+		t.Errorf("expected 0 trimmed (protected by keepRecent), got %d", trimmed)
+	}
+}
+
+func TestSoftTrimEntriesSkipsErrorResults(t *testing.T) {
+	ctx := &ConversationContext{
+		entries:             make([]conversationEntry, 0),
+		toolResultReplacements: make(map[string]string),
+		clearedToolResults:     make(map[string]bool),
+	}
+
+	// Add a tool_use entry
+	largeText := stringsRepeat("x", 8000)
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "assistant",
+		content: ToolUseContent{
+			{OfToolUse: &anthropic.ToolUseBlockParam{ID: "tool-1", Name: "exec"}},
+		},
+	})
+
+	// Add a tool_result entry with error
+	isError := anthropic.Bool(true)
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "user",
+		content: ToolResultContent{
+			{ToolUseID: "tool-1", IsError: isError, Content: []anthropic.ToolResultBlockParamContentUnion{
+				{OfText: &anthropic.TextBlockParam{Text: largeText}},
+			}},
+		},
+	})
+
+	trimmed := ctx.SoftTrimEntries(0)
+	if trimmed != 0 {
+		t.Errorf("expected 0 trimmed (error result protected), got %d", trimmed)
+	}
+}
+
+func TestSoftTrimEntriesSkipsNonCompactableTools(t *testing.T) {
+	ctx := &ConversationContext{
+		entries:             make([]conversationEntry, 0),
+		toolResultReplacements: make(map[string]string),
+		clearedToolResults:     make(map[string]bool),
+	}
+
+	// Add a tool_use entry for a non-compactable tool
+	largeText := stringsRepeat("x", 8000)
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "assistant",
+		content: ToolUseContent{
+			{OfToolUse: &anthropic.ToolUseBlockParam{ID: "tool-1", Name: "memory_add"}},
+		},
+	})
+
+	// Add a tool_result entry
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "user",
+		content: ToolResultContent{
+			{ToolUseID: "tool-1", Content: []anthropic.ToolResultBlockParamContentUnion{
+				{OfText: &anthropic.TextBlockParam{Text: largeText}},
+			}},
+		},
+	})
+
+	trimmed := ctx.SoftTrimEntries(0)
+	if trimmed != 0 {
+		t.Errorf("expected 0 trimmed (non-compactable tool), got %d", trimmed)
+	}
+}
+
+func TestSoftTrimPreservesHeadAndTail(t *testing.T) {
+	ctx := &ConversationContext{
+		entries:             make([]conversationEntry, 0),
+		toolResultReplacements: make(map[string]string),
+		clearedToolResults:     make(map[string]bool),
+	}
+
+	// Create a large output with distinctive head and tail
+	head := "BEGIN_OUTPUT_MARKER"
+	tail := "END_OUTPUT_MARKER"
+	middle := stringsRepeat("x", 8000)
+	largeText := head + middle + tail
+
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "assistant",
+		content: ToolUseContent{
+			{OfToolUse: &anthropic.ToolUseBlockParam{ID: "tool-1", Name: "read_file"}},
+		},
+	})
+
+	ctx.entries = append(ctx.entries, conversationEntry{
+		role: "user",
+		content: ToolResultContent{
+			{ToolUseID: "tool-1", Content: []anthropic.ToolResultBlockParamContentUnion{
+				{OfText: &anthropic.TextBlockParam{Text: largeText}},
+			}},
+		},
+	})
+
+	ctx.SoftTrimEntries(0)
+
+	// Verify head is preserved
+	for _, entry := range ctx.entries {
+		if results, ok := entry.content.(ToolResultContent); ok {
+			for _, r := range results {
+				for _, cb := range r.Content {
+					if cb.OfText != nil {
+						if !strings.HasPrefix(cb.OfText.Text, head) {
+							t.Error("trimmed text should preserve head")
+						}
+						if !strings.HasSuffix(cb.OfText.Text, tail) {
+							t.Error("trimmed text should preserve tail")
+						}
+					}
+				}
+			}
+		}
 	}
 }

@@ -760,6 +760,16 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	// Update compactor's max tokens based on model context window
 	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model, cfg.MaxContextTokens)
 	agent.compactor.SetMaxTokens(int(contextWindow))
+	// Initialize compaction state for cross-restart threshold persistence (P0)
+	if cfg.ProjectDir != "" {
+		sid := cfg.SessionID
+		if sid == "" {
+			sid = "default"
+		}
+		compactState := NewCompactionState(cfg.ProjectDir, sid)
+		compactState.StartFlushLoop()
+		agent.compactor.SetCompactionState(compactState)
+	}
 	// Initialize proactive budget manager
 	agent.budgetManager = NewProactiveBudgetManager(int(contextWindow))
 	agent.redundantCallDetector = NewRedundantCallDetector()
@@ -962,6 +972,16 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	// Update compactor's max tokens based on model context window
 	contextWindow := agent.modelCapabilities.GetContextWindow(cfg.Model, cfg.MaxContextTokens)
 	agent.compactor.SetMaxTokens(int(contextWindow))
+	// Initialize compaction state for cross-restart threshold persistence (P0)
+	if cfg.ProjectDir != "" {
+		sid := cfg.SessionID
+		if sid == "" {
+			sid = "default"
+		}
+		compactState := NewCompactionState(cfg.ProjectDir, sid)
+		compactState.StartFlushLoop()
+		agent.compactor.SetCompactionState(compactState)
+	}
 	// Initialize proactive budget manager
 	agent.budgetManager = NewProactiveBudgetManager(int(contextWindow))
 	agent.redundantCallDetector = NewRedundantCallDetector()
@@ -2044,6 +2064,28 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 		}
 
+		// Record tool usage in compaction state for dynamic prompt generation (P1)
+		if a.compactor != nil {
+			cState := a.compactor.compactionState
+			if cState != nil {
+				for _, call := range toolCalls {
+					name, _ := call["name"].(string)
+					if name != "" {
+						cState.RecordToolUsage(name)
+					}
+					// Record file extensions from file-related tools
+					input, _ := call["input"].(map[string]any)
+					if input != nil {
+						for _, key := range []string{"file_path", "path", "destination"} {
+							if path, ok := input[key].(string); ok && path != "" {
+								cState.RecordFileTouch(filepath.Ext(path))
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Hook: PostAssistantMessage — after assistant tool calls are fully processed
 		if a.hooks != nil {
 			a.hooks.ExecuteGenericHooksQuiet(HookPostAssistantMessage, map[string]interface{}{
@@ -2165,6 +2207,11 @@ func (a *AgentLoop) Close() {
 	if a.cronScheduler != nil {
 		a.cronScheduler.stop()
 		a.cronScheduler = nil
+	}
+
+	// Flush compaction state to disk before exit (P0)
+	if a.compactor != nil && a.compactor.compactionState != nil {
+		a.compactor.compactionState.Close()
 	}
 
 	if a.transcript != nil {
@@ -5718,25 +5765,53 @@ func (a *AgentLoop) InjectRunningAgentStatus() {
 // turn to prevent old tool results from accumulating between full compactions.
 // This matches upstream's per-turn microCompact call in query.ts.
 //
-// Strategy: prefer the cached MC path (cache_edits API) which deletes tool
-// results server-side WITHOUT modifying local messages, preserving the prompt
-// cache prefix. Fall back to local content-replacement (MicroCompactEntries)
-// only when cached MC has no pending deletions — typically after a full
-// compaction reset or when below the trigger threshold.
+// Progressive compression (MiMo-Code pattern):
+//   - Pressure 0 (ratio < 0.50): no action
+//   - Pressure 1 (ratio 0.50-0.70): soft-trim large outputs (keep head+tail)
+//   - Pressure 2 (ratio >= 0.70): hard-clear old results (persist to disk)
 func (a *AgentLoop) runPerTurnMicroCompact() {
 	if !a.config.MicroCompactEnabled {
 		return
 	}
 
-	// Fall back to local content-replacement for micro-compact.
-	// This breaks the prompt cache but is the only available path now.
 	keepRecent := a.config.MicroCompactKeepRecent
 	if keepRecent <= 0 {
 		keepRecent = 5
 	}
-	cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
-	if cleared > 0 {
-		a.logDebug("\n[per-turn-micro-compact] Local MC: cleared %d old tool results\n", cleared)
+
+	// Determine pressure level based on token ratio
+	pressure := 0
+	if a.compactor != nil {
+		ctxMax := a.compactor.CompactThreshold() // 75% of context window
+		if ctxMax > 0 {
+			estimatedTokens := a.context.EstimatedTokens()
+			ratio := float64(estimatedTokens) / float64(ctxMax)
+			switch {
+			case ratio >= 0.93: // 0.70 / 0.75 ≈ 0.93 of threshold
+				pressure = 2
+			case ratio >= 0.67: // 0.50 / 0.75 ≈ 0.67 of threshold
+				pressure = 1
+			}
+		}
+	}
+
+	switch {
+	case pressure >= 2:
+		// Level 2: Hard-clear old tool results (persist to disk)
+		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
+		if cleared > 0 {
+			a.logDebug("\n[per-turn-micro-compact] Level 2 hard-clear: cleared %d old tool results\n", cleared)
+		}
+
+	case pressure >= 1:
+		// Level 1: Soft-trim large tool outputs (keep head + tail)
+		trimmed := a.context.SoftTrimEntries(keepRecent)
+		if trimmed > 0 {
+			a.logDebug("\n[per-turn-micro-compact] Level 1 soft-trim: trimmed %d large tool results\n", trimmed)
+		}
+
+	default:
+		// Pressure 0: no action needed
 	}
 }
 
@@ -5788,26 +5863,48 @@ func (a *AgentLoop) decidePostResponseFold(promptTokens int, ctxMax int) {
 func (a *AgentLoop) tryCompaction() {
 	a.logDebug("[compact] tryCompaction called: est_tokens=%d\n", a.context.EstimatedTokens())
 
-	// Phase 0: Micro-compact — clear old tool results (cheap, no LLM call)
+	// Phase 0: Micro-compact — progressive compression (MiMo-Code pattern)
 	// Time-based trigger: only fire when gap since last assistant > threshold (default 60 min).
-	// When gapMinutes=0, fires every turn (legacy count-based behavior).
+	// Pressure levels: 0=no action, 1=soft-trim (keep head+tail), 2=hard-clear (persist to disk)
 	if a.config.MicroCompactEnabled && a.context.ShouldTimeBasedMicroCompact(a.config.MicroCompactGapMinutes) {
 		keepRecent := a.config.MicroCompactKeepRecent
 		if keepRecent <= 0 {
 			keepRecent = 5
 		}
-		cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
-		if cleared > 0 {
-			a.logDebug("\n[micro-compact] Cleared %d old tool results\n", cleared)
-			// NOTE: do NOT call toolStateTracker.OnCompaction() here.
-			// Micro-compact clears OLD tool results (beyond keepRecent threshold) by
-			// replacing their text with placeholders. This is lightweight text replacement,
-			// not a structural context compaction. The files and searches themselves
-			// remain relevant — only the detailed output is trimmed. Incrementing the
-			// epoch here would incorrectly mark all files and searches as stale, causing
-			// the Session State note to say "RE-READ if needed" for files whose
-			// content is still in context. The epoch advances only during real compaction
-			// (where context is structurally reduced and the summary may miss details).
+
+		// Determine pressure level
+		pressure := 0
+		if a.compactor != nil {
+			ctxMax := a.compactor.CompactThreshold()
+			if ctxMax > 0 {
+				estimatedTokens := a.context.EstimatedTokens()
+				ratio := float64(estimatedTokens) / float64(ctxMax)
+				switch {
+				case ratio >= 0.93:
+					pressure = 2
+				case ratio >= 0.67:
+					pressure = 1
+				}
+			}
+		}
+
+		switch {
+		case pressure >= 2:
+			// Level 2: Hard-clear old tool results (persist to disk)
+			cleared := a.context.MicroCompactEntries(keepRecent, a.config.MicroCompactPlaceholder, a.config.MicroCompactMinCharCount)
+			if cleared > 0 {
+				a.logDebug("\n[micro-compact] Level 2 hard-clear: cleared %d old tool results\n", cleared)
+			}
+
+		case pressure >= 1:
+			// Level 1: Soft-trim large tool outputs (keep head + tail)
+			trimmed := a.context.SoftTrimEntries(keepRecent)
+			if trimmed > 0 {
+				a.logDebug("\n[micro-compact] Level 1 soft-trim: trimmed %d large tool results\n", trimmed)
+			}
+
+		default:
+			// Pressure 0: no action needed
 		}
 	}
 

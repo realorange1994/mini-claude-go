@@ -45,9 +45,9 @@ func estimateTokens(text string) int {
 			cjkCount++
 		}
 	}
-	// Non-CJK chars: ~4 chars per token
+	// Non-CJK chars: ~4 chars per token (ceiling division to avoid 0 for short strings)
 	nonCJK := len(text) - cjkCount
-	return (nonCJK / 4) + cjkCount
+	return ((nonCJK + 3) / 4) + cjkCount
 }
 
 // EstimateTokens returns an approximate token count for the given text.
@@ -1099,6 +1099,87 @@ When you are using compact - please focus on test output and code changes. Inclu
 </example>
 `
 
+// buildDynamicCompactInstructions generates context-aware compaction instructions
+// based on the session's tool usage patterns and file types. Inspired by MiMo-Code's
+// adaptive compaction approach.
+func buildDynamicCompactInstructions(state *CompactionState) string {
+	if state == nil {
+		return ""
+	}
+
+	var sections []string
+
+	// Tool-specific instructions based on actual usage
+	topTools := state.TopTools(5)
+	if len(topTools) > 0 {
+		toolInstructions := map[string]string{
+			"exec":      "Pay special attention to bash commands executed, their outputs, and any errors. Include command sequences that worked for debugging or building.",
+			"read_file": "Include summaries of key file reads with file paths. For files that were read multiple times, note what changed between reads.",
+			"edit_file": "Track all code edits made — include the file path, what was changed, and why. Preserve the before/after context for significant changes.",
+			"write_file": "Note all new files created and their purpose. Include the key structure/patterns of newly written files.",
+			"grep":      "Include search patterns that were productive — these reveal the codebase structure the agent explored.",
+			"glob":      "Note file patterns discovered — these help the next agent navigate the codebase efficiently.",
+			"git":       "Track git operations: commits made, branches created, merge conflicts resolved. Include commit messages.",
+			"web_search": "Include web search queries and their results if they informed technical decisions.",
+			"web_fetch":  "Summarize documentation or reference pages that were fetched and used.",
+			"lisp_eval":  "Note any Lisp computations performed and their results.",
+			"lisp_exec":  "Track system commands executed via Lisp and their outcomes.",
+		}
+
+		var toolHints []string
+		for _, tool := range topTools {
+			if hint, ok := toolInstructions[tool]; ok {
+				toolHints = append(toolHints, "- "+hint)
+			}
+		}
+		if len(toolHints) > 0 {
+			sections = append(sections, "## Tool-Specific Focus\n"+strings.Join(toolHints, "\n"))
+		}
+	}
+
+	// File-type-specific instructions
+	topFileTypes := state.TopFileTypes(5)
+	if len(topFileTypes) > 0 {
+		langInstructions := map[string]string{
+			".go":   "Focus on Go-specific patterns: interfaces, error handling, goroutine usage, and package structure.",
+			".ts":   "Focus on TypeScript types, interfaces, and any type errors encountered.",
+			".js":   "Focus on JavaScript patterns and any runtime issues.",
+			".py":   "Focus on Python patterns, imports, and virtual environment setup.",
+			".rs":   "Focus on Rust ownership, borrowing, and lifetime patterns.",
+			".java": "Focus on Java class hierarchies and dependency management.",
+			".sql":  "Include schema changes, migration queries, and their effects.",
+			".json": "Note configuration changes and their impact.",
+			".yaml": "Note infrastructure/deployment configuration changes.",
+			".md":   "Track documentation updates and their rationale.",
+			".html": "Note template changes and their relationship to backend logic.",
+			".css":  "Track styling changes and their visual impact.",
+			".sh":   "Include shell script changes and their deployment implications.",
+		}
+
+		var langHints []string
+		for _, ext := range topFileTypes {
+			if hint, ok := langInstructions[ext]; ok {
+				langHints = append(langHints, "- "+hint)
+			}
+		}
+		if len(langHints) > 0 {
+			sections = append(sections, "## Language-Specific Focus\n"+strings.Join(langHints, "\n"))
+		}
+	}
+
+	// Compaction history hint
+	count := state.GetCompactionCount()
+	if count > 0 {
+		sections = append(sections, fmt.Sprintf("## Compaction Context\nThis is compaction #%d for this session. Previous compactions may have already summarized earlier work. Focus on NEW information since the last compaction — avoid re-summarizing what was already captured.", count))
+	}
+
+	if len(sections) == 0 {
+		return ""
+	}
+
+	return "\n\n## Additional Context-Aware Instructions\n" + strings.Join(sections, "\n\n")
+}
+
 // PARTIAL_COMPACT_PROMPT matches upstream's PARTIAL_COMPACT_PROMPT.
 // Used for partial compaction of recent messages only.
 const partialCompactPrompt = `Your task is to create a detailed summary of the RECENT portion of the conversation — the messages that follow earlier retained context. The earlier messages are being kept intact and do NOT need to be summarized. Focus your summary on what was discussed, learned, and accomplished in the recent messages only.
@@ -1462,11 +1543,12 @@ type Compactor struct {
 	compactBuffer         int
 	llmCompactFailedCount int
 	maxLLMCompactFailures int
-	disabled              bool      // permanently disable LLM-driven auto-compact after too many failures; other compaction paths (SM-compact, PartialCompact, CompactContext fallback) remain available
+	disabled              bool      // permanently disable LLM-driven auto-compact after too many failures; other compaction paths (SM-compact, PartialCompact, truncation fallback) remain available
 	lastSummary           string    // for iterative summary updates
 	lastCompactSavings    []float64 // track savings ratio for anti-thrashing
 	postCompactTokens     int       // token count after last compaction, for cooldown
 	compressionLevel      int       // progressive summarization level (1=full, 2=concise, 3=minimal, 4+=ultra-minimal)
+	compactionState       *CompactionState // persisted compaction history for cross-restart continuity
 }
 
 // NewCompactor creates a new compactor with default settings.
@@ -1478,6 +1560,13 @@ func NewCompactor() *Compactor {
 		llmCompactFailedCount: 0,
 		maxLLMCompactFailures: 3,
 	}
+}
+
+// SetCompactionState attaches a persisted compaction state for cross-restart tracking.
+func (c *Compactor) SetCompactionState(state *CompactionState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.compactionState = state
 }
 
 // SetMaxTokens sets the compactor's max token limit based on the model's context window.
@@ -1570,7 +1659,15 @@ func (c *Compactor) Compact(
 	}
 	c.mu.Unlock()
 
-	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary, systemPrompt, transcriptPath, c.compressionLevel+1)
+	// Build dynamic compaction instructions from session state (P1 optimization)
+	var dynamicInstructions string
+	c.mu.Lock()
+	if c.compactionState != nil {
+		dynamicInstructions = buildDynamicCompactInstructions(c.compactionState)
+	}
+	c.mu.Unlock()
+
+	result, err := compactConversationLLM(messages, model, apiKey, baseURL, c.lastSummary, systemPrompt, transcriptPath, c.compressionLevel+1, dynamicInstructions)
 	if err != nil {
 		c.mu.Lock()
 		c.llmCompactFailedCount++
@@ -1597,6 +1694,13 @@ func (c *Compactor) Compact(
 	}
 	// Set cooldown: record post-compact token count to prevent immediate re-compaction
 	c.postCompactTokens = result.PostCompactTokens
+
+	// Record compaction in persisted state (P0 optimization)
+	if c.compactionState != nil {
+		thresholdPct := int(float64(result.PreCompactTokens) / float64(c.maxTokens) * 100)
+		c.compactionState.RecordCompaction(thresholdPct, result.PostCompactTokens, c.compressionLevel+1)
+	}
+
 	c.mu.Unlock()
 
 	fmt.Fprintf(os.Stderr, "\n[Compaction] auto: %d messages -> 2 (summary), ~%d tokens saved\n",
@@ -1612,7 +1716,7 @@ func (c *Compactor) Compact(
 // retry, up to MAX_PTL_RETRIES times.
 const MAX_PTL_RETRIES = 3
 
-func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int) (*CompactionResultLLM, error) {
+func compactConversationLLM(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int, dynamicInstructions string) (*CompactionResultLLM, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages to compact")
 	}
@@ -1621,7 +1725,7 @@ func compactConversationLLM(messages []anthropic.MessageParam, model string, api
 	// prompt-too-long, progressively drop the oldest rounds and retry.
 	var lastErr error
 	for attempt := 0; attempt <= MAX_PTL_RETRIES; attempt++ {
-		result, err := doCompactLLMCallWithRetry(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath, compressionLevel)
+		result, err := doCompactLLMCallWithRetry(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath, compressionLevel, dynamicInstructions)
 		if err == nil {
 			return result, nil
 		}
@@ -1724,7 +1828,7 @@ var ErrCompactStreamIncomplete = fmt.Errorf("stream ended without receiving any 
 // doCompactLLMCall makes a single streaming compaction API call.
 // Collects text incrementally and returns the result. The caller should retry on
 // transient failures (rate limit, timeout, network).
-func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int) (*CompactionResultLLM, error) {
+func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int, dynamicInstructions string) (*CompactionResultLLM, error) {
 	preTokens := estimateMessageParamsTokens(messages)
 
 	// Apply 3-pass pre-pruning before sending to LLM
@@ -1759,6 +1863,11 @@ func doCompactLLMCall(messages []anthropic.MessageParam, model string, apiKey st
 		userPrompt = noToolsPreamble + strings.Replace(iterativeCompactPromptForLevel(compressionLevel), "{previous_summary}", previousSummary, 1) + noToolsTrailer
 	} else {
 		userPrompt = noToolsPreamble + compactPromptForLevel(compressionLevel) + noToolsTrailer
+	}
+
+	// Inject dynamic context-aware instructions if available (P1 optimization)
+	if dynamicInstructions != "" {
+		userPrompt = strings.TrimSuffix(userPrompt, noToolsTrailer) + dynamicInstructions + noToolsTrailer
 	}
 
 	// Append the summary prompt as the final user message
@@ -1871,7 +1980,7 @@ func isTransientCompactError(errMsg string) bool {
 // backoff, matching upstream's streamCompactSummary retry behavior.
 const MAX_COMPACT_STREAMING_RETRIES = 2
 
-func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int) (*CompactionResultLLM, error) {
+func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, apiKey string, baseURL string, previousSummary string, systemPrompt string, transcriptPath string, compressionLevel int, dynamicInstructions string) (*CompactionResultLLM, error) {
 	var lastErr error
 	for attempt := 0; attempt <= MAX_COMPACT_STREAMING_RETRIES; attempt++ {
 		if attempt > 0 {
@@ -1887,7 +1996,7 @@ func doCompactLLMCallWithRetry(messages []anthropic.MessageParam, model string, 
 			}
 		}
 
-		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath, compressionLevel)
+		result, err := doCompactLLMCall(messages, model, apiKey, baseURL, previousSummary, systemPrompt, transcriptPath, compressionLevel, dynamicInstructions)
 		if err == nil {
 			return result, nil
 		}

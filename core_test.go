@@ -69,16 +69,16 @@ func TestCompactNothingToCompact(t *testing.T) {
 
 func TestCompactBasic(t *testing.T) {
 	msgs := []CompactionMessage{
-		{Role: "user", Content: "oldest q1"},
-		{Role: "assistant", Content: "oldest a1"},
-		{Role: "user", Content: "oldest q2"},
-		{Role: "assistant", Content: "oldest a2"},
-		{Role: "user", Content: "oldest q3"},
-		{Role: "assistant", Content: "oldest a3"},
-		{Role: "user", Content: "middle q4"},
-		{Role: "assistant", Content: "middle a4"},
-		{Role: "user", Content: "latest q5"},
-		{Role: "assistant", Content: "latest a5"},
+		{Role: "user", Content: stringsRepeat("oldest q1 ", 10)},
+		{Role: "assistant", Content: stringsRepeat("oldest a1 ", 10)},
+		{Role: "user", Content: stringsRepeat("oldest q2 ", 10)},
+		{Role: "assistant", Content: stringsRepeat("oldest a2 ", 10)},
+		{Role: "user", Content: stringsRepeat("oldest q3 ", 10)},
+		{Role: "assistant", Content: stringsRepeat("oldest a3 ", 10)},
+		{Role: "user", Content: stringsRepeat("middle q4 ", 10)},
+		{Role: "assistant", Content: stringsRepeat("middle a4 ", 10)},
+		{Role: "user", Content: stringsRepeat("latest q5 ", 10)},
+		{Role: "assistant", Content: stringsRepeat("latest a5 ", 10)},
 	}
 	cfg := DefaultCompactionConfig()
 	cfg.KeepRounds = 3

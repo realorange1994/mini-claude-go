@@ -610,6 +610,9 @@ func RegisterMemoryTools(r *tools.Registry, sm *SessionMemory) {
 		OnAdd: func(category, content, source string) {
 			sm.AddNote(category, content, source)
 		},
+		OnScopedAdd: func(scope, category, content, source string) {
+			sm.AddScopedNote(MemoryScope(scope), category, content, source)
+		},
 	})
 	r.Register(&tools.MemorySearchTool{
 		OnSearch: func(query string) []tools.MemorySearchResult {

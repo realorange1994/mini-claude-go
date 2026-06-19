@@ -49,6 +49,14 @@ const (
 	// file recovery, skill recovery) so ApplyPromptCaching can skip these messages
 	// when placing cache breakpoints.
 	SystemInjectedPrefix = "<!-- system-injected -->"
+
+	// Progressive micro-compression constants (MiMo-Code pattern).
+	// Level 1 (soft-trim): keeps head + tail of large tool outputs.
+	// Level 2 (hard-clear): persists to disk and replaces with placeholder.
+	SOFT_TRIM_THRESHOLD  = 4096 // min chars to trigger soft-trim
+	SOFT_TRIM_KEEP_HEAD  = 1536 // chars to keep from start
+	SOFT_TRIM_KEEP_TAIL  = 1536 // chars to keep from end
+	SOFT_TRIM_MIN_OUTPUT = 2000 // min output chars to consider soft-trimming
 )
 
 // buildCompressionPrompt generates the compression instruction text for inline
@@ -2641,6 +2649,113 @@ func adjustForToolPairing(preBoundary []conversationEntry, kept []conversationEn
 }
 
 // compactableToolNames is defined in compact.go (shared across package main).
+
+// SoftTrimEntries performs level 1 progressive micro-compression.
+// It soft-trims large tool outputs by keeping only the head and tail portions,
+// replacing the middle with a trim marker. This preserves the most useful parts
+// (beginning shows intent, end shows results) while freeing context space.
+// Unlike MicroCompactEntries (level 2), this does NOT persist to disk — the
+// trimmed content is lost but the remaining head/tail provide enough context.
+//
+// Inspired by MiMo-Code's prune level 1: keeps head 1.5K + tail 1.5K of outputs > 4K.
+//
+// Returns the number of tool results that were soft-trimmed.
+func (c *ConversationContext) SoftTrimEntries(keepRecent int) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if keepRecent <= 0 {
+		keepRecent = 5
+	}
+
+	// Initialize maps if not already done
+	if c.toolResultReplacements == nil {
+		c.toolResultReplacements = make(map[string]string)
+	}
+	if c.clearedToolResults == nil {
+		c.clearedToolResults = make(map[string]bool)
+	}
+
+	// Build tool_use_id -> tool_name mapping
+	toolNameMap := make(map[string]string)
+	for _, entry := range c.entries {
+		blocks, ok := entry.content.(ToolUseContent)
+		if !ok {
+			continue
+		}
+		for _, b := range blocks {
+			if b.OfToolUse != nil && b.OfToolUse.ID != "" {
+				toolNameMap[b.OfToolUse.ID] = b.OfToolUse.Name
+			}
+		}
+	}
+
+	recentCount := 0
+	trimmed := 0
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		entry := &c.entries[i]
+		results, ok := entry.content.(ToolResultContent)
+		if !ok {
+			continue
+		}
+		if recentCount < keepRecent {
+			recentCount++
+			continue
+		}
+
+		// Preserve error results
+		hasError := false
+		for _, r := range results {
+			if r.IsError.Valid() && r.IsError.Value {
+				hasError = true
+				break
+			}
+		}
+		if hasError {
+			continue
+		}
+
+		// Check each block for soft-trim eligibility
+		for _, r := range results {
+			toolName, ok := toolNameMap[r.ToolUseID]
+			if !ok || !compactableToolNames[toolName] {
+				continue
+			}
+
+			// Already replaced in this pass
+			if c.clearedToolResults[r.ToolUseID] {
+				continue
+			}
+
+			// Find text content and check size
+			for ci, cb := range r.Content {
+				if cb.OfText == nil {
+					continue
+				}
+				text := cb.OfText.Text
+				if len(text) < SOFT_TRIM_THRESHOLD {
+					continue // Too small to trim
+				}
+
+				// Soft-trim: keep head + tail, replace middle with marker
+				head := text[:SOFT_TRIM_KEEP_HEAD]
+				tail := text[len(text)-SOFT_TRIM_KEEP_TAIL:]
+				trimmedText := head +
+					"\n\n[... trimmed — kept first and last 1.5K of " +
+					fmt.Sprintf("%d", len(text)) +
+					" chars ...]\n\n" + tail
+
+				// Record replacement
+				c.toolResultReplacements[r.ToolUseID] = trimmedText
+				// Update the entry content in-place for soft-trim (level 1 doesn't persist)
+				r.Content[ci].OfText.Text = trimmedText
+				trimmed++
+				break // Only trim the first text block per result
+			}
+		}
+	}
+
+	return trimmed
+}
 
 // MicroCompactEntries clears content of old tool results beyond the keepRecent
 // window. Operates directly on conversation entries (no serialization round-trip).

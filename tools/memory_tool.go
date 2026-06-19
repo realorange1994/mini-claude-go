@@ -12,8 +12,17 @@ var validMemoryCategories = map[string]bool{
 	"reference":  true,
 }
 
+var validMemoryScopes = map[string]bool{
+	"global":  true,
+	"project": true,
+	"session": true,
+}
+
 // MemoryAddCallback is the function signature for adding a memory note.
 type MemoryAddCallback func(category, content, source string)
+
+// MemoryScopedAddCallback is the function signature for adding a scoped memory note.
+type MemoryScopedAddCallback func(scope, category, content, source string)
 
 // MemorySearchCallback is the function signature for searching memory notes.
 type MemorySearchCallback func(query string) []MemorySearchResult
@@ -26,12 +35,13 @@ type MemorySearchResult struct {
 
 // MemoryAddTool saves a note to session memory.
 type MemoryAddTool struct {
-	OnAdd MemoryAddCallback
+	OnAdd      MemoryAddCallback
+	OnScopedAdd MemoryScopedAddCallback
 }
 
 func (t *MemoryAddTool) Name() string { return "memory_add" }
 func (t *MemoryAddTool) Description() string {
-	return "Save a note to session memory for later reference. Use categories: 'preference' (user preferences), 'decision' (key decisions), 'state' (project state), 'reference' (useful references)."
+	return "Save a note to memory for later reference. Supports three scopes: 'global' (cross-project preferences), 'project' (project rules/architecture), 'session' (current session state). Categories: 'preference', 'decision', 'state', 'reference'."
 }
 
 func (t *MemoryAddTool) InputSchema() map[string]any {
@@ -42,11 +52,16 @@ func (t *MemoryAddTool) InputSchema() map[string]any {
 			"category": map[string]any{
 				"type":        "string",
 				"enum":        []any{"preference", "decision", "state", "reference"},
-				"description": "Category of the memory note. Only 'preference', 'decision', 'state', 'reference' are accepted.",
+				"description": "Category of the memory note.",
 			},
 			"content": map[string]any{
 				"type":        "string",
 				"description": "The note content to remember",
+			},
+			"scope": map[string]any{
+				"type":        "string",
+				"enum":        []any{"global", "project", "session"},
+				"description": "Memory scope: 'global' (cross-project), 'project' (project-level), 'session' (current session). Default: 'session'.",
 			},
 		},
 	}
@@ -59,12 +74,28 @@ func (t *MemoryAddTool) CheckPermissions(params map[string]any) PermissionResult
 func (t *MemoryAddTool) Execute(params map[string]any) ToolResult {
 	category, _ := params["category"].(string)
 	content, _ := params["content"].(string)
+	scope, _ := params["scope"].(string)
 	if category == "" || content == "" {
 		return ToolResultError("category and content are required")
 	}
 	if !validMemoryCategories[category] {
 		return ToolResultError(fmt.Sprintf("invalid category %q — must be one of: preference, decision, state, reference", category))
 	}
+	// Default to session scope
+	if scope == "" {
+		scope = "session"
+	}
+	if !validMemoryScopes[scope] {
+		return ToolResultError(fmt.Sprintf("invalid scope %q — must be one of: global, project, session", scope))
+	}
+
+	// Use scoped callback if available and scope is not session
+	if t.OnScopedAdd != nil && scope != "session" {
+		t.OnScopedAdd(scope, category, content, "assistant")
+		return ToolResultOK(fmt.Sprintf("Saved to %s memory [%s]: %s", scope, category, content))
+	}
+
+	// Fall back to session-scoped callback
 	if t.OnAdd == nil {
 		return ToolResultError("memory system not initialized")
 	}
