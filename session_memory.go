@@ -223,6 +223,7 @@ type SessionMemory struct {
 	wg         sync.WaitGroup
 	maxEntries int
 	onAdd      func() // optional callback invoked when a note is added
+	ftsIndex   *MemoryFTSIndex // FTS index for memory search (MiMo-Code P2)
 	// LastSummarizedMessageUUID tracks the UUID of the most recent message that
 	// has been summarized by session memory extraction. This enables incremental
 	// SM-compact: subsequent compactions only compact forward from this point,
@@ -282,6 +283,7 @@ func NewSessionMemoryWithPaths(projectDir, globalPath string) *SessionMemory {
 		checkpointDir:  filepath.Join(projectDir, ".claude", "checkpoints"),
 		stopCh:         make(chan struct{}),
 		maxEntries:     100,
+		ftsIndex:       NewMemoryFTSIndex(),
 	}
 
 	// Load all three memory levels
@@ -347,6 +349,9 @@ func (sm *SessionMemory) AddNote(category, content, source string) {
 		UpdatedAt: time.Now(),
 	})
 
+	// Update FTS index (MiMo-Code P2)
+	sm.ftsIndex.Index(ScopeSession, category, content)
+
 	// Enforce per-category max entries (keep newest)
 	sm.trimCategoryEntriesLocked(category)
 
@@ -388,6 +393,8 @@ func (sm *SessionMemory) addGlobalNote(category, content, source string) {
 		Source:    source,
 	})
 	sm.globalDirty = true
+	// Update FTS index (MiMo-Code P2)
+	sm.ftsIndex.Index(ScopeGlobal, category, content)
 }
 
 // addProjectNote adds a note to project memory (project-level rules).
@@ -411,6 +418,8 @@ func (sm *SessionMemory) addProjectNote(category, content, source string) {
 		Source:    source,
 	})
 	sm.projectDirty = true
+	// Update FTS index (MiMo-Code P2)
+	sm.ftsIndex.Index(ScopeProject, category, content)
 }
 
 // GetScopedNotes returns entries from the specified scope.
@@ -473,6 +482,33 @@ func (sm *SessionMemory) SearchScopedNotes(query string, scopes ...MemoryScope) 
 	}
 
 	return result
+}
+
+// SearchMemory performs full-text search across all memory scopes.
+// MiMo-Code P2: uses FTS index for fast ranked search.
+func (sm *SessionMemory) SearchMemory(query string, limit int) []FTSSearchResult {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	return sm.ftsIndex.Search(query, limit)
+}
+
+// RebuildFTSIndex rebuilds the FTS index from all memory entries.
+func (sm *SessionMemory) RebuildFTSIndex() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.ftsIndex = NewMemoryFTSIndex()
+
+	for _, e := range sm.entries {
+		sm.ftsIndex.Index(ScopeSession, e.Category, e.Content)
+	}
+	for _, e := range sm.projectEntries {
+		sm.ftsIndex.Index(ScopeProject, e.Category, e.Content)
+	}
+	for _, e := range sm.globalEntries {
+		sm.ftsIndex.Index(ScopeGlobal, e.Category, e.Content)
+	}
 }
 
 // SearchOptions configures intelligent search behavior.

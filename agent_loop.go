@@ -428,6 +428,8 @@ type AgentLoop struct {
 	telemetry                 *TelemetryManager                   // telemetry event tracking
 	cronScheduler             *CronScheduler                      // cron task scheduler (started after agent setup)
 	debugLog                  *os.File                            // file handle for diagnostic logging (not console)
+	checkpointWriter          *CheckpointWriter                   // background checkpoint writer (MiMo-Code P8)
+	autoDreamManager          *AutoDreamManager                   // auto-dream scheduler (MiMo-Code P9)
 	// Task-scoped iteration tracking (openclacky pattern): tracks iteration
 	// count and skill read count at task start, used to compute task-local
 	// iteration counts for skill evolution and memory updater triggers.
@@ -752,6 +754,8 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		announcedMCPServers: make(map[string]bool),
 		announcedTools:      make(map[string]bool),
 		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
+		checkpointWriter:    NewCheckpointWriter(cfg.ProjectDir),
+		autoDreamManager:    NewAutoDreamManager(cfg.ProjectDir),
 	}
 	// Latch beta headers for session stability — once set, stays same for the
 	// entire session to prevent mid-session anthropic-beta header churn.
@@ -1409,6 +1413,14 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// Clear any stale interrupted flag from previous run
 	a.SetInterrupted(false)
 
+	// Start background services (MiMo-Code P8/P9)
+	if a.checkpointWriter != nil {
+		a.checkpointWriter.Start()
+	}
+	if a.autoDreamManager != nil {
+		a.autoDreamManager.Start()
+	}
+
 	// Reset the turn budget so each new conversation starts fresh
 	a.budget = NewIterationBudget(a.maxTurns)
 	a.lastDeltasState = DeltasStateNone // reset streaming state
@@ -1492,6 +1504,9 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// Empty response tracking -- prevents infinite loops on thinking-only responses
 	consecutiveEmptyResponses := 0
 	const maxEmptyResponses = 3
+
+	// Task Gate Stop tracking (MiMo-Code P5)
+	taskGateReentries := 0
 
 	// Preflight compression: turn-start fold estimation (DeepSeek-Reasonix pattern)
 	// If estimated tokens > 90% of ctxMax, fold BEFORE making the API call
@@ -1957,6 +1972,29 @@ func (a *AgentLoop) Run(userMessage string) string {
 			// Genuine final answer with text
 			consecutiveEmptyResponses = 0
 			// No tool calls -- model gave final answer.
+
+			// Task Gate Stop (MiMo-Code P5): check for incomplete tasks before stopping
+			if a.workTaskStore != nil {
+				gateDecision := TaskGateDecide(TaskGateInput{
+					TaskStore:  a.workTaskStore,
+					ReactCount: taskGateReentries,
+					MaxReact:   MaxTaskGateMainReact,
+					Mode:       GateModeMain,
+				})
+				if gateDecision.NeedReentry {
+					taskGateReentries++
+					a.context.AddAssistantText(finalText)
+					a.context.AddUserMessage(gateDecision.ReentryText)
+					a.out("[task-gate] Incomplete tasks detected, re-entering loop (%d/%d)\n",
+						taskGateReentries, MaxTaskGateMainReact)
+					continue
+				}
+				if gateDecision.CapExceeded {
+					a.out("[task-gate] Cap exceeded, proceeding with %d incomplete tasks\n",
+						len(gateDecision.IncompleteTasks))
+				}
+			}
+
 			// Like Claude Code's stop hooks: the loop could continue here
 			// with additional checks (token budget, quality check, etc.)
 			// but for now we simply exit.
