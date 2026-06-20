@@ -430,6 +430,9 @@ type AgentLoop struct {
 	debugLog                  *os.File                            // file handle for diagnostic logging (not console)
 	checkpointWriter          *CheckpointWriter                   // background checkpoint writer (MiMo-Code P8)
 	autoDreamManager          *AutoDreamManager                   // auto-dream scheduler (MiMo-Code P9)
+	sessionDiff               *SessionDiff                        // session change tracking (MiMo-Code 3B)
+	revertManager             *RevertManager                      // session revert manager (MiMo-Code 3A)
+	truncationService         *TruncationService                  // sophisticated truncation (MiMo-Code 2A)
 	// Task-scoped iteration tracking (openclacky pattern): tracks iteration
 	// count and skill read count at task start, used to compute task-local
 	// iteration counts for skill evolution and memory updater triggers.
@@ -756,6 +759,9 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 		checkpointWriter:    NewCheckpointWriter(cfg.ProjectDir),
 		autoDreamManager:    NewAutoDreamManager(cfg.ProjectDir),
+		sessionDiff:         NewSessionDiff(cfg.SessionID),
+		revertManager:       NewRevertManager(filepath.Join(cfg.ProjectDir, ".claude", "snapshots")),
+		truncationService:   NewTruncationService(filepath.Join(cfg.ProjectDir, ".claude", "tool-output")),
 	}
 	// Latch beta headers for session stability — once set, stays same for the
 	// entire session to prevent mid-session anthropic-beta header churn.
@@ -1950,6 +1956,16 @@ func (a *AgentLoop) Run(userMessage string) string {
 
 		if len(textParts) > 0 {
 			finalText = strings.Join(textParts, "\n")
+		}
+
+		// Step Classification (MiMo-Code 3C): centralize loop control logic
+		stepClass := ClassifyAssistantStep(finalText, toolCalls, "", nil)
+		if stepClass.Category == StepFailed {
+			a.logDebug("[step-classify] failed: %s\n", stepClass.ErrorMsg)
+		}
+		// Use classification for loop control
+		if !ShouldContinue(stepClass) && stepClass.Category != StepFinal {
+			a.logDebug("[step-classify] category=%s, stopping\n", stepClass.Category)
 		}
 
 		if len(toolCalls) == 0 {
@@ -4327,6 +4343,13 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		})
 	}
 
+	// Session Diff tracking (MiMo-Code 3B): record file changes
+	if a.sessionDiff != nil && (toolName == "write_file" || toolName == "edit_file") {
+		if path, ok := input["path"].(string); ok {
+			a.sessionDiff.RecordChange(path, len(output), 0)
+		}
+	}
+
 	a.logDebug("[tool] completed: %s (isError=%v, output_len=%d)\n", toolName, result.IsError, len(output))
 
 	// Openclacky pattern: inject TODO reminder into tool result text.
@@ -6250,6 +6273,11 @@ func (a *AgentLoop) tryCompaction() {
 			postCompactMessages := a.context.BuildMessages()
 			postCompactTokens := estimateMessageParamsTokens(postCompactMessages)
 			a.compactor.SetPostCompactTokens(postCompactTokens)
+
+			// Auto-continue after compaction (MiMo-Code 1C)
+			// Inject a synthetic user message so the agent continues working
+			// instead of stopping and waiting for user input.
+			a.context.AddUserMessage("Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.")
 		}
 		return
 	}

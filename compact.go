@@ -1410,8 +1410,20 @@ func modelContextWindow(model string) int {
 }
 
 // EffectiveWindow returns the usable context window minus output reserve.
+// Context window constants (MiMo-Code 1B)
+const (
+	CompactionBuffer = 20_000 // reserve for compaction
+	OutputCap        = 20_000 // cap output reservation so large-output models don't strangle input
+)
+
 func (t *ContextWindowTracker) EffectiveWindow() int {
-	return t.modelMaxTokens - 20_000 // reserve 20K for output
+	// Cap output reservation at OutputCap (MiMo-Code pattern)
+	// Models with 32K+ output windows don't need full reservation
+	outputReserve := t.modelMaxTokens / 4 // estimate 25% for output
+	if outputReserve > OutputCap {
+		outputReserve = OutputCap
+	}
+	return t.modelMaxTokens - outputReserve - CompactionBuffer
 }
 
 // CompactThreshold returns the token count at which compaction should trigger.

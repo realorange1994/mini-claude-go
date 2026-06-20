@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -150,6 +151,23 @@ func (w *CheckpointWriter) writeCheckpoint(req CheckpointRequest) CheckpointWrit
 		return CheckpointWriterResult{Error: fmt.Errorf("write checkpoint: %w", err)}
 	}
 
+	// Validate checkpoint (MiMo-Code 4A)
+	validator := NewCheckpointValidator()
+	validationErrors, requiresExtract := validator.ValidateAndQuarantine(content, checkpointPath)
+	if len(validationErrors) > 0 {
+		// Log validation errors
+		for _, err := range validationErrors {
+			fmt.Printf("[checkpoint-validator] %s: %s\n", err.Severity, err.Message)
+		}
+		if requiresExtract {
+			// Quarantine invalid checkpoint
+			quarantinePath := strings.TrimSuffix(checkpointPath, ".md") + ".invalid.md"
+			os.Rename(checkpointPath, quarantinePath)
+			w.consecutiveFails++
+			return CheckpointWriterResult{Error: fmt.Errorf("checkpoint validation failed: %d errors", len(validationErrors))}
+		}
+	}
+
 	// Write metadata file
 	metadata := map[string]any{
 		"id":         checkpointID,
@@ -160,6 +178,16 @@ func (w *CheckpointWriter) writeCheckpoint(req CheckpointRequest) CheckpointWrit
 	metadataPath := filepath.Join(w.checkpointDir, checkpointID+".json")
 	metadataBytes, _ := json.MarshalIndent(metadata, "", "  ")
 	os.WriteFile(metadataPath, metadataBytes, 0644)
+
+	// Progress Reconciliation (MiMo-Code 4B): integrate task progress
+	progressDir := filepath.Join(req.ProjectDir, ".claude", "tasks")
+	reconciler := NewProgressReconciler(progressDir, w.checkpointDir)
+	progressDiff := reconciler.BuildProgressDiffForCheckpoint()
+	if progressDiff != "" {
+		// Append progress diff to checkpoint content
+		updatedContent := content + "\n\n" + progressDiff
+		os.WriteFile(checkpointPath, []byte(updatedContent), 0644)
+	}
 
 	// Update state
 	w.mu.Lock()
