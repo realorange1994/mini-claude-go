@@ -924,7 +924,8 @@ func (t *ToolStateTracker) BuildSessionStateNote() string {
 type conversationEntry struct {
 	role       string // "user" or "assistant" (or "system" for boundary markers)
 	content    EntryContent
-	summarized bool // true if this entry was already included in a previous compaction summary
+	summarized bool   // true if this entry was already included in a previous compaction summary
+	agentID    string // agent that created this entry ("main" or subagent ID, MiMo-Code pattern)
 }
 
 // ConversationContext manages the conversation message history and system prompt.
@@ -1632,6 +1633,78 @@ func (c *ConversationContext) BuildMessages() []anthropic.MessageParam {
 	}
 
 	return merged
+}
+
+// BuildMessagesForAgent returns messages filtered by agent_id.
+// MiMo-Code pattern: subagent messages are isolated from the parent context.
+// agentID="main" returns only main agent messages, "*" returns all.
+func (c *ConversationContext) BuildMessagesForAgent(agentID string) []anthropic.MessageParam {
+	c.mu.Lock()
+	redactedData := make([]string, len(c.pendingRedactedThinking))
+	copy(redactedData, c.pendingRedactedThinking)
+	c.pendingRedactedThinking = nil
+
+	// Copy and filter entries by agent_id
+	// Empty agentID is treated as "main" (MiMo-Code pattern)
+	var filteredEntries []conversationEntry
+	for _, entry := range c.entries {
+		entryAgentID := entry.agentID
+		if entryAgentID == "" {
+			entryAgentID = "main"
+		}
+		if agentID == "*" || entryAgentID == agentID {
+			filteredEntries = append(filteredEntries, entry)
+		}
+	}
+	c.mu.Unlock()
+
+	// Use the same BuildMessages logic but on filtered entries
+	return c.buildMessagesFromEntries(filteredEntries, redactedData)
+}
+
+// buildMessagesFromEntries converts entries to API messages.
+func (c *ConversationContext) buildMessagesFromEntries(entries []conversationEntry, redactedData []string) []anthropic.MessageParam {
+	// Find compact boundary
+	boundaryIdx := -1
+	for i := len(entries) - 1; i >= 0; i-- {
+		if _, ok := entries[i].content.(CompactBoundaryContent); ok {
+			boundaryIdx = i
+			break
+		}
+	}
+
+	startIdx := 0
+	if boundaryIdx >= 0 {
+		startIdx = boundaryIdx
+	}
+
+	messages := make([]anthropic.MessageParam, 0, len(entries)-startIdx)
+	for _, entry := range entries[startIdx:] {
+		msg := anthropic.MessageParam{Role: anthropic.MessageParamRole(entry.role)}
+
+		switch v := entry.content.(type) {
+		case TextContent:
+			msg.Content = []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: string(v)}},
+			}
+		case ToolUseContent:
+			msg.Content = []anthropic.ContentBlockParamUnion(v)
+		case ToolResultContent:
+			msg.Content = []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: v[0].ToolUseID,
+					Content:   v[0].Content,
+					IsError:   v[0].IsError,
+				}},
+			}
+		default:
+			continue
+		}
+
+		messages = append(messages, msg)
+	}
+
+	return messages
 }
 
 // InjectTimeContext adds the current date/time as a user message with the

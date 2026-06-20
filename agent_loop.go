@@ -421,6 +421,7 @@ type AgentLoop struct {
 	lastApiCompletionTime     time.Time                           // timestamp of last successful API call (for thinking latch)
 	ttlLockedUntilUnix       int64                               // TTL lock: unix timestamp cache stays valid until (atomic, session-stable locking)
 	announcedMCPServers       map[string]bool                     // servers whose instructions have been announced this session (delta tracking)
+	announcedTools            map[string]bool                     // tools sent in API calls this session (delta tracking, MiMo-Code P3)
 	betaHeadersLatched        []string                            // once set, stays same for session — prevents mid-session header churn
 	errorReporter             *ErrorReporter                      // captures error events for analysis
 	lastTransition            LoopTransitionReason                // reason for the most recent loop continue
@@ -749,6 +750,7 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		sonnetModel:         getDefaultSonnetModel(),
 		errorReporter:       NewErrorReporter(),
 		announcedMCPServers: make(map[string]bool),
+		announcedTools:      make(map[string]bool),
 		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 	}
 	// Latch beta headers for session stability — once set, stays same for the
@@ -3576,6 +3578,11 @@ func (a *AgentLoop) buildToolParams() []anthropic.ToolUnionParam {
 			a.logDebug("[prefix-fingerprint] drift detected: hash changed to %s\n",
 				a.prefixFingerprint.LastHash())
 		}
+	}
+
+	// Track announced tools for delta re-announcement after compaction (MiMo-Code P3)
+	for _, t := range tools {
+		a.announcedTools[t.Name()] = true
 	}
 
 	return toolParams

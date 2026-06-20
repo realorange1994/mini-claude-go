@@ -2866,6 +2866,81 @@ func (sm *SessionMemory) GetCheckpointSummary() string {
 	return sb.String()
 }
 
+// ─── Session Forking (MiMo-Code P4) ──────────────────────────────────────────
+
+// ForkSession creates a new session from a checkpoint.
+// Returns a new SessionMemory with the checkpoint's entries restored.
+// The forked session shares the same project/global paths but has a new session file.
+func (sm *SessionMemory) ForkSession(checkpointID string) (*SessionMemory, error) {
+	checkpoint, err := sm.LoadCheckpoint(checkpointID)
+	if err != nil {
+		return nil, fmt.Errorf("load checkpoint for fork: %w", err)
+	}
+
+	sm.mu.RLock()
+	projectDir := sm.projectDir
+	globalPath := sm.globalPath
+	sm.mu.RUnlock()
+
+	// Create new session memory with same paths
+	forked := NewSessionMemoryWithPaths(projectDir, globalPath)
+
+	// Generate unique session file for fork
+	forkID := fmt.Sprintf("fork-%s", time.Now().Format("20060102-150405"))
+	forked.filePath = filepath.Join(projectDir, ".claude", fmt.Sprintf("session_memory_%s.md", forkID))
+
+	// Restore checkpoint entries
+	forked.mu.Lock()
+	forked.entries = checkpoint.Entries
+	forked.dirty = true
+	forked.lastCheckpointID = checkpointID
+	forked.mu.Unlock()
+
+	return forked, nil
+}
+
+// ForkSessionAtPoint creates a new session from a specific point in the conversation.
+// The forked session contains entries up to and including the specified point.
+// MiMo-Code pattern: enables conversation branching for experimentation.
+func (sm *SessionMemory) ForkSessionAtPoint(entries []MemoryEntry, point int) (*SessionMemory, error) {
+	if point < 0 || point >= len(entries) {
+		return nil, fmt.Errorf("fork point %d out of range [0, %d)", point, len(entries))
+	}
+
+	sm.mu.RLock()
+	projectDir := sm.projectDir
+	globalPath := sm.globalPath
+	sm.mu.RUnlock()
+
+	// Create new session memory with same paths
+	forked := NewSessionMemoryWithPaths(projectDir, globalPath)
+
+	// Generate unique session file for fork
+	forkID := fmt.Sprintf("fork-%s", time.Now().Format("20060102-150405"))
+	forked.filePath = filepath.Join(projectDir, ".claude", fmt.Sprintf("session_memory_%s.md", forkID))
+
+	// Copy entries up to and including the fork point
+	forked.mu.Lock()
+	forked.entries = make([]MemoryEntry, point+1)
+	copy(forked.entries, entries[:point+1])
+	forked.dirty = true
+	forked.mu.Unlock()
+
+	return forked, nil
+}
+
+// GetForkInfo returns information about the current session's fork origin.
+// Returns empty string if not a forked session.
+func (sm *SessionMemory) GetForkInfo() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if sm.lastCheckpointID != "" {
+		return fmt.Sprintf("Forked from checkpoint: %s", sm.lastCheckpointID)
+	}
+	return ""
+}
+
 // ─── Forked Agent Extraction ─────────────────────────────────────────────────
 //
 // RunForkedSessionMemoryExtraction uses a forked agent to update session_memory.md.
