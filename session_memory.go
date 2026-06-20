@@ -2817,6 +2817,13 @@ func (sm *SessionMemory) LoadCheckpoint(checkpointID string) (*SessionCheckpoint
 	return &checkpoint, nil
 }
 
+// LoadCheckpointBudgeted loads a checkpoint markdown file with token budget.
+// MiMo-Code P6: prevents context overflow when loading large checkpoints.
+func (sm *SessionMemory) LoadCheckpointBudgeted(checkpointID string, budgetTokens int) (*BudgetedReadResult, error) {
+	checkpointPath := filepath.Join(sm.checkpointDir, checkpointID+".md")
+	return ReadBudgetedSectionAware(checkpointPath, budgetTokens)
+}
+
 // ListCheckpoints returns available checkpoint IDs.
 func (sm *SessionMemory) ListCheckpoints() []string {
 	if sm.checkpointDir == "" {

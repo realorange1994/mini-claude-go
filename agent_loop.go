@@ -2088,6 +2088,23 @@ func (a *AgentLoop) Run(userMessage string) string {
 			}
 		}
 
+		// Checkpoint Writer trigger (MiMo-Code P8): submit checkpoint write at thresholds
+		if a.checkpointWriter != nil && !a.checkpointWriter.IsRunning() {
+			ctxMax := int(a.modelCapabilities.GetContextWindow(a.config.Model, a.config.MaxContextTokens))
+			if ctxMax > 0 {
+				currentTokens := a.context.EstimatedTokens()
+				ratio := float64(currentTokens) / float64(ctxMax)
+				// Trigger at 50%, 70%, 85% of context window
+				if ratio >= 0.50 {
+					a.checkpointWriter.Submit(CheckpointRequest{
+						SessionID:  "session",
+						ProjectDir: a.config.ProjectDir,
+						Timestamp:  time.Now(),
+					})
+				}
+			}
+		}
+
 		// Update tool state tracker after tool execution
 		if a.toolStateTracker != nil {
 			for _, call := range toolCalls {
