@@ -216,7 +216,37 @@ func applyReplacement(content, oldStr, newStr string, replaceAll bool) string {
 	if replaceAll {
 		return strings.Replace(content, oldStr, newStr, -1)
 	}
-	return strings.Replace(content, oldStr, newStr, 1)
+
+	// Try exact match first
+	if strings.Contains(content, oldStr) {
+		return strings.Replace(content, oldStr, newStr, 1)
+	}
+
+	// Try fuzzy matching: line-trimmed comparison
+	contentLines := strings.Split(content, "\n")
+	oldLines := strings.Split(oldStr, "\n")
+
+	for i := 0; i <= len(contentLines)-len(oldLines); i++ {
+		match := true
+		for j, oldLine := range oldLines {
+			if strings.TrimSpace(contentLines[i+j]) != strings.TrimSpace(oldLine) {
+				match = false
+				break
+			}
+		}
+		if match {
+			// Replace the block
+			result := make([]string, len(contentLines))
+			copy(result, contentLines)
+			newLines := strings.Split(newStr, "\n")
+			for j, newLine := range newLines {
+				result[i+j] = newLine
+			}
+			return strings.Join(result, "\n")
+		}
+	}
+
+	return content
 }
 
 // preserveQuoteStyle returns the new string with curly quote style matching the file.

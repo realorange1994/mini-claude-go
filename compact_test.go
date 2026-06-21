@@ -77,10 +77,10 @@ func TestGroupMessagesByRound(t *testing.T) {
 
 func TestFindSafeCompactionBoundary(t *testing.T) {
 	rounds := []apiRound{
-		{indices: []int{0, 1}, messages: []CompactionMessage{{Role: "user", Content: "q1"}, {Role: "assistant", Content: "a1"}}},
-		{indices: []int{2, 3}, messages: []CompactionMessage{{Role: "user", Content: "q2"}, {Role: "assistant", Content: "a2"}}},
-		{indices: []int{4, 5}, messages: []CompactionMessage{{Role: "user", Content: "q3"}, {Role: "assistant", Content: "a3"}}},
-		{indices: []int{6, 7}, messages: []CompactionMessage{{Role: "user", Content: "q4"}, {Role: "assistant", Content: "a4"}}},
+			{messages: []CompactionMessage{{Role: "user", Content: "q1"}, {Role: "assistant", Content: "a1"}}},
+			{messages: []CompactionMessage{{Role: "user", Content: "q2"}, {Role: "assistant", Content: "a2"}}},
+			{messages: []CompactionMessage{{Role: "user", Content: "q3"}, {Role: "assistant", Content: "a3"}}},
+			{messages: []CompactionMessage{{Role: "user", Content: "q4"}, {Role: "assistant", Content: "a4"}}},
 	}
 
 	// Keep last 2 rounds, boundary should be at index 2 (third round)

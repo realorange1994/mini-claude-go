@@ -23,6 +23,21 @@ const (
 	MaxProgressTokens = 6000
 )
 
+// SectionBudget defines per-section token budgets.
+var SectionBudget = map[string]int{
+	"Active intent":              500,
+	"Next concrete action":       500,
+	"Directives":                 300,
+	"Task tree":                  1000,
+	"Current work":               2000,
+	"Files and code sections":    1500,
+	"Discovered knowledge":       1500,
+	"Errors and fixes":           500,
+	"Live resources":             300,
+	"Design decisions":           1000,
+	"Open notes":                 500,
+}
+
 // CheckpointValidationRule represents a validation rule.
 type CheckpointValidationRule struct {
 	ID       string
@@ -126,6 +141,38 @@ func (v *CheckpointValidator) Validate(content string) []*ValidationError {
 			errors = append(errors, err)
 		}
 	}
+	return errors
+}
+
+// ValidateSectionBudgets validates per-section token budgets.
+func (v *CheckpointValidator) ValidateSectionBudgets(content string) []*ValidationError {
+	var errors []*ValidationError
+
+	// Parse sections
+	_, sections := ParseSections(content)
+
+	for _, section := range sections {
+		sectionName := strings.TrimPrefix(section.Header, "## §")
+		sectionName = strings.TrimPrefix(sectionName, "## ")
+		sectionName = strings.TrimSpace(sectionName)
+
+		// Find matching budget
+		for budgetName, budget := range SectionBudget {
+			if strings.Contains(sectionName, budgetName) {
+				sectionContent := strings.Join(section.Body, "\n")
+				tokens := estimateTokensCV(sectionContent)
+				if tokens > budget {
+					errors = append(errors, &ValidationError{
+						RuleID:   "section-budget-exceeded",
+						Severity: "extract-required",
+						Message:  fmt.Sprintf("Section '%s' exceeds %d tokens (%d)", sectionName, budget, tokens),
+					})
+				}
+				break
+			}
+		}
+	}
+
 	return errors
 }
 
