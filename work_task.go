@@ -2903,13 +2903,10 @@ func (s *WorkTaskStore) UpdateTask(id string, updates map[string]any) error {
 }
 
 // containsString checks if a string slice contains a given string.
+// containsString checks if a string slice contains a string.
+// Uses common utility function.
 func containsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
+	return ContainsStr(slice, s)
 }
 
 // removeString removes all occurrences of a string from a slice.

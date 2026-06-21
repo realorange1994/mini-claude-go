@@ -18,14 +18,28 @@ func TestWorktreeService_New(t *testing.T) {
 func TestWorktreeService_Create(t *testing.T) {
 	// Initialize a git repo
 	dir := t.TempDir()
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test").Run()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	cmd.Run()
+
+	cmd = exec.Command("git", "config", "user.email", "test@test.com")
+	cmd.Dir = dir
+	cmd.Run()
+
+	cmd = exec.Command("git", "config", "user.name", "Test")
+	cmd.Dir = dir
+	cmd.Run()
 
 	// Create initial commit
 	os.WriteFile(filepath.Join(dir, "README.md"), []byte("test"), 0644)
-	exec.Command("git", "add", ".").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	cmd.Run()
+
+	cmd = exec.Command("git", "commit", "-m", "initial")
+	cmd.Dir = dir
+	cmd.Run()
 
 	s := NewWorktreeService(dir)
 	worktree, err := s.Create("test-worktree")
