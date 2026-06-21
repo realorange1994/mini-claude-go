@@ -351,6 +351,15 @@ func (a *AgentLoop) SpawnSubAgent(
 		copy(parentEntries, a.context.entries)
 		parentSystemPrompt = a.context.SystemPrompt()
 		a.context.mu.RUnlock()
+
+		// Fork Context Caching (MiMo-Code): capture prefix snapshot for cache hits
+		if a.forkContextCache != nil && isForkMode {
+			var toolNames []string
+			for _, t := range a.registry.AllTools() {
+				toolNames = append(toolNames, t.Name())
+			}
+			a.forkContextCache.Capture(taskID, parentSystemPrompt, toolNames, nil)
+		}
 	}
 
 	// For fork mode, wrap the user's directive with the fork boilerplate.
@@ -502,6 +511,16 @@ func (a *AgentLoop) SpawnSubAgent(
 		// If Run returned empty, try to recover partial results from conversation context
 		if childResult == "" {
 			childResult = childLoop.getPartialResult()
+		}
+
+		// Progress Checker (MiMo-Code): validate subagent wrote progress
+		if a.progressChecker != nil && taskID != "" {
+			validation, err := a.progressChecker.ValidateProgress(taskID)
+			if err == nil && !validation.Valid {
+				a.logDebug("[progress-checker] task %s: %s\n", taskID, validation.Reason)
+				// Write template if progress file is missing
+				a.progressChecker.WriteProgressTemplate(taskID)
+			}
 		}
 
 		// Capture final result into the task's output buffer

@@ -243,6 +243,12 @@ type AgentLoop struct {
 	sessionCwd                *SessionCwd                         // session-scoped working directory (MiMo-Code)
 	memoryPathGuard           *MemoryPathGuard                    // memory write path guard (MiMo-Code)
 	sseChunkTimeoutConfig     *SSEChunkTimeoutConfig              // SSE chunk timeout (MiMo-Code)
+	workspaceTrust            *WorkspaceTrust                     // workspace trust system (MiMo-Code)
+	protectedPaths            *ProtectedPaths                     // platform protected paths (MiMo-Code)
+	forkContextCache          *ForkContextCache                   // fork context caching (MiMo-Code)
+	progressChecker           *ProgressChecker                    // subagent progress checker (MiMo-Code)
+	historyService            *HistoryService                     // cross-session history FTS (MiMo-Code)
+	eventStore                *EventStore                         // event sourcing (MiMo-Code)
 	// Task-scoped iteration tracking (openclacky pattern): tracks iteration
 	// count and skill read count at task start, used to compute task-local
 	// iteration counts for skill evolution and memory updater triggers.
@@ -584,6 +590,12 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		sessionCwd:            NewSessionCwd(cfg.ProjectDir),
 		memoryPathGuard:       NewMemoryPathGuard(cfg.ProjectDir),
 		sseChunkTimeoutConfig: NewSSEChunkTimeoutConfig(),
+		workspaceTrust:        NewWorkspaceTrust(cfg.ProjectDir),
+		protectedPaths:        NewProtectedPaths(),
+		forkContextCache:      NewForkContextCache(),
+		progressChecker:       NewProgressChecker(filepath.Join(cfg.ProjectDir, ".claude", "tasks")),
+		historyService:        NewHistoryService(),
+		eventStore:            NewEventStore(),
 	}
 	// Latch beta headers for session stability — once set, stays same for the
 	// entire session to prevent mid-session anthropic-beta header churn.
@@ -1247,6 +1259,23 @@ func (a *AgentLoop) Run(userMessage string) string {
 	}
 	if a.autoDreamManager != nil {
 		a.autoDreamManager.Start()
+	}
+
+	// Workspace Trust check (MiMo-Code): verify workspace is trusted
+	if a.workspaceTrust != nil && !a.workspaceTrust.IsTrusted(a.config.ProjectDir) {
+		a.out("[WARN] Workspace %s is not trusted. Some operations may be restricted.\n", a.config.ProjectDir)
+	}
+
+	// Event Store (MiMo-Code): record run start event
+	if a.eventStore != nil {
+		a.eventStore.Append(Event{
+			Type:        EventSessionCreated,
+			AggregateID: "session",
+			Data: map[string]any{
+				"model": a.config.Model,
+				"mode":  a.config.PermissionMode,
+			},
+		})
 	}
 
 	// Reset the turn budget so each new conversation starts fresh
@@ -3834,6 +3863,22 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 
 	a.logDebug("[tool] executing: %s (id=%s, checkPerms=%v)\n", toolName, toolUseID, checkPermissions)
 
+	// Protected Paths check (MiMo-Code): block operations on protected directories
+	if a.protectedPaths != nil {
+		if path, ok := input["path"].(string); ok {
+			if a.protectedPaths.IsProtected(path) {
+				a.logDebug("[protected-path] blocked: %s\n", path)
+				return anthropic.ToolResultBlockParam{
+					ToolUseID: toolUseID,
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("Error: Path %s is protected and cannot be accessed.", path)}},
+					},
+					IsError: param.NewOpt(true),
+				}, fmt.Sprintf("Error: Path %s is protected", path)
+			}
+		}
+	}
+
 	// Guard: if toolUseID is empty, try to recover it from the raw map
 	// or generate a fallback. Empty toolUseID causes API error 2013.
 	if toolUseID == "" {
@@ -4191,6 +4236,18 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		if path, ok := input["path"].(string); ok {
 			a.sessionDiff.RecordChange(path, len(output), 0)
 		}
+	}
+
+	// History FTS indexing (MiMo-Code): index tool output for cross-session search
+	if a.historyService != nil {
+		a.historyService.Index(HistoryEntry{
+			ID:        fmt.Sprintf("%s-%s", toolName, toolUseID),
+			SessionID: "current",
+			Role:      "tool",
+			Content:   output,
+			ToolName:  toolName,
+			Timestamp: time.Now(),
+		})
 	}
 
 	// Auto-Formatter (MiMo-Code 3): format file after write/edit
