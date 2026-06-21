@@ -433,6 +433,12 @@ type AgentLoop struct {
 	sessionDiff               *SessionDiff                        // session change tracking (MiMo-Code 3B)
 	revertManager             *RevertManager                      // session revert manager (MiMo-Code 3A)
 	truncationService         *TruncationService                  // sophisticated truncation (MiMo-Code 2A)
+	formatterService          *FormatterService                   // auto-formatter (MiMo-Code 3)
+	lspManager                *LSPManager                         // LSP integration (MiMo-Code 2)
+	snapshotManager           *SnapshotManager                    // git snapshot (MiMo-Code 6)
+	maxModeService            *MaxModeService                     // max mode (MiMo-Code 1)
+	codeSearchService         *CodeSearchService                  // code search (MiMo-Code 7)
+	externalImportService     *ExternalImportService              // external import (MiMo-Code 4)
 	// Task-scoped iteration tracking (openclacky pattern): tracks iteration
 	// count and skill read count at task start, used to compute task-local
 	// iteration counts for skill evolution and memory updater triggers.
@@ -762,6 +768,12 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		sessionDiff:         NewSessionDiff(cfg.SessionID),
 		revertManager:       NewRevertManager(filepath.Join(cfg.ProjectDir, ".claude", "snapshots")),
 		truncationService:   NewTruncationService(filepath.Join(cfg.ProjectDir, ".claude", "tool-output")),
+		formatterService:    NewFormatterService(true),
+		lspManager:          NewLSPManager(false),
+		snapshotManager:     NewSnapshotManager(cfg.ProjectDir),
+		maxModeService:      NewMaxModeService(MaxModeConfig{Enabled: false, NumCandidates: DefaultCandidates}),
+		codeSearchService:   NewCodeSearchService(NewCodeSearchConfig()),
+		externalImportService: NewExternalImportService(ExternalImportConfig{Enabled: false}),
 	}
 	// Latch beta headers for session stability — once set, stays same for the
 	// entire session to prevent mid-session anthropic-beta header churn.
@@ -4347,6 +4359,36 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 	if a.sessionDiff != nil && (toolName == "write_file" || toolName == "edit_file") {
 		if path, ok := input["path"].(string); ok {
 			a.sessionDiff.RecordChange(path, len(output), 0)
+		}
+	}
+
+	// Auto-Formatter (MiMo-Code 3): format file after write/edit
+	if a.formatterService != nil && (toolName == "write_file" || toolName == "edit_file") {
+		if path, ok := input["path"].(string); ok {
+			if err := a.formatterService.FormatFile(path); err != nil {
+				a.logDebug("[formatter] failed: %v\n", err)
+			}
+		}
+	}
+
+	// LSP Integration (MiMo-Code 2): notify LSP of file changes
+	if a.lspManager != nil && (toolName == "write_file" || toolName == "edit_file") {
+		if path, ok := input["path"].(string); ok {
+			if err := a.lspManager.NotifyFileChange(path); err != nil {
+				a.logDebug("[lsp] notify failed: %v\n", err)
+			}
+			// Collect diagnostics
+			diags := a.lspManager.GetDiagnostics(path)
+			if len(diags) > 0 {
+				a.logDebug("[lsp] %d diagnostics for %s\n", len(diags), path)
+			}
+		}
+	}
+
+	// Git Snapshot (MiMo-Code 6): track file changes
+	if a.snapshotManager != nil && (toolName == "write_file" || toolName == "edit_file") {
+		if path, ok := input["path"].(string); ok {
+			a.snapshotManager.Track([]string{path})
 		}
 	}
 
