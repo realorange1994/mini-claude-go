@@ -1,0 +1,78 @@
+# miniClaude Extensions Configuration
+# All extensions are disabled by default - user enables what they need
+
+# Explicitly enabled extensions (by name)
+# Add extension names here to enable them
+enabled: []
+
+# Extension-specific configuration
+extensions:
+  # Context compaction - reduces token usage by summarizing history
+  compact:
+    enabled: false
+    priority: 100
+    options:
+      maxTokens: 100000
+      triggerThreshold: 0.8
+
+  # KV cache optimization - improves prefix cache hit rate
+  cache:
+    enabled: false
+    priority: 90
+    options:
+      cacheBreakDetection: true
+
+  # Streaming output - shows tokens as they're generated
+  streaming:
+    enabled: false
+    priority: 80
+
+  # MCP client - enables Model Context Protocol servers
+  mcp:
+    enabled: false
+    priority: 70
+
+  # Skills system - enables skill-based automation
+  skills:
+    enabled: false
+    priority: 60
+
+  # Cron scheduler - runs scheduled prompts
+  cron:
+    enabled: false
+    priority: 50
+
+  # Telemetry - sends usage data to help improve the project
+  telemetry:
+    enabled: false
+    priority: 40
+
+  # Hooks - custom shell command hooks
+  hooks:
+    enabled: false
+    priority: 30
+
+  # Session memory - remembers context across sessions
+  memory:
+    enabled: false
+    priority: 20
+
+  # File history - tracks which files have been read
+  file_history:
+    enabled: false
+    priority: 10
+
+  # Sub-agents - enables spawning background agents
+  subagent:
+    enabled: false
+    priority: 10
+
+  # Cost tracking - tracks API usage costs
+  cost_tracking:
+    enabled: false
+    priority: 5
+
+  # Auto-classifier - automatically selects best model
+  auto_classifier:
+    enabled: false
+    priority: 5

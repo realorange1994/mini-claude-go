@@ -1,0 +1,167 @@
+{
+  "nextId": 7,
+  "tasks": [
+    {
+      "ID": "2",
+      "Subject": "second session task",
+      "Description": "Task created during second session",
+      "ActiveForm": "",
+      "Status": "pending",
+      "Priority": "",
+      "Owner": "",
+      "ParentID": "",
+      "Tags": [],
+      "Metadata": null,
+      "Blocks": [],
+      "BlockedBy": [],
+      "CreatedAt": "2026-06-19T13:50:50.7082803+08:00",
+      "UpdatedAt": "2026-06-19T13:50:50.7082803+08:00",
+      "time_spent": 0
+    },
+    {
+      "ID": "1",
+      "Subject": "test persistence",
+      "Description": "testing disk save",
+      "ActiveForm": "",
+      "Status": "pending",
+      "Priority": "",
+      "Owner": "",
+      "ParentID": "",
+      "Tags": [],
+      "Metadata": null,
+      "Blocks": [],
+      "BlockedBy": [],
+      "CreatedAt": "2026-06-19T13:50:32.4968638+08:00",
+      "UpdatedAt": "2026-06-19T13:50:32.4968638+08:00",
+      "time_spent": 0
+    },
+    {
+      "ID": "3",
+      "Subject": "Setup Go module",
+      "Description": "Setup Go module with priority high",
+      "ActiveForm": "Setting up Go module",
+      "Status": "in_progress",
+      "Priority": "",
+      "Owner": "",
+      "ParentID": "",
+      "Tags": [],
+      "Metadata": {
+        "priority": "high"
+      },
+      "Blocks": [],
+      "BlockedBy": [],
+      "CreatedAt": "2026-06-19T15:23:16.3024971+08:00",
+      "UpdatedAt": "2026-06-19T15:25:20.4658148+08:00",
+      "started_at": "2026-06-19T15:23:48.9488273+08:00",
+      "time_spent": 0,
+      "history": [
+        {
+          "from": "pending",
+          "to": "in_progress",
+          "timestamp": "2026-06-19T15:23:48.9488273+08:00"
+        }
+      ]
+    },
+    {
+      "ID": "4",
+      "Subject": "Implement REST API",
+      "Description": "Implement REST API with priority critical, tag: backend",
+      "ActiveForm": "",
+      "Status": "in_progress",
+      "Priority": "",
+      "Owner": "",
+      "ParentID": "",
+      "Tags": [],
+      "Metadata": {
+        "priority": "critical",
+        "tags": [
+          "backend"
+        ]
+      },
+      "Blocks": [
+        "5",
+        "6"
+      ],
+      "BlockedBy": [],
+      "CreatedAt": "2026-06-19T15:23:16.310643+08:00",
+      "UpdatedAt": "2026-06-19T15:25:20.4713848+08:00",
+      "started_at": "2026-06-19T15:23:48.9553704+08:00",
+      "time_spent": 0,
+      "history": [
+        {
+          "from": "pending",
+          "to": "in_progress",
+          "timestamp": "2026-06-19T15:23:48.9553704+08:00"
+        }
+      ]
+    },
+    {
+      "ID": "5",
+      "Subject": "Write unit tests",
+      "Description": "Write unit tests with priority high, tag: testing",
+      "ActiveForm": "Writing unit tests",
+      "Status": "pending",
+      "Priority": "",
+      "Owner": "",
+      "ParentID": "",
+      "Tags": [],
+      "Metadata": {
+        "priority": "high",
+        "tags": [
+          "testing"
+        ]
+      },
+      "Blocks": [
+        "7"
+      ],
+      "BlockedBy": [
+        "4"
+      ],
+      "CreatedAt": "2026-06-19T15:23:16.3160451+08:00",
+      "UpdatedAt": "2026-06-19T15:25:20.4786882+08:00",
+      "time_spent": 0
+    },
+    {
+      "ID": "6",
+      "Subject": "Update API docs",
+      "Description": "Update API docs with priority medium",
+      "ActiveForm": "Updating API docs",
+      "Status": "pending",
+      "Priority": "",
+      "Owner": "",
+      "ParentID": "",
+      "Tags": [],
+      "Metadata": {
+        "priority": "medium"
+      },
+      "Blocks": [],
+      "BlockedBy": [
+        "4"
+      ],
+      "CreatedAt": "2026-06-19T15:23:16.3214945+08:00",
+      "UpdatedAt": "2026-06-19T15:25:20.485117+08:00",
+      "time_spent": 0
+    },
+    {
+      "ID": "7",
+      "Subject": "Deploy to staging",
+      "Description": "Deploy to staging with priority high",
+      "ActiveForm": "Deploying to staging",
+      "Status": "pending",
+      "Priority": "",
+      "Owner": "",
+      "ParentID": "",
+      "Tags": [],
+      "Metadata": {
+        "priority": "high"
+      },
+      "Blocks": [],
+      "BlockedBy": [
+        "5"
+      ],
+      "CreatedAt": "2026-06-19T15:23:16.3272409+08:00",
+      "UpdatedAt": "2026-06-19T15:25:20.491873+08:00",
+      "time_spent": 0
+    }
+  ]
+}
