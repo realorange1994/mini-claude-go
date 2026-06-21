@@ -1,12 +1,50 @@
 package main
 
 import (
+	"bytes"
 	"strings"
+	"sync"
 )
 
 // ─── Common Utilities ──────────────────────────────────────────────────────
 //
 // Shared utility functions to avoid code duplication.
+
+// BufferPool is a pool of bytes.Buffer for reducing memory allocations.
+var BufferPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
+
+// GetBuffer gets a buffer from the pool.
+func GetBuffer() *bytes.Buffer {
+	return BufferPool.Get().(*bytes.Buffer)
+}
+
+// PutBuffer returns a buffer to the pool.
+func PutBuffer(buf *bytes.Buffer) {
+	buf.Reset()
+	BufferPool.Put(buf)
+}
+
+// StringPool is a pool of strings.Builder for reducing memory allocations.
+var StringPool = sync.Pool{
+	New: func() any {
+		return new(strings.Builder)
+	},
+}
+
+// GetStringBuilder gets a strings.Builder from the pool.
+func GetStringBuilder() *strings.Builder {
+	return StringPool.Get().(*strings.Builder)
+}
+
+// PutStringBuilder returns a strings.Builder to the pool.
+func PutStringBuilder(sb *strings.Builder) {
+	sb.Reset()
+	StringPool.Put(sb)
+}
 
 // ContainsStr checks if a string slice contains a string.
 func ContainsStr(slice []string, item string) bool {

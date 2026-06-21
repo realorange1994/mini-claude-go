@@ -28,6 +28,9 @@ Multi-phase automatic context management to stay within token limits:
 - **Reactive compact**: triggers when token count spikes above a threshold (default 5000) between turns.
 - **4-phase fallback chain**: round-based compact, turn-based smart compact, selective clear (read-only tools), then aggressive truncation.
 - **Post-compact recovery**: re-injects recently read file content and used skill content after compaction.
+- **Auto-Continue**: automatically continues work after compaction instead of waiting for user input.
+- **Two-Level Pruning**: soft-trim (keep head+tail) and hard-clear (mark as compacted) based on pressure levels.
+- **Budgeted Read**: token-budgeted file reading with section-aware truncation.
 
 ### @ Context References
 
@@ -48,329 +51,209 @@ Inject external context into prompts with `@file:path`, `@folder:path`, `@staged
 | **Terminal** | `terminal` (tmux/screen session management) |
 | **Task management** | `task_create`, `task_list`, `task_get`, `task_update`, `task_stop`, `task_output` |
 | **Agent** | `agent` (sub-agent spawning), `send_message` (communicate with running agents) |
-| **Memory** | `memory_add`, `memory_search` |
-| **Skills** | `read_skill`, `list_skills`, `search_skills` |
-| **MCP** | `list_mcp_tools`, `call_mcp_tool`, `mcp_server_status` |
-| **Other** | `brief`, `runtime_info`, `tool_search` |
+| **Advanced** | `apply_patch` (atomic multi-file edits), `code_search` (Exa API), `todo_write` (task list) |
 
-**File History**: 17 dedicated file history tools for version tracking and diffing: `file_history`, `file_history_read`, `file_history_grep`, `file_history_diff`, `file_history_search`, `file_history_summary`, `file_history_timeline`, `file_history_annotate`, `file_history_tag`, `file_history_checkout`, `file_history_batch`, `file_restore`, `file_rewind`.
+### MiMo-Code Inspired Features
 
-### Permission Modes
+Features borrowed from [MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) (TypeScript monorepo):
 
-Three permission strategies with an LLM-based security classifier in auto mode:
+#### Context Management
+- **Pressure Level Tracking**: 4-level pressure system (0-3) based on token usage
+- **Output-Capped Context**: prevents large-output models from shrinking input window
+- **Provider Message Transform**: Anthropic/Bedrock/Mistral message normalization
+- **Boundary Adjustment**: ensures tool_use/tool_result pairs aren't split
 
-| Mode | Behavior |
-|------|----------|
-| `ask` (default) | Dangerous operations (write, exec, delete) require user confirmation. Safe commands (from allowlist) proceed automatically. |
-| `auto` | LLM-based security classifier evaluates non-whitelisted actions. Read-only tools auto-allowed. After 3 consecutive denials, falls back to interactive prompt. |
-| `plan` | Read-only mode. All write and exec operations blocked. |
+#### Session Management
+- **Session Forking**: create independent session copies from checkpoints
+- **Session Diff Tracking**: track file changes per session
+- **Step Classification**: 6 categories for loop control (final/continue/think-only/invalid/failed)
+- **External Session Import**: import sessions from Claude Code/Codex
 
-Switch modes interactively with `/mode auto`, `/mode ask`, or `/mode plan`.
+#### Memory System
+- **Three-Level Memory**: global/project/session scopes
+- **FTS Search**: full-text search with BM25 ranking
+- **Fuzzy Deduplication**: content similarity detection
+- **Auto-Dream**: periodic memory consolidation
 
-### Auto Mode Classifier
+#### Tool Enhancements
+- **Smart Truncation**: error-aware head+tail splitting
+- **Doom Loop Detection**: detects repeated tool calls
+- **Recoverable Errors**: distinguishes fixable vs fatal errors
+- **Invocation Style**: JSON or shell tool invocation
 
-In `auto` mode, an LLM-powered security classifier (using Anthropic SDK's `tool_use` structured output) evaluates actions that are not in the safe whitelist:
+#### Sub-Agent System
+- **Agent ID Isolation**: messages filtered by agent_id
+- **Task Gate Stop**: prevents stopping with incomplete tasks
+- **Completion Gate**: verifies agents finish work
+- **Health Check**: detects stuck agents
 
-- **Git**: read-only operations (`info`, `status`, `log`, `diff`, `show`, `reflog`, `blame`, `describe`, `shortlog`, `ls-tree`, `rev-parse`, `rev-list`) are auto-allowed. Write/destructive operations (`push`, `commit`, `merge`, `rebase`, `reset`, `clean`, etc.) go through the classifier.
-- **Exec**: safe command prefixes are auto-allowed (file listing/reading, search, diff, version checks, build/test/lint, network inspection). Dangerous patterns (`rm`, `sudo`, `chmod`, `chown`, `mkfs`, `dd if=`, `curl|bash`, `wget|sh`, redirects to system directories) are not auto-allowlisted. Unknown commands go through the classifier. Combined commands (`&&`, `||`, `;`) are split and each segment is checked independently — `safe_cmd && evil_cmd` correctly blocks.
-- **Process**: read-only operations (`list`, `pgrep`, `top`, `pstree`, `ps`) are auto-allowed. Destructive operations (`kill`, `pkill`, `terminate`) go through the classifier.
-- **Fileops**: read-only operations (`read`, `stat`, `checksum`, `exists`, `ls`) are auto-allowed. Write/destructive operations (`rmrf`, `rm`, `mv`, `cp`, `chmod`, etc.) go through the classifier — no unconditional hard blocks, matching Claude Code's upstream design.
-- **Cache**: classifier results cached by command/operation with 5-minute TTL to reduce API calls.
-- **Fallback**: after 3 consecutive classifier denials, falls back to interactive user prompt.
+#### Compression & Recovery
+- **Checkpoint Writer**: structured checkpoint.md generation
+- **Checkpoint Validator**: validates checkpoint structure
+- **Progress Reconciliation**: integrates subagent progress
+- **Session Revert**: git-based snapshot restoration
 
-#### Two-Stage Classifier
+### LSP Integration
 
-The classifier uses a two-stage approach modeled after Claude Code's upstream `yoloClassifier.ts`:
+Full Language Server Protocol support:
 
-- **Stage 1 (fast)**: 2112 max_tokens — quick allow/block decision. Most safe commands are decided here.
-- **Stage 2 (thinking)**: 6144 max_tokens with 2048-token thinking padding — full chain-of-thought reasoning with a richer prompt. Triggered when Stage 1 blocks, for deeper security analysis.
+- **Go** (gopls): diagnostics, hover, go-to-definition
+- **TypeScript** (typescript-language-server): diagnostics, hover
+- **Python** (pylsp): diagnostics, hover
 
-#### Dangerous Removal Path Validation
+Features:
+- Initialize/initialized handshake
+- Document sync (didOpen/didChange/didClose/didSave)
+- Diagnostic publishing
+- Synchronous request/response with timeout
 
-`rm`/`rmdir` commands are checked against system-critical paths before classification. The following paths are hard-blocked (cannot be auto-allowlisted):
-- `/` (root directory)
-- `~` and `*` / `/*` (wildcards)
-- Direct children of `/` (`/usr`, `/tmp`, `/etc`, `/bin`, `/var`, etc.)
-- Windows drive roots (`C:\`, `D:\`) and protected directories (`C:\Windows`, `C:\Users`, `C:\Program Files`)
+### Plugin System
 
-Project-scoped paths (`./build`, `./node_modules`, `/home/user/project/dist`) pass the path check and are evaluated by the classifier.
+Extensible hook-based plugin architecture:
 
-#### Classifier Decision Categories
+- **Hook Points**: preStop, postStop, config, event, preTool, postTool
+- **Plugin Discovery**: scan external directories
+- **Plugin Installation**: local path or git URL
+- **Enable/Disable**: per-plugin control
 
-The classifier uses BLOCK ALWAYS semantic categories (modeled after upstream):
-1. External Code Execution: `curl|bash`, `wget|sh`, piping to shell
-2. Irreversible Local Destruction: `rm -rf`, recursive deletion, file truncation, database drops
-3. Unauthorized Persistence: cron jobs, systemd services, shell profile modifications
-4. Security Weakening: disabling firewalls, security policies, `chmod 777`
-5. Privilege Escalation: `sudo`, `su`, `runas`
-6. Unauthorized Network Services: starting servers, listeners, port bindings
+### Workflow Runtime
 
-### Sub-Agent System
+Multi-step workflow orchestration:
 
-The `agent` tool spawns isolated child agent loops with restricted tool access:
+- **Step Types**: agent, parallel, pipeline, condition
+- **Workflow Definition**: JSON-based workflow definitions
+- **Execution**: sequential step execution
+- **Persistence**: save/load workflows to disk
 
-- **Agent types**: general-purpose (default), `explore` (read-only search), `plan` (read-only architecture planning), `verify` (adversarial testing, can write to temp only)
-- **Execution modes**: synchronous (blocks until completion) or asynchronous (background goroutine with completion notifications)
-- **Tool access control**: layer-based filtering with explicit whitelisting (`allowed_tools`), blacklisting (`disallowed_tools`), and wildcard `"*"` option
-- **Context inheritance** (fork mode): sub-agent can receive a clone of the parent's conversation history
-- **Recursive spawning protection**: sub-agents cannot spawn further agents
-- **Completion notifications** delivered to parent via buffered channel and injected into conversation context
+### ACP IDE Integration
 
-### Work Task Management
+Agent Communication Protocol for IDE integration:
 
-Structured task tracking with dependency graph:
+- **Methods**: initialize, newSession, loadSession, listSessions, forkSession, resumeSession, prompt, cancel, setSessionModel, setSessionMode
+- **Events**: toolCall, toolResult, text, reasoning, permission, done, error
+- **Transport**: stdio and HTTP
 
-- Create, list, get, and update tasks with subject, description, active form, and status workflow (pending -> in_progress -> completed/deleted)
-- `blocks`/`blockedBy` dependency relationships with BFS cycle detection
-- Owner assignment for sub-agent delegation
-- Arbitrary metadata attachment (merge or delete individual keys)
-- Cleanup on task deletion (all references removed from other tasks)
+### Inter-Agent Inbox
 
-### Background Bash Tasks
+Persistent messaging between agents:
 
-Spawn shell commands as tracked background processes:
+- **Send/Receive**: send messages between agents
+- **Drain/Peek**: read messages with or without marking as read
+- **Persistence**: messages saved to disk
+- **XML Format**: `<inbox>` blocks for agent injection
 
-- Output written to disk files under `.claude/tasks/bash/`
-- Completion notifications with exit code, duration, and status
-- Process tracking for external kill support via `task_stop`
-- Large output truncation (head + tail with truncation marker)
+### Session Sharing
 
-### MCP (Model Context Protocol)
+Cloud sync for collaborative debugging:
 
-External tool integration via stdio and HTTP/SSE transports. Supports Claude Code-compatible `.mcp.json` format (project-level) and `~/.claude/.mcp.json` (home directory).
+- **Share/Unshare**: share session to cloud
+- **Sync**: incremental data synchronization
+- **Share URL**: get shareable link
 
-### Skills System
+### Git Snapshot System
 
-Extensible skill loader with `read_skill`, `list_skills`, and `search_skills` tools, plus a `SkillTracker` for progressive disclosure across turns. Supports both workspace skills (`skills/` directory) and binary-bundled builtin skills (shipped alongside the executable).
+Git-based snapshot/restore system:
 
-### Session Memory
+- **Track**: track file changes
+- **Create**: create snapshots
+- **Restore**: restore files from snapshot
+- **Diff**: compute differences between snapshots
 
-Persistent structured notes across the session, stored in `.claude/session_memory.md`:
+### Auto-Formatter
 
-- Categories: `preference`, `decision`, `state`, `reference`
-- Periodic flush to disk (every 30 seconds) and on exit
-- Deduplication of identical notes
-- Used by SM-compact as the summary source
-- Automatically injected into the system prompt each turn
-- Searchable via `memory_search` tool
+Automatic code formatting after file writes:
 
-### Error Classification & Recovery
+- **Supported**: gofmt, prettier, ruff, biome, rustfmt, clang-format, shfmt, nixfmt
+- **Auto-detect**: detects project formatter from config files
+- **Configurable**: enable/disable per formatter
 
-- **15-category structured error taxonomy**: retryable, context overflow, rate limit, auth, billing, tool pairing, timeout, overloaded, etc., with recovery hints
-- **Key rotation** and fallback suggestions for auth/billing errors
-- **Crash recovery**: per-call transcript flush to `.claude/transcripts/`, truncated line handling, tool pairing validation, and role alternation repair on resume
-- **API message normalization**: JSON key sorting and whitespace normalization for KV cache reuse (prefix caching)
+### Max Mode
 
-### Performance
+Multi-candidate + Judge for better output:
 
-- **Prompt caching**: Anthropic-style prompt caching with `cache_control` markers (system + 3 breakpoints)
-- **CachedSystemPrompt**: dirty flag avoids rebuilding system prompt on every API call
-- **Preflight compression**: automatically compresses long resumed sessions to ~100k tokens before the first API call
-- **Rate limiting**: response-header-based rate limit tracking with retry delay estimation
-- **Retry utilities**: exponential backoff with jitter
+- **Candidates**: run N parallel candidates (default 5)
+- **Judge**: select best candidate
+- **Overhead Tracking**: track token overhead
 
-### CLAUDE.md Support
+### Skill Discovery
 
-Automatically loads project-specific instructions from `CLAUDE.md` in the project root.
+Remote skill discovery:
+
+- **External Directories**: scan ~/.claude/skills, ~/.agents/skills, etc.
+- **Remote Index**: fetch skills from URL
+- **Skill Sources**: builtin, workspace, external, remote, compose
 
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/miniClaudeCode-go.git
-cd miniClaudeCode-go
-go build -o miniclaudecode .
+# Clone the repository
+git clone https://github.com/realorange1994/mini-claude-go.git
+cd mini-claude-go
+
+# Build
+go build -o miniclaudecode.exe .
+
+# Or install
+go install .
 ```
 
-Cross-platform builds are supported (Windows, Linux, macOS):
+## Quick Start
 
 ```bash
-GOOS=linux GOARCH=amd64 go build -o miniclaudecode-linux .
-GOOS=darwin GOARCH=arm64 go build -o miniclaudecode-macos .
-GOOS=windows GOARCH=amd64 go build -o miniclaudecode.exe .
+# Interactive mode
+./miniclaudecode.exe
+
+# One-shot mode
+./miniclaudecode.exe "What is 2+2?"
+
+# With specific model
+./miniclaudecode.exe --model claude-sonnet-4-20250514
+
+# Resume session
+./miniclaudecode.exe --resume last
 ```
-
-## Usage
-
-```bash
-# Interactive REPL (default: ask mode, no streaming)
-./miniclaudecode
-
-# Enable streaming output
-./miniclaudecode --stream
-
-# Specify permission mode
-./miniclaudecode --mode ask
-./miniclaudecode --mode auto
-./miniclaudecode --mode plan
-
-# Specify model
-./miniclaudecode --model claude-sonnet-4-20250514
-
-# Specify project directory
-./miniclaudecode --dir /path/to/project
-
-# Resume a previous session
-./miniclaudecode --resume last
-
-# One-shot mode (single prompt, then exit)
-./miniclaudecode "Review the code in main.go"
-
-# Combine options
-./miniclaudecode --stream --mode auto --dir /path/to/project "Fix the bug in handler.go"
-```
-
-### CLI Flags
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--model` | Anthropic model to use | (required) |
-| `--api-key` | API key (overrides env and config) | |
-| `--base-url` | Custom API base URL | |
-| `--mode` | Permission mode (`ask`, `auto`, `plan`) | `ask` |
-| `--max-turns` | Max agent loop turns per message | `90` |
-| `--stream` | Enable streaming output | `false` |
-| `--dir` | Project directory | current dir |
-| `--resume` | Resume from transcript (path, number, or `last`) | |
-
-### Slash Commands (Interactive Mode)
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show available commands |
-| `/resume [session]` | Resume a previous session (`last`, number, or filename) |
-| `/compact` | Force context compaction |
-| `/partialcompact [up_to\|from] [pivot]` | Directional partial compaction |
-| `/clear` | Clear conversation history |
-| `/mode [ask\|auto\|plan]` | Switch permission mode |
-| `/tools` | List all available tools |
-| `/quit` (or `/exit`, `/q`) | Exit |
-
-### @ Context References
-
-Inject external context directly into prompts:
-
-```
-Read the main module @file:src/main.go and check the staged changes @staged
-```
-
-Supported references:
-
-| Reference | Description |
-|-----------|-------------|
-| `@file:path[:start-end]` | File content with optional line range (e.g., `@file:main.go:10-50`) |
-| `@folder:path` | Directory tree listing (max 3 levels deep) |
-| `@staged` | Git staged diff |
-| `@diff` | Git unstaged diff |
-| `@git:N` | Git commit diff (N = number of commits, default 1, max 10) |
-| `@url:URL` | Web page content (HTML extracted and cleaned) |
 
 ## Configuration
 
-miniClaudeCode-go follows a **convention over configuration** philosophy: sensible defaults are hard-coded, and you only need to configure what differs from those defaults.
-
-### Priority Order
-
-**CLI flags > `.claude/settings.json` (project) > `~/.claude/settings.json` (home) > environment variables > hard-coded defaults**
-
-Project-level settings override home-level settings. Environment variables are retained as a fallback for backward compatibility but are never preferred over explicit configuration.
-
-### Settings File
-
-Configuration is stored in `.claude/settings.json` (project-level, overrides home) or `~/.claude/settings.json` (home directory, used as fallback):
-
-```json
-{
-  "env": {
-    "ANTHROPIC_AUTH_TOKEN": "your-api-key",
-    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
-    "ANTHROPIC_MODEL": "claude-sonnet-4-20250514"
-  },
-  "runtime": {
-    "effort_level": "fast",
-    "prefer_non_streaming": false,
-    "exit_after_stop_delay": "5m",
-    "telemetry_disabled": false
-  },
-  "models": {
-    "default_opus_model": "claude-opus-4-5-20250610",
-    "default_sonnet_model": "claude-sonnet-4-20250514",
-    "default_haiku_model": "claude-haiku-4-5-20250610"
-  },
-  "tokens": {
-    "max_context_tokens": 1000000,
-    "max_output_tokens": 64000
-  },
-  "tools": {
-    "git_bash_path": "C:\\Program Files\\Git\\bin\\bash.exe"
-  }
-}
-```
-
-### Runtime Settings
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `runtime.effort_level` | string | `""` | Set to `"fast"` to use a cheaper/faster model |
-| `runtime.prefer_non_streaming` | bool | `false` | Force non-streaming API mode |
-| `runtime.exit_after_stop_delay` | string | `""` | Idle timeout before auto-exit (e.g. `"5m"`, `"30s"`) |
-| `runtime.telemetry_disabled` | bool | `false` | Disable telemetry collection |
-
-### Model Defaults
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `models.default_opus_model` | `claude-opus-4-5-20250610` | Model resolved by the `opus` alias |
-| `models.default_sonnet_model` | `claude-sonnet-4-20250514` | Model resolved by the `sonnet` alias |
-| `models.default_haiku_model` | `claude-haiku-4-5-20250610` | Model resolved by the `haiku` alias |
-
-### Token Limits
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `tokens.max_context_tokens` | int | `0` (use model default) | Override context window size for all models |
-| `tokens.max_output_tokens` | int | `0` (use model default) | Override max output tokens for all models |
-
-When set to `0`, the model's natural limits from the built-in capability table are used. Non-zero values override those limits globally.
-
-### Tool Settings
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `tools.git_bash_path` | string | `""` (auto-detect) | Path to Git Bash on Windows (e.g. `C:\Program Files\Git\bin\bash.exe`) |
-
-### Environment Variables (Fallback)
-
-Environment variables are supported for backward compatibility but are **not preferred** over settings file values. They are only used when the corresponding settings file field is empty or not set:
+### Environment Variables
 
 ```bash
-# Authentication (category 1/2 — still env-first)
-export ANTHROPIC_API_KEY="your-api-key"
-export ANTHROPIC_AUTH_TOKEN="your-api-key"
-export ANTHROPIC_BASE_URL="https://api.anthropic.com"
-export ANTHROPIC_MODEL="claude-sonnet-4-20250514"
+# API Key (required)
+export ANTHROPIC_API_KEY=sk-ant-...
 
-# Runtime (category 3 — settings.json preferred)
-export CLAUDE_CODE_PREFER_NON_STREAMING=1
-export CLAUDE_CODE_EFFORT_LEVEL=fast
-export CLAUDE_CODE_EXIT_AFTER_STOP_DELAY=5m
-export CLAUDE_CODE_TELEMETRY_DISABLED=1
-
-# Model aliases (category 4 — settings.json preferred)
-export CLAUDE_DEFAULT_OPUS_MODEL=claude-opus-4-5-20250610
+# Model selection
+export CLAUDE_MODEL=claude-sonnet-4-20250514
 export CLAUDE_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
 export CLAUDE_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20250610
 
-# Token limits (category 4 — settings.json preferred)
+# Token limits
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
 
-# Tool-specific (category 5 — settings.json preferred)
+# Tool-specific
 export CLAUDE_CODE_GIT_BASH_PATH="C:\Program Files\Git\bin\bash.exe"
+```
+
+### Settings File
+
+Create `.claude/settings.json` in your project root:
+
+```json
+{
+  "api_key": "sk-ant-...",
+  "model": "claude-sonnet-4-20250514",
+  "max_turns": 90,
+  "permission_mode": "auto",
+  "auto_classifier_enabled": true,
+  "micro_compact_enabled": true,
+  "lsp_enabled": true,
+  "formatter_enabled": true
+}
 ```
 
 ### MCP Configuration
 
-Create `.mcp.json` in your project root (Claude Code-compatible format):
+Create `.mcp.json` in your project root:
 
 ```json
 {
@@ -378,15 +261,10 @@ Create `.mcp.json` in your project root (Claude Code-compatible format):
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
-    },
-    "remote-server": {
-      "url": "https://example.com/mcp"
     }
   }
 }
 ```
-
-Home directory MCP config: `~/.claude/.mcp.json`
 
 ### CLAUDE.md
 
@@ -396,64 +274,147 @@ Place a `CLAUDE.md` file in your project root to provide project-specific instru
 
 ```
 miniClaudeCode-go/
-├── main.go                  # Entry point, CLI flags, REPL loop
-├── agent_loop.go            # Core agent loop (IterationBudget, notifications, sub-agent spawning)
-├── agent_sub.go             # Sub-agent system: SpawnSubAgent, specialized types, fork mode
-├── agent_task.go            # Task store (TaskStore, TaskState), background bash tasks
-├── work_task.go             # Work task management (dependency graph, cycle detection)
-├── auto_classifier.go       # Two-stage LLM classifier, dangerous path validation, combined command splitting, operation-level allowlists
-├── permissions.go           # Permission gate (ask/auto/plan modes), denied patterns
-├── streaming.go             # SSE streaming, ThinkFilter, StreamProgress, CollectHandler
-├── context.go               # ConversationContext, entry types, compaction boundaries
-├── context_references.go    # @ reference expansion (file, folder, git, url)
-├── compact.go               # All compaction strategies (micro, SM, LLM, partial, reactive)
-├── config.go                # Configuration loading (file/env/flags), defaults, registry setup
-├── system_prompt.go         # CachedSystemPrompt builder with dirty flag
-├── prompt_caching.go        # Anthropic prompt caching (cache_control markers)
-├── error_types.go           # 15-category structured error classification
-├── normalize.go             # API message normalization for KV cache reuse
-├── rate_limit.go            # Rate limit tracking with retry delay estimation
-├── retry_utils.go           # Retry with exponential backoff and jitter
-├── filehistory.go           # File version history and snapshots
-├── session_memory.go        # Session memory with persistent notes
-├── skills/                  # Skill loading and progressive disclosure
-│   ├── loader.go           # SkillLoader (workspace + builtin skills)
-│   └── tracker.go          # SkillTracker for progressive disclosure
-├── tools/                   # Built-in tool implementations
-│   ├── base.go             # ToolResultMetadata, schema validation
-│   ├── coercion.go         # Argument type coercion
-│   ├── agent_tool.go       # AgentTool (sub-agent spawning)
-│   ├── send_message_tool.go # SendMessageTool
-│   ├── task_tool.go        # TaskCreate/List/Get/Update
-│   ├── task_output_tool.go # TaskOutputTool (blocking wait)
-│   ├── exec_tool.go        # Shell command execution
-│   ├── file_read.go        # File reading
-│   ├── file_write.go       # File writing
-│   ├── file_edit.go        # File editing
-│   ├── multi_edit.go       # Multi-edit operations
-│   ├── glob_tool.go        # Glob pattern matching
-│   ├── grep_tool.go        # Grep search
-│   ├── list_dir.go         # Directory listing
-│   ├── web_search.go       # Web search
-│   ├── exa_search.go       # Exa-powered search
-│   ├── web_fetch.go        # Web content fetching
-│   ├── fileops.go          # File operations (copy/move/delete/chmod)
-│   ├── process.go          # Process management
-│   ├── git_tool.go         # Git operations with dangerous op detection
-│   ├── system_tool.go      # System information
-│   ├── terminal_tool.go    # tmux/screen management
-│   ├── runtime_info.go     # Go runtime info
-│   ├── skill_tools.go      # read_skill, list_skills, search_skills
-│   ├── memory_tool.go      # memory_add, memory_search
-│   ├── mcp_tools.go        # list_mcp_tools, call_mcp_tool, mcp_server_status
-│   └── file_history_tools.go # File history tools
-├── mcp/                    # MCP client (stdio + HTTP/SSE transports)
-│   └── client.go           # MCP protocol implementation
-├── transcript/             # Crash-safe JSONL conversation logging
-│   └── transcript.go       # Transcript reader/writer
+├── main.go                          # Entry point, CLI flags, REPL loop
+├── agent_loop.go                    # Core agent loop (IterationBudget, notifications, sub-agent spawning)
+├── agent_sub.go                     # Sub-agent system: SpawnSubAgent, specialized types, fork mode
+├── agent_task.go                    # Task store (TaskStore, TaskState), background bash tasks
+├── work_task.go                     # Work task management (dependency graph, cycle detection)
+├── auto_classifier.go               # Two-stage LLM classifier
+├── permissions.go                   # Permission gate (ask/auto/plan modes)
+├── streaming.go                     # SSE streaming, ThinkFilter, StreamProgress
+├── context.go                       # ConversationContext, entry types, compaction boundaries
+├── context_references.go            # @ reference expansion
+├── compact.go                       # All compaction strategies
+├── config.go                        # Configuration loading
+├── system_prompt.go                 # CachedSystemPrompt builder
+├── prompt_caching.go                # Anthropic prompt caching
+├── error_types.go                   # 15-category structured error classification
+├── normalize.go                     # API message normalization
+├── rate_limit.go                    # Rate limit tracking
+├── retry_utils.go                   # Retry with exponential backoff
+├── filehistory.go                   # File version history and snapshots
+├── session_memory.go                # Session memory with persistent notes
+│
+├── # MiMo-Code Inspired Features
+├── provider_transform.go            # Provider message transform layer
+├── budgeted_read.go                 # Token-budgeted file reading
+├── prune.go                         # Two-level pruning (soft-trim + hard-clear)
+├── step_classify.go                 # Step classification (6 categories)
+├── session_diff.go                  # Session diff/summary tracking
+├── revert_manager.go                # Session revert with git snapshots
+├── boundary_adjust.go               # API boundary adjustment
+├── checkpoint_validator.go          # Checkpoint validation
+├── progress_reconcile.go            # Progress reconciliation
+├── checkpoint_writer.go             # Background checkpoint writer
+├── auto_dream.go                    # Auto-dream memory consolidation
+├── task_gate.go                     # Task gate stop pattern
+├── session_goal.go                  # Goal/Judge stop condition
+├── memory_fts.go                    # FTS search with BM25 ranking
+├── truncation_service.go            # Sophisticated truncation service
+├── invocation_style.go              # Per-tool invocation style
+├── consecutive_failure_tracker.go   # Doom loop detection
+├── max_mode.go                      # Multi-candidate + Judge
+├── apply_patch.go                   # Atomic multi-file patch application
+├── code_search.go                   # Exa API code search
+├── formatter_service.go             # Auto-formatter service
+├── external_import.go               # External session import
+├── git_snapshot.go                  # Git-based snapshot system
+├── lsp_manager.go                   # LSP protocol implementation
+├── skill_discovery.go               # Remote skill discovery
+├── worktree_service.go              # Git worktree service
+├── inbox_service.go                 # Inter-agent inbox
+├── share_service.go                 # Session sharing
+├── plugin_manager.go                # Plugin system
+├── acp_agent.go                     # ACP IDE integration
+├── workflow_runtime.go              # Workflow runtime
+├── common_utils.go                  # Common utility functions
+│
+├── tools/                           # Built-in tool implementations
+│   ├── base.go                      # ToolResultMetadata, schema validation
+│   ├── coercion.go                  # Argument type coercion
+│   ├── agent_tool.go                # AgentTool (sub-agent spawning)
+│   ├── send_message_tool.go         # SendMessageTool
+│   ├── task_tool.go                 # TaskCreate/List/Get/Update
+│   ├── task_output_tool.go          # TaskOutputTool (blocking wait)
+│   ├── exec_tool.go                 # Shell command execution
+│   ├── file_read.go                 # File reading
+│   ├── file_write.go                # File writing
+│   ├── file_edit.go                 # File editing
+│   ├── multi_edit.go                # Multi-edit operations
+│   ├── glob_tool.go                 # Glob pattern matching
+│   ├── grep_tool.go                 # Grep search
+│   ├── list_dir.go                  # Directory listing
+│   ├── web_search.go                # Web search
+│   ├── exa_search.go                # Exa-powered search
+│   ├── web_fetch.go                 # Web content fetching
+│   ├── fileops.go                   # File operations (copy/move/delete/chmod)
+│   ├── process.go                   # Process management
+│   ├── git_tool.go                  # Git operations with dangerous op detection
+│   ├── system_tool.go               # System information
+│   ├── terminal_tool.go             # tmux/screen management
+│   ├── runtime_info.go              # Go runtime info
+│   ├── skill_tools.go               # read_skill, list_skills, search_skills
+│   ├── memory_tool.go               # memory_add, memory_search
+│   ├── mcp_tools.go                 # list_mcp_tools, call_mcp_tool, mcp_server_status
+│   └── output_cleaner.go            # Smart truncation
+│
+├── skills/                          # Skill loading
+│   ├── loader.go                    # SkillLoader (workspace + builtin skills)
+│   └── tracker.go                   # SkillTracker for progressive disclosure
+│
+├── mcp/                             # MCP client
+│   └── client.go                    # MCP protocol implementation
+│
+├── permissions/                     # Permission system
+│   ├── wildcard.go                  # Wildcard pattern matching
+│   └── internal_paths.go            # Memory path isolation
+│
+├── transcript/                      # Crash-safe JSONL logging
+│   └── transcript.go                # Transcript reader/writer
+│
+├── .github/workflows/               # CI/CD configuration
+│   └── ci.yml                       # GitHub Actions
+│
 └── go.mod
 ```
+
+## Testing
+
+```bash
+# Run all tests
+go test ./...
+
+# Run with verbose output
+go test -v ./...
+
+# Run specific test
+go test -run TestE2E_FullWorkflow
+
+# Run with timeout
+go test -count=1 -timeout 180s
+```
+
+### Test Coverage
+
+- **Unit Tests**: 277 tests
+- **End-to-End Tests**: 9 tests
+- **Total**: 286 tests, 100% pass rate
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Run `go test ./...`
+6. Submit a pull request
 
 ## License
 
 MIT
+
+## Acknowledgments
+
+- [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) - Original inspiration
+- [MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) - Feature inspiration
+- [Anthropic](https://www.anthropic.com/) - API and model support
