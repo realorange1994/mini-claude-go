@@ -343,7 +343,17 @@ func (a *ACPAgent) handlePrompt(req *ACPRequest) (any, error) {
 		"text":      "Processing...",
 	})
 
-	// TODO: Integrate with agent loop to process the message
+	// Process message through agent loop if available
+	if a.agentLoop != nil {
+		// Run agent loop with the message
+		result := a.agentLoop.Run(params.Message)
+
+		// Send text result
+		a.sendNotification(ACPEventText, map[string]any{
+			"sessionId": params.SessionID,
+			"text":      result,
+		})
+	}
 
 	// Send done notification
 	a.sendNotification(ACPEventDone, map[string]any{

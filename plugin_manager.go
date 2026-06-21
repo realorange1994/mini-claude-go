@@ -189,6 +189,42 @@ func (m *PluginManager) Execute(hook PluginHookPoint, ctx *PluginHookContext) ([
 	return results, nil
 }
 
+// AggregateExecute executes hooks and aggregates results.
+// If any plugin returns Continue=false, the aggregated result will be Continue=false.
+// The reason from the first plugin that returns Continue=false is used.
+func (m *PluginManager) AggregateExecute(hook PluginHookPoint, ctx *PluginHookContext) (*PluginHookResult, error) {
+	results, err := m.Execute(hook, ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(results) == 0 {
+		return &PluginHookResult{Continue: true}, nil
+	}
+
+	// Aggregate results
+	aggregated := &PluginHookResult{
+		Continue: true,
+		Data:     make(map[string]any),
+	}
+
+	for _, result := range results {
+		if !result.Continue {
+			aggregated.Continue = false
+			if aggregated.Reason == "" {
+				aggregated.Reason = result.Reason
+			}
+		}
+
+		// Merge data
+		for k, v := range result.Data {
+			aggregated.Data[k] = v
+		}
+	}
+
+	return aggregated, nil
+}
+
 // ExecuteQuiet executes hooks without returning results.
 func (m *PluginManager) ExecuteQuiet(hook PluginHookPoint, ctx *PluginHookContext) {
 	m.Execute(hook, ctx)
