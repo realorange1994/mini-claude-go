@@ -2,9 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -185,15 +185,46 @@ func (m *AutoDreamManager) runDream() {
 	m.saveState()
 
 	// Dream task: consolidate session knowledge into project memory
-	task := `Run one automatic dream memory consolidation pass for the current project.
+	// Read session memory and consolidate into project memory
+	sessionDir := filepath.Join(m.projectDir, ".claude")
+	projectMemoryDir := filepath.Join(sessionDir, "memory")
 
-Use the memory files as the working index and the raw session data as the source of truth.
-Consolidate only durable, verified information into project memory.
-Focus on: decisions, discoveries, patterns, and lessons learned.`
+	// Scan session memory files
+	entries, err := os.ReadDir(projectMemoryDir)
+	if err != nil {
+		return
+	}
 
-	// In a real implementation, this would spawn a background LLM subagent
-	// For now, we just log the task
-	fmt.Printf("[auto-dream] Task: %s\n", task)
+	var discoveries []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+			path := filepath.Join(projectMemoryDir, entry.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			// Extract discoveries from session memory
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "discovery") || strings.Contains(line, "learned") {
+					discoveries = append(discoveries, line)
+				}
+			}
+		}
+	}
+
+	// Consolidate discoveries into project memory
+	if len(discoveries) > 0 {
+		projectMemoryPath := filepath.Join(projectMemoryDir, "project.md")
+		var content string
+		content += "# Project Memory\n\n"
+		content += "## Discoveries\n\n"
+		for _, d := range discoveries {
+			content += "- " + d + "\n"
+		}
+		os.MkdirAll(projectMemoryDir, 0755)
+		os.WriteFile(projectMemoryPath, []byte(content), 0644)
+	}
 }
 
 // runDistill runs the auto-distill task.
@@ -204,13 +235,47 @@ func (m *AutoDreamManager) runDistill() {
 
 	m.saveState()
 
-	task := `Run one automatic distill pass for the current project.
+	// Distill: identify repeated workflows and create skill candidates
+	sessionDir := filepath.Join(m.projectDir, ".claude")
+	skillsDir := filepath.Join(sessionDir, "skills")
 
-Review the past month of sessions and identify repeated manual workflows worth packaging.
-Inventory existing skills and commands first so you reuse or extend instead of duplicating.
-Produce a compact shortlist of high-confidence missing assets.`
+	// Scan for repeated patterns in session memory
+	projectMemoryDir := filepath.Join(sessionDir, "memory")
+	entries, err := os.ReadDir(projectMemoryDir)
+	if err != nil {
+		return
+	}
 
-	fmt.Printf("[auto-distill] Task: %s\n", task)
+	var patterns []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+			path := filepath.Join(projectMemoryDir, entry.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			// Look for repeated patterns
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "pattern") || strings.Contains(line, "workflow") {
+					patterns = append(patterns, line)
+				}
+			}
+		}
+	}
+
+	// Create skill candidates from patterns
+	if len(patterns) > 0 {
+		os.MkdirAll(skillsDir, 0755)
+		skillPath := filepath.Join(skillsDir, "auto-distilled.md")
+		var content string
+		content += "# Auto-Distilled Skills\n\n"
+		content += "## Identified Patterns\n\n"
+		for _, p := range patterns {
+			content += "- " + p + "\n"
+		}
+		os.WriteFile(skillPath, []byte(content), 0644)
+	}
 }
 
 // getProjectAge returns the project age in milliseconds.

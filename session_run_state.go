@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 // ─── Session Run State Machine (MiMo-Code 3) ───────────────────────────────
@@ -172,7 +173,7 @@ func isValidTransition(from, to RunState) bool {
 
 // timeNowUnix returns current Unix timestamp.
 func timeNowUnix() int64 {
-	return int64(0) // Placeholder
+	return time.Now().Unix()
 }
 
 // FormatRunState formats a run state for display.
