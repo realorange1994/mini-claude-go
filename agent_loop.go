@@ -249,6 +249,13 @@ type AgentLoop struct {
 	progressChecker           *ProgressChecker                    // subagent progress checker (MiMo-Code)
 	historyService            *HistoryService                     // cross-session history FTS (MiMo-Code)
 	eventStore                *EventStore                         // event sourcing (MiMo-Code)
+	controlPlane              *ControlPlane                       // workspace control plane (MiMo-Code)
+	boundedQueue              *BoundedQueue                       // bounded async queue (MiMo-Code)
+	rwLockManager             *RWLockManager                      // keyed RW lock (MiMo-Code)
+	bashArityClassifier       *BashArityClassifier                // command arity classifier (MiMo-Code)
+	metricsCollector          *MetricsCollector                   // remote metrics (MiMo-Code)
+	sessionRunManager         *SessionRunManager                  // session run state machine (MiMo-Code)
+	sessionPruneService       *SessionPruneService                // context prune service (MiMo-Code)
 	// Task-scoped iteration tracking (openclacky pattern): tracks iteration
 	// count and skill read count at task start, used to compute task-local
 	// iteration counts for skill evolution and memory updater triggers.
@@ -596,6 +603,13 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		progressChecker:       NewProgressChecker(filepath.Join(cfg.ProjectDir, ".claude", "tasks")),
 		historyService:        NewHistoryService(),
 		eventStore:            NewEventStore(),
+		controlPlane:          NewControlPlane(cfg.ProjectDir),
+		boundedQueue:          NewBoundedQueue(1000),
+		rwLockManager:         NewRWLockManager(),
+		bashArityClassifier:   NewBashArityClassifier(),
+		metricsCollector:      NewMetricsCollector(MetricsConfig{Enabled: false}, "session"),
+		sessionRunManager:     NewSessionRunManager(),
+		sessionPruneService:   NewSessionPruneService(PruneConfig{Enabled: true, Thresholds: []int{50000, 100000, 150000}}),
 	}
 	// Latch beta headers for session stability — once set, stays same for the
 	// entire session to prevent mid-session anthropic-beta header churn.
