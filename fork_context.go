@@ -82,18 +82,3 @@ func computePrefixHash(systemPrompt string, toolSchemas []string, modelMessages 
 	}
 	return fmt.Sprintf("%d", total)
 }
-
-// FormatForkContext formats a fork context for display.
-func FormatForkContext(ctx *ForkContext) string {
-	if ctx == nil {
-		return "No fork context."
-	}
-
-	var sb string
-	sb += "## Fork Context\n\n"
-	sb += fmt.Sprintf("- System prompt: %d chars\n", len(ctx.SystemPrompt))
-	sb += fmt.Sprintf("- Tool schemas: %d tools\n", len(ctx.ToolSchemas))
-	sb += fmt.Sprintf("- Model messages: %d messages\n", len(ctx.ModelMessages))
-	sb += "- Hash: " + ctx.Hash + "\n"
-	return sb
-}

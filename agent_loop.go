@@ -228,7 +228,6 @@ type AgentLoop struct {
 	checkpointWriter          *CheckpointWriter                   // background checkpoint writer (MiMo-Code P8)
 	autoDreamManager          *AutoDreamManager                   // auto-dream scheduler (MiMo-Code P9)
 	formatterService          *FormatterService                   // auto-formatter (MiMo-Code 3)
-	lspManager                *LSPManager                         // LSP integration (MiMo-Code 2)
 	textLoopDetector          *TextLoopDetector                   // text loop recovery (MiMo-Code)
 	repeatedStepDetector      *RepeatedStepDetector               // repeated step detection (MiMo-Code)
 	workspaceTrust            *WorkspaceTrust                     // workspace trust system (MiMo-Code)
@@ -562,7 +561,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		checkpointWriter:    NewCheckpointWriter(cfg.ProjectDir),
 		autoDreamManager:    NewAutoDreamManager(cfg.ProjectDir),
 		formatterService:    NewFormatterService(true),
-		lspManager:          NewLSPManager(false),
 		textLoopDetector:      NewTextLoopDetector(),
 		repeatedStepDetector:  NewRepeatedStepDetector(),
 		workspaceTrust:        NewWorkspaceTrust(cfg.ProjectDir),
@@ -4195,20 +4193,6 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		if path, ok := input["path"].(string); ok {
 			if err := a.formatterService.FormatFile(path); err != nil {
 				a.logDebug("[formatter] failed: %v\n", err)
-			}
-		}
-	}
-
-	// LSP Integration (MiMo-Code 2): notify LSP of file changes
-	if a.lspManager != nil && (toolName == "write_file" || toolName == "edit_file") {
-		if path, ok := input["path"].(string); ok {
-			if err := a.lspManager.NotifyFileChange(path); err != nil {
-				a.logDebug("[lsp] notify failed: %v\n", err)
-			}
-			// Collect diagnostics
-			diags := a.lspManager.GetDiagnostics(path)
-			if len(diags) > 0 {
-				a.logDebug("[lsp] %d diagnostics for %s\n", len(diags), path)
 			}
 		}
 	}

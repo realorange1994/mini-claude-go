@@ -114,22 +114,6 @@ func TestCheckpointValidator_BudgetExceeded(t *testing.T) {
 	}
 }
 
-func TestBuildReflectionMessage(t *testing.T) {
-	errors := []*ValidationError{
-		{RuleID: "topic-missing", Severity: "error", Message: "Missing topic"},
-		{RuleID: "subsection-missing", Severity: "error", Message: "Missing section"},
-	}
-
-	msg := BuildReflectionMessage(errors)
-
-	if !strings.Contains(msg, "topic-missing") {
-		t.Error("expected message to contain rule ID")
-	}
-	if !strings.Contains(msg, "Missing topic") {
-		t.Error("expected message to contain error message")
-	}
-}
-
 func TestEstimateTokensCV(t *testing.T) {
 	tests := []struct {
 		input    string

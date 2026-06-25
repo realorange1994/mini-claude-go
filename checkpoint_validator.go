@@ -144,38 +144,6 @@ func (v *CheckpointValidator) Validate(content string) []*ValidationError {
 	return errors
 }
 
-// ValidateSectionBudgets validates per-section token budgets.
-func (v *CheckpointValidator) ValidateSectionBudgets(content string) []*ValidationError {
-	var errors []*ValidationError
-
-	// Parse sections
-	_, sections := ParseSections(content)
-
-	for _, section := range sections {
-		sectionName := strings.TrimPrefix(section.Header, "## §")
-		sectionName = strings.TrimPrefix(sectionName, "## ")
-		sectionName = strings.TrimSpace(sectionName)
-
-		// Find matching budget
-		for budgetName, budget := range SectionBudget {
-			if strings.Contains(sectionName, budgetName) {
-				sectionContent := strings.Join(section.Body, "\n")
-				tokens := estimateTokensCV(sectionContent)
-				if tokens > budget {
-					errors = append(errors, &ValidationError{
-						RuleID:   "section-budget-exceeded",
-						Severity: "extract-required",
-						Message:  fmt.Sprintf("Section '%s' exceeds %d tokens (%d)", sectionName, budget, tokens),
-					})
-				}
-				break
-			}
-		}
-	}
-
-	return errors
-}
-
 // ValidateAndQuarantine validates and quarantines if invalid.
 // Returns the validation errors and whether the checkpoint was quarantined.
 func (v *CheckpointValidator) ValidateAndQuarantine(content string, checkpointPath string) ([]*ValidationError, bool) {
@@ -201,33 +169,6 @@ func (v *CheckpointValidator) ValidateAndQuarantine(content string, checkpointPa
 	}
 
 	return errors, requiresExtract
-}
-
-// BuildReflectionMessage builds a reflection message from validation errors.
-func BuildReflectionMessage(errors []*ValidationError) string {
-	var sb strings.Builder
-
-	sb.WriteString("<system-reminder>\n")
-	sb.WriteString("Checkpoint validation failed. Please fix the following issues:\n\n")
-
-	// Group by severity
-	bySeverity := make(map[string][]*ValidationError)
-	for _, err := range errors {
-		bySeverity[err.Severity] = append(bySeverity[err.Severity], err)
-	}
-
-	for severity, errs := range bySeverity {
-		sb.WriteString(fmt.Sprintf("**%s**:\n", severity))
-		for _, err := range errs {
-			sb.WriteString(fmt.Sprintf("- [%s] %s\n", err.RuleID, err.Message))
-		}
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString("Please revise the checkpoint and try again.\n")
-	sb.WriteString("</system-reminder>")
-
-	return sb.String()
 }
 
 // estimateTokensCV estimates tokens from character count.
