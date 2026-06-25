@@ -233,11 +233,8 @@ type AgentLoop struct {
 	formatterService          *FormatterService                   // auto-formatter (MiMo-Code 3)
 	lspManager                *LSPManager                         // LSP integration (MiMo-Code 2)
 	snapshotManager           *SnapshotManager                    // git snapshot (MiMo-Code 6)
-	maxModeService            *MaxModeService                     // max mode (MiMo-Code 1)
 	textLoopDetector          *TextLoopDetector                   // text loop recovery (MiMo-Code)
 	repeatedStepDetector      *RepeatedStepDetector               // repeated step detection (MiMo-Code)
-	editReplacerChain         *EditReplacerChain                  // multi-strategy edit replacer (MiMo-Code)
-	sessionCwd                *SessionCwd                         // session-scoped working directory (MiMo-Code)
 	workspaceTrust            *WorkspaceTrust                     // workspace trust system (MiMo-Code)
 	protectedPaths            *ProtectedPaths                     // platform protected paths (MiMo-Code)
 	forkContextCache          *ForkContextCache                   // fork context caching (MiMo-Code)
@@ -575,11 +572,8 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		formatterService:    NewFormatterService(true),
 		lspManager:          NewLSPManager(false),
 		snapshotManager:     NewSnapshotManager(cfg.ProjectDir),
-		maxModeService:      NewMaxModeService(MaxModeConfig{Enabled: false, NumCandidates: DefaultCandidates}),
 		textLoopDetector:      NewTextLoopDetector(),
 		repeatedStepDetector:  NewRepeatedStepDetector(),
-		editReplacerChain:     NewEditReplacerChain(),
-		sessionCwd:            NewSessionCwd(cfg.ProjectDir),
 		workspaceTrust:        NewWorkspaceTrust(cfg.ProjectDir),
 		protectedPaths:        NewProtectedPaths(),
 		forkContextCache:      NewForkContextCache(),
