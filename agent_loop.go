@@ -235,23 +235,15 @@ type AgentLoop struct {
 	lspManager                *LSPManager                         // LSP integration (MiMo-Code 2)
 	snapshotManager           *SnapshotManager                    // git snapshot (MiMo-Code 6)
 	maxModeService            *MaxModeService                     // max mode (MiMo-Code 1)
-	codeSearchService         *CodeSearchService                  // code search (MiMo-Code 7)
-	externalImportService     *ExternalImportService              // external import (MiMo-Code 4)
 	textLoopDetector          *TextLoopDetector                   // text loop recovery (MiMo-Code)
 	repeatedStepDetector      *RepeatedStepDetector               // repeated step detection (MiMo-Code)
 	editReplacerChain         *EditReplacerChain                  // multi-strategy edit replacer (MiMo-Code)
 	sessionCwd                *SessionCwd                         // session-scoped working directory (MiMo-Code)
-	memoryPathGuard           *MemoryPathGuard                    // memory write path guard (MiMo-Code)
-	sseChunkTimeoutConfig     *SSEChunkTimeoutConfig              // SSE chunk timeout (MiMo-Code)
 	workspaceTrust            *WorkspaceTrust                     // workspace trust system (MiMo-Code)
 	protectedPaths            *ProtectedPaths                     // platform protected paths (MiMo-Code)
 	forkContextCache          *ForkContextCache                   // fork context caching (MiMo-Code)
 	progressChecker           *ProgressChecker                    // subagent progress checker (MiMo-Code)
-	historyService            *HistoryService                     // cross-session history FTS (MiMo-Code)
 	eventStore                *EventStore                         // event sourcing (MiMo-Code)
-	controlPlane              *ControlPlane                       // workspace control plane (MiMo-Code)
-	boundedQueue              *BoundedQueue                       // bounded async queue (MiMo-Code)
-	rwLockManager             *RWLockManager                      // keyed RW lock (MiMo-Code)
 	bashArityClassifier       *BashArityClassifier                // command arity classifier (MiMo-Code)
 	metricsCollector          *MetricsCollector                   // remote metrics (MiMo-Code)
 	sessionRunManager         *SessionRunManager                  // session run state machine (MiMo-Code)
@@ -589,23 +581,15 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		lspManager:          NewLSPManager(false),
 		snapshotManager:     NewSnapshotManager(cfg.ProjectDir),
 		maxModeService:      NewMaxModeService(MaxModeConfig{Enabled: false, NumCandidates: DefaultCandidates}),
-		codeSearchService:   NewCodeSearchService(NewCodeSearchConfig()),
-		externalImportService: NewExternalImportService(ExternalImportConfig{Enabled: false}),
 		textLoopDetector:      NewTextLoopDetector(),
 		repeatedStepDetector:  NewRepeatedStepDetector(),
 		editReplacerChain:     NewEditReplacerChain(),
 		sessionCwd:            NewSessionCwd(cfg.ProjectDir),
-		memoryPathGuard:       NewMemoryPathGuard(cfg.ProjectDir),
-		sseChunkTimeoutConfig: NewSSEChunkTimeoutConfig(),
 		workspaceTrust:        NewWorkspaceTrust(cfg.ProjectDir),
 		protectedPaths:        NewProtectedPaths(),
 		forkContextCache:      NewForkContextCache(),
 		progressChecker:       NewProgressChecker(filepath.Join(cfg.ProjectDir, ".claude", "tasks")),
-		historyService:        NewHistoryService(),
 		eventStore:            NewEventStore(),
-		controlPlane:          NewControlPlane(cfg.ProjectDir),
-		boundedQueue:          NewBoundedQueue(1000),
-		rwLockManager:         NewRWLockManager(),
 		bashArityClassifier:   NewBashArityClassifier(),
 		metricsCollector:      NewMetricsCollector(MetricsConfig{Enabled: false}, "session"),
 		sessionRunManager:     NewSessionRunManager(),
@@ -4250,18 +4234,6 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 		if path, ok := input["path"].(string); ok {
 			a.sessionDiff.RecordChange(path, len(output), 0)
 		}
-	}
-
-	// History FTS indexing (MiMo-Code): index tool output for cross-session search
-	if a.historyService != nil {
-		a.historyService.Index(HistoryEntry{
-			ID:        fmt.Sprintf("%s-%s", toolName, toolUseID),
-			SessionID: "current",
-			Role:      "tool",
-			Content:   output,
-			ToolName:  toolName,
-			Timestamp: time.Now(),
-		})
 	}
 
 	// Auto-Formatter (MiMo-Code 3): format file after write/edit
