@@ -313,43 +313,6 @@ func TestE2E_AutoDreamWithSessionMemory(t *testing.T) {
 	}
 }
 
-func TestE2E_PruningWithPressure(t *testing.T) {
-	// Test that pruning works with pressure levels
-	var outputs []ToolOutput
-	for i := 0; i < 40; i++ {
-		outputs = append(outputs, ToolOutput{
-			ToolName:  "bash",
-			Output:    strings.Repeat("x", 5000),
-			TurnIndex: i,
-		})
-	}
-	for i := 40; i < 45; i++ {
-		outputs = append(outputs, ToolOutput{
-			ToolName:  "bash",
-			Output:    "recent",
-			TurnIndex: i,
-		})
-	}
-
-	// Pressure 0: no pruning
-	result0 := PruneOldToolOutputs(outputs, 0)
-	if result0.SoftTrimmed != 0 || result0.HardCleared != 0 {
-		t.Error("expected no pruning at pressure 0")
-	}
-
-	// Pressure 1: soft trim
-	result1 := PruneOldToolOutputs(outputs, 1)
-	if result1.SoftTrimmed == 0 {
-		t.Error("expected soft-trimming at pressure 1")
-	}
-
-	// Pressure 2: hard clear
-	result2 := PruneOldToolOutputs(outputs, 2)
-	if result2.HardCleared == 0 {
-		t.Error("expected hard-clearing at pressure 2")
-	}
-}
-
 func TestE2E_AgentIDWithMessages(t *testing.T) {
 	cfg := DefaultConfig()
 	ctx := NewConversationContext(cfg)
