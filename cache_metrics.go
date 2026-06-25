@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 )
 
@@ -119,80 +118,6 @@ func (m *CacheMetrics) String() string {
 
 	return fmt.Sprintf("cache: %.1f%% hit (%d/%d tokens), completion: %d tokens",
 		ratio*100, m.cacheHitTokens, total, m.totalCompletionTokens)
-}
-
-// ReadTracker tracks files read via read_file/list_directory.
-// Edit operations consult this before proceeding. Cleared on fold/compaction.
-//
-// Matching DeepSeek-Reasonix's tools/read-tracker.ts
-type ReadTracker struct {
-	mu          sync.RWMutex
-	readFiles   map[string]bool // normalized file path -> true
-	readDirs    map[string]bool // normalized directory path -> true
-	epoch       int              // incremented on each compaction to invalidate stale reads
-}
-
-// NewReadTracker creates a new read tracker.
-func NewReadTracker() *ReadTracker {
-	return &ReadTracker{
-		readFiles: make(map[string]bool),
-		readDirs:  make(map[string]bool),
-	}
-}
-
-// MarkRead marks a file as read.
-func (rt *ReadTracker) MarkRead(path string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.readFiles[normalizePath(path)] = true
-}
-
-// MarkDirRead marks a directory as read (via list_directory).
-func (rt *ReadTracker) MarkDirRead(path string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.readDirs[normalizePath(path)] = true
-}
-
-// WasRead returns true if the file was read in the current epoch.
-func (rt *ReadTracker) WasRead(path string) bool {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
-	return rt.readFiles[normalizePath(path)]
-}
-
-// WasDirRead returns true if the directory was listed in the current epoch.
-func (rt *ReadTracker) WasDirRead(path string) bool {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
-	return rt.readDirs[normalizePath(path)]
-}
-
-// Reset clears all tracked reads (called after compaction).
-func (rt *ReadTracker) Reset() {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.readFiles = make(map[string]bool)
-	rt.readDirs = make(map[string]bool)
-	rt.epoch++
-}
-
-// Epoch returns the current epoch number.
-func (rt *ReadTracker) Epoch() int {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
-	return rt.epoch
-}
-
-// normalizePath normalizes a file path for comparison.
-func normalizePath(path string) string {
-	// Convert backslashes to forward slashes for Windows compatibility
-	path = strings.ReplaceAll(path, "\\", "/")
-	// Remove trailing slashes
-	path = strings.TrimRight(path, "/")
-	// Lowercase for case-insensitive comparison on Windows
-	path = strings.ToLower(path)
-	return path
 }
 
 // trimTrailingToolCalls drops unpaired assistant messages with tool_calls

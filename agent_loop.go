@@ -186,7 +186,6 @@ type AgentLoop struct {
 	prefixFingerprint         *PrefixFingerprint                  // tracks system+tools+fewshots hash to detect prefix cache drift
 	foldSummaryPin            *FoldSummaryPin                    // tracks content that must survive compaction (active skills, constraints)
 	cacheMetrics             *CacheMetrics                      // tracks cache hit/miss tokens per API call
-	readTracker              *ReadTracker                       // tracks files read for read-before-edit validation
 	budgetManager            *ProactiveBudgetManager            // proactive context window budget management
 	agentOutput               io.Writer                           // configurable output for terminal (defaults to os.Stderr); background agents override to capture output
 	drainPendingMessagesFunc  func() []string                     // called at turn boundaries to drain pending messages from parent task store
@@ -244,10 +243,6 @@ type AgentLoop struct {
 	forkContextCache          *ForkContextCache                   // fork context caching (MiMo-Code)
 	progressChecker           *ProgressChecker                    // subagent progress checker (MiMo-Code)
 	eventStore                *EventStore                         // event sourcing (MiMo-Code)
-	bashArityClassifier       *BashArityClassifier                // command arity classifier (MiMo-Code)
-	metricsCollector          *MetricsCollector                   // remote metrics (MiMo-Code)
-	sessionRunManager         *SessionRunManager                  // session run state machine (MiMo-Code)
-	sessionPruneService       *SessionPruneService                // context prune service (MiMo-Code)
 	// Task-scoped iteration tracking (openclacky pattern): tracks iteration
 	// count and skill read count at task start, used to compute task-local
 	// iteration counts for skill evolution and memory updater triggers.
@@ -590,10 +585,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		forkContextCache:      NewForkContextCache(),
 		progressChecker:       NewProgressChecker(filepath.Join(cfg.ProjectDir, ".claude", "tasks")),
 		eventStore:            NewEventStore(),
-		bashArityClassifier:   NewBashArityClassifier(),
-		metricsCollector:      NewMetricsCollector(MetricsConfig{Enabled: false}, "session"),
-		sessionRunManager:     NewSessionRunManager(),
-		sessionPruneService:   NewSessionPruneService(PruneConfig{Enabled: true, Thresholds: []int{50000, 100000, 150000}}),
 	}
 	// Latch beta headers for session stability — once set, stays same for the
 	// entire session to prevent mid-session anthropic-beta header churn.
@@ -630,7 +621,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 	agent.prefixFingerprint = NewPrefixFingerprint()
 	agent.foldSummaryPin = NewFoldSummaryPin()
 	agent.cacheMetrics = NewCacheMetrics()
-	agent.readTracker = NewReadTracker()
 	// Initialize currentMaxTokens from config
 	agent.currentMaxTokens.Store(int64(cfg.MaxOutputTokens))
 	// Fix gate to point to agent's config (not the local cfg copy)
@@ -845,7 +835,6 @@ func NewAgentLoopFromTranscript(cfg Config, registry *tools.Registry, useStream 
 	agent.prefixFingerprint = NewPrefixFingerprint()
 	agent.foldSummaryPin = NewFoldSummaryPin()
 	agent.cacheMetrics = NewCacheMetrics()
-	agent.readTracker = NewReadTracker()
 
 	// Restore skill state from transcript entries so skillTracker reflects
 	// which skills were already read in this session. This ensures skills
