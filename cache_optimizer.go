@@ -47,14 +47,14 @@ func shrinkOversizedToolResultsByTokens(messages []anthropic.MessageParam, maxTo
 			continue
 		}
 
-		beforeTokens := countTokensBounded(content)
+		beforeTokens := estimateTokens(content)
 		if beforeTokens <= maxTokens {
 			continue
 		}
 
 		// Truncate to approximate token budget
 		truncated := truncateForTokens(content, maxTokens)
-		afterTokens := countTokensBounded(truncated)
+		afterTokens := estimateTokens(truncated)
 
 		if afterTokens >= beforeTokens {
 			continue
@@ -103,12 +103,6 @@ func truncateForTokens(text string, maxTokens int) string {
 	}
 
 	return truncated + "\n\n[... tool output truncated for token budget; use Read to get full content]"
-}
-
-// countTokensBounded is an alias for estimateTokens for backwards compatibility.
-// Deprecated: use estimateTokens from compact.go instead.
-func countTokensBounded(text string) int {
-	return estimateTokens(text)
 }
 
 // fixToolCallPairing drops both unpaired assistant.tool_calls and stray tool messages.
