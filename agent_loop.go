@@ -227,7 +227,6 @@ type AgentLoop struct {
 	debugLog                  *os.File                            // file handle for diagnostic logging (not console)
 	checkpointWriter          *CheckpointWriter                   // background checkpoint writer (MiMo-Code P8)
 	autoDreamManager          *AutoDreamManager                   // auto-dream scheduler (MiMo-Code P9)
-	sessionDiff               *SessionDiff                        // session change tracking (MiMo-Code 3B)
 	formatterService          *FormatterService                   // auto-formatter (MiMo-Code 3)
 	lspManager                *LSPManager                         // LSP integration (MiMo-Code 2)
 	textLoopDetector          *TextLoopDetector                   // text loop recovery (MiMo-Code)
@@ -236,7 +235,6 @@ type AgentLoop struct {
 	protectedPaths            *ProtectedPaths                     // platform protected paths (MiMo-Code)
 	forkContextCache          *ForkContextCache                   // fork context caching (MiMo-Code)
 	progressChecker           *ProgressChecker                    // subagent progress checker (MiMo-Code)
-	eventStore                *EventStore                         // event sourcing (MiMo-Code)
 	// Task-scoped iteration tracking (openclacky pattern): tracks iteration
 	// count and skill read count at task start, used to compute task-local
 	// iteration counts for skill evolution and memory updater triggers.
@@ -563,7 +561,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		telemetry:           NewTelemetryManager(cfg.TelemetryDisabled),
 		checkpointWriter:    NewCheckpointWriter(cfg.ProjectDir),
 		autoDreamManager:    NewAutoDreamManager(cfg.ProjectDir),
-		sessionDiff:         NewSessionDiff(cfg.SessionID),
 		formatterService:    NewFormatterService(true),
 		lspManager:          NewLSPManager(false),
 		textLoopDetector:      NewTextLoopDetector(),
@@ -572,7 +569,6 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		protectedPaths:        NewProtectedPaths(),
 		forkContextCache:      NewForkContextCache(),
 		progressChecker:       NewProgressChecker(filepath.Join(cfg.ProjectDir, ".claude", "tasks")),
-		eventStore:            NewEventStore(),
 	}
 	// Latch beta headers for session stability — once set, stays same for the
 	// entire session to prevent mid-session anthropic-beta header churn.
@@ -1239,18 +1235,6 @@ func (a *AgentLoop) Run(userMessage string) string {
 	// Workspace Trust check (MiMo-Code): verify workspace is trusted
 	if a.workspaceTrust != nil && !a.workspaceTrust.IsTrusted(a.config.ProjectDir) {
 		a.out("[WARN] Workspace %s is not trusted. Some operations may be restricted.\n", a.config.ProjectDir)
-	}
-
-	// Event Store (MiMo-Code): record run start event
-	if a.eventStore != nil {
-		a.eventStore.Append(Event{
-			Type:        EventSessionCreated,
-			AggregateID: "session",
-			Data: map[string]any{
-				"model": a.config.Model,
-				"mode":  a.config.PermissionMode,
-			},
-		})
 	}
 
 	// Reset the turn budget so each new conversation starts fresh
@@ -4204,13 +4188,6 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 			"output":      output,
 			"is_error":    result.IsError,
 		})
-	}
-
-	// Session Diff tracking (MiMo-Code 3B): record file changes
-	if a.sessionDiff != nil && (toolName == "write_file" || toolName == "edit_file") {
-		if path, ok := input["path"].(string); ok {
-			a.sessionDiff.RecordChange(path, len(output), 0)
-		}
 	}
 
 	// Auto-Formatter (MiMo-Code 3): format file after write/edit
