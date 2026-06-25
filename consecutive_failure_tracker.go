@@ -182,48 +182,6 @@ func (d *DoomLoopDetector) CheckRecord(toolName string, args map[string]any) boo
 	return count >= d.threshold
 }
 
-// DoomLoopInfo holds information about a detected doom loop.
-type DoomLoopInfo struct {
-	Detected bool
-	ToolName string
-	Count    int
-	ArgsHash string
-}
-
-// CheckRecordWithInfo records a tool call and returns doom loop information.
-// MiMo-Code 2C: provides detailed info for permission gate integration.
-func (d *DoomLoopDetector) CheckRecordWithInfo(toolName string, args map[string]any) DoomLoopInfo {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	fp := toolCallFingerprint{
-		toolName: toolName,
-		argsHash: fingerprintArgs(args),
-	}
-
-	d.recent = append(d.recent, fp)
-	if len(d.recent) > d.maxRecent {
-		d.recent = d.recent[1:]
-	}
-
-	// Count consecutive identical calls from the end
-	count := 0
-	for i := len(d.recent) - 1; i >= 0; i-- {
-		if d.recent[i].toolName == fp.toolName && d.recent[i].argsHash == fp.argsHash {
-			count++
-		} else {
-			break
-		}
-	}
-
-	return DoomLoopInfo{
-		Detected: count >= d.threshold,
-		ToolName: toolName,
-		Count:    count,
-		ArgsHash: fp.argsHash,
-	}
-}
-
 // Clear resets the detector state.
 func (d *DoomLoopDetector) Clear() {
 	d.mu.Lock()
