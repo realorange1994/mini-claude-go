@@ -228,11 +228,8 @@ type AgentLoop struct {
 	checkpointWriter          *CheckpointWriter                   // background checkpoint writer (MiMo-Code P8)
 	autoDreamManager          *AutoDreamManager                   // auto-dream scheduler (MiMo-Code P9)
 	sessionDiff               *SessionDiff                        // session change tracking (MiMo-Code 3B)
-	revertManager             *RevertManager                      // session revert manager (MiMo-Code 3A)
-	truncationService         *TruncationService                  // sophisticated truncation (MiMo-Code 2A)
 	formatterService          *FormatterService                   // auto-formatter (MiMo-Code 3)
 	lspManager                *LSPManager                         // LSP integration (MiMo-Code 2)
-	snapshotManager           *SnapshotManager                    // git snapshot (MiMo-Code 6)
 	textLoopDetector          *TextLoopDetector                   // text loop recovery (MiMo-Code)
 	repeatedStepDetector      *RepeatedStepDetector               // repeated step detection (MiMo-Code)
 	workspaceTrust            *WorkspaceTrust                     // workspace trust system (MiMo-Code)
@@ -567,11 +564,8 @@ func NewAgentLoop(cfg Config, registry *tools.Registry, useStream bool) (*AgentL
 		checkpointWriter:    NewCheckpointWriter(cfg.ProjectDir),
 		autoDreamManager:    NewAutoDreamManager(cfg.ProjectDir),
 		sessionDiff:         NewSessionDiff(cfg.SessionID),
-		revertManager:       NewRevertManager(filepath.Join(cfg.ProjectDir, ".claude", "snapshots")),
-		truncationService:   NewTruncationService(filepath.Join(cfg.ProjectDir, ".claude", "tool-output")),
 		formatterService:    NewFormatterService(true),
 		lspManager:          NewLSPManager(false),
-		snapshotManager:     NewSnapshotManager(cfg.ProjectDir),
 		textLoopDetector:      NewTextLoopDetector(),
 		repeatedStepDetector:  NewRepeatedStepDetector(),
 		workspaceTrust:        NewWorkspaceTrust(cfg.ProjectDir),
@@ -4239,13 +4233,6 @@ func (a *AgentLoop) executeTool(call map[string]any, checkPermissions bool) (ant
 			if len(diags) > 0 {
 				a.logDebug("[lsp] %d diagnostics for %s\n", len(diags), path)
 			}
-		}
-	}
-
-	// Git Snapshot (MiMo-Code 6): track file changes
-	if a.snapshotManager != nil && (toolName == "write_file" || toolName == "edit_file") {
-		if path, ok := input["path"].(string); ok {
-			a.snapshotManager.Track([]string{path})
 		}
 	}
 
