@@ -210,12 +210,3 @@ func TestE2E_PressureLevels(t *testing.T) {
 	}
 }
 
-func TestE2E_WorkflowExecution(t *testing.T) {
-	dir := t.TempDir()
-	_ = dir
-	// Workflow module removed — test stub retained to keep test count stable.
-}
-
-func TestE2E_InboxMessaging(t *testing.T) {
-	// Inbox module removed — test stub retained to keep test count stable.
-}

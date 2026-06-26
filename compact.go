@@ -843,22 +843,6 @@ func SetGlobalModelCapabilities(mc *ModelCapabilitiesCache) {
 	globalModelCaps = mc
 }
 
-// ContextWindowTracker tracks token usage against model-specific context windows.
-type ContextWindowTracker struct {
-	modelMaxTokens       int
-	autoCompactThreshold float64
-	autoCompactBuffer    int
-}
-
-// NewContextWindowTracker creates a tracker for the given model.
-func NewContextWindowTracker(model string, threshold float64, buffer int) *ContextWindowTracker {
-	return &ContextWindowTracker{
-		modelMaxTokens:       modelContextWindow(model),
-		autoCompactThreshold: threshold,
-		autoCompactBuffer:    buffer,
-	}
-}
-
 // modelContextWindow returns the context window size for a model.
 // Checks the global ModelCapabilitiesCache first (if initialized), then
 // falls back to suffix-based detection and 200K default.
@@ -882,40 +866,6 @@ func modelContextWindow(model string) int {
 	}
 	// Default to 200K for all other Anthropic models
 	return 200_000
-}
-
-// EffectiveWindow returns the usable context window minus output reserve.
-// Context window constants (MiMo-Code 1B)
-const (
-	CompactionBuffer = 20_000 // reserve for compaction
-	OutputCap        = 20_000 // cap output reservation so large-output models don't strangle input
-)
-
-func (t *ContextWindowTracker) EffectiveWindow() int {
-	// Cap output reservation at OutputCap (MiMo-Code pattern)
-	// Models with 32K+ output windows don't need full reservation
-	outputReserve := t.modelMaxTokens / 4 // estimate 25% for output
-	if outputReserve > OutputCap {
-		outputReserve = OutputCap
-	}
-	return t.modelMaxTokens - outputReserve - CompactionBuffer
-}
-
-// CompactThreshold returns the token count at which compaction should trigger.
-func (t *ContextWindowTracker) CompactThreshold() int {
-	effective := t.EffectiveWindow()
-	threshold := int(float64(effective) * t.autoCompactThreshold)
-	buf := effective - t.autoCompactBuffer
-	if threshold < buf {
-		return threshold
-	}
-	return buf
-}
-
-// ShouldCompact checks if the current message count exceeds the compaction threshold.
-func (t *ContextWindowTracker) ShouldCompact(messages []anthropic.MessageParam) bool {
-	tokens := estimateMessageParamsTokens(messages)
-	return tokens >= t.CompactThreshold()
 }
 
 // estimateMessageParamsTokens estimates tokens for API message params.

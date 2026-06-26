@@ -37,41 +37,6 @@ func archiveRounds(archiveDir string, rounds []apiRound) (string, error) {
 	return archivePath, nil
 }
 
-// LoadArchive loads messages from an archive file.
-func LoadArchive(path string) ([]CompactionMessage, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read archive: %w", err)
-	}
-
-	var messages []CompactionMessage
-	if err := json.Unmarshal(data, &messages); err != nil {
-		return nil, fmt.Errorf("unmarshal archive: %w", err)
-	}
-
-	return messages, nil
-}
-
-// ListArchives lists archive files in a directory.
-func ListArchives(archiveDir string) ([]os.FileInfo, error) {
-	entries, err := os.ReadDir(archiveDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var archives []os.FileInfo
-	for _, entry := range entries {
-		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
-			info, err := entry.Info()
-			if err == nil {
-				archives = append(archives, info)
-			}
-		}
-	}
-
-	return archives, nil
-}
-
 // timestampStr returns a timestamp string for filenames.
 func timestampStr() string {
 	return fmt.Sprintf("%d", time.Now().UnixMilli())
