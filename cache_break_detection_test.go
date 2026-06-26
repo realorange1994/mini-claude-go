@@ -9,7 +9,7 @@ import (
 // --- RecordPromptState tests ---
 
 func TestRecordPromptState_FirstCall(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	pending := RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 	if pending != nil {
@@ -18,7 +18,7 @@ func TestRecordPromptState_FirstCall(t *testing.T) {
 }
 
 func TestRecordPromptState_NoChange(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// First call — establishes baseline
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
@@ -37,7 +37,7 @@ func TestRecordPromptState_NoChange(t *testing.T) {
 }
 
 func TestRecordPromptState_SystemChange(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// First call
 	RecordPromptState("system prompt v1", nil, nil, "claude-sonnet-4-6", false)
@@ -53,7 +53,7 @@ func TestRecordPromptState_SystemChange(t *testing.T) {
 }
 
 func TestRecordPromptState_SystemCharDelta(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// Short → longer system prompt
 	RecordPromptState("short", nil, nil, "model", false)
@@ -66,7 +66,7 @@ func TestRecordPromptState_SystemCharDelta(t *testing.T) {
 	}
 
 	// Longer → shorter
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 	RecordPromptState("this is a much longer system prompt with more text", nil, nil, "model", false)
 	pending = RecordPromptState("short", nil, nil, "model", false)
 	if pending == nil || !pending.SystemPromptChanged {
@@ -78,7 +78,7 @@ func TestRecordPromptState_SystemCharDelta(t *testing.T) {
 }
 
 func TestRecordPromptState_ModelChange(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 	pending := RecordPromptState("system prompt", nil, nil, "claude-opus-4-6", false)
@@ -96,7 +96,7 @@ func TestRecordPromptState_ModelChange(t *testing.T) {
 }
 
 func TestRecordPromptState_FastModeChange(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 	pending := RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", true)
@@ -110,7 +110,7 @@ func TestRecordPromptState_FastModeChange(t *testing.T) {
 }
 
 func TestRecordPromptState_ToolChange(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	tools1 := []map[string]any{
 		{"name": "exec", "description": "run shell"},
@@ -142,7 +142,7 @@ func TestRecordPromptState_ToolChange(t *testing.T) {
 }
 
 func TestRecordPromptState_ToolSchemaModified(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// Same tool name, different description (schema changed but tool set unchanged)
 	tools1 := []map[string]any{
@@ -177,7 +177,7 @@ func TestRecordPromptState_ToolSchemaModified(t *testing.T) {
 }
 
 func TestRecordPromptState_MultipleChanges(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	tools := []map[string]any{
 		{"name": "exec", "description": "run shell"},
@@ -204,32 +204,9 @@ func TestRecordPromptState_MultipleChanges(t *testing.T) {
 	}
 }
 
-func TestRecordPromptState_CallCountIncrements(t *testing.T) {
-	ResetCacheBreakTracker()
-
-	RecordPromptState("system", nil, nil, "model", false)
-	s1 := GetCacheBreakSnapshot()
-	if s1.CallCount != 1 {
-		t.Errorf("expected call count 1, got %d", s1.CallCount)
-	}
-
-	// No change
-	RecordPromptState("system", nil, nil, "model", false)
-	s2 := GetCacheBreakSnapshot()
-	if s2.CallCount != 2 {
-		t.Errorf("expected call count 2, got %d", s2.CallCount)
-	}
-
-	// Change
-	RecordPromptState("system v2", nil, nil, "model", false)
-	s3 := GetCacheBreakSnapshot()
-	if s3.CallCount != 3 {
-		t.Errorf("expected call count 3, got %d", s3.CallCount)
-	}
-}
 
 func TestRecordPromptState_NoChangeReturnsNil(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system", nil, nil, "model", false)
 
@@ -243,7 +220,7 @@ func TestRecordPromptState_NoChangeReturnsNil(t *testing.T) {
 // --- CheckResponseForCacheBreak tests ---
 
 func TestCheckResponseForCacheBreak_NoBreak(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 
@@ -261,7 +238,7 @@ func TestCheckResponseForCacheBreak_NoBreak(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_Break(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 
@@ -279,7 +256,7 @@ func TestCheckResponseForCacheBreak_Break(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_BreakReasonIncludesDrop(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
 	CheckResponseForCacheBreak(10000, 5000, nil, false)
@@ -298,7 +275,7 @@ func TestCheckResponseForCacheBreak_BreakReasonIncludesDrop(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_BoundaryExactly5Percent(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
 	CheckResponseForCacheBreak(10000, 5000, nil, false)
@@ -312,7 +289,7 @@ func TestCheckResponseForCacheBreak_BoundaryExactly5Percent(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_DropAbove5PercentBelowThreshold(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
 	CheckResponseForCacheBreak(5000, 2000, nil, false)
@@ -326,7 +303,7 @@ func TestCheckResponseForCacheBreak_DropAbove5PercentBelowThreshold(t *testing.T
 }
 
 func TestCheckResponseForCacheBreak_CompactionReset(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 	CheckResponseForCacheBreak(10000, 5000, nil, false)
@@ -339,7 +316,7 @@ func TestCheckResponseForCacheBreak_CompactionReset(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_TTLDetection(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "claude-sonnet-4-6", false)
 	CheckResponseForCacheBreak(10000, 5000, nil, false)
@@ -360,7 +337,7 @@ func TestCheckResponseForCacheBreak_TTLDetection(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_TTLGreaterThan1Hour(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
 	CheckResponseForCacheBreak(10000, 5000, nil, false)
@@ -376,7 +353,7 @@ func TestCheckResponseForCacheBreak_TTLGreaterThan1Hour(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_ServerSideEviction(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system prompt", nil, nil, "model", false)
 	CheckResponseForCacheBreak(10000, 5000, nil, false)
@@ -393,7 +370,7 @@ func TestCheckResponseForCacheBreak_ServerSideEviction(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_WithPendingChanges(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// First call
 	RecordPromptState("system prompt v1", nil, nil, "claude-sonnet-4-6", false)
@@ -417,7 +394,7 @@ func TestCheckResponseForCacheBreak_WithPendingChanges(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_WithModelChangePending(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system", nil, nil, "claude-sonnet-4-6", false)
 	RecordPromptState("system", nil, nil, "claude-opus-4-6", false)
@@ -440,7 +417,7 @@ func TestCheckResponseForCacheBreak_WithModelChangePending(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_WithToolChangePending(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	tools1 := []map[string]any{
 		{"name": "exec", "description": "run shell"},
@@ -469,7 +446,7 @@ func TestCheckResponseForCacheBreak_WithToolChangePending(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_WithFastModeChangePending(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system", nil, nil, "model", false)
 	RecordPromptState("system", nil, nil, "model", true)
@@ -486,7 +463,7 @@ func TestCheckResponseForCacheBreak_WithFastModeChangePending(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_MultipleReasons(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	tools := []map[string]any{
 		{"name": "exec", "description": "run shell"},
@@ -522,7 +499,7 @@ func TestCheckResponseForCacheBreak_MultipleReasons(t *testing.T) {
 }
 
 func TestCheckResponseForCacheBreak_PendingChangesClearedAfterBreak(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	RecordPromptState("system v1", nil, nil, "model", false)
 	RecordPromptState("system v2", nil, nil, "model", false)
@@ -547,7 +524,7 @@ func TestCheckResponseForCacheBreak_PendingChangesClearedAfterBreak(t *testing.T
 }
 
 func TestCheckResponseForCacheBreak_DropIncludesCharInfo(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	tools := []map[string]any{
 		{"name": "exec", "description": "run"},
@@ -571,11 +548,11 @@ func TestCheckResponseForCacheBreak_DropIncludesCharInfo(t *testing.T) {
 // --- Utility function tests ---
 
 func TestResetCacheBreakTracker(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 	RecordPromptState("system prompt", nil, nil, "model1", false)
 	CheckResponseForCacheBreak(10000, 5000, nil, false)
 
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// After reset, should act like first call
 	isBreak, _ := CheckResponseForCacheBreak(7000, 3000, nil, false)
@@ -585,7 +562,7 @@ func TestResetCacheBreakTracker(t *testing.T) {
 }
 
 func TestUpdateLastAssistantMsgTime(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// Before any message
 	gap := TimeSinceLastAssistantMsg()
@@ -605,42 +582,6 @@ func TestUpdateLastAssistantMsgTime(t *testing.T) {
 	}
 }
 
-func TestGetCacheBreakSnapshot(t *testing.T) {
-	ResetCacheBreakTracker()
-
-	snapshot := GetCacheBreakSnapshot()
-	if snapshot.CallCount != 0 {
-		t.Errorf("expected call count 0, got %d", snapshot.CallCount)
-	}
-	if snapshot.Model != "" {
-		t.Errorf("expected empty model, got %s", snapshot.Model)
-	}
-
-	RecordPromptState("test", nil, nil, "test-model", true)
-
-	snapshot = GetCacheBreakSnapshot()
-	if snapshot.Model != "test-model" {
-		t.Errorf("expected model 'test-model', got %s", snapshot.Model)
-	}
-	if !snapshot.FastMode {
-		t.Error("expected fast mode to be true")
-	}
-}
-
-func TestGetCacheBreakSnapshot_IncludesTokenCount(t *testing.T) {
-	ResetCacheBreakTracker()
-
-	RecordPromptState("system", nil, nil, "model", false)
-	CheckResponseForCacheBreak(12345, 5000, nil, false)
-
-	snapshot := GetCacheBreakSnapshot()
-	if snapshot.CacheReadTokens == nil {
-		t.Fatal("expected cache_read_tokens to be set")
-	}
-	if *snapshot.CacheReadTokens != 12345 {
-		t.Errorf("expected 12345 cache_read_tokens, got %d", *snapshot.CacheReadTokens)
-	}
-}
 
 // --- Hash function tests ---
 
@@ -706,7 +647,7 @@ func TestFNVHashJSON_InvalidInput(t *testing.T) {
 // --- Phase 1 + Phase 2 integration ---
 
 func TestIntegration_Ph1SystemChange_Ph2Explains(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// Turn 1: baseline
 	RecordPromptState("system v1", nil, nil, "model", false)
@@ -724,7 +665,7 @@ func TestIntegration_Ph1SystemChange_Ph2Explains(t *testing.T) {
 }
 
 func TestIntegration_Ph1NoChange_Ph2ServerSide(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// Turn 1: baseline
 	RecordPromptState("system", nil, nil, "model", false)
@@ -746,7 +687,7 @@ func TestIntegration_Ph1NoChange_Ph2ServerSide(t *testing.T) {
 }
 
 func TestIntegration_Ph1CacheControlChange(t *testing.T) {
-	ResetCacheBreakTracker()
+	resetCacheBreakTracker()
 
 	// Baseline with no cache_control markers
 	RecordPromptState("system", nil, nil, "model", false)

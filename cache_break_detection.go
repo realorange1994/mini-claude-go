@@ -280,8 +280,8 @@ func buildCacheBreakExplanation(
 	)
 }
 
-// ResetCacheBreakTracker resets the tracker (e.g., after /clear or new session).
-func ResetCacheBreakTracker() {
+// resetCacheBreakTracker resets the tracker (e.g., after /clear or new session).
+func resetCacheBreakTracker() {
 	globalCacheBreakTracker = &CacheBreakTracker{}
 }
 
@@ -317,30 +317,4 @@ func fnvHashJSON(v any) uint64 {
 	h := fnv.New64a()
 	h.Write(data)
 	return h.Sum64()
-}
-
-// CacheBreakStateSnapshot is a serializable snapshot for logging.
-type CacheBreakStateSnapshot struct {
-	SystemHash       uint64   `json:"system_hash"`
-	ToolsHash        uint64   `json:"tools_hash"`
-	CacheControlHash uint64   `json:"cache_control_hash"`
-	ToolNames        []string `json:"tool_names"`
-	Model            string   `json:"model"`
-	FastMode         bool     `json:"fast_mode"`
-	CallCount        int      `json:"call_count"`
-	CacheReadTokens  *int64   `json:"cache_read_tokens,omitempty"`
-}
-
-// GetCacheBreakSnapshot returns the current state for debugging.
-func GetCacheBreakSnapshot() CacheBreakStateSnapshot {
-	state := globalCacheBreakTracker
-	return CacheBreakStateSnapshot{
-		SystemHash:       state.prevSystemHash,
-		ToolsHash:        state.prevToolsHash,
-		CacheControlHash: state.prevCacheControlHash,
-		Model:            state.prevModel,
-		FastMode:         state.prevFastMode,
-		CallCount:        state.prevCallCount,
-		CacheReadTokens:  state.prevCacheReadTokens,
-	}
 }
