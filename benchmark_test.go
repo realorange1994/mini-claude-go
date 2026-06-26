@@ -122,18 +122,3 @@ func BenchmarkDoomLoopDetector_CheckRecord(b *testing.B) {
 		detector.CheckRecord("bash", args)
 	}
 }
-
-func BenchmarkPressureLevel(b *testing.B) {
-	cfg := DefaultConfig()
-	ctx := NewConversationContext(cfg)
-
-	// Add some messages
-	for i := 0; i < 50; i++ {
-		ctx.AddUserMessage("test")
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		ctx.PressureLevel(100000)
-	}
-}

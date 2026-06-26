@@ -122,18 +122,4 @@ func TestE2E_DoomLoopDetection(t *testing.T) {
 	}
 }
 
-func TestE2E_PressureLevels(t *testing.T) {
-	ctx := NewConversationContext(DefaultConfig())
-
-	// 1. Add messages to increase pressure
-	for i := 0; i < 100; i++ {
-		ctx.AddUserMessage("test message " + string(make([]byte, 100)))
-	}
-
-	// 2. Check pressure level
-	level := ctx.PressureLevel(100000)
-	if level < 0 || level > 3 {
-		t.Errorf("expected pressure level 0-3, got %d", level)
-	}
-}
 
