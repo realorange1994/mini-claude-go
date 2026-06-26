@@ -1163,14 +1163,6 @@ func (c *ConversationContext) GetPressureLevel() int {
 	return c.pressureLevel
 }
 
-// EstimateRequestTokens estimates total request tokens including tools and system prompt.
-// DeepSeek-Reasonix pattern: estimateTurnStart includes tools + fewshots overhead
-// to make better pre-fold decisions.
-func (c *ConversationContext) EstimateRequestTokens(toolTokenOverhead int, systemPromptTokens int) int {
-	base := c.EstimatedTokens()
-	return base + toolTokenOverhead + systemPromptTokens
-}
-
 // estimateEntriesTokens estimates token count for a slice of conversation entries
 // using content-type-aware heuristic estimation. No safety margin is applied —
 // the caller applies it if needed.
