@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -130,31 +129,4 @@ func isStaleFile(path string, cutoff time.Time) bool {
 // registerCleanupCommand adds /cleanup to the known commands list.
 func init() {
 	// This is handled in main.go's isKnownCmd check
-}
-
-// CleanupStaleTempFiles removes .tmp.* files older than 1 day in the project directory.
-// Called automatically at startup to clean up leftover atomic write temp files.
-func CleanupStaleTempFiles(projectDir string) int {
-	tmpFiles, _ := filepath.Glob(filepath.Join(projectDir, "*.tmp.*"))
-	removed := 0
-	for _, f := range tmpFiles {
-		if isStaleFile(f, time.Now().AddDate(0, 0, -1)) {
-			if os.Remove(f) == nil {
-				removed++
-			}
-		}
-	}
-	// Also check subdirectories (limited depth)
-	subTmpFiles, _ := filepath.Glob(filepath.Join(projectDir, "*", "*.tmp.*"))
-	for _, f := range subTmpFiles {
-		if isStaleFile(f, time.Now().AddDate(0, 0, -1)) {
-			if strings.Contains(f, ".claude") || strings.Contains(f, "node_modules") {
-				continue // skip internal directories
-			}
-			if os.Remove(f) == nil {
-				removed++
-			}
-		}
-	}
-	return removed
 }
