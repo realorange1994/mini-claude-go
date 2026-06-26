@@ -645,65 +645,6 @@ func toolArgSummary(toolName, argsJSON string) string {
 }
 
 // ---------------------------------------------------------------------------
-// StreamBus -- pub/sub for StreamChunk events
-// ---------------------------------------------------------------------------
-
-// StreamBus publishes streaming chunks to named subscribers.
-type StreamBus struct {
-	mu          sync.RWMutex
-	subscribers map[string]chan StreamChunk
-}
-
-// NewStreamBus creates an empty bus.
-func NewStreamBus() *StreamBus {
-	return &StreamBus{
-		subscribers: make(map[string]chan StreamChunk),
-	}
-}
-
-// Subscribe registers a subscriber and returns a receive-only channel.
-func (b *StreamBus) Subscribe(id string) <-chan StreamChunk {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	ch := make(chan StreamChunk, 100) // buffered so publisher never blocks
-	b.subscribers[id] = ch
-	return ch
-}
-
-// Unsubscribe removes a subscriber and closes its channel.
-func (b *StreamBus) Unsubscribe(id string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if ch, ok := b.subscribers[id]; ok {
-		close(ch)
-		delete(b.subscribers, id)
-	}
-}
-
-// Publish delivers a chunk to every subscriber (non-blocking, drops on full).
-func (b *StreamBus) Publish(chunk StreamChunk) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for id, ch := range b.subscribers {
-		select {
-		case ch <- chunk:
-		default:
-			fmt.Fprintf(os.Stderr, "[WARN] StreamBus: subscriber %q channel full, dropping chunk\n", id)
-		}
-	}
-}
-
-// Close shuts down every subscriber channel.
-func (b *StreamBus) Close() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, ch := range b.subscribers {
-		close(ch)
-	}
-	b.subscribers = make(map[string]chan StreamChunk)
-}
-
-// ---------------------------------------------------------------------------
 // StreamProgress -- tracks streaming metrics (TTFB, throughput)
 // ---------------------------------------------------------------------------
 
@@ -786,10 +727,9 @@ const (
 // ---------------------------------------------------------------------------
 
 // StreamAdapter wraps the anthropic streaming response iterator and feeds
-// chunks into a handler (and optionally a bus).
+// chunks into a handler.
 type StreamAdapter struct {
 	handler        streamHandler
-	bus            *StreamBus
 	stallTimeoutMs int         // stall timeout in ms (0 = defaults)
 	startupMs      int         // startup timeout in ms (0 = defaults)
 	finishReason   string      // captured from MessageDeltaEvent.stop_reason
@@ -798,11 +738,10 @@ type StreamAdapter struct {
 }
 
 // NewStreamAdapter creates an adapter that dispatches every chunk to the
-// given handler and publishes on the bus (nil bus = no publishing).
-func NewStreamAdapter(handler streamHandler, bus *StreamBus) *StreamAdapter {
+// given handler.
+func NewStreamAdapter(handler streamHandler) *StreamAdapter {
 	return &StreamAdapter{
 		handler:     handler,
-		bus:         bus,
 		deltasState: DeltasStateNone,
 		progress:    StreamProgress{StartTime: time.Now()},
 	}
@@ -1061,9 +1000,6 @@ func (sa *StreamAdapter) handleDeltaRaw(delta anthropic.RawContentBlockDeltaUnio
 func (sa *StreamAdapter) dispatch(chunk StreamChunk) {
 	if sa.handler != nil {
 		_ = sa.handler(chunk) // handler errors are non-fatal for the stream
-	}
-	if sa.bus != nil {
-		sa.bus.Publish(chunk)
 	}
 }
 

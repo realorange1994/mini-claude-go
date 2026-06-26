@@ -2760,7 +2760,7 @@ func (a *AgentLoop) tryStreamOnce(params anthropic.MessageNewParams, collect *Co
 			return fmt.Errorf("model confused: echoed tool syntax as text")
 		}
 		return nil
-	}, nil)
+	})
 
 	// Configure dynamic stall timeout (matching hermes-agent patterns)
 	isLocal := isLocalEndpoint(a.config.BaseURL)

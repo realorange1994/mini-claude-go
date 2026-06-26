@@ -15,7 +15,6 @@
 package main
 
 import (
-	"encoding/json"
 	"sort"
 	"strings"
 
@@ -675,10 +674,6 @@ func ReorderContentForAPI(messages []anthropic.MessageParam) []anthropic.Message
 	return result
 }
 
-// ReorderAttachmentsForAPI is an alias for ReorderContentForAPI for backward compatibility.
-// Deprecated: use ReorderContentForAPI instead.
-var ReorderAttachmentsForAPI = ReorderContentForAPI
-
 // smooshSystemReminders is disabled for cache stability.
 // Folding <system-reminder> text blocks into tool_result content changes the content
 // block count of previously-cached messages, which breaks the Anthropic KV cache
@@ -1054,17 +1049,3 @@ func normalizeWhitespace(text string) string {
 	return strings.Join(result, "\n")
 }
 
-// NormalizeJSONBytes sorts JSON object keys in a byte slice.
-// Useful for normalizing raw JSON before sending to API.
-func NormalizeJSONBytes(data []byte) []byte {
-	var v any
-	if err := json.Unmarshal(data, &v); err != nil {
-		return data
-	}
-	normalized := sortValueKeys(v)
-	result, err := json.Marshal(normalized)
-	if err != nil {
-		return data
-	}
-	return result
-}

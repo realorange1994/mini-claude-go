@@ -25,10 +25,6 @@ var packageGitBashPath string
 type HookEvent string
 
 const (
-	// Existing compact hooks
-	HookPreCompact  HookEvent = "pre_compact"
-	HookPostCompact HookEvent = "post_compact"
-
 	// API lifecycle hooks
 	HookPreAPICall  HookEvent = "pre_api_call"
 	HookPostAPICall HookEvent = "post_api_call"
@@ -510,9 +506,6 @@ func (e HookBlockError) Error() string {
 // defaultHookTimeout is the default timeout for shell command hooks (10 minutes).
 // Matching upstream's TOOL_HOOK_EXECUTION_TIMEOUT_MS = 10 * 60 * 1000.
 const defaultHookTimeout = 10 * 60 * time.Second
-
-// sessionEndHookTimeout is the timeout for SessionEnd hooks (1.5 seconds).
-const sessionEndHookTimeout = 1500 * time.Millisecond
 
 // ExecuteShellHook runs a shell command hook with JSON input via stdin.
 // It spawns a shell process, passes the serialized input as JSON, and

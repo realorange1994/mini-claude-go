@@ -655,20 +655,6 @@ func isBinaryLines(lines []string) bool {
 	return false
 }
 
-// isBinaryContent checks if content appears to be binary (byte slice version).
-func isBinaryContent(content []byte) bool {
-	checkLen := len(content)
-	if checkLen > 4096 {
-		checkLen = 4096
-	}
-	for _, b := range content[:checkLen] {
-		if b == 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // codeFenceLanguage returns the markdown code fence language for a file extension.
 func codeFenceLanguage(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
