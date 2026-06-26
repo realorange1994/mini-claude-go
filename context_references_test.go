@@ -233,15 +233,6 @@ func TestIsBinaryLines(t *testing.T) {
 	}
 }
 
-func TestIsBinaryContent(t *testing.T) {
-	if !isBinaryContent([]byte{0x00, 0x01, 0x02}) {
-		t.Error("should detect null byte as binary")
-	}
-	if isBinaryContent([]byte("normal text")) {
-		t.Error("should not detect normal text as binary")
-	}
-}
-
 // ─── extractHTMLContent ──────────────────────────────────────────────────────
 
 func TestExtractHTMLContent(t *testing.T) {
@@ -430,19 +421,5 @@ func TestCodeFenceLanguageCommonExtensions(t *testing.T) {
 		if got != expected {
 			t.Errorf("codeFenceLanguage(%q) = %q, want %q", file, got, expected)
 		}
-	}
-}
-
-// ─── Upstream: isBinaryContent detection ─────────────────────────────────────
-
-func TestIsBinaryContentNullBytes(t *testing.T) {
-	if !isBinaryContent([]byte{0x00, 0x01, 0x02, 'h', 'e', 'l', 'l', 'o'}) {
-		t.Error("should detect null byte as binary")
-	}
-	if isBinaryContent([]byte("hello world")) {
-		t.Error("should not detect normal text as binary")
-	}
-	if isBinaryContent([]byte{}) {
-		t.Error("empty content should not be binary")
 	}
 }

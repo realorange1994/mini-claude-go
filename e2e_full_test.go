@@ -9,50 +9,6 @@ import (
 // ─── End-to-End Integration Tests ──────────────────────────────────────────
 // Test complete user scenarios to verify all modules work together.
 
-func TestE2E_FullWorkflow(t *testing.T) {
-	dir := t.TempDir()
-
-	// 1. Create session memory
-	sm := NewSessionMemory(dir)
-	sm.AddNote("state", "Working on authentication module", "test")
-	sm.AddNote("decision", "Use Go 1.25", "test")
-
-	// 2. Verify FTS search works
-	results := sm.SearchMemory("authentication", 10)
-	if len(results) == 0 {
-		t.Error("expected FTS results")
-	}
-
-	// 3. Create checkpoint
-	cpID, err := sm.WriteCheckpoint(nil)
-	if err != nil {
-		t.Fatalf("write checkpoint failed: %v", err)
-	}
-
-	// 4. Fork session
-	forked, err := sm.ForkSession(cpID)
-	if err != nil {
-		t.Fatalf("fork session failed: %v", err)
-	}
-
-	// 5. Verify forked session has same entries
-	forkedEntries := forked.GetRecentEntries(10)
-	if len(forkedEntries) != 2 {
-		t.Errorf("expected 2 entries in forked, got %d", len(forkedEntries))
-	}
-
-	// 6. Add note to forked session
-	forked.AddNote("state", "Forked session state", "test")
-
-	// 7. Verify original not affected
-	originalEntries := sm.GetRecentEntries(10)
-	for _, e := range originalEntries {
-		if e.Content == "Forked session state" {
-			t.Error("forked note should not appear in original")
-		}
-	}
-}
-
 func TestE2E_TaskManagement(t *testing.T) {
 	dir := t.TempDir()
 	store := NewWorkTaskStore(dir)
@@ -77,35 +33,6 @@ func TestE2E_TaskManagement(t *testing.T) {
 	}
 }
 
-func TestE2E_CheckpointValidation(t *testing.T) {
-	validator := NewCheckpointValidator()
-
-	// 1. Valid checkpoint
-	validContent := `Topic: Test checkpoint
-
-### Execution context
-Working on auth module
-
-### Live resources
-- E:\Git\project\
-
-### Session metadata
-- Session started: 2026-06-21`
-
-	errors := validator.Validate(validContent)
-	if len(errors) != 0 {
-		t.Errorf("expected no errors for valid checkpoint, got %d", len(errors))
-	}
-
-	// 2. Invalid checkpoint (missing topic)
-	invalidContent := `### Execution context
-Working on auth module`
-
-	errors = validator.Validate(invalidContent)
-	if len(errors) == 0 {
-		t.Error("expected errors for invalid checkpoint")
-	}
-}
 
 func TestE2E_BudgetedRead(t *testing.T) {
 	dir := t.TempDir()

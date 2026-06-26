@@ -289,19 +289,6 @@ func TestIsBinaryLinesEmpty(t *testing.T) {
 	}
 }
 
-// ─── isBinaryContent ─────────────────────────────────────────────────────────
-
-func TestIsBinaryContentNull(t *testing.T) {
-	if !isBinaryContent([]byte{0x00, 0x01, 0x02}) {
-		t.Error("should detect null byte as binary")
-	}
-}
-
-func TestIsBinaryContentNormal(t *testing.T) {
-	if isBinaryContent([]byte("normal text content")) {
-		t.Error("should not detect normal text as binary")
-	}
-}
 
 // ─── ensurePathAllowed ───────────────────────────────────────────────────────
 

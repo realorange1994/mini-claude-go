@@ -1013,35 +1013,6 @@ func TestParseAgentType(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// GetAttribution / FormatAttribution — attribution.go
-// ---------------------------------------------------------------------------
-
-func TestGetAttribution(t *testing.T) {
-	// GetAttribution runs git notes, which may fail in test env
-	// Just verify it doesn't panic
-	_ = GetAttribution("HEAD")
-}
-
-func TestFormatAttribution(t *testing.T) {
-	// sanitizeModelName strips date suffix: claude-sonnet-4-20250514 -> claude-sonnet-4
-	result := FormatAttribution("claude-sonnet-4-20250514", []string{"main.go", "agent_loop.go"})
-	if !strings.Contains(result, "claude-sonnet-4") {
-		t.Errorf("expected sanitized model name in attribution, got %q", result)
-	}
-	if strings.Contains(result, "20250514") {
-		t.Errorf("date suffix should be stripped, got %q", result)
-	}
-	if !strings.Contains(result, "main.go") {
-		t.Errorf("expected file name in attribution, got %q", result)
-	}
-	// Empty files case
-	result2 := FormatAttribution("claude-sonnet-4-20250514", nil)
-	if !strings.Contains(result2, "claude-sonnet-4") {
-		t.Errorf("expected model name in attribution, got %q", result2)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // IsAutoAllowlisted — auto_classifier.go:534
 // ---------------------------------------------------------------------------
 
@@ -1070,67 +1041,6 @@ func TestIsAutoAllowlisted(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Round 3: Compact helper functions
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// LoadArchive / ListArchives — compact.go:505/521
-// ---------------------------------------------------------------------------
-
-func TestLoadArchiveInvalidPath(t *testing.T) {
-	_, err := LoadArchive("/nonexistent/path/archive.json")
-	if err == nil {
-		t.Error("expected error for nonexistent archive path")
-	}
-}
-
-func TestLoadArchiveValidFile(t *testing.T) {
-	tmpFile := filepath.Join(t.TempDir(), "archive.json")
-	msgs := []CompactionMessage{
-		{Role: "user", Content: "q1"},
-		{Role: "assistant", Content: "a1"},
-	}
-	data, _ := json.Marshal(msgs)
-	os.WriteFile(tmpFile, data, 0o644)
-
-	loaded, err := LoadArchive(tmpFile)
-	if err != nil {
-		t.Fatalf("LoadArchive failed: %v", err)
-	}
-	if len(loaded) != 2 {
-		t.Errorf("expected 2 messages, got %d", len(loaded))
-	}
-}
-
-func TestListArchivesEmptyDir(t *testing.T) {
-	tmpDir := t.TempDir()
-	entries, err := ListArchives(tmpDir)
-	if err != nil {
-		t.Fatalf("ListArchives failed: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries, got %d", len(entries))
-	}
-}
-
-func TestListArchivesWithFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "archive1"+ArchiveExtension), []byte("[]"), 0o644)
-	os.WriteFile(filepath.Join(tmpDir, "archive2"+ArchiveExtension), []byte("[]"), 0o644)
-
-	entries, err := ListArchives(tmpDir)
-	if err != nil {
-		t.Fatalf("ListArchives failed: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(entries))
-	}
-}
-
-func TestListArchivesInvalidDir(t *testing.T) {
-	_, err := ListArchives("/nonexistent/dir")
-	if err == nil {
-		t.Error("expected error for nonexistent dir")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // SelectiveCompact — compact.go:560
@@ -1482,21 +1392,6 @@ func TestNewTaskStoreBasic(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// NewAttribution — attribution.go:16
-// ---------------------------------------------------------------------------
-
-func TestNewAttribution(t *testing.T) {
-	attr := NewAttribution("claude-sonnet-4-20250514")
-	if attr == nil {
-		t.Fatal("expected non-nil attribution")
-	}
-	// sanitizeModelName strips the date suffix
-	if attr.Model != "claude-sonnet-4" {
-		t.Errorf("expected sanitized model, got %q", attr.Model)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // normalizeWhitespace — normalize.go:808
 // ---------------------------------------------------------------------------
 
@@ -1680,27 +1575,6 @@ func TestCompactorSetPostCompactTokens(t *testing.T) {
 	c.SetPostCompactTokens(80000)
 	if c.postCompactTokens != 80000 {
 		t.Errorf("expected postCompactTokens=80000, got %d", c.postCompactTokens)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ContextWindowTracker — compact.go:1137
-// ---------------------------------------------------------------------------
-
-func TestNewContextWindowTracker(t *testing.T) {
-	tracker := NewContextWindowTracker("claude-sonnet-4-20250514", 0.8, 15000)
-	if tracker == nil {
-		t.Fatal("expected non-nil tracker")
-	}
-	// Should get 1M for Sonnet 4 (known 1M-capable)
-	if tracker.modelMaxTokens != 1_000_000 {
-		t.Errorf("expected modelMaxTokens=1000000 for Sonnet-4, got %d", tracker.modelMaxTokens)
-	}
-	if tracker.autoCompactThreshold != 0.8 {
-		t.Errorf("expected threshold=0.8, got %f", tracker.autoCompactThreshold)
-	}
-	if tracker.autoCompactBuffer != 15000 {
-		t.Errorf("expected buffer=15000, got %d", tracker.autoCompactBuffer)
 	}
 }
 
@@ -2387,26 +2261,7 @@ func TestStripImagesNoChange(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ContextWindowTracker methods — compact.go:1129
-// ---------------------------------------------------------------------------
-
-func TestContextWindowTrackerUsage(t *testing.T) {
-	tracker := NewContextWindowTracker("claude-sonnet-4", 0.8, 15000)
-	// modelMaxTokens set correctly by NewContextWindowTracker
-	if tracker.modelMaxTokens != 1_000_000 {
-		t.Errorf("expected 1M for Sonnet-4, got %d", tracker.modelMaxTokens)
-	}
-}
-
-func TestGetStringSliceStringSlice(t *testing.T) {
-	m := map[string]any{"files": []string{"a.go", "b.go"}}
-	got := getStringSlice(m, "files")
-	if len(got) != 2 || got[0] != "a.go" || got[1] != "b.go" {
-		t.Errorf("expected [a.go, b.go], got %v", got)
-	}
-}
-
-// ─── diffLastTwoSnapshots + snapshot end-to-end ────────────────────────────
+// diffLastTwoSnapshots + snapshot end-to-end ────────────────────────────────
 
 func TestDiffLastTwoSnapshotsBasic(t *testing.T) {
 	// Create a temp file

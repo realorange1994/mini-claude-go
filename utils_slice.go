@@ -15,23 +15,7 @@ func GroupBy[T any, K comparable](items []T, keyFn func(T) K) map[K][]T {
 }
 
 // ─── Array Utilities ──────────────────────────────────────────────────────────
-// Upstream: intersperse(), count(), uniq() in array.ts
-
-// Intersperse inserts a separator between elements of a slice.
-// The separator function receives the index (1-based position between elements).
-func Intersperse[T any](items []T, separator func(int) T) []T {
-	if len(items) == 0 {
-		return []T{}
-	}
-	result := make([]T, 0, len(items)*2-1)
-	for i, item := range items {
-		if i > 0 {
-			result = append(result, separator(i))
-		}
-		result = append(result, item)
-	}
-	return result
-}
+// Upstream: count(), uniq() in array.ts
 
 // Count returns the number of elements in a slice that match the predicate.
 func Count[T any](items []T, predicate func(T) bool) int {
@@ -57,48 +41,3 @@ func Uniq[T comparable](items []T) []T {
 	return result
 }
 
-// ─── Set Utilities ────────────────────────────────────────────────────────────
-// Upstream: difference(), intersects(), every(), union() in set.ts
-
-// SetDifference returns elements in a that are not in b.
-func SetDifference[T comparable](a, b map[T]bool) map[T]bool {
-	result := make(map[T]bool)
-	for item := range a {
-		if !b[item] {
-			result[item] = true
-		}
-	}
-	return result
-}
-
-// SetIntersects returns true if a and b share any elements.
-func SetIntersects[T comparable](a, b map[T]bool) bool {
-	for item := range a {
-		if b[item] {
-			return true
-		}
-	}
-	return false
-}
-
-// SetEvery returns true if every element of a is also in b (a is subset of b).
-func SetEvery[T comparable](a, b map[T]bool) bool {
-	for item := range a {
-		if !b[item] {
-			return false
-		}
-	}
-	return true
-}
-
-// SetUnion returns the union of a and b.
-func SetUnion[T comparable](a, b map[T]bool) map[T]bool {
-	result := make(map[T]bool)
-	for item := range a {
-		result[item] = true
-	}
-	for item := range b {
-		result[item] = true
-	}
-	return result
-}

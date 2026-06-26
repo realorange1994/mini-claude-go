@@ -78,17 +78,3 @@ func (p *ProtectedPaths) GetProtected() []string {
 	copy(result, p.paths)
 	return result
 }
-
-// FormatProtectedPaths formats protected paths for display.
-func FormatProtectedPaths(paths []string) string {
-	if len(paths) == 0 {
-		return "No protected paths."
-	}
-
-	var sb string
-	sb += "## Protected Paths\n\n"
-	for _, path := range paths {
-		sb += "- " + path + "\n"
-	}
-	return sb
-}

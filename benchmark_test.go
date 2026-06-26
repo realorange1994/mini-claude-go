@@ -137,21 +137,3 @@ func BenchmarkPressureLevel(b *testing.B) {
 		ctx.PressureLevel(100000)
 	}
 }
-
-func BenchmarkBufferPool_GetPut(b *testing.B) {
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		buf := GetBuffer()
-		buf.WriteString("test")
-		PutBuffer(buf)
-	}
-}
-
-func BenchmarkStringBuilderPool_GetPut(b *testing.B) {
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		sb := GetStringBuilder()
-		sb.WriteString("test")
-		PutStringBuilder(sb)
-	}
-}

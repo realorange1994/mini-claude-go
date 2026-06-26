@@ -1982,28 +1982,7 @@ func TestWorkTaskStore_TimeTracking_IsOverdue(t *testing.T) {
 	}
 }
 
-func TestWorkTaskStore_TimeTracking_GetTimeReport(t *testing.T) {
-	store := NewWorkTaskStore("")
-	id := store.CreateTask("Task 1", "", "", nil)
 
-	store.TransitionTo(id, WorkTaskInProgress, "starting")
-	store.TransitionTo(id, WorkTaskCompleted, "done")
-
-	report := store.GetTimeReport(id)
-	if report == nil {
-		t.Fatal("expected non-nil report")
-	}
-	if report.TaskID != id {
-		t.Errorf("expected task ID '%s', got '%s'", id, report.TaskID)
-	}
-	// TotalTime should be >= 0
-	if report.TotalTime < 0 {
-		t.Error("expected non-negative total time")
-	}
-	if report.Transitions != 2 {
-		t.Errorf("expected 2 transitions, got %d", report.Transitions)
-	}
-}
 
 func TestWorkTaskStore_TimeTracking_StoreTimeReport(t *testing.T) {
 	store := NewWorkTaskStore("")
@@ -2132,22 +2111,6 @@ func TestWorkTaskStore_TransitionTo_Reopen(t *testing.T) {
 	}
 }
 
-func TestWorkTaskStore_CanTransitionTo(t *testing.T) {
-	store := NewWorkTaskStore("")
-	id := store.CreateTask("Task 1", "", "", nil)
-
-	// pending -> in_progress: valid
-	ok, _ := store.CanTransitionTo(id, WorkTaskInProgress)
-	if !ok {
-		t.Error("expected pending -> in_progress to be valid")
-	}
-
-	// pending -> completed: invalid
-	ok, _ = store.CanTransitionTo(id, WorkTaskCompleted)
-	if ok {
-		t.Error("expected pending -> completed to be invalid")
-	}
-}
 
 func TestWorkTaskStore_GetValidTransitions(t *testing.T) {
 	store := NewWorkTaskStore("")
@@ -2171,28 +2134,6 @@ func TestWorkTaskStore_GetValidTransitions(t *testing.T) {
 	}
 }
 
-func TestWorkTaskStore_GetTransitionHistory(t *testing.T) {
-	store := NewWorkTaskStore("")
-	id := store.CreateTask("Task 1", "", "", nil)
-
-	store.TransitionTo(id, WorkTaskInProgress, "starting")
-	store.TransitionTo(id, WorkTaskCompleted, "done")
-
-	history := store.GetTransitionHistory(id)
-	if len(history) != 2 {
-		t.Fatalf("expected 2 history entries, got %d", len(history))
-	}
-
-	if history[0].From != WorkTaskPending || history[0].To != WorkTaskInProgress {
-		t.Errorf("expected first transition pending -> in_progress, got %s -> %s", history[0].From, history[0].To)
-	}
-	if history[1].From != WorkTaskInProgress || history[1].To != WorkTaskCompleted {
-		t.Errorf("expected second transition in_progress -> completed, got %s -> %s", history[1].From, history[1].To)
-	}
-	if history[0].Reason != "starting" {
-		t.Errorf("expected reason 'starting', got '%s'", history[0].Reason)
-	}
-}
 
 func TestWorkTaskStore_TransitionTo_DeleteCleansReferences(t *testing.T) {
 	store := NewWorkTaskStore("")

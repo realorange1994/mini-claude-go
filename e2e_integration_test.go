@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // ─── End-to-End Integration Tests ──────────────────────────────────────────
@@ -65,49 +64,6 @@ func TestE2E_MemoryFTSWithScopedNotes(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected to find session-scoped result")
-	}
-}
-
-func TestE2E_SessionForkWithMemory(t *testing.T) {
-	dir := t.TempDir()
-	sm := NewSessionMemory(dir)
-
-	// Add notes
-	sm.AddNote("state", "Original state", "test")
-	sm.AddNote("decision", "Original decision", "test")
-
-	// Write checkpoint
-	cpID, err := sm.WriteCheckpoint(nil)
-	if err != nil {
-		t.Fatalf("write checkpoint: %v", err)
-	}
-
-	// Fork session
-	forked, err := sm.ForkSession(cpID)
-	if err != nil {
-		t.Fatalf("fork session: %v", err)
-	}
-
-	// Forked should have same entries
-	entries := forked.GetRecentEntries(10)
-	if len(entries) != 2 {
-		t.Errorf("expected 2 entries in forked, got %d", len(entries))
-	}
-
-	// Forked should have its own FTS index
-	forked.RebuildFTSIndex() // Need to rebuild FTS for forked session
-	results := forked.SearchMemory("Original", 10)
-	if len(results) == 0 {
-		t.Error("expected FTS results in forked session")
-	}
-
-	// Add note to forked — should not affect original
-	forked.AddNote("state", "Forked state", "test")
-	originalEntries := sm.GetRecentEntries(10)
-	for _, e := range originalEntries {
-		if e.Content == "Forked state" {
-			t.Error("forked note should not appear in original")
-		}
 	}
 }
 
@@ -230,56 +186,6 @@ Assistant: P1-P9 已全部完成...`
 	}
 	if !strings.Contains(result2.Text, "## §1 Goal") {
 		t.Error("expected section headers to be preserved")
-	}
-}
-
-func TestE2E_CheckpointWriterWithSessionMemory(t *testing.T) {
-	dir := t.TempDir()
-	sm := NewSessionMemory(dir)
-
-	// Add notes
-	sm.AddNote("state", "Working on auth", "test")
-	sm.AddNote("decision", "Use Go 1.25", "test")
-
-	// Create checkpoint writer
-	writer := NewCheckpointWriter(dir)
-
-	// Submit write request
-	writer.Submit(CheckpointRequest{
-		SessionID: "test-session",
-		Messages: []CheckpointMessage{
-			{Role: "user", Content: "Implement authentication"},
-			{Role: "assistant", Content: "I'll implement the auth module."},
-		},
-		ProjectDir: dir,
-		Timestamp:  time.Now(),
-	})
-
-	// Wait for write to complete
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify checkpoint was written
-	if writer.GetLastCheckpointID() == "" {
-		t.Error("expected checkpoint to be written")
-	}
-
-	// Write checkpoint via SessionMemory
-	cpID, err := sm.WriteCheckpoint(nil)
-	if err != nil {
-		t.Fatalf("write checkpoint: %v", err)
-	}
-
-	// Fork from checkpoint
-	forked, err := sm.ForkSession(cpID)
-	if err != nil {
-		t.Fatalf("fork session: %v", err)
-	}
-
-	// Forked should have FTS working
-	forked.RebuildFTSIndex() // Need to rebuild FTS for forked session
-	results := forked.SearchMemory("auth", 10)
-	if len(results) == 0 {
-		t.Error("expected FTS results in forked session")
 	}
 }
 

@@ -14,12 +14,6 @@ import (
 // ─── HookEvent constants ─────────────────────────────────────────────────────
 
 func TestHookEventConstants(t *testing.T) {
-	if HookPreCompact != "pre_compact" {
-		t.Errorf("HookPreCompact = %q, want 'pre_compact'", HookPreCompact)
-	}
-	if HookPostCompact != "post_compact" {
-		t.Errorf("HookPostCompact = %q, want 'post_compact'", HookPostCompact)
-	}
 	// New hook event constants
 	if HookPreAPICall != "pre_api_call" {
 		t.Errorf("HookPreAPICall = %q, want 'pre_api_call'", HookPreAPICall)
@@ -69,9 +63,8 @@ func TestHookEventConstants(t *testing.T) {
 }
 
 func TestHookEventCount(t *testing.T) {
-	// Verify we have at least 16 hook types
+	// Verify we have at least 14 hook types
 	allHooks := []HookEvent{
-		HookPreCompact, HookPostCompact,
 		HookPreAPICall, HookPostAPICall,
 		HookPreUserMessage, HookPostUserMessage,
 		HookPreAssistantMessage, HookPostAssistantMessage,
@@ -80,7 +73,7 @@ func TestHookEventCount(t *testing.T) {
 		HookPreToolUse, HookPostToolUse,
 		HookStop,
 	}
-	if len(allHooks) < 17 {
+	if len(allHooks) < 15 {
 		t.Errorf("expected at least 17 hook types, got %d", len(allHooks))
 	}
 }
@@ -1026,11 +1019,10 @@ func TestNewHookExecutor(t *testing.T) {
 // ─── All hook events are invocable ──────────────────────────────────────────
 
 func TestAllHookEventsInvocable(t *testing.T) {
-	// Verify that all 17 defined HookEvent constants can be registered and
+	// Verify that all defined HookEvent constants can be registered and
 	// executed through the generic hook system. This catches the case where
 	// a hook type is defined but never wired into the agent loop.
 	allHooks := []HookEvent{
-		HookPreCompact, HookPostCompact,
 		HookPreAPICall, HookPostAPICall,
 		HookPreUserMessage, HookPostUserMessage,
 		HookPreAssistantMessage, HookPostAssistantMessage,

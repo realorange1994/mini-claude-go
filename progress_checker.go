@@ -110,20 +110,3 @@ written_at: %s
 	path := filepath.Join(dir, "progress.md")
 	return os.WriteFile(path, []byte(template), 0644)
 }
-
-// FormatValidation formats a progress validation for display.
-func FormatValidation(v *ProgressValidation) string {
-	if v.Valid {
-		return fmt.Sprintf("✓ Progress valid for task %s", v.TaskID)
-	}
-
-	var sb string
-	sb += fmt.Sprintf("✗ Progress invalid for task %s: %s\n", v.TaskID, v.Reason)
-	if len(v.Missing) > 0 {
-		sb += "Missing sections:\n"
-		for _, s := range v.Missing {
-			sb += "  - " + s + "\n"
-		}
-	}
-	return sb
-}
