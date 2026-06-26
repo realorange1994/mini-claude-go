@@ -1023,13 +1023,6 @@ func (c *Compactor) SetPostCompactTokens(tokens int) {
 	c.postCompactTokens = tokens
 }
 
-// CompressionLevel returns the current compression level.
-func (c *Compactor) CompressionLevel() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.compressionLevel
-}
-
 // ShouldCompact checks if compaction is needed based on token count and cooldown.
 func (c *Compactor) ShouldCompact(messages []anthropic.MessageParam) bool {
 	tokens := estimateMessageParamsTokens(messages)

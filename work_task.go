@@ -1343,22 +1343,6 @@ func roundDuration(d time.Duration) time.Duration {
 
 // ─── Workflow State Machine ─────────────────────────────────────────────────
 
-// CanTransitionTo checks if a status transition is valid.
-func (s *WorkTaskStore) CanTransitionTo(id string, newStatus WorkTaskStatus) (bool, string) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	task, ok := s.tasks[id]
-	if !ok {
-		return false, fmt.Sprintf("task %s not found", id)
-	}
-
-	if allowed, ok := validTransitions[task.Status]; !ok || !allowed[newStatus] {
-		return false, fmt.Sprintf("cannot transition from %s to %s", task.Status, newStatus)
-	}
-	return true, ""
-}
-
 // TransitionTo performs a validated status transition with time tracking.
 // Returns error if transition is invalid.
 func (s *WorkTaskStore) TransitionTo(id string, newStatus WorkTaskStatus, reason string) error {
@@ -1488,76 +1472,6 @@ func (s *WorkTaskStore) GetValidTransitions(id string) []WorkTaskStatus {
 	return transitions
 }
 
-// GetTransitionHistory returns the full transition history for a task.
-func (s *WorkTaskStore) GetTransitionHistory(id string) []StatusTransition {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	task, ok := s.tasks[id]
-	if !ok {
-		return nil
-	}
-	result := make([]StatusTransition, len(task.History))
-	copy(result, task.History)
-	return result
-}
-
-// GetTimeReport returns a time tracking report for a task.
-func (s *WorkTaskStore) GetTimeReport(id string) *TimeReport {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	task, ok := s.tasks[id]
-	if !ok {
-		return nil
-	}
-
-	report := &TimeReport{
-		TaskID:      task.ID,
-		Subject:     task.Subject,
-		Status:      task.Status,
-		CreatedAt:   task.CreatedAt,
-		StartedAt:   task.StartedAt,
-		CompletedAt: task.CompletedAt,
-		TotalTime:   task.GetDuration(),
-		ActiveTime:  task.GetActiveTime(),
-		IdleTime:    task.GetIdleTime(),
-		Transitions: len(task.History),
-	}
-
-	// Calculate time per status
-	report.TimePerStatus = make(map[WorkTaskStatus]time.Duration)
-	for i, h := range task.History {
-		var end time.Time
-		if i+1 < len(task.History) {
-			end = task.History[i+1].Timestamp
-		} else if task.CompletedAt != nil {
-			end = *task.CompletedAt
-		} else {
-			end = time.Now()
-		}
-		report.TimePerStatus[h.To] += end.Sub(h.Timestamp)
-	}
-
-	return report
-}
-
-// TimeReport holds time tracking information for a task.
-type TimeReport struct {
-	TaskID        string                    `json:"task_id"`
-	Subject       string                    `json:"subject"`
-	Status        WorkTaskStatus            `json:"status"`
-	CreatedAt     time.Time                 `json:"created_at"`
-	StartedAt     *time.Time                `json:"started_at,omitempty"`
-	CompletedAt   *time.Time                `json:"completed_at,omitempty"`
-	TotalTime     time.Duration             `json:"total_time"`
-	ActiveTime    time.Duration             `json:"active_time"`
-	IdleTime      time.Duration             `json:"idle_time"`
-	Transitions   int                       `json:"transitions"`
-	TimePerStatus map[WorkTaskStatus]time.Duration `json:"time_per_status"`
-}
-
-// GetStoreTimeReport returns aggregated time tracking for all tasks.
 func (s *WorkTaskStore) GetStoreTimeReport() *StoreTimeReport {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
