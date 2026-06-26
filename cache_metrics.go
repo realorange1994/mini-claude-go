@@ -120,58 +120,6 @@ func (m *CacheMetrics) String() string {
 		ratio*100, m.cacheHitTokens, total, m.totalCompletionTokens)
 }
 
-// trimTrailingToolCalls drops unpaired assistant messages with tool_calls
-// before generating a forced summary. Keeps prefix cache valid.
-//
-// Matching DeepSeek-Reasonix's context-manager.ts trimTrailingToolCalls
-func TrimTrailingToolCalls(messages []MessageParam) bool {
-	if len(messages) == 0 {
-		return false
-	}
-
-	// Get the last message
-	lastMsg := messages[len(messages)-1]
-
-	// Check if it's an assistant message with tool_calls but no matching tool result
-	if lastMsg.Role != RoleAssistant {
-		return false
-	}
-
-	// Check for tool_calls in content blocks
-	hasToolCalls := false
-	for _, block := range lastMsg.Content {
-		if block.ToolUse != nil {
-			hasToolCalls = true
-			break
-		}
-	}
-
-	if !hasToolCalls {
-		return false
-	}
-
-	// Check if there's a matching tool result
-	hasToolResult := false
-	for i := len(messages) - 2; i >= 0; i-- {
-		if messages[i].Role == RoleTool {
-			hasToolResult = true
-			break
-		}
-		if messages[i].Role == RoleAssistant {
-			break // Stop at previous assistant message
-		}
-	}
-
-	// If there's no tool result, we need to trim this message
-	if !hasToolResult {
-		// Remove the last message (the unpaired tool_calls)
-		// This is a destructive operation - caller should copy if needed
-		messages[len(messages)-1] = MessageParam{}
-		return true
-	}
-
-	return false
-}
 
 // MessageParam and Role constants (simplified for this file)
 type MessageParam struct {
